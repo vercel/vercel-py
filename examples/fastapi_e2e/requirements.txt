@@ -1,4 +1,3 @@
 fastapi>=0.110.0
 uvicorn>=0.30.0
-vercel-py>=0.0.1
-
+vercel-sdk>=0.0.2

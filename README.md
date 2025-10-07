@@ -1,4 +1,4 @@
-# vercel-py
+# vercel-sdk
 
 Python SDK for Vercel.
 
@@ -6,7 +6,7 @@ Python SDK for Vercel.
 ## Installation
 
 ```bash
-pip install vercel-py
+pip install vercel-sdk
 ```
 
 ## Requirements
