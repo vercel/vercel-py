@@ -10,7 +10,7 @@ __all__ = [
 ]
 
 
-def invalidate_by_tag(tag: str | list[str]) -> Any:  # noqa: D401
+def invalidate_by_tag(tag: str | list[str]) -> Any:
     api = get_context().purge
     if api is None:
         return None
@@ -21,7 +21,7 @@ def dangerously_delete_by_tag(
     tag: str | list[str],
     *,
     revalidation_deadline_seconds: int | None = None,
-) -> Any:  # noqa: D401
+) -> Any:
     api = get_context().purge
     if api is None:
         return None
@@ -29,4 +29,3 @@ def dangerously_delete_by_tag(
         tag,
         revalidation_deadline_seconds=revalidation_deadline_seconds,
     )
-
