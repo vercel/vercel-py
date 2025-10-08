@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from ..functions._context import get_headers
 from .token_util import (
     find_project_info,
     get_token_payload,
@@ -22,12 +23,20 @@ class VercelOidcTokenError(Exception):
 
 
 def get_vercel_oidc_token_sync() -> str:
-    token = os.getenv("VERCEL_OIDC_TOKEN")
-    if not token:
+    # Prefer request header (set via vercel.functions.set_headers middleware),
+    # fall back to environment variable like the TypeScript SDK.
+    headers = get_headers()
+    if headers:
+        token_from_header = headers.get("x-vercel-oidc-token")
+        if token_from_header:
+            return token_from_header
+
+    token_from_env = os.getenv("VERCEL_OIDC_TOKEN")
+    if not token_from_env:
         raise VercelOidcTokenError(
             "The 'x-vercel-oidc-token' header is missing from the request. Do you have the OIDC option enabled in the Vercel project settings?"
         )
-    return token
+    return token_from_env
 
 
 async def refresh_token() -> None:

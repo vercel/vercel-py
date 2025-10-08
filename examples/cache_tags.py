@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from vercel.functions.cache import get_cache
+from vercel.cache import get_cache
 
 
 async def main() -> None:
