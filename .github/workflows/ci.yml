@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - 'vercel-py/**'
+  pull_request:
+    paths:
+      - 'vercel-py/**'
+
+jobs:
+  build-and-lint:
+    name: build-and-lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vercel-py
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff build mypy pytest pytest-asyncio
+          pip install -e .
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Type check (mypy)
+        run: mypy --ignore-missing-imports src
+
+      - name: Run tests (pytest)
+        run: pytest -v
+
+      - name: Build package
+        run: python -m build
+
+      - name: Import check
+        run: python -c "import vercel, vercel.functions, vercel.oidc"
+
+
