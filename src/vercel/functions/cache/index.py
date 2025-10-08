@@ -69,7 +69,7 @@ def get_cache(
             async def expire_tag(self, tag):
                 return await resolver().expire_tag(tag)
 
-        return _Wrapper()  # type: ignore[return-value]
+        return _Wrapper()
 
     return wrap_with_key_transformation(
         resolve_cache,
