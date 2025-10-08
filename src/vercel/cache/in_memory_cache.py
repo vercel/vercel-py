@@ -14,9 +14,10 @@ class InMemoryCache(RuntimeCache):
         if not entry:
             return None
         ttl = entry.get("ttl")
-        if ttl is not None and entry["last_modified"] + ttl * 1000 < __import__(
-            "time"
-        ).time() * 1000:
+        if (
+            ttl is not None
+            and entry["last_modified"] + ttl * 1000 < __import__("time").time() * 1000
+        ):
             await self.delete(key)
             return None
         return entry["value"]

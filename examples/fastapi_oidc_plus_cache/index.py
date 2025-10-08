@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from typing import Callable
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
+import logging
+import traceback
 
-from vercel.functions import set_headers, get_cache
+from vercel.cache import get_cache
+from vercel.headers import geolocation, ip_address, set_headers
 from vercel.oidc import get_vercel_oidc_token, decode_oidc_payload
 
 
+logger = logging.getLogger(__name__)
 app = FastAPI()
 
 
@@ -21,9 +25,14 @@ async def vercel_context_middleware(request: Request, call_next: Callable):
 
 @app.get("/api/oidc")
 async def oidc_info():
-    token = await get_vercel_oidc_token()
-    payload = decode_oidc_payload(token)
-    return {"sub": payload.get("sub"), "exp": payload.get("exp")}
+    try:
+        token = await get_vercel_oidc_token()
+        payload = decode_oidc_payload(token)
+        return {"sub": payload.get("sub"), "exp": payload.get("exp")}
+    except Exception as e:
+        logger.error(f"Error getting OIDC info: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Error getting OIDC info")
 
 
 @app.get("/api/cache")
@@ -66,6 +75,21 @@ async def test():
     }
 
 
+@app.get("/api/geo")
+async def geo_info(request: Request):
+    """Return geolocation info inferred from request headers."""
+    info = geolocation(request)
+    return info
+
+
+@app.get("/api/ip")
+async def ip_info(request: Request):
+    """Return client IP inferred from request headers."""
+    ip = ip_address(request.headers)
+    return {"ip": ip}
+
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -18,6 +18,18 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: uv venv --python 3.12
       - run: uv pip install build
+      - name: Verify tag matches version
+        run: |
+          VERSION=$(python - <<'PY'
+import tomllib, sys
+print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])
+PY
+)
+          TAG=${GITHUB_REF#refs/tags/}
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "Version mismatch: pyproject=$VERSION tag=$TAG"
+            exit 1
+          fi
       - name: Build
         run: uv run python -m build
       - name: Publish to PyPI

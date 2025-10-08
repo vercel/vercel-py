@@ -4,10 +4,14 @@ import base64
 import json
 import os
 import sys
-from dataclasses import dataclass
-from typing import Any
-
 import httpx
+from typing import Any, TypedDict
+from dataclasses import dataclass
+
+
+class ProjectInfo(TypedDict):
+    projectId: str
+    teamId: str | None
 
 
 @dataclass
@@ -19,11 +23,13 @@ def _user_data_dir() -> str | None:
     try:
         home = os.path.expanduser("~")
         if sys.platform.startswith("win"):
-            return os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+            # Prefer LOCALAPPDATA for application data storage on Windows
+            return os.environ.get("LOCALAPPDATA")
         if sys.platform == "darwin":
             return os.path.join(home, "Library", "Application Support")
         # linux and others
-        return os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+        xdg_data_home = os.environ.get("XDG_DATA_HOME")
+        return xdg_data_home or os.path.join(home, ".local", "share")
     except Exception:
         return None
 
@@ -54,11 +60,11 @@ def get_vercel_cli_token() -> str | None:
 
 
 def _find_root_dir(start: str | None = None) -> str | None:
-    # Walk up from start (or cwd) looking for .vercel/project.json
+    # Walk up from start (or cwd) looking for a .vercel folder (align with TS SDK)
     current = os.path.abspath(start or os.getcwd())
     while True:
-        prj_json = os.path.join(current, ".vercel", "project.json")
-        if os.path.exists(prj_json):
+        vercel_dir = os.path.join(current, ".vercel")
+        if os.path.isdir(vercel_dir):
             return current
         parent = os.path.dirname(current)
         if parent == current:
@@ -66,7 +72,7 @@ def _find_root_dir(start: str | None = None) -> str | None:
         current = parent
 
 
-def find_project_info() -> dict[str, str]:
+def find_project_info() -> ProjectInfo:
     root = _find_root_dir()
     if not root:
         raise RuntimeError("Unable to find root directory")
@@ -76,8 +82,8 @@ def find_project_info() -> dict[str, str]:
     try:
         with open(prj_path, "r", encoding="utf-8") as f:
             prj = json.load(f)
-        project_id = prj.get("projectId") or prj.get("orgId")
-        team_id = prj.get("orgId")
+        project_id = prj.get("projectId")
+        team_id = prj.get("orgId") if isinstance(prj.get("orgId"), str) else None
         if not isinstance(project_id, str):
             raise TypeError("Expected a string-valued projectId property")
         return {"projectId": project_id, "teamId": team_id}
@@ -149,7 +155,9 @@ def is_expired(payload: dict[str, Any]) -> bool:
     return int(exp * 1000) < now_ms + fifteen_minutes_ms
 
 
-async def fetch_vercel_oidc_token(auth_token: str, project_id: str, team_id: str | None) -> VercelTokenResponse | None:
+async def fetch_vercel_oidc_token(
+    auth_token: str, project_id: str, team_id: str | None
+) -> VercelTokenResponse | None:
     url = f"https://api.vercel.com/v1/projects/{project_id}/token?source=vercel-oidc-refresh"
     if team_id:
         url += f"&teamId={team_id}"
@@ -161,5 +169,3 @@ async def fetch_vercel_oidc_token(auth_token: str, project_id: str, team_id: str
         if not isinstance(data, dict) or not isinstance(data.get("token"), str):
             raise TypeError("Expected a string-valued token property")
         return VercelTokenResponse(token=data["token"])
-
-

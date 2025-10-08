@@ -63,9 +63,7 @@ class BuildCache:
                 content=json.dumps(value),
             )
             if r.status_code != 200:
-                raise RuntimeError(
-                    f"Failed to set cache: {r.status_code} {r.reason_phrase}"
-                )
+                raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -74,9 +72,7 @@ class BuildCache:
         try:
             r = await self._client.delete(self._endpoint + key, headers=self._headers)
             if r.status_code != 200:
-                raise RuntimeError(
-                    f"Failed to delete cache: {r.status_code} {r.reason_phrase}"
-                )
+                raise RuntimeError(f"Failed to delete cache: {r.status_code} {r.reason_phrase}")
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -90,9 +86,7 @@ class BuildCache:
                 headers=self._headers,
             )
             if r.status_code != 200:
-                raise RuntimeError(
-                    f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}"
-                )
+                raise RuntimeError(f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}")
         except Exception as e:
             if self._on_error:
                 self._on_error(e)

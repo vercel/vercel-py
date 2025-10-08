@@ -4,7 +4,7 @@ import json
 import os
 from typing import Callable
 
-from .._context import get_context
+from ._context import get_context
 from .in_memory_cache import InMemoryCache
 from .build_client import BuildCache
 from .types import RuntimeCache
@@ -99,9 +99,7 @@ def _get_cache_implementation(debug: bool = False) -> RuntimeCache:
 
     if not endpoint or not headers:
         if not _warned_cache_unavailable:
-            print(
-                "Runtime Cache unavailable in this environment. Falling back to in-memory cache."
-            )
+            print("Runtime Cache unavailable in this environment. Falling back to in-memory cache.")
             _warned_cache_unavailable = True
         return _in_memory_cache_instance
 
