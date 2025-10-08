@@ -68,7 +68,7 @@ def _find_root_dir(start: str | None = None) -> str | None:
         current = parent
 
 
-def find_project_info() -> dict[str, str]:
+def find_project_info() -> dict[str, str | None]:
     root = _find_root_dir()
     if not root:
         raise RuntimeError("Unable to find root directory")
