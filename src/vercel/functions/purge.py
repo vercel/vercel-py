@@ -14,7 +14,7 @@ def invalidate_by_tag(tag: str | list[str]) -> Any:  # noqa: D401
     api = get_context().purge
     if api is None:
         return None
-    return api.invalidate_by_tag(tag)  # type: ignore[attr-defined]
+    return api.invalidate_by_tag(tag)
 
 
 def dangerously_delete_by_tag(
@@ -28,5 +28,5 @@ def dangerously_delete_by_tag(
     return api.dangerously_delete_by_tag(
         tag,
         revalidation_deadline_seconds=revalidation_deadline_seconds,
-    )  # type: ignore[attr-defined]
+    )
 

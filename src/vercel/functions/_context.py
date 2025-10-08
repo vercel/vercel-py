@@ -2,14 +2,31 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Protocol
+
+
+class PurgeAPI(Protocol):
+    """Protocol for the purge API object."""
+
+    def invalidate_by_tag(self, tag: str | list[str]) -> Any:
+        """Invalidate cache entries by tag."""
+        ...
+
+    def dangerously_delete_by_tag(
+        self,
+        tag: str | list[str],
+        *,
+        revalidation_deadline_seconds: int | None = None,
+    ) -> Any:
+        """Dangerously delete cache entries by tag."""
+        ...
 
 
 _cv_wait_until: ContextVar[Callable[[Awaitable[object]], None] | None] = ContextVar(
     "vercel_wait_until", default=None
 )
 _cv_cache: ContextVar[object | None] = ContextVar("vercel_cache", default=None)
-_cv_purge: ContextVar[object | None] = ContextVar("vercel_purge", default=None)
+_cv_purge: ContextVar[PurgeAPI | None] = ContextVar("vercel_purge", default=None)
 _cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar(
     "vercel_headers", default=None
 )
@@ -19,7 +36,7 @@ _cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar(
 class _ContextSnapshot:
     wait_until: Callable[[Awaitable[object]], None] | None
     cache: object | None
-    purge: object | None
+    purge: PurgeAPI | None
     headers: Mapping[str, str] | None
 
 
@@ -36,7 +53,7 @@ def set_context(
     *,
     wait_until: Callable[[Awaitable[object]], None] | None = None,
     cache: object | None = None,
-    purge: object | None = None,
+    purge: PurgeAPI | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> None:
     if wait_until is not None:

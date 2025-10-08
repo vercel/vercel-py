@@ -33,14 +33,14 @@ class _RequestLike(Protocol):
 
 
 class Geo(TypedDict, total=False):
-    city: str
-    country: str
-    flag: str
-    region: str
-    countryRegion: str
-    latitude: str
-    longitude: str
-    postalCode: str
+    city: str | None
+    country: str | None
+    flag: str | None
+    region: str | None
+    countryRegion: str | None
+    latitude: str | None
+    longitude: str | None
+    postalCode: str | None
 
 
 def _get_header(headers: _HeadersLike, key: str) -> str | None:  # noqa: D401
