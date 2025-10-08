@@ -2,11 +2,7 @@ name: CI
 
 on:
   push:
-    paths:
-      - 'vercel-py/**'
   pull_request:
-    paths:
-      - 'vercel-py/**'
 
 jobs:
   build-and-lint:
