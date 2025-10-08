@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import urllib.parse
-from typing import TypedDict, Protocol, cast
+from typing import TypedDict, Protocol
 
 __all__ = [
     "ip_address",
@@ -60,11 +60,8 @@ def _get_flag(country_code: str | None) -> str | None:
     )
 
 
-def ip_address(input_: _RequestLike | _HeadersLike) -> str | None:
-    if hasattr(input_, "headers"):
-        headers = cast(_RequestLike, input_).headers
-    else:
-        headers = cast(_HeadersLike, input_)
+def ip_address(input: _RequestLike | _HeadersLike) -> str | None:
+    headers = input.headers if hasattr(input, "headers") else input
     return _get_header(headers, IP_HEADER_NAME)
 
 
