@@ -8,6 +8,8 @@ from vercel.functions.cache import get_cache
 async def main() -> None:
     cache = get_cache()
 
+    raise Exception("test")
+
     await cache.set("post:1", {"title": "Hello"}, {"tags": ["post", "feed"]})
     await cache.set("post:2", {"title": "World"}, {"tags": ["post"]})
 
