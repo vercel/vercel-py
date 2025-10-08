@@ -28,8 +28,7 @@ EMOJI_FLAG_UNICODE_STARTING_POSITION = 127397
 
 
 class _HeadersLike(Protocol):
-    def get(self, name: str) -> str | None:
-        ...
+    def get(self, name: str) -> str | None: ...
 
 
 class _RequestLike(Protocol):
@@ -59,9 +58,7 @@ def _get_header_decode(req: _RequestLike, key: str) -> str | None:
 def _get_flag(country_code: str | None) -> str | None:
     if not country_code or len(country_code) != 2 or not country_code.isalpha():
         return None
-    return "".join(
-        chr(EMOJI_FLAG_UNICODE_STARTING_POSITION + ord(c)) for c in country_code.upper()
-    )
+    return "".join(chr(EMOJI_FLAG_UNICODE_STARTING_POSITION + ord(c)) for c in country_code.upper())
 
 
 def ip_address(input: _RequestLike | _HeadersLike) -> str | None:

@@ -28,7 +28,7 @@ jobs:
           uv run ruff format
           uv run ruff check --fix .
           uv run mypy src
-          uv run python -c "import vercel, vercel.functions, vercel.oidc"
+          uv run python -c "import vercel, vercel.cache, vercel.headers, vercel.oidc"
 
       - name: Run tests
         run: uv run pytest -v

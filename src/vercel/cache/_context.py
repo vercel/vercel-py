@@ -27,9 +27,7 @@ _cv_wait_until: ContextVar[Callable[[Awaitable[object]], None] | None] = Context
 )
 _cv_cache: ContextVar[object | None] = ContextVar("vercel_cache", default=None)
 _cv_purge: ContextVar[PurgeAPI | None] = ContextVar("vercel_purge", default=None)
-_cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar(
-    "vercel_headers", default=None
-)
+_cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar("vercel_headers", default=None)
 
 
 @dataclass

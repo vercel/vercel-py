@@ -23,7 +23,7 @@ class VercelOidcTokenError(Exception):
 
 
 def get_vercel_oidc_token_sync() -> str:
-    # Prefer request header (set via vercel.functions.set_headers middleware),
+    # Prefer request header (set via vercel.headers.set_headers middleware),
     # fall back to environment variable like the TypeScript SDK.
     headers = get_headers()
     if headers:
@@ -41,7 +41,7 @@ def get_vercel_oidc_token_sync() -> str:
 
 async def refresh_token() -> None:
     project = find_project_info()
-    project_id = project["projectId"]
+    project_id: str = project["projectId"]
     team_id = project.get("teamId")
 
     maybe = load_token(project_id)

@@ -25,7 +25,7 @@ async def vercel_context_middleware(request: Request, call_next: Callable):
 
 @app.get("/api/oidc")
 async def oidc_info():
-    try:    
+    try:
         token = await get_vercel_oidc_token()
         payload = decode_oidc_payload(token)
         return {"sub": payload.get("sub"), "exp": payload.get("exp")}
@@ -91,4 +91,5 @@ async def ip_info(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

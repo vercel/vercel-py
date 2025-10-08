@@ -4,10 +4,14 @@ import base64
 import json
 import os
 import sys
-from dataclasses import dataclass
-from typing import Any
-
 import httpx
+from typing import Any, TypedDict
+from dataclasses import dataclass
+
+
+class ProjectInfo(TypedDict):
+    projectId: str
+    teamId: str | None
 
 
 @dataclass
@@ -68,7 +72,7 @@ def _find_root_dir(start: str | None = None) -> str | None:
         current = parent
 
 
-def find_project_info() -> dict[str, str | None]:
+def find_project_info() -> ProjectInfo:
     root = _find_root_dir()
     if not root:
         raise RuntimeError("Unable to find root directory")
@@ -151,7 +155,9 @@ def is_expired(payload: dict[str, Any]) -> bool:
     return int(exp * 1000) < now_ms + fifteen_minutes_ms
 
 
-async def fetch_vercel_oidc_token(auth_token: str, project_id: str, team_id: str | None) -> VercelTokenResponse | None:
+async def fetch_vercel_oidc_token(
+    auth_token: str, project_id: str, team_id: str | None
+) -> VercelTokenResponse | None:
     url = f"https://api.vercel.com/v1/projects/{project_id}/token?source=vercel-oidc-refresh"
     if team_id:
         url += f"&teamId={team_id}"
@@ -163,5 +169,3 @@ async def fetch_vercel_oidc_token(auth_token: str, project_id: str, team_id: str
         if not isinstance(data, dict) or not isinstance(data.get("token"), str):
             raise TypeError("Expected a string-valued token property")
         return VercelTokenResponse(token=data["token"])
-
-
