@@ -44,5 +44,3 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
-
-## Rye config removed in favor of uv
