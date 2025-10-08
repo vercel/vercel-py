@@ -8,9 +8,6 @@ jobs:
   build-and-lint:
     name: build-and-lint
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: vercel-py
     steps:
       - name: Checkout
         uses: actions/checkout@v4
