@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Iterable, Protocol
+import asyncio
 
 from .errors import BlobError
 
@@ -208,6 +209,11 @@ class StreamingBodyWithProgress:
                     loaded=self._loaded, total=total, percentage=percentage
                 )
             )
+
+    async def __aiter__(self):  # type: ignore[override]
+        for chunk in self:
+            yield chunk
+            await asyncio.sleep(0)
 
 
 def make_request_id(store_id: str) -> str:

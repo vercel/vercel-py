@@ -142,26 +142,32 @@ async def request_api(
 
                 data = None
                 json_body = None
+                content = None
 
                 # Wrap body for progress when possible
                 if body is not None:
-                    if isinstance(body, (bytes, bytearray, memoryview, str)) or hasattr(
-                        body, "read"
-                    ):
+                    if isinstance(body, (bytes, bytearray, memoryview, str)) or hasattr(body, "read"):
                         wrapped = StreamingBodyWithProgress(body, on_upload_progress)
-                        data = wrapped
+                        # For AsyncClient, ensure async streaming content to avoid sync-body error
+                        content = wrapped.__aiter__()
                     else:
                         # For objects meant to be JSON
                         json_body = body
 
-                resp = await client.request(
+                request_kwargs = dict(
                     method=method,
                     url=url,
                     headers=final_headers,
                     params=params,
-                    data=data,
-                    json=json_body,
                 )
+                if content is not None:
+                    request_kwargs["content"] = content
+                elif data is not None:
+                    request_kwargs["data"] = data
+                if json_body is not None:
+                    request_kwargs["json"] = json_body
+
+                resp = await client.request(**request_kwargs)
 
                 if 200 <= resp.status_code < 300:
                     if on_upload_progress:
