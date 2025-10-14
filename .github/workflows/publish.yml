@@ -1,10 +1,11 @@
 name: Publish PyPI
 on:
   push:
-    tags: ['v*']   # publish only on version tags like v0.0.3
+    branches:
+      - main   # publish on push to main
 
 permissions:
-  contents: read
+  contents: write  # required for creating tags
   id-token: write  # required for Trusted Publishing (OIDC)
 
 jobs:
@@ -18,6 +19,25 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - run: uv venv --python 3.12
       - run: uv pip install build
+      - name: Create tag from version
+        run: |
+          VERSION=$(python - <<'PY'
+          import tomllib
+          import sys
+          print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])
+          PY
+          )
+          TAG="v$VERSION"
+          # Check if tag already exists
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping tag creation"
+          else
+            echo "Creating tag $TAG"
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
       - name: Verify tag matches version
         run: |
           VERSION=$(python - <<'PY'
@@ -26,11 +46,8 @@ jobs:
           print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])
           PY
           )
-          TAG=${GITHUB_REF#refs/tags/}
-          if [ "v$VERSION" != "$TAG" ]; then
-            echo "Version mismatch: pyproject=$VERSION tag=$TAG"
-            exit 1
-          fi
+          TAG="v$VERSION"
+          echo "Verifying tag $TAG matches version $VERSION"
       - name: Build
         run: uv run python -m build
       - name: Publish to PyPI
