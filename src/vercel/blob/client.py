@@ -10,7 +10,6 @@ import json
 import httpx
 
 from .errors import BlobError
-from ._request import request_api
 
 
 def get_payload_from_client_token(client_token: str) -> dict[str, Any]:

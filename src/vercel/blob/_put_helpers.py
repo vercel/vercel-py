@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._helpers import MAXIMUM_PATHNAME_LENGTH, validate_pathname, require_public_access
+from ._helpers import validate_pathname, require_public_access
 from .errors import BlobError
 
 

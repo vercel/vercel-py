@@ -12,7 +12,7 @@ from .types import (
     ListBlobResult as ListBlobResultType,
     CreateFolderResult as CreateFolderResultType,
 )
-from .errors import BlobError, BlobNotFoundError
+from .errors import BlobError
 from .multipart import uncontrolled_multipart_upload
 
 
