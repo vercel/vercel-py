@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Callable
 import httpx
 
@@ -11,6 +12,7 @@ from .errors import (
     BlobError,
     BlobFileTooLargeError,
     BlobNotFoundError,
+    BlobRequestAbortedError,
     BlobServiceNotAvailable,
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
@@ -111,6 +113,7 @@ async def request_api(
 
     send_body_length = bool(on_upload_progress) or should_use_x_content_length()
     total_length = compute_body_length(body) if send_body_length else 0
+    loaded = 0
 
     if on_upload_progress:
         on_upload_progress(
@@ -122,6 +125,7 @@ async def request_api(
         httpx.Timeout(timeout) if timeout is not None else httpx.Timeout(30.0)
     )
     async with httpx.AsyncClient(timeout=timeout_conf) as client:
+        last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
                 final_headers = {
