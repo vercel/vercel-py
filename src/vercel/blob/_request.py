@@ -115,14 +115,10 @@ async def request_api(
     total_length = compute_body_length(body) if send_body_length else 0
 
     if on_upload_progress:
-        on_upload_progress(
-            UploadProgressEvent(loaded=0, total=total_length, percentage=0.0)
-        )
+        on_upload_progress(UploadProgressEvent(loaded=0, total=total_length, percentage=0.0))
 
     url = get_api_url(pathname)
-    timeout_conf = (
-        httpx.Timeout(timeout) if timeout is not None else httpx.Timeout(30.0)
-    )
+    timeout_conf = httpx.Timeout(timeout) if timeout is not None else httpx.Timeout(30.0)
     async with httpx.AsyncClient(timeout=timeout_conf) as client:
         for attempt in range(retries + 1):
             try:
@@ -138,13 +134,14 @@ async def request_api(
                 if send_body_length and total_length:
                     final_headers["x-content-length"] = str(total_length)
 
-                data = None
                 json_body = None
                 content = None
 
                 # Wrap body for progress when possible
                 if body is not None:
-                    if isinstance(body, (bytes, bytearray, memoryview, str)) or hasattr(body, "read"):
+                    if isinstance(body, (bytes, bytearray, memoryview, str)) or hasattr(
+                        body, "read"
+                    ):
                         wrapped = StreamingBodyWithProgress(body, on_upload_progress)
                         # For AsyncClient, ensure async streaming content to avoid sync-body error
                         content = wrapped.__aiter__()
@@ -152,20 +149,23 @@ async def request_api(
                         # For objects meant to be JSON
                         json_body = body
 
-                request_kwargs = dict(
-                    method=method,
-                    url=url,
-                    headers=final_headers,
-                    params=params,
-                )
                 if content is not None:
-                    request_kwargs["content"] = content
-                elif data is not None:
-                    request_kwargs["data"] = data
-                if json_body is not None:
-                    request_kwargs["json"] = json_body
-
-                resp = await client.request(**request_kwargs)
+                    resp = await client.request(
+                        method=method,
+                        url=url,
+                        headers=final_headers,
+                        params=params,
+                        content=content,
+                        json=json_body,
+                    )
+                else:
+                    resp = await client.request(
+                        method=method,
+                        url=url,
+                        headers=final_headers,
+                        params=params,
+                        json=json_body,
+                    )
 
                 if 200 <= resp.status_code < 300:
                     if on_upload_progress:

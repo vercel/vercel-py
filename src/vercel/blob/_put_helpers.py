@@ -14,33 +14,20 @@ PUT_OPTION_HEADER_MAP: dict[str, str] = {
 }
 
 
-def create_put_headers(
-    allowed_options: list[str], options: dict[str, Any]
-) -> dict[str, str]:
+def create_put_headers(allowed_options: list[str], options: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {}
     if "contentType" in allowed_options and options.get("contentType"):
         headers[PUT_OPTION_HEADER_MAP["contentType"]] = str(options["contentType"])
-    if (
-        "addRandomSuffix" in allowed_options
-        and options.get("addRandomSuffix") is not None
-    ):
+    if "addRandomSuffix" in allowed_options and options.get("addRandomSuffix") is not None:
         headers[PUT_OPTION_HEADER_MAP["addRandomSuffix"]] = (
             "1" if options.get("addRandomSuffix") else "0"
         )
-    if (
-        "allowOverwrite" in allowed_options
-        and options.get("allowOverwrite") is not None
-    ):
+    if "allowOverwrite" in allowed_options and options.get("allowOverwrite") is not None:
         headers[PUT_OPTION_HEADER_MAP["allowOverwrite"]] = (
             "1" if options.get("allowOverwrite") else "0"
         )
-    if (
-        "cacheControlMaxAge" in allowed_options
-        and options.get("cacheControlMaxAge") is not None
-    ):
-        headers[PUT_OPTION_HEADER_MAP["cacheControlMaxAge"]] = str(
-            options["cacheControlMaxAge"]
-        )
+    if "cacheControlMaxAge" in allowed_options and options.get("cacheControlMaxAge") is not None:
+        headers[PUT_OPTION_HEADER_MAP["cacheControlMaxAge"]] = str(options["cacheControlMaxAge"])
     return headers
 
 

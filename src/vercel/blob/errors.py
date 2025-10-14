@@ -7,9 +7,7 @@ class BlobError(Exception):
 
 class BlobAccessError(BlobError):
     def __init__(self) -> None:
-        super().__init__(
-            "Access denied, please provide a valid token for this resource."
-        )
+        super().__init__("Access denied, please provide a valid token for this resource.")
 
 
 class BlobContentTypeNotAllowedError(BlobError):
@@ -56,9 +54,7 @@ class BlobNotFoundError(BlobError):
 
 class BlobServiceNotAvailable(BlobError):
     def __init__(self) -> None:
-        super().__init__(
-            "The blob service is currently not available. Please try again."
-        )
+        super().__init__("The blob service is currently not available. Please try again.")
 
 
 class BlobServiceRateLimited(BlobError):

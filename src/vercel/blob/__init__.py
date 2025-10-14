@@ -15,7 +15,12 @@ from .errors import (
 )
 
 from .ops import put, delete, head, list_blobs, copy, create_folder
-from .multipart import create_multipart_upload, upload_part, complete_multipart_upload, uncontrolled_multipart_upload
+from .multipart import (
+    create_multipart_upload,
+    upload_part,
+    complete_multipart_upload,
+    uncontrolled_multipart_upload,
+)
 from .client import (
     get_payload_from_client_token,
     generate_client_token_from_read_write_token,
