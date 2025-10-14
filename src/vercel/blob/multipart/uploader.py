@@ -19,7 +19,7 @@ async def uncontrolled_multipart_upload(
     pathname: str,
     body: Any,
     *,
-    access: str = 'public',
+    access: str = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     allow_overwrite: bool = False,
@@ -28,17 +28,19 @@ async def uncontrolled_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
-        'access': access,
-        'contentType': content_type,
-        'addRandomSuffix': add_random_suffix,
-        'allowOverwrite': allow_overwrite,
-        'cacheControlMaxAge': cache_control_max_age,
-        'token': token,
+        "access": access,
+        "contentType": content_type,
+        "addRandomSuffix": add_random_suffix,
+        "allowOverwrite": allow_overwrite,
+        "cacheControlMaxAge": cache_control_max_age,
+        "token": token,
     }
     opts = await create_put_options(pathname=pathname, options=options)
-    headers = create_put_headers(['cacheControlMaxAge', 'addRandomSuffix', 'allowOverwrite', 'contentType'], opts)
+    headers = create_put_headers(
+        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
+    )
 
-    create_resp = await _create_multipart_upload(pathname, headers, token=opts.get('token'))
+    create_resp = await _create_multipart_upload(pathname, headers, token=opts.get("token"))
     upload_id = create_resp["uploadId"]
     key = create_resp["key"]
 
@@ -98,7 +100,7 @@ async def uncontrolled_multipart_upload(
                 key=key,
                 pathname=pathname,
                 headers=headers,
-                token=opts.get('token'),
+                token=opts.get("token"),
                 part_number=part_number,
                 body=content,
                 on_upload_progress=progress,
@@ -108,15 +110,13 @@ async def uncontrolled_multipart_upload(
     await asyncio.gather(*[upload_one(i, c) for i, c in enumerate(chunks)])
 
     if on_upload_progress:
-        on_upload_progress(
-            UploadProgressEvent(loaded=total, total=total, percentage=100.0)
-        )
+        on_upload_progress(UploadProgressEvent(loaded=total, total=total, percentage=100.0))
 
     return await _complete_multipart_upload(
         upload_id=upload_id,
         key=key,
         pathname=pathname,
         headers=headers,
-        token=opts.get('token'),
+        token=opts.get("token"),
         parts=results,
     )

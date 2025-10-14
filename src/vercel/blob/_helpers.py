@@ -26,9 +26,7 @@ def debug(message: str, *args: Any) -> None:
 
 
 def get_api_url(pathname: str = "") -> str:
-    base_url = os.getenv("VERCEL_BLOB_API_URL") or os.getenv(
-        "NEXT_PUBLIC_VERCEL_BLOB_API_URL"
-    )
+    base_url = os.getenv("VERCEL_BLOB_API_URL") or os.getenv("NEXT_PUBLIC_VERCEL_BLOB_API_URL")
     return f"{base_url or DEFAULT_VERCEL_BLOB_API_URL}{pathname}"
 
 
@@ -87,14 +85,10 @@ def validate_pathname(pathname: str) -> None:
     if not pathname:
         raise BlobError("pathname is required")
     if len(pathname) > MAXIMUM_PATHNAME_LENGTH:
-        raise BlobError(
-            f"pathname is too long, maximum length is {MAXIMUM_PATHNAME_LENGTH}"
-        )
+        raise BlobError(f"pathname is too long, maximum length is {MAXIMUM_PATHNAME_LENGTH}")
     for invalid in DISALLOWED_PATHNAME_CHARACTERS:
         if invalid in pathname:
-            raise BlobError(
-                f'pathname cannot contain "{invalid}", please encode it if needed'
-            )
+            raise BlobError(f'pathname cannot contain "{invalid}", please encode it if needed')
 
 
 def require_public_access(options: dict[str, Any]) -> None:
@@ -205,9 +199,7 @@ class StreamingBodyWithProgress:
             total = self._total if self._total else self._loaded
             percentage = round((self._loaded / total) * 100, 2) if total else 0.0
             self._on_progress(
-                UploadProgressEvent(
-                    loaded=self._loaded, total=total, percentage=percentage
-                )
+                UploadProgressEvent(loaded=self._loaded, total=total, percentage=percentage)
             )
 
     async def __aiter__(self):  # type: ignore[override]

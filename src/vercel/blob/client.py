@@ -49,9 +49,7 @@ async def generate_client_token_from_read_write_token(
 
     parts = read_write_token.split("_")
     if len(parts) < 4 or not parts[3]:
-        raise BlobError(
-            "Invalid `token` parameter" if token else "Invalid `BLOB_READ_WRITE_TOKEN`"
-        )
+        raise BlobError("Invalid `token` parameter" if token else "Invalid `BLOB_READ_WRITE_TOKEN`")
 
     store_id = parts[3]
     from time import time as _time
@@ -71,9 +69,7 @@ async def generate_client_token_from_read_write_token(
     import json
 
     payload_b64 = base64.b64encode(json.dumps(payload_obj).encode()).decode()
-    signature = hmac.new(
-        read_write_token.encode(), payload_b64.encode(), sha256
-    ).hexdigest()
+    signature = hmac.new(read_write_token.encode(), payload_b64.encode(), sha256).hexdigest()
     encoded = base64.b64encode(f"{signature}.{payload_b64}".encode()).decode()
     return f"vercel_blob_client_{store_id}_{encoded}"
 
@@ -97,9 +93,7 @@ async def handle_upload(
         pathname = payload["pathname"]
         client_payload = payload.get("clientPayload")
         multipart = payload.get("multipart", False)
-        token_options = await on_before_generate_token(
-            pathname, client_payload, multipart
-        )
+        token_options = await on_before_generate_token(pathname, client_payload, multipart)
         token_payload = token_options.get("tokenPayload", client_payload)
         callback_url = token_options.get("callbackUrl")
         if on_upload_completed and not callback_url:
@@ -126,9 +120,7 @@ async def handle_upload(
         signature = request.headers.get(signature_header, "")
         if not signature:
             raise BlobError("Missing callback signature")
-        computed = hmac.new(
-            resolved_token.encode(), json.dumps(body).encode(), sha256
-        ).hexdigest()
+        computed = hmac.new(resolved_token.encode(), json.dumps(body).encode(), sha256).hexdigest()
         if not hmac.compare_digest(computed, signature):
             raise BlobError("Invalid callback signature")
         if on_upload_completed:

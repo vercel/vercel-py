@@ -14,7 +14,7 @@ from .core import (
 async def create_multipart_upload(
     pathname: str,
     *,
-    access: str = 'public',
+    access: str = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     allow_overwrite: bool = False,
@@ -22,25 +22,25 @@ async def create_multipart_upload(
     token: str | None = None,
 ) -> dict[str, str]:
     options: dict[str, Any] = {
-        'access': access,
-        'contentType': content_type,
-        'addRandomSuffix': add_random_suffix,
-        'allowOverwrite': allow_overwrite,
-        'cacheControlMaxAge': cache_control_max_age,
-        'token': token,
+        "access": access,
+        "contentType": content_type,
+        "addRandomSuffix": add_random_suffix,
+        "allowOverwrite": allow_overwrite,
+        "cacheControlMaxAge": cache_control_max_age,
+        "token": token,
     }
     opts = await create_put_options(pathname=pathname, options=options)
     headers = create_put_headers(
-        ['cacheControlMaxAge', 'addRandomSuffix', 'allowOverwrite', 'contentType'], opts
+        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
     )
-    return await _create_mpu(pathname, headers, token=opts.get('token'))
+    return await _create_mpu(pathname, headers, token=opts.get("token"))
 
 
 async def upload_part(
     pathname: str,
     body: Any,
     *,
-    access: str = 'public',
+    access: str = "public",
     token: str | None = None,
     upload_id: str,
     key: str,
@@ -49,24 +49,24 @@ async def upload_part(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
-        'access': access,
-        'contentType': content_type,
-        'token': token,
-        'uploadId': upload_id,
-        'key': key,
-        'partNumber': part_number,
+        "access": access,
+        "contentType": content_type,
+        "token": token,
+        "uploadId": upload_id,
+        "key": key,
+        "partNumber": part_number,
     }
     opts = await create_put_options(pathname=pathname, options=options)
     headers = create_put_headers(
-        ['cacheControlMaxAge', 'addRandomSuffix', 'allowOverwrite', 'contentType'], opts
+        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
     )
     return await _upload_part(
-        upload_id=opts['uploadId'],
-        key=opts['key'],
+        upload_id=opts["uploadId"],
+        key=opts["key"],
         pathname=pathname,
         headers=headers,
-        token=opts.get('token'),
-        part_number=opts['partNumber'],
+        token=opts.get("token"),
+        part_number=opts["partNumber"],
         body=body,
         on_upload_progress=on_upload_progress,
     )
@@ -76,30 +76,28 @@ async def complete_multipart_upload(
     pathname: str,
     parts: list[dict[str, Any]],
     *,
-    access: str = 'public',
+    access: str = "public",
     content_type: str | None = None,
     token: str | None = None,
     upload_id: str,
     key: str,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {
-        'access': access,
-        'contentType': content_type,
-        'token': token,
-        'uploadId': upload_id,
-        'key': key,
+        "access": access,
+        "contentType": content_type,
+        "token": token,
+        "uploadId": upload_id,
+        "key": key,
     }
     opts = await create_put_options(pathname=pathname, options=options)
     headers = create_put_headers(
-        ['cacheControlMaxAge', 'addRandomSuffix', 'allowOverwrite', 'contentType'], opts
+        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
     )
     return await _complete_mpu(
-        upload_id=opts['uploadId'],
-        key=opts['key'],
+        upload_id=opts["uploadId"],
+        key=opts["key"],
         pathname=pathname,
         headers=headers,
-        token=opts.get('token'),
+        token=opts.get("token"),
         parts=parts,
     )
-
-
