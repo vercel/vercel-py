@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from ._helpers import UploadProgressEvent, parse_datetime
 from ._put_helpers import create_put_headers, create_put_options, PUT_OPTION_HEADER_MAP
@@ -27,7 +27,7 @@ async def put(
     cache_control_max_age: int | None = None,
     token: str | None = None,
     multipart: bool = False,
-    on_upload_progress: callable[[UploadProgressEvent], None] | None = None,
+    on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
     if body is None:
         raise BlobError('body is required')
@@ -58,7 +58,15 @@ async def put(
     # Multipart uncontrolled support
     if opts.get('multipart') is True:
         raw = await uncontrolled_multipart_upload(
-            pathname, body, headers, opts, on_upload_progress=on_upload_progress
+            pathname,
+            body,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            allow_overwrite=allow_overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+            on_upload_progress=on_upload_progress,
         )
         return PutBlobResultType(
             url=raw['url'],

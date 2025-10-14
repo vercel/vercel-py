@@ -138,7 +138,6 @@ async def request_api(
                 if send_body_length and total_length:
                     final_headers["x-content-length"] = str(total_length)
 
-                data = None
                 json_body = None
                 content = None
 
@@ -159,13 +158,22 @@ async def request_api(
                     params=params,
                 )
                 if content is not None:
-                    request_kwargs["content"] = content
-                elif data is not None:
-                    request_kwargs["data"] = data
-                if json_body is not None:
-                    request_kwargs["json"] = json_body
-
-                resp = await client.request(**request_kwargs)
+                    resp = await client.request(
+                        method=method,
+                        url=url,
+                        headers=final_headers,
+                        params=params,
+                        content=content,
+                        json=json_body,
+                    )
+                else:
+                    resp = await client.request(
+                        method=method,
+                        url=url,
+                        headers=final_headers,
+                        params=params,
+                        json=json_body,
+                    )
 
                 if 200 <= resp.status_code < 300:
                     if on_upload_progress:

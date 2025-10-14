@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 from .._request import request_api
@@ -28,7 +28,7 @@ async def _upload_part(
     headers: dict[str, str],
     part_number: int,
     body: Any,
-    on_upload_progress: callable[[UploadProgressEvent], None] | None = None,
+    on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     token: str | None = None,
 ):
     params = {"pathname": pathname}
