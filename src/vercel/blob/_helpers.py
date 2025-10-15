@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from os import PathLike
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Iterable, Protocol
 import asyncio
+from typing import Any, Callable, Iterable, Protocol, Awaitable
 
 from .errors import BlobError
 
@@ -14,6 +15,12 @@ from .errors import BlobError
 DEFAULT_VERCEL_BLOB_API_URL = "https://vercel.com/api/blob"
 MAXIMUM_PATHNAME_LENGTH = 950
 DISALLOWED_PATHNAME_CHARACTERS = ["//"]
+PUT_OPTION_HEADER_MAP: dict[str, str] = {
+    "cacheControlMaxAge": "x-cache-control-max-age",
+    "addRandomSuffix": "x-add-random-suffix",
+    "allowOverwrite": "x-allow-overwrite",
+    "contentType": "x-content-type",
+}
 
 
 def debug(message: str, *args: Any) -> None:
@@ -23,6 +30,33 @@ def debug(message: str, *args: Any) -> None:
             print(f"vercel-blob: {message}", *args)
     except Exception:
         pass
+
+
+def is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
+def normalize_path(p: str | os.PathLike) -> str:
+    s = str(p)
+    # prevent accidental double slashes and backslashes
+    s = s.replace("\\", "/")
+    while "//" in s:
+        s = s.replace("//", "/")
+    # disallow empty or root-only
+    if not s or s == "/":
+        raise ValueError("path must not be empty or '/'")
+    # normalize leading slash away: 'a/b' not '/a/b'
+    if s.startswith("/"):
+        s = s[1:]
+    return s
+
+
+def build_cache_control(cache_control: str | None, max_age: int | None) -> str | None:
+    if cache_control:
+        return cache_control
+    if max_age is not None:
+        return f"max-age={int(max_age)}"
+    return None
 
 
 def get_api_url(pathname: str = "") -> str:
@@ -81,14 +115,14 @@ def extract_store_id_from_token(token: str) -> str:
         return ""
 
 
-def validate_pathname(pathname: str) -> None:
-    if not pathname:
-        raise BlobError("pathname is required")
-    if len(pathname) > MAXIMUM_PATHNAME_LENGTH:
-        raise BlobError(f"pathname is too long, maximum length is {MAXIMUM_PATHNAME_LENGTH}")
+def validate_path(path: str) -> None:
+    if not path:
+        raise BlobError("path is required")
+    if len(path) > MAXIMUM_PATHNAME_LENGTH:
+        raise BlobError(f"path is too long, maximum length is {MAXIMUM_PATHNAME_LENGTH}")
     for invalid in DISALLOWED_PATHNAME_CHARACTERS:
-        if invalid in pathname:
-            raise BlobError(f'pathname cannot contain "{invalid}", please encode it if needed')
+        if invalid in path:
+            raise BlobError(f'path cannot contain "{invalid}", please encode it if needed')
 
 
 def require_public_access(options: dict[str, Any]) -> None:
@@ -127,7 +161,9 @@ class UploadProgressEvent:
     percentage: float
 
 
-OnUploadProgressCallback = Callable[[UploadProgressEvent], None]
+OnUploadProgressCallback = (
+    Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
+)
 
 
 class SupportsRead(Protocol):
@@ -202,9 +238,60 @@ class StreamingBodyWithProgress:
                 UploadProgressEvent(loaded=self._loaded, total=total, percentage=percentage)
             )
 
+    async def _emit_progress_async(self) -> None:
+        if self._on_progress:
+            total = self._total if self._total else self._loaded
+            percentage = round((self._loaded / total) * 100, 2) if total else 0.0
+            result = self._on_progress(
+                UploadProgressEvent(loaded=self._loaded, total=total, percentage=percentage)
+            )
+            # Check if the callback is async
+            if asyncio.iscoroutine(result):
+                await result
+
     async def __aiter__(self):  # type: ignore[override]
-        for chunk in self:
-            yield chunk
+        # Async version that properly handles async callbacks
+        if isinstance(self._source, str):
+            data = self._source.encode("utf-8")
+            async for chunk in self._yield_bytes_async(data):
+                yield chunk
+            return
+        if isinstance(self._source, (bytes, bytearray, memoryview)):
+            async for chunk in self._yield_bytes_async(bytes(self._source)):
+                yield chunk
+            return
+        if hasattr(self._source, "read"):
+            # file-like
+            while True:
+                chunk = self._source.read(self._chunk_size)  # type: ignore[attr-defined]
+                if not chunk:
+                    break
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    chunk = bytes(chunk)
+                self._loaded += len(chunk)
+                await self._emit_progress_async()
+                yield bytes(chunk)
+                await asyncio.sleep(0)
+            return
+        # assume iterable of bytes
+        for chunk in self._source:  # type: ignore[assignment]
+            if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                chunk = bytes(chunk)
+            self._loaded += len(chunk)
+            await self._emit_progress_async()
+            yield bytes(chunk)
+            await asyncio.sleep(0)
+
+    async def _yield_bytes_async(self, data: bytes):
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            end = min(offset + self._chunk_size, len(view))
+            chunk = view[offset:end]
+            offset = end
+            self._loaded += len(chunk)
+            await self._emit_progress_async()
+            yield chunk.tobytes()
             await asyncio.sleep(0)
 
 
@@ -251,3 +338,68 @@ def get_download_url(blob_url: str) -> str:
         # Fallback: naive append
         sep = "&" if "?" in blob_url else "?"
         return f"{blob_url}{sep}download=1"
+
+
+def create_put_headers(allowed_options: list[str], options: dict[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if "contentType" in allowed_options and options.get("contentType"):
+        headers[PUT_OPTION_HEADER_MAP["contentType"]] = str(options["contentType"])
+    if "addRandomSuffix" in allowed_options and options.get("addRandomSuffix") is not None:
+        headers[PUT_OPTION_HEADER_MAP["addRandomSuffix"]] = (
+            "1" if options.get("addRandomSuffix") else "0"
+        )
+    if "allowOverwrite" in allowed_options and options.get("allowOverwrite") is not None:
+        headers[PUT_OPTION_HEADER_MAP["allowOverwrite"]] = (
+            "1" if options.get("allowOverwrite") else "0"
+        )
+    if "cacheControlMaxAge" in allowed_options and options.get("cacheControlMaxAge") is not None:
+        headers[PUT_OPTION_HEADER_MAP["cacheControlMaxAge"]] = str(options["cacheControlMaxAge"])
+    return headers
+
+
+def create_put_options(
+    *,
+    path: str,
+    options: dict[str, Any] | None,
+    extra_checks: Callable[[dict[str, Any]], None] | None = None,
+    get_token: Callable[[str, dict[str, Any]], str] | None = None,
+) -> dict[str, Any]:
+    validate_path(path)
+    if not options:
+        raise BlobError("missing options, see usage")
+    require_public_access(options)
+    if extra_checks:
+        extra_checks(options)
+    if get_token:
+        options["token"] = get_token(path, options)
+    return options
+
+
+def normalize_common_args(
+    *,
+    path: str | PathLike,
+    access: str,
+    content_type: str | None,
+    overwrite: bool,
+    cache_control: str | None,
+    max_age: int | None,
+    add_random_suffix: bool,
+    token: str | None,
+) -> tuple[str, dict[str, Any], dict[str, str]]:
+    p = normalize_path(path)
+    cc = build_cache_control(cache_control, max_age)
+
+    options: dict[str, Any] = {
+        "access": access,
+        "contentType": content_type,
+        "addRandomSuffix": add_random_suffix,
+        "allowOverwrite": overwrite,
+        "cacheControlMaxAge": None,  # deprecated; keep None
+        "cacheControl": cc,  # preferred
+        "token": token,
+    }
+    opts = create_put_options(path=p, options=options)
+    headers = create_put_headers(
+        ["cacheControl", "addRandomSuffix", "allowOverwrite", "contentType"], opts
+    )
+    return p, opts, headers

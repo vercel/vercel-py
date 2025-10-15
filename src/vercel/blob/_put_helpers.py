@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
-from ._helpers import MAXIMUM_PATHNAME_LENGTH, validate_pathname, require_public_access
+from ._helpers import validate_path, require_public_access
 from .errors import BlobError
 
 
@@ -31,15 +31,19 @@ def create_put_headers(allowed_options: list[str], options: dict[str, Any]) -> d
     return headers
 
 
-async def create_put_options(
-    *, pathname: str, options: dict[str, Any] | None, extra_checks=None, get_token=None
+def create_put_options(
+    *,
+    path: str,
+    options: dict[str, Any] | None,
+    extra_checks: Callable[[dict[str, Any]], None] | None = None,
+    get_token: Callable[[str, dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
-    validate_pathname(pathname)
+    validate_path(path)
     if not options:
         raise BlobError("missing options, see usage")
     require_public_access(options)
     if extra_checks:
         extra_checks(options)
     if get_token:
-        options["token"] = await get_token(pathname, options)  # type: ignore[assignment]
+        options["token"] = get_token(path, options)
     return options
