@@ -3,7 +3,7 @@ from __future__ import annotations
 import urllib.parse
 from typing import TypedDict, Protocol
 
-from .cache._context import set_headers, get_headers
+from .cache.context import set_headers, get_headers
 
 __all__ = [
     "ip_address",
