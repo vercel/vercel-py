@@ -49,17 +49,18 @@ class InMemoryCache(Cache):
 
 
 class AsyncInMemoryCache(AsyncCache):
-    def __init__(self) -> None:
-        self._cache: dict[str, dict] = {}
+    def __init__(self, delegate: InMemoryCache | None = None) -> None:
+        # Reuse the synchronous implementation under the hood and expose async API
+        self.cache = delegate or InMemoryCache()
 
     async def get(self, key: str):
-        return super().get(key)
+        return self.cache.get(key)
 
     async def set(self, key: str, value: object, options: dict | None = None) -> None:
-        return super().set(key, value, options)
+        self.cache.set(key, value, options)
 
     async def delete(self, key: str) -> None:
-        return super().delete(key)
+        self.cache.delete(key)
 
     async def expire_tag(self, tag: str | Sequence[str]) -> None:
-        return super().expire_tag(tag)
+        self.cache.expire_tag(tag)

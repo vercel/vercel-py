@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, HTTPException
 import logging
 import traceback
 
-from vercel.cache import get_cache
+from vercel.cache import AsyncRuntimeCache
 
 from vercel.headers import geolocation, ip_address, set_headers
 from vercel.oidc import get_vercel_oidc_token, decode_oidc_payload
@@ -14,6 +14,9 @@ from vercel.oidc import get_vercel_oidc_token, decode_oidc_payload
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
+
+
+cache = AsyncRuntimeCache()
 
 
 @app.middleware("http")
@@ -38,7 +41,6 @@ async def oidc_info():
 
 @app.get("/api/cache")
 async def cache_demo():
-    cache = get_cache(namespace="fastapi-e2e")
     key = "hit"
     val = await cache.get(key)
     if val is None:
@@ -61,7 +63,6 @@ async def test():
     oidc_exp = payload.get("exp")
 
     # Test cache logic
-    cache = get_cache(namespace="fastapi-e2e")
     key = "test:logic"
     await cache.delete(key)
     val = await cache.get(key)

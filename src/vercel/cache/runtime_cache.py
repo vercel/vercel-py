@@ -9,43 +9,59 @@ from .types import Cache, AsyncCache
 from .utils import create_key_transformer
 
 
-_in_memory_cache_instance: InMemoryCache | AsyncInMemoryCache | None = None
-_build_cache_instance: BuildCache | AsyncBuildCache | None = None
+_in_memory_cache_instance: InMemoryCache | None = None
+_async_in_memory_cache_instance: AsyncInMemoryCache | None = None
+_build_cache_instance: BuildCache | None = None
+_async_build_cache_instance: AsyncBuildCache | None = None
 _warned_cache_unavailable = False
 
 
 class RuntimeCache(Cache):
-    def __init__(self):
-        self.cache = {}
+    def __init__(
+        self,
+        *,
+        key_hash_function: Callable[[str], str] | None = None,
+        namespace: str | None = None,
+        namespace_separator: str | None = None,
+    ) -> None:
+        # Transform keys to match get_cache behavior
+        self._make_key = create_key_transformer(key_hash_function, namespace, namespace_separator)
 
     def get(self, key: str):
-        return self.cache.get(key)
+        return resolve_cache(sync=True).get(self._make_key(key))
 
-    def set(self, key: str, value: object):
-        self.cache[key] = value
+    def set(self, key: str, value: object, options: dict | None = None):
+        return resolve_cache(sync=True).set(self._make_key(key), value, options)
 
     def delete(self, key: str):
-        self.cache.pop(key, None)
+        return resolve_cache(sync=True).delete(self._make_key(key))
 
     def expire_tag(self, tag: str | Sequence[str]):
-        self.cache.pop(tag, None)
+        # Tag invalidation is not namespaced/hashed by design
+        return resolve_cache(sync=True).expire_tag(tag)
 
 
 class AsyncRuntimeCache(AsyncCache):
-    def __init__(self):
-        self.cache = {}
+    def __init__(
+        self,
+        *,
+        key_hash_function: Callable[[str], str] | None = None,
+        namespace: str | None = None,
+        namespace_separator: str | None = None,
+    ) -> None:
+        self._make_key = create_key_transformer(key_hash_function, namespace, namespace_separator)
 
     async def get(self, key: str):
-        return self.cache.get(key)
+        return await resolve_cache(sync=False).get(self._make_key(key))
 
-    async def set(self, key: str, value: object):
-        self.cache[key] = value
+    async def set(self, key: str, value: object, options: dict | None = None):
+        return await resolve_cache(sync=False).set(self._make_key(key), value, options)
 
     async def delete(self, key: str):
-        self.cache.pop(key, None)
+        return await resolve_cache(sync=False).delete(self._make_key(key))
 
     async def expire_tag(self, tag: str | Sequence[str]):
-        self.cache.pop(tag, None)
+        return await resolve_cache(sync=False).expire_tag(tag)
 
 
 def get_cache(
@@ -54,27 +70,11 @@ def get_cache(
     namespace: str | None = None,
     namespace_separator: str | None = None,
 ) -> RuntimeCache:
-    def wrap_with_key_transformation(
-        resolver: Callable[[], RuntimeCache], make_key: Callable[[str], str]
-    ) -> RuntimeCache:
-        class _Wrapper:
-            def get(self, key: str):
-                return resolver().get(make_key(key))
-
-            def set(self, key: str, value: object, options: dict | None = None):
-                return resolver().set(make_key(key), value, options)
-
-            def delete(self, key: str):
-                return resolver().delete(make_key(key))
-
-            def expire_tag(self, tag):
-                return resolver().expire_tag(tag)
-
-        return _Wrapper()
-
-    return wrap_with_key_transformation(
-        resolve_cache(sync=True),
-        create_key_transformer(key_hash_function, namespace, namespace_separator),
+    # Backwards-compatible helper that returns a wrapper equivalent to RuntimeCache()
+    return RuntimeCache(
+        key_hash_function=key_hash_function,
+        namespace=namespace,
+        namespace_separator=namespace_separator,
     )
 
 
@@ -84,42 +84,28 @@ def get_async_cache(
     namespace: str | None = None,
     namespace_separator: str | None = None,
 ) -> AsyncRuntimeCache:
-    def wrap_with_key_transformation(
-        resolver: Callable[[], AsyncRuntimeCache], make_key: Callable[[str], str]
-    ) -> AsyncRuntimeCache:
-        class _Wrapper:
-            async def get(self, key: str):
-                return await resolver().get(make_key(key))
-
-            async def set(self, key: str, value: object, options: dict | None = None):
-                return await resolver().set(make_key(key), value, options)
-
-            async def delete(self, key: str):
-                return await resolver().delete(make_key(key))
-
-            async def expire_tag(self, tag):
-                return await resolver().expire_tag(tag)
-
-        return _Wrapper()
-
-    return wrap_with_key_transformation(
-        resolve_cache(sync=False),
-        create_key_transformer(key_hash_function, namespace, namespace_separator),
+    return AsyncRuntimeCache(
+        key_hash_function=key_hash_function,
+        namespace=namespace,
+        namespace_separator=namespace_separator,
     )
 
 
-def _get_cache_implementation(
-    debug: bool = False, sync: bool = True
-) -> RuntimeCache | AsyncRuntimeCache:
-    global _in_memory_cache_instance, _build_cache_instance, _warned_cache_unavailable
+def _get_cache_implementation(debug: bool = False, sync: bool = True) -> Cache | AsyncCache:
+    global _in_memory_cache_instance, _async_in_memory_cache_instance
+    global _build_cache_instance, _async_build_cache_instance, _warned_cache_unavailable
 
+    # Prepare a single shared InMemoryCache backing store and an async wrapper over it
     if _in_memory_cache_instance is None:
-        _in_memory_cache_instance = InMemoryCache() if sync else AsyncInMemoryCache()
+        _in_memory_cache_instance = InMemoryCache()
+    if _async_in_memory_cache_instance is None:
+        _async_in_memory_cache_instance = AsyncInMemoryCache(delegate=_in_memory_cache_instance)
 
+    # Disable build cache via env
     if os.getenv("RUNTIME_CACHE_DISABLE_BUILD_CACHE") == "true":
         if debug:
             print("Using InMemoryCache as build cache is disabled")
-        return _in_memory_cache_instance
+        return _in_memory_cache_instance if sync else _async_in_memory_cache_instance
 
     endpoint = os.getenv("RUNTIME_CACHE_ENDPOINT")
     headers = os.getenv("RUNTIME_CACHE_HEADERS")
@@ -134,26 +120,36 @@ def _get_cache_implementation(
         if not _warned_cache_unavailable:
             print("Runtime Cache unavailable in this environment. Falling back to in-memory cache.")
             _warned_cache_unavailable = True
-        return _in_memory_cache_instance
+        return _in_memory_cache_instance if sync else _async_in_memory_cache_instance  # type: ignore[return-value]
 
-    if _build_cache_instance is None:
-        try:
-            parsed_headers = json.loads(headers)
-            if not isinstance(parsed_headers, dict):
-                raise ValueError("RUNTIME_CACHE_HEADERS must be a JSON object")
-        except Exception as e:
-            print("Failed to parse RUNTIME_CACHE_HEADERS:", e)
-            return _in_memory_cache_instance
-        _build_cache_instance = BuildCache(
-            endpoint=endpoint,
-            headers=parsed_headers,
-            on_error=lambda e: print(e),
-        )
+    # Build cache clients
+    try:
+        parsed_headers = json.loads(headers)
+        if not isinstance(parsed_headers, dict):
+            raise ValueError("RUNTIME_CACHE_HEADERS must be a JSON object")
+    except Exception as e:
+        print("Failed to parse RUNTIME_CACHE_HEADERS:", e)
+        return _in_memory_cache_instance if sync else _async_in_memory_cache_instance  # type: ignore[return-value]
 
-    return _build_cache_instance
+    if sync:
+        if _build_cache_instance is None:
+            _build_cache_instance = BuildCache(
+                endpoint=endpoint,
+                headers=parsed_headers,
+                on_error=lambda e: print(e),
+            )
+        return _build_cache_instance
+    else:
+        if _async_build_cache_instance is None:
+            _async_build_cache_instance = AsyncBuildCache(
+                endpoint=endpoint,
+                headers=parsed_headers,
+                on_error=lambda e: print(e),
+            )
+        return _async_build_cache_instance
 
 
-def resolve_cache(sync: bool = True) -> RuntimeCache | AsyncRuntimeCache:
+def resolve_cache(sync: bool = True) -> Cache | AsyncCache:
     ctx = get_context()
     cache = getattr(ctx, "cache", None)
     if cache is not None:
