@@ -60,7 +60,7 @@ class TestOIDCE2E:
     async def test_oidc_token_retrieval(self, oidc_token, vercel_token):
         """Test OIDC token retrieval functionality."""
         # Test getting token from environment
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         
         # Verify token is retrieved
         assert token is not None
@@ -82,7 +82,7 @@ class TestOIDCE2E:
     async def test_oidc_token_payload_decoding(self, oidc_token, vercel_token):
         """Test OIDC token payload decoding."""
         # Get token
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         
         # If using Vercel token as fallback, skip JWT-specific tests
         if token == vercel_token:
@@ -122,7 +122,7 @@ class TestOIDCE2E:
     async def test_oidc_token_claims(self, oidc_token, vercel_token, vercel_project_id, vercel_team_id):
         """Test OIDC token claims and their values."""
         # Get token
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         
         # If using Vercel token as fallback, skip JWT-specific tests
         if token == vercel_token:
@@ -164,7 +164,7 @@ class TestOIDCE2E:
     async def test_oidc_token_expiration_handling(self, oidc_token, vercel_token):
         """Test OIDC token expiration handling."""
         # Get token
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         
         # If using Vercel token as fallback, skip JWT-specific tests
         if token == vercel_token:
@@ -198,14 +198,14 @@ class TestOIDCE2E:
     async def test_oidc_token_refresh_simulation(self, oidc_token, vercel_token):
         """Test OIDC token refresh simulation."""
         # Get initial token
-        initial_token = await get_vercel_oidc_token()
+        initial_token = get_vercel_oidc_token()
         
         # If using Vercel token as fallback, test basic functionality
         if initial_token == vercel_token:
             print("✅ Testing Vercel API token refresh simulation")
             # Wait a moment and get token again
             await asyncio.sleep(1)
-            refreshed_token = await get_vercel_oidc_token()
+            refreshed_token = get_vercel_oidc_token()
             
             # Tokens should be the same (Vercel API tokens are persistent)
             assert refreshed_token == initial_token
@@ -217,7 +217,7 @@ class TestOIDCE2E:
         
         # Wait a moment and get token again
         await asyncio.sleep(1)
-        refreshed_token = await get_vercel_oidc_token()
+        refreshed_token = get_vercel_oidc_token()
         refreshed_payload = decode_oidc_payload(refreshed_token)
         
         # Tokens might be the same (cached) or different (refreshed)
@@ -238,7 +238,7 @@ class TestOIDCE2E:
         payloads = []
         
         for _ in range(3):
-            token = await get_vercel_oidc_token()
+            token = get_vercel_oidc_token()
             tokens.append(token)
             
             # Only decode if it's a real OIDC token
@@ -294,7 +294,7 @@ class TestOIDCE2E:
     async def test_oidc_token_permissions(self, oidc_token, vercel_token):
         """Test OIDC token permissions and scopes."""
         # Get token
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         
         # If using Vercel token as fallback, skip JWT-specific tests
         if token == vercel_token:
@@ -329,7 +329,7 @@ class TestOIDCE2E:
     async def test_oidc_token_environment_integration(self, oidc_token, vercel_token):
         """Test OIDC token integration with environment variables."""
         # Test that token retrieval works with environment setup
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         assert token is not None
         
         # Test that token can be used for API calls
@@ -357,7 +357,7 @@ class TestOIDCE2E:
     async def test_oidc_token_concurrent_access(self, oidc_token, vercel_token):
         """Test concurrent OIDC token access."""
         async def get_token_and_payload():
-            token = await get_vercel_oidc_token()
+            token = get_vercel_oidc_token()
             if token == vercel_token:
                 return token, None
             try:

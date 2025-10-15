@@ -18,7 +18,7 @@ import pytest
 import time
 from typing import Any, Dict
 
-from vercel.cache import get_cache
+from vercel.cache.aio import get_cache
 
 
 class TestCacheE2E:

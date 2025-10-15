@@ -15,11 +15,11 @@ import tempfile
 from typing import Any, Dict, List
 from unittest.mock import Mock
 
-from vercel.cache import get_cache
+from vercel.cache.aio import get_cache
 from vercel import blob
 from vercel.headers import ip_address, geolocation, set_headers
 from vercel.oidc import get_vercel_oidc_token, decode_oidc_payload
-from vercel.projects import get_projects
+from vercel.projects import get_projects, create_project, update_project, delete_project
 
 
 class TestVercelSDKIntegration:
@@ -139,7 +139,7 @@ class TestVercelSDKIntegration:
         ip = ip_address(mock_request)
         
         # Get OIDC token and decode payload
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         
         # Handle both real OIDC tokens and Vercel API token fallback
         if token == vercel_token:
@@ -280,7 +280,7 @@ class TestVercelSDKIntegration:
         uploaded_blobs.append(upload_result.url)
         
         # Step 2: Get user context (OIDC + Headers)
-        token = await get_vercel_oidc_token()
+        token = get_vercel_oidc_token()
         
         # Handle both real OIDC tokens and Vercel API token fallback
         if token == vercel_token:
