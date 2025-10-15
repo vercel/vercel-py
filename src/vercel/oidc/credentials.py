@@ -1,16 +1,9 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 
 from .token import decode_oidc_payload
-
-
-@dataclass
-class Credentials:
-    token: str
-    project_id: str
-    team_id: str
+from .types import Credentials
 
 
 def get_credentials(

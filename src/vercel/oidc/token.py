@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import os
+import httpx
 
 from ..cache.context import get_headers
-from .token_util import (
+from .utils import (
     find_project_info,
     get_token_payload,
     get_vercel_cli_token,
     is_expired,
     load_token,
     save_token,
-    fetch_vercel_oidc_token,
 )
+from .types import VercelTokenResponse
+
+
+BASE_URL = "https://api.vercel.com/v1"
 
 
 class VercelOidcTokenError(Exception):
@@ -22,7 +26,7 @@ class VercelOidcTokenError(Exception):
         self.cause = cause
 
 
-def get_vercel_oidc_token_sync() -> str:
+def get_vercel_oidc_token_from_context() -> str:
     # Prefer request header (set via vercel.headers.set_headers middleware),
     # fall back to environment variable like the TypeScript SDK.
     headers = get_headers()
@@ -37,6 +41,10 @@ def get_vercel_oidc_token_sync() -> str:
             "The 'x-vercel-oidc-token' header is missing from the request. Do you have the OIDC option enabled in the Vercel project settings?"
         )
     return token_from_env
+
+
+# for TS parity
+get_vercel_oidc_token_sync = get_vercel_oidc_token_from_context
 
 
 def refresh_token() -> None:
@@ -72,7 +80,7 @@ async def refresh_token_async() -> None:
             raise VercelOidcTokenError("Failed to refresh OIDC token: login to vercel cli")
         if not project_id:
             raise VercelOidcTokenError("Failed to refresh OIDC token: project id not found")
-        new_token = await fetch_vercel_oidc_token(auth_token, project_id, team_id)
+        new_token = await fetch_vercel_oidc_token_async(auth_token, project_id, team_id)
         if not new_token:
             raise VercelOidcTokenError("Failed to refresh OIDC token")
         save_token(new_token, project_id)
@@ -85,13 +93,13 @@ def get_vercel_oidc_token() -> str:
     token = ""
     err: Exception | None = None
     try:
-        token = get_vercel_oidc_token_sync()
+        token = get_vercel_oidc_token_from_context()
     except Exception as e:
         err = e
     try:
         if not token or is_expired(get_token_payload(token)):
-            await refresh_token()
-            token = get_vercel_oidc_token_sync()
+            refresh_token()
+            token = get_vercel_oidc_token_from_context()
     except Exception as e:
         if err and isinstance(e, Exception) and getattr(err, "message", None):
             e.args = (f"{err}\n{e}",)
@@ -103,18 +111,50 @@ async def get_vercel_oidc_token_async() -> str:
     token = ""
     err: Exception | None = None
     try:
-        token = get_vercel_oidc_token_sync()
+        token = get_vercel_oidc_token_from_context()
     except Exception as e:
         err = e
     try:
         if not token or is_expired(get_token_payload(token)):
-            await refresh_token()
-            token = get_vercel_oidc_token_sync()
+            await refresh_token_async()
+            token = get_vercel_oidc_token_from_context()
     except Exception as e:
         if err and isinstance(e, Exception) and getattr(err, "message", None):
             e.args = (f"{err}\n{e}",)
         raise VercelOidcTokenError("Failed to refresh OIDC token", e)
     return token
+
+
+def fetch_vercel_oidc_token(
+    auth_token: str, project_id: str, team_id: str | None
+) -> VercelTokenResponse | None:
+    url = f"{BASE_URL}/projects/{project_id}/token?source=vercel-oidc-refresh"
+    if team_id:
+        url += f"&teamId={team_id}"
+    with httpx.Client(timeout=httpx.Timeout(30.0)) as client:
+        r = client.post(url, headers={"authorization": f"Bearer {auth_token}"})
+        if not (200 <= r.status_code < 300):
+            raise RuntimeError(f"Failed to refresh OIDC token: {r.status_code} {r.reason_phrase}")
+        data = r.json()
+        if not isinstance(data, dict) or not isinstance(data.get("token"), str):
+            raise TypeError("Expected a string-valued token property")
+        return VercelTokenResponse(token=data["token"])
+
+
+async def fetch_vercel_oidc_token_async(
+    auth_token: str, project_id: str, team_id: str | None
+) -> VercelTokenResponse | None:
+    url = f"{BASE_URL}/projects/{project_id}/token?source=vercel-oidc-refresh"
+    if team_id:
+        url += f"&teamId={team_id}"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        r = await client.post(url, headers={"authorization": f"Bearer {auth_token}"})
+        if not (200 <= r.status_code < 300):
+            raise RuntimeError(f"Failed to refresh OIDC token: {r.status_code} {r.reason_phrase}")
+        data = r.json()
+        if not isinstance(data, dict) or not isinstance(data.get("token"), str):
+            raise TypeError("Expected a string-valued token property")
+        return VercelTokenResponse(token=data["token"])
 
 
 def decode_oidc_payload(token: str) -> dict:
