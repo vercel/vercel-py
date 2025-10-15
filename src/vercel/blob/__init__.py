@@ -47,7 +47,7 @@ from .client import (
     BlobClient,
     AsyncBlobClient,
 )
-from ._helpers import get_download_url, UploadProgressEvent, OnUploadProgressCallback
+from .utils import get_download_url, UploadProgressEvent, OnUploadProgressCallback
 from .types import (
     PutBlobResult,
     HeadBlobResult,

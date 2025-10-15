@@ -5,7 +5,7 @@ from os import PathLike
 from typing import Any, Callable, Awaitable, Iterable, Iterator
 
 from .errors import BlobError
-from ._helpers import UploadProgressEvent
+from .utils import UploadProgressEvent
 from .types import (
     PutBlobResult as PutBlobResultType,
     HeadBlobResult as HeadBlobResultType,
