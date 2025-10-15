@@ -15,7 +15,14 @@ import asyncio
 import os
 import pytest
 
-from vercel import blob
+from vercel.blob import (
+    put_async,
+    head_async,
+    list_objects_async,
+    copy_async,
+    delete_async,
+    create_folder_async,
+)
 from vercel.blob import UploadProgressEvent
 
 
@@ -58,7 +65,7 @@ class TestBlobStorageE2E:
         pathname = f"{test_prefix}/test-file.txt"
 
         # Upload a text file
-        result = await blob.put(
+        result = await put_async(
             pathname,
             test_data["text"],
             access="public",
@@ -75,7 +82,7 @@ class TestBlobStorageE2E:
         assert result.downloadUrl is not None
 
         # Get file metadata
-        metadata = await blob.head(result.url, token=blob_token)
+        metadata = await head_async(result.url, token=blob_token)
 
         # Verify metadata
         assert metadata.contentType == "text/plain"
@@ -95,7 +102,7 @@ class TestBlobStorageE2E:
         uploaded_paths = []
         for filename, content, content_type in files:
             pathname = f"{test_prefix}/{filename}"
-            result = await blob.put(
+            result = await put_async(
                 pathname,
                 content,
                 access="public",
@@ -107,7 +114,7 @@ class TestBlobStorageE2E:
             uploaded_paths.append(result.pathname)
 
         # List blobs with prefix
-        listing = await blob.list_blobs(prefix=f"{test_prefix}/", limit=10, token=blob_token)
+        listing = await list_objects_async(prefix=f"{test_prefix}/", limit=10, token=blob_token)
 
         # Verify listing
         assert listing.blobs is not None
@@ -123,7 +130,7 @@ class TestBlobStorageE2E:
         """Test blob copying functionality."""
         # Upload original file
         original_path = f"{test_prefix}/original.txt"
-        original_result = await blob.put(
+        original_result = await put_async(
             original_path,
             test_data["text"],
             access="public",
@@ -135,7 +142,7 @@ class TestBlobStorageE2E:
 
         # Copy the file
         copy_path = f"{test_prefix}/copy.txt"
-        copy_result = await blob.copy(
+        copy_result = await copy_async(
             original_result.pathname,
             copy_path,
             access="public",
@@ -149,8 +156,8 @@ class TestBlobStorageE2E:
         assert copy_result.url is not None
 
         # Verify both files have same content
-        original_metadata = await blob.head(original_result.url, token=blob_token)
-        copy_metadata = await blob.head(copy_result.url, token=blob_token)
+        original_metadata = await head_async(original_result.url, token=blob_token)
+        copy_metadata = await head_async(copy_result.url, token=blob_token)
 
         assert original_metadata.size == copy_metadata.size
         assert original_metadata.contentType == copy_metadata.contentType
@@ -160,7 +167,7 @@ class TestBlobStorageE2E:
         """Test blob deletion functionality."""
         # Upload a file
         pathname = f"{test_prefix}/to-delete.txt"
-        result = await blob.put(
+        result = await put_async(
             pathname,
             test_data["text"],
             access="public",
@@ -170,15 +177,15 @@ class TestBlobStorageE2E:
         )
 
         # Verify file exists
-        metadata = await blob.head(result.url, token=blob_token)
+        metadata = await head_async(result.url, token=blob_token)
         assert metadata is not None
 
         # Delete the file
-        await blob.delete([result.url], token=blob_token)
+        await delete_async([result.url], token=blob_token)
 
         # Verify file is deleted
         try:
-            await blob.head(result.url, token=blob_token)
+            await head_async(result.url, token=blob_token)
             assert False, "File should have been deleted"
         except Exception as e:
             # Expected - file should not exist
@@ -190,9 +197,7 @@ class TestBlobStorageE2E:
         folder_path = f"{test_prefix}/test-folder"
 
         # Create folder
-        folder_result = await blob.create_folder(
-            folder_path, token=blob_token, allow_overwrite=True
-        )
+        folder_result = await create_folder_async(folder_path, token=blob_token, overwrite=True)
 
         uploaded_blobs.append(folder_result.url)
 
@@ -202,7 +207,7 @@ class TestBlobStorageE2E:
 
         # Upload a file to the folder
         file_path = f"{folder_path}/file-in-folder.txt"
-        file_result = await blob.put(
+        file_result = await put_async(
             file_path,
             b"File in folder",
             access="public",
@@ -224,7 +229,7 @@ class TestBlobStorageE2E:
         large_content = test_data["large"] * 10  # ~180KB
 
         # Upload using multipart
-        result = await blob.put(
+        result = await put_async(
             pathname,
             large_content,
             access="public",
@@ -241,7 +246,7 @@ class TestBlobStorageE2E:
         assert result.url is not None
 
         # Verify file metadata
-        metadata = await blob.head(result.url, token=blob_token)
+        metadata = await head_async(result.url, token=blob_token)
         assert metadata.size == len(large_content)
         assert metadata.contentType == "text/plain"
 
@@ -258,7 +263,7 @@ class TestBlobStorageE2E:
             progress_events.append(event)
 
         # Upload with progress callback
-        result = await blob.put(
+        result = await put_async(
             pathname,
             test_data["large"],
             access="public",
@@ -287,7 +292,7 @@ class TestBlobStorageE2E:
         """Test different access levels for blob uploads."""
         # Test public access
         public_path = f"{test_prefix}/public-file.txt"
-        public_result = await blob.put(
+        public_result = await put_async(
             public_path,
             test_data["text"],
             access="public",
@@ -299,7 +304,7 @@ class TestBlobStorageE2E:
 
         # Test private access
         private_path = f"{test_prefix}/private-file.txt"
-        private_result = await blob.put(
+        private_result = await put_async(
             private_path,
             test_data["text"],
             access="private",
@@ -314,8 +319,8 @@ class TestBlobStorageE2E:
         assert private_result.url is not None
 
         # Verify metadata can be retrieved for both
-        public_metadata = await blob.head(public_result.url, token=blob_token)
-        private_metadata = await blob.head(private_result.url, token=blob_token)
+        public_metadata = await head_async(public_result.url, token=blob_token)
+        private_metadata = await head_async(private_result.url, token=blob_token)
 
         assert public_metadata is not None
         assert private_metadata is not None
@@ -332,13 +337,13 @@ class TestBlobStorageE2E:
 
         for filename, content, expected_type in test_files:
             pathname = f"{test_prefix}/{filename}"
-            result = await blob.put(
+            result = await put_async(
                 pathname, content, access="public", token=blob_token, add_random_suffix=True
             )
             uploaded_blobs.append(result.url)
 
             # Verify content type
-            metadata = await blob.head(result.url, token=blob_token)
+            metadata = await head_async(result.url, token=blob_token)
             assert metadata.contentType == expected_type
 
     @pytest.mark.asyncio
@@ -346,7 +351,7 @@ class TestBlobStorageE2E:
         """Test blob error handling for invalid operations."""
         # Test uploading invalid data
         with pytest.raises(Exception):
-            await blob.put(
+            await put_async(
                 f"{test_prefix}/invalid.txt",
                 {"invalid": "dict"},  # Should fail - not bytes/string
                 access="public",
@@ -355,7 +360,7 @@ class TestBlobStorageE2E:
 
         # Test accessing non-existent blob
         with pytest.raises(Exception):
-            await blob.head("https://example.com/non-existent-blob", token=blob_token)
+            await head_async("https://example.com/non-existent-blob", token=blob_token)
 
     @pytest.mark.asyncio
     async def test_blob_concurrent_operations(
@@ -366,7 +371,7 @@ class TestBlobStorageE2E:
         async def upload_file(i: int):
             pathname = f"{test_prefix}/concurrent-{i}.txt"
             content = f"Concurrent file {i}: {test_data['text'].decode()}"
-            result = await blob.put(
+            result = await put_async(
                 pathname,
                 content.encode(),
                 access="public",
@@ -386,7 +391,7 @@ class TestBlobStorageE2E:
 
         # Verify all files can be accessed
         metadata_results = await asyncio.gather(
-            *[blob.head(result.url, token=blob_token) for result in results]
+            *[head_async(result.url, token=blob_token) for result in results]
         )
 
         for metadata in metadata_results:
