@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._context import get_context
-
-__all__ = [
-    "invalidate_by_tag",
-    "dangerously_delete_by_tag",
-]
+from .context import get_context
 
 
 def invalidate_by_tag(tag: str | list[str]) -> Any:

@@ -284,7 +284,7 @@ def get(
         if exc.response is not None and exc.response.status_code == 404:
             raise BlobNotFoundError() from exc
         raise
-    except httpx.HTTPError as exc:
+    except httpx.HTTPError:
         raise
 
 
@@ -314,7 +314,7 @@ async def get_async(
         if exc.response is not None and exc.response.status_code == 404:
             raise BlobNotFoundError() from exc
         raise
-    except httpx.HTTPError as exc:
+    except httpx.HTTPError:
         raise
 
 

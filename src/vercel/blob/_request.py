@@ -12,7 +12,6 @@ from .errors import (
     BlobError,
     BlobFileTooLargeError,
     BlobNotFoundError,
-    BlobRequestAbortedError,
     BlobServiceNotAvailable,
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
