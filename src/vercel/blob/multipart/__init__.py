@@ -12,14 +12,6 @@ from .uploader import (
     auto_multipart_upload,
     auto_multipart_upload_async,
 )
-from .core import (
-    _create_multipart_upload,
-    _create_multipart_upload_async,
-    _upload_part,
-    _upload_part_async,
-    _complete_multipart_upload,
-    _complete_multipart_upload_async,
-)
 
 __all__ = [
     "create_multipart_upload",
