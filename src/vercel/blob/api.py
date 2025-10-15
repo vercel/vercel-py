@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from typing import Any, Callable
+import time
+from typing import Any, Callable, Awaitable
 import httpx
 
 from .errors import (
@@ -12,14 +12,13 @@ from .errors import (
     BlobError,
     BlobFileTooLargeError,
     BlobNotFoundError,
-    BlobRequestAbortedError,
     BlobServiceNotAvailable,
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
     BlobStoreSuspendedError,
     BlobUnknownError,
 )
-from ._helpers import (
+from .utils import (
     StreamingBodyWithProgress,
     UploadProgressEvent,
     compute_body_length,
@@ -91,7 +90,7 @@ def _is_network_error(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
-async def request_api(
+def request_api(
     pathname: str,
     method: str,
     options: dict[str, Any] | None = None,
@@ -102,10 +101,9 @@ async def request_api(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     timeout: float | None = None,
 ) -> Any:
-    """Core HTTP caller with retries, headers, progress and error mapping."""
+    """Synchronous HTTP caller with retries, headers, progress and error mapping."""
     token = get_token_from_options_or_env(options or {})
-    store_id = extract_store_id_from_token(token)
-    request_id = make_request_id(store_id)
+    request_id = make_request_id(store_id="")
     attempt = 0
     retries = get_retries()
     api_version = get_api_version()
@@ -113,19 +111,14 @@ async def request_api(
 
     send_body_length = bool(on_upload_progress) or should_use_x_content_length()
     total_length = compute_body_length(body) if send_body_length else 0
-    loaded = 0
 
     if on_upload_progress:
-        on_upload_progress(
-            UploadProgressEvent(loaded=0, total=total_length, percentage=0.0)
-        )
+        on_upload_progress(UploadProgressEvent(loaded=0, total=total_length, percentage=0.0))
 
     url = get_api_url(pathname)
-    timeout_conf = (
-        httpx.Timeout(timeout) if timeout is not None else httpx.Timeout(30.0)
-    )
-    async with httpx.AsyncClient(timeout=timeout_conf) as client:
-        last_error: Exception | None = None
+    timeout_conf = httpx.Timeout(timeout) if timeout is not None else httpx.Timeout(30.0)
+
+    with httpx.Client(timeout=timeout_conf) as client:
         for attempt in range(retries + 1):
             try:
                 final_headers = {
@@ -140,34 +133,25 @@ async def request_api(
                 if send_body_length and total_length:
                     final_headers["x-content-length"] = str(total_length)
 
-                data = None
                 json_body = None
                 content = None
 
-                # Wrap body for progress when possible
                 if body is not None:
-                    if isinstance(body, (bytes, bytearray, memoryview, str)) or hasattr(body, "read"):
-                        wrapped = StreamingBodyWithProgress(body, on_upload_progress)
-                        # For AsyncClient, ensure async streaming content to avoid sync-body error
-                        content = wrapped.__aiter__()
+                    if isinstance(body, (bytes, bytearray, memoryview, str)) or hasattr(
+                        body, "read"
+                    ):
+                        content = StreamingBodyWithProgress(body, on_upload_progress)
                     else:
-                        # For objects meant to be JSON
                         json_body = body
 
-                request_kwargs = dict(
+                resp = client.request(
                     method=method,
                     url=url,
                     headers=final_headers,
                     params=params,
+                    content=content,
+                    json=json_body,
                 )
-                if content is not None:
-                    request_kwargs["content"] = content
-                elif data is not None:
-                    request_kwargs["data"] = data
-                if json_body is not None:
-                    request_kwargs["json"] = json_body
-
-                resp = await client.request(**request_kwargs)
 
                 if 200 <= resp.status_code < 300:
                     if on_upload_progress:
@@ -178,6 +162,131 @@ async def request_api(
                                 percentage=100.0,
                             )
                         )
+                    content_type = resp.headers.get("content-type", "")
+                    if "application/json" in content_type or (resp.text or "").startswith("{"):
+                        try:
+                            return resp.json()
+                        except Exception:
+                            return resp.text
+                    try:
+                        return resp.json()
+                    except Exception:
+                        return resp.text
+
+                code, mapped = _map_error(resp)
+                if _should_retry(code) and attempt < retries:
+                    debug(f"retrying API request to {pathname}", f"{code}")
+                    time.sleep(min(2**attempt * 0.1, 2.0))
+                    continue
+                raise mapped
+
+            except Exception as exc:
+                if _is_network_error(exc) and attempt < retries:
+                    debug(f"retrying API request to {pathname}", str(exc))
+                    time.sleep(min(2**attempt * 0.1, 2.0))
+                    continue
+                if isinstance(exc, httpx.HTTPError):
+                    raise BlobUnknownError() from exc
+                raise
+
+    raise BlobUnknownError()
+
+
+async def request_api_async(
+    pathname: str,
+    method: str,
+    options: dict[str, Any] | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
+    body: Any = None,
+    on_upload_progress: Callable[[UploadProgressEvent], None]
+    | Callable[[UploadProgressEvent], Awaitable[None]]
+    | None = None,
+    timeout: float | None = None,
+) -> Any:
+    """Core HTTP caller with retries, headers, progress and error mapping."""
+    token = get_token_from_options_or_env(options or {})
+    store_id = extract_store_id_from_token(token)
+    request_id = make_request_id(store_id)
+    attempt = 0
+    retries = get_retries()
+    api_version = get_api_version()
+    extra_headers = get_proxy_through_alternative_api_header_from_env()
+
+    send_body_length = bool(on_upload_progress) or should_use_x_content_length()
+    total_length = compute_body_length(body) if send_body_length else 0
+
+    if on_upload_progress:
+        result = on_upload_progress(
+            UploadProgressEvent(loaded=0, total=total_length, percentage=0.0)
+        )
+        # If callback is async, await it
+        if asyncio.iscoroutine(result):
+            await result
+
+    url = get_api_url(pathname)
+    timeout_conf = httpx.Timeout(timeout) if timeout is not None else httpx.Timeout(30.0)
+    async with httpx.AsyncClient(timeout=timeout_conf) as client:
+        for attempt in range(retries + 1):
+            try:
+                final_headers = {
+                    "authorization": f"Bearer {token}",
+                    "x-api-blob-request-id": request_id,
+                    "x-api-blob-request-attempt": str(attempt),
+                    "x-api-version": api_version,
+                    **extra_headers,
+                }
+                if headers:
+                    final_headers.update(headers)
+                if send_body_length and total_length:
+                    final_headers["x-content-length"] = str(total_length)
+
+                json_body = None
+                content = None
+
+                # Wrap body for progress when possible
+                if body is not None:
+                    if isinstance(body, (bytes, bytearray, memoryview, str)) or hasattr(
+                        body, "read"
+                    ):
+                        wrapped = StreamingBodyWithProgress(body, on_upload_progress)
+                        # For AsyncClient, ensure async streaming content to avoid sync-body error
+                        content = wrapped.__aiter__()
+                    else:
+                        # For objects meant to be JSON
+                        json_body = body
+
+                if content is not None:
+                    resp = await client.request(
+                        method=method,
+                        url=url,
+                        headers=final_headers,
+                        params=params,
+                        content=content,
+                        json=json_body,
+                    )
+                else:
+                    resp = await client.request(
+                        method=method,
+                        url=url,
+                        headers=final_headers,
+                        params=params,
+                        json=json_body,
+                    )
+
+                if 200 <= resp.status_code < 300:
+                    if on_upload_progress:
+                        result = on_upload_progress(
+                            UploadProgressEvent(
+                                loaded=total_length or 0,
+                                total=total_length or 0,
+                                percentage=100.0,
+                            )
+                        )
+                        # If callback is async, await it
+                        if asyncio.iscoroutine(result):
+                            await result
                     content_type = resp.headers.get("content-type", "")
                     if "application/json" in content_type or resp.text.startswith("{"):
                         try:

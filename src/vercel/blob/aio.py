@@ -13,38 +13,26 @@ from .errors import (
     BlobServiceRateLimited,
     BlobRequestAbortedError,
 )
+
 from .ops import (
-    put,
-    put_async,
-    delete,
-    delete_async,
-    head,
-    head_async,
-    list_objects,
-    list_objects_async,
-    iter_objects,
-    iter_objects_async,
-    copy,
-    copy_async,
-    create_folder,
-    create_folder_async,
-    download_file,
-    download_file_async,
-    upload_file,
-    upload_file_async,
+    put_async as put,
+    delete_async as delete,
+    head_async as head,
+    get_async as get,
+    list_objects_async as list_objects,
+    iter_objects_async as iter_objects,
+    copy_async as copy,
+    create_folder_async as create_folder,
+    download_file_async as download_file,
+    upload_file_async as upload_file,
 )
 from .multipart import (
-    create_multipart_upload,
-    create_multipart_upload_async,
-    upload_part,
-    upload_part_async,
-    complete_multipart_upload,
-    complete_multipart_upload_async,
-    auto_multipart_upload,
-    auto_multipart_upload_async,
+    create_multipart_upload_async as create_multipart_upload,
+    upload_part_async as upload_part,
+    complete_multipart_upload_async as complete_multipart_upload,
+    auto_multipart_upload_async as auto_multipart_upload,
 )
 from .client import (
-    BlobClient,
     AsyncBlobClient,
 )
 from .utils import get_download_url, UploadProgressEvent, OnUploadProgressCallback
@@ -55,7 +43,6 @@ from .types import (
     ListBlobItem,
     CreateFolderResult,
 )
-from . import aio as aioblob
 
 __all__ = [
     # errors
@@ -74,45 +61,30 @@ __all__ = [
     "BlobRequestAbortedError",
     # ops
     "put",
-    "put_async",
     "delete",
-    "delete_async",
     "head",
-    "head_async",
+    "get",
     "list_objects",
-    "list_objects_async",
     "iter_objects",
-    "iter_objects_async",
     "copy",
-    "copy_async",
     "create_folder",
-    "create_folder_async",
     "download_file",
-    "download_file_async",
     "upload_file",
-    "upload_file_async",
     # multipart
     "create_multipart_upload",
-    "create_multipart_upload_async",
     "upload_part",
-    "upload_part_async",
     "complete_multipart_upload",
-    "complete_multipart_upload_async",
     "auto_multipart_upload",
-    "auto_multipart_upload_async",
     # client
-    "BlobClient",
     "AsyncBlobClient",
     # helpers
     "get_download_url",
-    # types
     "UploadProgressEvent",
     "OnUploadProgressCallback",
+    # types
     "PutBlobResult",
     "HeadBlobResult",
     "ListBlobResult",
     "ListBlobItem",
     "CreateFolderResult",
-    # aio
-    "aioblob",
 ]

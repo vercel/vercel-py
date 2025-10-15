@@ -21,9 +21,7 @@ def _require_token(token: str | None) -> str:
     env_token = os.getenv("VERCEL_TOKEN")
     resolved = token or env_token
     if not resolved:
-        raise RuntimeError(
-            "Missing Vercel API token. Pass token=... or set VERCEL_TOKEN."
-        )
+        raise RuntimeError("Missing Vercel API token. Pass token=... or set VERCEL_TOKEN.")
     return resolved
 
 

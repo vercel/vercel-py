@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from typing import Sequence
+from .types import Cache, AsyncCache
 
-from .types import RuntimeCache
 
-
-class InMemoryCache(RuntimeCache):
+class InMemoryCache(Cache):
     def __init__(self) -> None:
         self._cache: dict[str, dict] = {}
 
-    async def get(self, key: str):
+    def get(self, key: str):
         entry = self._cache.get(key)
         if not entry:
             return None
@@ -18,11 +17,11 @@ class InMemoryCache(RuntimeCache):
             ttl is not None
             and entry["last_modified"] + ttl * 1000 < __import__("time").time() * 1000
         ):
-            await self.delete(key)
+            self.delete(key)
             return None
         return entry["value"]
 
-    async def set(self, key: str, value: object, options: dict | None = None) -> None:
+    def set(self, key: str, value: object, options: dict | None = None) -> None:
         from time import time
 
         opts = options or {}
@@ -35,10 +34,10 @@ class InMemoryCache(RuntimeCache):
             "ttl": ttl,
         }
 
-    async def delete(self, key: str) -> None:
+    def delete(self, key: str) -> None:
         self._cache.pop(key, None)
 
-    async def expire_tag(self, tag: str | Sequence[str]) -> None:
+    def expire_tag(self, tag: str | Sequence[str]) -> None:
         tags = {tag} if isinstance(tag, str) else set(tag)
         to_delete = []
         for k, entry in self._cache.items():
@@ -47,3 +46,21 @@ class InMemoryCache(RuntimeCache):
                 to_delete.append(k)
         for k in to_delete:
             self._cache.pop(k, None)
+
+
+class AsyncInMemoryCache(AsyncCache):
+    def __init__(self, delegate: InMemoryCache | None = None) -> None:
+        # Reuse the synchronous implementation under the hood and expose async API
+        self.cache = delegate or InMemoryCache()
+
+    async def get(self, key: str):
+        return self.cache.get(key)
+
+    async def set(self, key: str, value: object, options: dict | None = None) -> None:
+        self.cache.set(key, value, options)
+
+    async def delete(self, key: str) -> None:
+        self.cache.delete(key)
+
+    async def expire_tag(self, tag: str | Sequence[str]) -> None:
+        self.cache.expire_tag(tag)
