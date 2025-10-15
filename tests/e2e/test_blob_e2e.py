@@ -160,7 +160,7 @@ class TestBlobStorageE2E:
         copy_metadata = await head_async(copy_result.url, token=blob_token)
 
         assert original_metadata.size == copy_metadata.size
-        assert original_metadata.contentType == copy_metadata.contentType
+        assert original_metadata.content_type == copy_metadata.content_type
 
     @pytest.mark.asyncio
     async def test_blob_delete_operation(self, blob_token, test_prefix, test_data, uploaded_blobs):
