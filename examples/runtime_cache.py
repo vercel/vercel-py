@@ -3,12 +3,8 @@ from __future__ import annotations
 import asyncio
 import time
 
-from vercel.cache import (
-    get_cache,
-    get_async_cache,
-    RuntimeCache,
-    AsyncRuntimeCache,
-)
+from vercel.cache import get_cache, RuntimeCache
+from vercel.cache.aio import get_cache as get_async_cache, AsyncRuntimeCache
 
 
 def sync_demo() -> None:

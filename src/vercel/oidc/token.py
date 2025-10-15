@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from ..cache._context import get_headers
+from ..cache.context import get_headers
 from .token_util import (
     find_project_info,
     get_token_payload,

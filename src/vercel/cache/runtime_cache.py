@@ -78,19 +78,6 @@ def get_cache(
     )
 
 
-def get_async_cache(
-    *,
-    key_hash_function: Callable[[str], str] | None = None,
-    namespace: str | None = None,
-    namespace_separator: str | None = None,
-) -> AsyncRuntimeCache:
-    return AsyncRuntimeCache(
-        key_hash_function=key_hash_function,
-        namespace=namespace,
-        namespace_separator=namespace_separator,
-    )
-
-
 def _get_cache_implementation(debug: bool = False, sync: bool = True) -> Cache | AsyncCache:
     global _in_memory_cache_instance, _async_in_memory_cache_instance
     global _build_cache_instance, _async_build_cache_instance, _warned_cache_unavailable
