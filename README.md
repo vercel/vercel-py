@@ -27,9 +27,11 @@ client_ip = ip_address(request.headers)
 
 ### Runtime Cache
 
-The SDK provides an in-memory cache implementation for development and testing. In production, Vercel uses HTTP caching headers and Data Cache for caching.
+The SDK talks to Vercel’s Runtime Cache when the following env vars are present; otherwise it falls back to an in-memory cache.
 
-- Optional: `SUSPENSE_CACHE_DEBUG=true` to log cache behavior
+- `RUNTIME_CACHE_ENDPOINT`: base URL of the runtime cache API (e.g. https://cache.vercel.com/...)  
+- `RUNTIME_CACHE_HEADERS`: JSON object of headers to send (e.g. '{"authorization": "Bearer <token>"}')
+- Optional: `SUSPENSE_CACHE_DEBUG=true` to log fallback behavior
 
 ```python
 import asyncio
