@@ -9,8 +9,6 @@ from .api import (
 from .uploader import (
     auto_multipart_upload,
     auto_multipart_upload_async,
-    auto_multipart_upload,
-    auto_multipart_upload_async,
 )
 
 __all__ = [

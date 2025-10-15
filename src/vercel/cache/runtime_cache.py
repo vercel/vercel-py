@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Callable, Sequence
+from typing import Callable, Sequence, overload, Literal, cast
 
 from .context import get_context
 from .cache_in_memory import InMemoryCache, AsyncInMemoryCache
@@ -70,7 +70,6 @@ def get_cache(
     namespace: str | None = None,
     namespace_separator: str | None = None,
 ) -> RuntimeCache:
-    # Backwards-compatible helper that returns a wrapper equivalent to RuntimeCache()
     return RuntimeCache(
         key_hash_function=key_hash_function,
         namespace=namespace,
@@ -136,9 +135,17 @@ def _get_cache_implementation(debug: bool = False, sync: bool = True) -> Cache |
         return _async_build_cache_instance
 
 
+@overload
+def resolve_cache(sync: Literal[True] = ...) -> Cache: ...
+
+
+@overload
+def resolve_cache(sync: Literal[False]) -> AsyncCache: ...
+
+
 def resolve_cache(sync: bool = True) -> Cache | AsyncCache:
     ctx = get_context()
     cache = getattr(ctx, "cache", None)
     if cache is not None:
-        return cache
+        return cast(Cache, cache) if sync else cast(AsyncCache, cache)
     return _get_cache_implementation(os.getenv("SUSPENSE_CACHE_DEBUG") == "true", sync)
