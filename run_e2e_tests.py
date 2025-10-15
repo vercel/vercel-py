@@ -6,78 +6,77 @@ This script runs end-to-end tests for the Vercel Python SDK,
 checking all major workflows and integrations.
 """
 
-import asyncio
 import os
 import sys
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Dict, Optional
 
 # Add the project root to the Python path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 # Import E2ETestConfig directly to avoid pytest dependency
-import os
-from typing import Optional
+
 
 class E2ETestConfig:
     """Configuration for E2E tests."""
-    
+
     # Environment variable names
-    BLOB_TOKEN_ENV = 'BLOB_READ_WRITE_TOKEN'
-    VERCEL_TOKEN_ENV = 'VERCEL_TOKEN'
-    OIDC_TOKEN_ENV = 'VERCEL_OIDC_TOKEN'
-    PROJECT_ID_ENV = 'VERCEL_PROJECT_ID'
-    TEAM_ID_ENV = 'VERCEL_TEAM_ID'
-    
+    BLOB_TOKEN_ENV = "BLOB_READ_WRITE_TOKEN"
+    VERCEL_TOKEN_ENV = "VERCEL_TOKEN"
+    OIDC_TOKEN_ENV = "VERCEL_OIDC_TOKEN"
+    PROJECT_ID_ENV = "VERCEL_PROJECT_ID"
+    TEAM_ID_ENV = "VERCEL_TEAM_ID"
+
     @classmethod
     def get_blob_token(cls) -> Optional[str]:
         """Get blob storage token."""
         return os.getenv(cls.BLOB_TOKEN_ENV)
-    
+
     @classmethod
     def get_vercel_token(cls) -> Optional[str]:
         """Get Vercel API token."""
         return os.getenv(cls.VERCEL_TOKEN_ENV)
-    
+
     @classmethod
     def get_oidc_token(cls) -> Optional[str]:
         """Get OIDC token."""
         return os.getenv(cls.OIDC_TOKEN_ENV)
-    
+
     @classmethod
     def get_project_id(cls) -> Optional[str]:
         """Get Vercel project ID."""
         return os.getenv(cls.PROJECT_ID_ENV)
-    
+
     @classmethod
     def get_team_id(cls) -> Optional[str]:
         """Get Vercel team ID."""
         return os.getenv(cls.TEAM_ID_ENV)
-    
+
     @classmethod
     def is_blob_enabled(cls) -> bool:
         """Check if blob storage is enabled."""
         return cls.get_blob_token() is not None
-    
+
     @classmethod
     def is_vercel_api_enabled(cls) -> bool:
         """Check if Vercel API is enabled."""
         return cls.get_vercel_token() is not None
-    
+
     @classmethod
     def is_oidc_enabled(cls) -> bool:
         """Check if OIDC is enabled."""
         return cls.get_oidc_token() is not None
-    
+
     @classmethod
     def get_test_prefix(cls) -> str:
         """Get a unique test prefix."""
         import time
+
         return f"e2e-test-{int(time.time())}"
-    
+
     @classmethod
     def get_required_env_vars(cls) -> Dict[str, str]:
         """Get all required environment variables."""
@@ -88,18 +87,18 @@ class E2ETestConfig:
             cls.PROJECT_ID_ENV: cls.get_project_id(),
             cls.TEAM_ID_ENV: cls.get_team_id(),
         }
-    
+
     @classmethod
     def print_env_status(cls) -> None:
         """Print the status of environment variables."""
         print("E2E Test Environment Status:")
         print("=" * 40)
-        
+
         env_vars = cls.get_required_env_vars()
         for env_var, value in env_vars.items():
             status = "✓" if value else "✗"
             print(f"{status} {env_var}: {'Set' if value else 'Not set'}")
-        
+
         # Special note for OIDC token
         oidc_token = cls.get_oidc_token()
         vercel_token = cls.get_vercel_token()
@@ -109,29 +108,29 @@ class E2ETestConfig:
             print("⚠️  OIDC Token: Not available - Tests will use Vercel API token fallback")
         else:
             print("❌ OIDC Token: Not available - OIDC tests will be skipped")
-        
+
         print("=" * 40)
 
 
 class E2ETestRunner:
     """Runner for E2E tests."""
-    
+
     def __init__(self):
         self.config = E2ETestConfig()
         self.test_results = {}
-    
+
     def check_environment(self) -> bool:
         """Check if the test environment is properly configured."""
         print("Checking E2E test environment...")
         self.config.print_env_status()
-        
+
         # Check if at least one service is available
         services_available = [
             self.config.is_blob_enabled(),
             self.config.is_vercel_api_enabled(),
-            self.config.is_oidc_enabled()
+            self.config.is_oidc_enabled(),
         ]
-        
+
         if not any(services_available):
             print("❌ No services available for testing!")
             print("Please set at least one of the following environment variables:")
@@ -139,18 +138,21 @@ class E2ETestRunner:
             print(f"  - {self.config.VERCEL_TOKEN_ENV}")
             print(f"  - {self.config.OIDC_TOKEN_ENV}")
             return False
-        
+
         print("✅ Environment check passed!")
         return True
-    
+
     def run_unit_tests(self) -> bool:
         """Run unit tests first."""
         print("\n🧪 Running unit tests...")
         try:
-            result = subprocess.run([
-                sys.executable, "-m", "pytest", "tests/", "-v", "--tb=short"
-            ], capture_output=True, text=True, timeout=300)
-            
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests/", "-v", "--tb=short"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
             if result.returncode == 0:
                 print("✅ Unit tests passed!")
                 return True
@@ -165,19 +167,19 @@ class E2ETestRunner:
         except Exception as e:
             print(f"❌ Error running unit tests: {e}")
             return False
-    
+
     def run_e2e_tests(self, test_pattern: str = None) -> bool:
         """Run E2E tests."""
         print("\n🚀 Running E2E tests...")
-        
+
         cmd = [sys.executable, "-m", "pytest", "tests/e2e/", "-v", "--tb=short"]
-        
+
         if test_pattern:
             cmd.extend(["-k", test_pattern])
-        
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            
+
             if result.returncode == 0:
                 print("✅ E2E tests passed!")
                 return True
@@ -192,16 +194,19 @@ class E2ETestRunner:
         except Exception as e:
             print(f"❌ Error running E2E tests: {e}")
             return False
-    
+
     def run_integration_tests(self) -> bool:
         """Run integration tests."""
         print("\n🔗 Running integration tests...")
-        
+
         try:
-            result = subprocess.run([
-                sys.executable, "-m", "pytest", "tests/integration/", "-v", "--tb=short"
-            ], capture_output=True, text=True, timeout=600)
-            
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "tests/integration/", "-v", "--tb=short"],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+
             if result.returncode == 0:
                 print("✅ Integration tests passed!")
                 return True
@@ -216,29 +221,29 @@ class E2ETestRunner:
         except Exception as e:
             print(f"❌ Error running integration tests: {e}")
             return False
-    
+
     def run_examples(self) -> bool:
         """Run example scripts as smoke tests."""
         print("\n📚 Running example scripts...")
-        
+
         examples_dir = Path(__file__).parent / "examples"
         if not examples_dir.exists():
             print("❌ Examples directory not found!")
             return False
-        
+
         example_files = list(examples_dir.glob("*.py"))
         if not example_files:
             print("❌ No example files found!")
             return False
-        
+
         success_count = 0
         for example_file in example_files:
             print(f"  Running {example_file.name}...")
             try:
-                result = subprocess.run([
-                    sys.executable, str(example_file)
-                ], capture_output=True, text=True, timeout=60)
-                
+                result = subprocess.run(
+                    [sys.executable, str(example_file)], capture_output=True, text=True, timeout=60
+                )
+
                 if result.returncode == 0:
                     print(f"  ✅ {example_file.name} passed!")
                     success_count += 1
@@ -250,47 +255,47 @@ class E2ETestRunner:
                 print(f"  ❌ {example_file.name} timed out!")
             except Exception as e:
                 print(f"  ❌ Error running {example_file.name}: {e}")
-        
+
         if success_count == len(example_files):
             print("✅ All example scripts passed!")
             return True
         else:
             print(f"❌ {len(example_files) - success_count} example scripts failed!")
             return False
-    
+
     def run_all_tests(self, test_pattern: str = None) -> bool:
         """Run all tests."""
         print("🧪 Starting comprehensive E2E test suite...")
         print("=" * 60)
-        
+
         # Check environment
         if not self.check_environment():
             return False
-        
+
         # Run unit tests
         if not self.run_unit_tests():
             return False
-        
+
         # Run E2E tests
         if not self.run_e2e_tests(test_pattern):
             return False
-        
+
         # Run integration tests
         if not self.run_integration_tests():
             return False
-        
+
         # Run examples
         if not self.run_examples():
             return False
-        
+
         print("\n" + "=" * 60)
         print("🎉 All tests passed! E2E test suite completed successfully.")
         return True
-    
+
     def run_specific_tests(self, test_type: str, test_pattern: str = None) -> bool:
         """Run specific type of tests."""
         print(f"🧪 Running {test_type} tests...")
-        
+
         if test_type == "unit":
             return self.run_unit_tests()
         elif test_type == "e2e":
@@ -311,29 +316,24 @@ def main():
         "--test-type",
         choices=["all", "unit", "e2e", "integration", "examples"],
         default="all",
-        help="Type of tests to run"
+        help="Type of tests to run",
     )
+    parser.add_argument("--pattern", help="Test pattern to match (for e2e tests)")
     parser.add_argument(
-        "--pattern",
-        help="Test pattern to match (for e2e tests)"
+        "--check-env", action="store_true", help="Only check environment configuration"
     )
-    parser.add_argument(
-        "--check-env",
-        action="store_true",
-        help="Only check environment configuration"
-    )
-    
+
     args = parser.parse_args()
-    
+
     runner = E2ETestRunner()
-    
+
     if args.check_env:
         success = runner.check_environment()
     elif args.test_type == "all":
         success = runner.run_all_tests(args.pattern)
     else:
         success = runner.run_specific_tests(args.test_type, args.pattern)
-    
+
     sys.exit(0 if success else 1)
 
 
