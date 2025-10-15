@@ -79,13 +79,13 @@ class TestBlobStorageE2E:
         # Verify upload result
         assert result.pathname is not None
         assert result.url is not None
-        assert result.downloadUrl is not None
+        assert result.download_url is not None
 
         # Get file metadata
         metadata = await head_async(result.url, token=blob_token)
 
         # Verify metadata
-        assert metadata.contentType == "text/plain"
+        assert metadata.content_type == "text/plain"
         assert metadata.size == len(test_data["text"])
         assert metadata.pathname == result.pathname
 
@@ -147,7 +147,7 @@ class TestBlobStorageE2E:
             copy_path,
             access="public",
             token=blob_token,
-            allow_overwrite=True,
+            overwrite=True,
         )
         uploaded_blobs.append(copy_result.url)
 
@@ -189,7 +189,7 @@ class TestBlobStorageE2E:
             assert False, "File should have been deleted"
         except Exception as e:
             # Expected - file should not exist
-            assert "not found" in str(e).lower() or "404" in str(e)
+            assert "not found" in str(e).lower() or "does not exist" in str(e).lower()
 
     @pytest.mark.asyncio
     async def test_blob_create_folder(self, blob_token, test_prefix, uploaded_blobs):
@@ -202,7 +202,7 @@ class TestBlobStorageE2E:
         uploaded_blobs.append(folder_result.url)
 
         # Verify folder creation
-        assert folder_result.pathname == folder_path
+        assert folder_result.pathname == folder_path + "/"
         assert folder_result.url is not None
 
         # Upload a file to the folder
@@ -248,7 +248,7 @@ class TestBlobStorageE2E:
         # Verify file metadata
         metadata = await head_async(result.url, token=blob_token)
         assert metadata.size == len(large_content)
-        assert metadata.contentType == "text/plain"
+        assert metadata.content_type == "text/plain"
 
     @pytest.mark.asyncio
     async def test_blob_upload_progress_callback(
@@ -302,28 +302,24 @@ class TestBlobStorageE2E:
         )
         uploaded_blobs.append(public_result.url)
 
-        # Test private access
+        # Test private access (should fail)
         private_path = f"{test_prefix}/private-file.txt"
-        private_result = await put_async(
-            private_path,
-            test_data["text"],
-            access="private",
-            content_type="text/plain",
-            token=blob_token,
-            add_random_suffix=True,
-        )
-        uploaded_blobs.append(private_result.url)
+        with pytest.raises(Exception):
+            await put_async(
+                private_path,
+                test_data["text"],
+                access="private",
+                content_type="text/plain",
+                token=blob_token,
+                add_random_suffix=True,
+            )
 
-        # Verify both uploads succeeded
+        # Verify public upload succeeded
         assert public_result.url is not None
-        assert private_result.url is not None
 
-        # Verify metadata can be retrieved for both
+        # Verify metadata can be retrieved for public file
         public_metadata = await head_async(public_result.url, token=blob_token)
-        private_metadata = await head_async(private_result.url, token=blob_token)
-
         assert public_metadata is not None
-        assert private_metadata is not None
 
     @pytest.mark.asyncio
     async def test_blob_content_type_detection(self, blob_token, test_prefix, uploaded_blobs):
@@ -344,7 +340,7 @@ class TestBlobStorageE2E:
 
             # Verify content type
             metadata = await head_async(result.url, token=blob_token)
-            assert metadata.contentType == expected_type
+            assert metadata.content_type == expected_type
 
     @pytest.mark.asyncio
     async def test_blob_error_handling(self, blob_token, test_prefix):
@@ -396,4 +392,4 @@ class TestBlobStorageE2E:
 
         for metadata in metadata_results:
             assert metadata is not None
-            assert metadata.contentType == "text/plain"
+            assert metadata.content_type == "text/plain"

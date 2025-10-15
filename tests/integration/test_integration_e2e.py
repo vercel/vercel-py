@@ -113,7 +113,7 @@ class TestVercelSDKIntegration:
         # Verify blob still exists and is accessible
         blob_info = await head_async(blob_result.url, token=blob_token)
         assert blob_info.size == len(file_content)
-        assert blob_info.contentType == "text/plain"
+        assert blob_info.content_type == "text/plain"
 
         # Clean up cache
         await cache.delete(cache_key)
