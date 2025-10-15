@@ -32,10 +32,6 @@ VERCEL_TEAM_ID=your_team_id_here
 
 # OIDC
 VERCEL_OIDC_TOKEN=your_oidc_token_here
-
-# Runtime Cache
-RUNTIME_CACHE_ENDPOINT=https://cache.vercel.com/your_endpoint
-RUNTIME_CACHE_HEADERS='{"authorization": "Bearer your_token"}'
 ```
 
 ### GitHub Actions Secrets
@@ -47,8 +43,6 @@ For running e2e tests in GitHub Actions, set these secrets in your repository:
 - `VERCEL_PROJECT_ID`
 - `VERCEL_TEAM_ID`
 - `VERCEL_OIDC_TOKEN`
-- `RUNTIME_CACHE_ENDPOINT`
-- `RUNTIME_CACHE_HEADERS`
 
 ## Running Tests
 
@@ -96,7 +90,7 @@ pytest tests/e2e/ -k "cache" -v
 - Concurrent operations
 - Fallback to in-memory cache when runtime cache is unavailable
 
-**Note**: Runtime cache requires internal Vercel infrastructure and is not publicly accessible. These tests validate the fallback behavior and ensure the SDK works correctly in all environments.
+**Note**: Vercel uses HTTP caching headers and Data Cache for production caching. These tests validate the in-memory cache implementation and ensure the SDK works correctly in all environments.
 
 ### Blob Storage Tests
 - File upload and download
