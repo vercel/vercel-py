@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 # Add the project root to the Python path
-project_root = Path(__file__).parent.parent.parent
+project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 # Import E2ETestConfig directly to avoid pytest dependency
