@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Awaitable
 
-from .._put_helpers import create_put_headers, create_put_options
-from .._helpers import UploadProgressEvent
+from ..utils import UploadProgressEvent, create_put_headers, create_put_options
 from .core import (
     _create_multipart_upload,
     _create_multipart_upload_async,

@@ -5,9 +5,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator
 
-from .._helpers import UploadProgressEvent, compute_body_length
+from ..utils import UploadProgressEvent, compute_body_length, create_put_headers, create_put_options
 from ..errors import BlobError
-from .._put_helpers import create_put_headers, create_put_options
 from .core import (
     _create_multipart_upload,
     _create_multipart_upload_async,

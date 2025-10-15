@@ -18,7 +18,7 @@ from .errors import (
     BlobStoreSuspendedError,
     BlobUnknownError,
 )
-from ._helpers import (
+from .utils import (
     StreamingBodyWithProgress,
     UploadProgressEvent,
     compute_body_length,

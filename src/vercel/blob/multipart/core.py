@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, Callable, Awaitable
 from urllib.parse import quote
 
-from .._request import request_api, request_api_async
-from .._helpers import UploadProgressEvent
+from ..api import request_api, request_api_async
+from ..utils import UploadProgressEvent
 
 
 def _create_multipart_upload(
