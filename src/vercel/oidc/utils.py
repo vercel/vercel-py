@@ -4,19 +4,9 @@ import base64
 import json
 import os
 import sys
-import httpx
-from typing import Any, TypedDict
-from dataclasses import dataclass
+from typing import Any
 
-
-class ProjectInfo(TypedDict):
-    projectId: str
-    teamId: str | None
-
-
-@dataclass
-class VercelTokenResponse:
-    token: str
+from .types import ProjectInfo, VercelTokenResponse
 
 
 def _user_data_dir() -> str | None:
@@ -153,19 +143,3 @@ def is_expired(payload: dict[str, Any]) -> bool:
     fifteen_minutes_ms = 15 * 60 * 1000
     now_ms = int(time.time() * 1000)
     return int(exp * 1000) < now_ms + fifteen_minutes_ms
-
-
-async def fetch_vercel_oidc_token(
-    auth_token: str, project_id: str, team_id: str | None
-) -> VercelTokenResponse | None:
-    url = f"https://api.vercel.com/v1/projects/{project_id}/token?source=vercel-oidc-refresh"
-    if team_id:
-        url += f"&teamId={team_id}"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        r = await client.post(url, headers={"authorization": f"Bearer {auth_token}"})
-        if not (200 <= r.status_code < 300):
-            raise RuntimeError(f"Failed to refresh OIDC token: {r.status_code} {r.reason_phrase}")
-        data = r.json()
-        if not isinstance(data, dict) or not isinstance(data.get("token"), str):
-            raise TypeError("Expected a string-valued token property")
-        return VercelTokenResponse(token=data["token"])

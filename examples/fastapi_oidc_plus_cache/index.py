@@ -9,7 +9,8 @@ import traceback
 from vercel.cache import AsyncRuntimeCache
 
 from vercel.headers import geolocation, ip_address, set_headers
-from vercel.oidc import get_vercel_oidc_token, decode_oidc_payload
+from vercel.oidc import decode_oidc_payload
+from vercel.oidc.aio import get_vercel_oidc_token
 
 
 logger = logging.getLogger(__name__)
