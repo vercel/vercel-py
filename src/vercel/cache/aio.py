@@ -1,5 +1,5 @@
 from typing import Callable
-from .runtime_cache import get_async_cache as get_cache, AsyncRuntimeCache
+from .runtime_cache import AsyncRuntimeCache
 
 
 def get_cache(
