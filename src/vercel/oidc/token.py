@@ -39,7 +39,28 @@ def get_vercel_oidc_token_sync() -> str:
     return token_from_env
 
 
-async def refresh_token() -> None:
+def refresh_token() -> None:
+    project = find_project_info()
+    project_id: str = project["projectId"]
+    team_id = project.get("teamId")
+
+    maybe = load_token(project_id)
+    if not maybe or is_expired(get_token_payload(maybe.token)):
+        auth_token = get_vercel_cli_token()
+        if not auth_token:
+            raise VercelOidcTokenError("Failed to refresh OIDC token: login to vercel cli")
+        if not project_id:
+            raise VercelOidcTokenError("Failed to refresh OIDC token: project id not found")
+        new_token = fetch_vercel_oidc_token(auth_token, project_id, team_id)
+        if not new_token:
+            raise VercelOidcTokenError("Failed to refresh OIDC token")
+        save_token(new_token, project_id)
+        os.environ["VERCEL_OIDC_TOKEN"] = new_token.token
+    else:
+        os.environ["VERCEL_OIDC_TOKEN"] = maybe.token
+
+
+async def refresh_token_async() -> None:
     project = find_project_info()
     project_id: str = project["projectId"]
     team_id = project.get("teamId")
@@ -60,7 +81,25 @@ async def refresh_token() -> None:
         os.environ["VERCEL_OIDC_TOKEN"] = maybe.token
 
 
-async def get_vercel_oidc_token() -> str:
+def get_vercel_oidc_token() -> str:
+    token = ""
+    err: Exception | None = None
+    try:
+        token = get_vercel_oidc_token_sync()
+    except Exception as e:
+        err = e
+    try:
+        if not token or is_expired(get_token_payload(token)):
+            await refresh_token()
+            token = get_vercel_oidc_token_sync()
+    except Exception as e:
+        if err and isinstance(e, Exception) and getattr(err, "message", None):
+            e.args = (f"{err}\n{e}",)
+        raise VercelOidcTokenError("Failed to refresh OIDC token", e)
+    return token
+
+
+async def get_vercel_oidc_token_async() -> str:
     token = ""
     err: Exception | None = None
     try:
