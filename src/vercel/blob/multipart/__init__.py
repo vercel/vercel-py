@@ -1,9 +1,35 @@
-from .api import create_multipart_upload, upload_part, complete_multipart_upload
-from .uploader import uncontrolled_multipart_upload
+from .api import (
+    create_multipart_upload,
+    create_multipart_upload_async,
+    upload_part,
+    upload_part_async,
+    complete_multipart_upload,
+    complete_multipart_upload_async,
+)
+from .uploader import (
+    auto_multipart_upload,
+    auto_multipart_upload_async,
+    auto_multipart_upload,
+    auto_multipart_upload_async,
+)
+from .core import (
+    _create_multipart_upload,
+    _create_multipart_upload_async,
+    _upload_part,
+    _upload_part_async,
+    _complete_multipart_upload,
+    _complete_multipart_upload_async,
+)
 
 __all__ = [
     "create_multipart_upload",
+    "create_multipart_upload_async",
     "upload_part",
+    "upload_part_async",
     "complete_multipart_upload",
-    "uncontrolled_multipart_upload",
+    "complete_multipart_upload_async",
+    "auto_multipart_upload",
+    "auto_multipart_upload_async",
+    "auto_multipart_upload",
+    "auto_multipart_upload_async",
 ]
