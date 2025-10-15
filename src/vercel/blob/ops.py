@@ -662,7 +662,7 @@ def upload_file(
 
 async def upload_file_async(
     local_path: str | PathLike,
-    path: str | PathLike,
+    path: str,
     *,
     access: str = "public",
     content_type: str | None = None,

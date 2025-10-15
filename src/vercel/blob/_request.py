@@ -201,7 +201,9 @@ async def request_api_async(
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     body: Any = None,
-    on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
+    on_upload_progress: Callable[[UploadProgressEvent], None]
+    | Callable[[UploadProgressEvent], Awaitable[None]]
+    | None = None,
     timeout: float | None = None,
 ) -> Any:
     """Core HTTP caller with retries, headers, progress and error mapping."""
