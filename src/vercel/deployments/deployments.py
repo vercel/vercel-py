@@ -143,7 +143,7 @@ def upload_file(
 
     bearer = _require_token(token)
     url = base_url.rstrip("/") + "/v2/files"
-    headers: dict[str, str | int] = {
+    headers: dict[str, str] = {
         "authorization": f"Bearer {bearer}",
         "accept": "application/json",
         "content-type": "application/octet-stream",
@@ -191,7 +191,7 @@ async def upload_file_async(
 
     bearer = _require_token(token)
     url = base_url.rstrip("/") + "/v2/files"
-    headers: dict[str, str | int] = {
+    headers: dict[str, str] = {
         "authorization": f"Bearer {bearer}",
         "accept": "application/json",
         "content-type": "application/octet-stream",
