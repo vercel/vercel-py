@@ -40,6 +40,9 @@ def main() -> None:
     else:
         print("📋 Using personal account")
 
+    project_id = None
+    project_name = None
+
     try:
         # 1. List existing projects
         print("\n1️⃣ Listing existing projects...")
@@ -96,17 +99,21 @@ def main() -> None:
         else:
             print("   ❌ Could not find our project in the list")
 
-        # 5. Clean up - delete the test project
-        print("\n5️⃣ Cleaning up - deleting test project...")
-        delete_project(project_id, team_id=team_id)
-        print(f"   ✅ Deleted project: {project_name}")
-
         print("\n🎉 All operations completed successfully!")
 
     except Exception as e:
         print(f"\n❌ Error: {e}")
         print("   Make sure your VERCEL_TOKEN is valid and has the necessary permissions")
-        return
+
+    finally:
+        # 5. Clean up - delete the test project (ensure cleanup happens even on error)
+        if project_id:
+            try:
+                print("\n5️⃣ Cleaning up - deleting test project...")
+                delete_project(project_id, team_id=team_id)
+                print(f"   ✅ Deleted project: {project_name}")
+            except Exception as cleanup_error:
+                print(f"   ⚠️  Failed to delete project {project_name}: {cleanup_error}")
 
 
 if __name__ == "__main__":
