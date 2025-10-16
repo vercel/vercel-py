@@ -40,16 +40,24 @@ jobs:
         run: npm install -g vercel@latest
 
       - name: Login to Vercel
-        run: vercel login --token ${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          echo "Verifying Vercel authentication..."
+          vercel whoami
 
       - name: Link Project
-        run: vercel link --yes --token ${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel link --yes
 
       - name: Fetch OIDC Token
         id: oidc-token
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           # Pull environment variables to get OIDC token
-          vercel env pull --token ${{ secrets.VERCEL_TOKEN }}
+          vercel env pull
           
           # Extract OIDC token from .env.local
           if [ -f .env.local ]; then
