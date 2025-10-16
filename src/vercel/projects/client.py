@@ -83,11 +83,11 @@ class ProjectsClient:
 class AsyncProjectsClient:
     def __init__(
         self,
-        bearer_token: str | None = None,
+        access_token: str | None = None,
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        self._bearer_token = bearer_token
+        self._access_token = access_token
         self._base_url = base_url or "https://api.vercel.com"
         self._timeout = timeout or 30.0
 
@@ -96,7 +96,7 @@ class AsyncProjectsClient:
     ) -> dict[str, Any]:
         return await acreate_project(
             body=body,
-            token=self._bearer_token,
+            token=self._access_token,
             team_id=team_id,
             slug=slug,
             base_url=self._base_url,
@@ -114,7 +114,7 @@ class AsyncProjectsClient:
         return await aupdate_project(
             id_or_name=id_or_name,
             body=body,
-            token=self._bearer_token,
+            token=self._access_token,
             team_id=team_id,
             slug=slug,
             base_url=self._base_url,
@@ -126,7 +126,7 @@ class AsyncProjectsClient:
     ) -> None:
         return await adelete_project(
             id_or_name=id_or_name,
-            token=self._bearer_token,
+            token=self._access_token,
             team_id=team_id,
             slug=slug,
             base_url=self._base_url,
@@ -141,7 +141,7 @@ class AsyncProjectsClient:
         query: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await aget_projects(
-            token=self._bearer_token,
+            token=self._access_token,
             team_id=team_id,
             slug=slug,
             query=query,

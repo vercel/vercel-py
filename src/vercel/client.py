@@ -12,7 +12,7 @@ class Vercel:
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        self._token = access_token
+        self._access_token = access_token
         self._base_url = base_url
         self._timeout = timeout or 30.0
 
@@ -28,19 +28,19 @@ class AsyncVercel:
     def __init__(
         self,
         *,
-        bearer_token: str | None = None,
+        access_token: str | None = None,
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        self._token = bearer_token
+        self._access_token = access_token
         self._base_url = base_url
         self._timeout = timeout or 30.0
 
         self.deployments = AsyncDeploymentsClient(
-            bearer_token=bearer_token, base_url=base_url, timeout=timeout
+            access_token=access_token, base_url=base_url, timeout=timeout
         )
         self.projects = AsyncProjectsClient(
-            bearer_token=bearer_token, base_url=base_url, timeout=timeout
+            access_token=access_token, base_url=base_url, timeout=timeout
         )
 
 

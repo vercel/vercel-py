@@ -65,11 +65,11 @@ class DeploymentsClient:
 class AsyncDeploymentsClient:
     def __init__(
         self,
-        bearer_token: str | None = None,
+        access_token: str | None = None,
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        self._bearer_token = bearer_token
+        self._access_token = access_token
         self._base_url = base_url or "https://api.vercel.com"
         self._timeout = timeout or 30.0
 
@@ -84,7 +84,7 @@ class AsyncDeploymentsClient:
     ) -> dict[str, Any]:
         return await acreate_deployment(
             body=body,
-            token=self._bearer_token,
+            token=self._access_token,
             team_id=team_id,
             slug=slug,
             force_new=force_new,
@@ -110,7 +110,7 @@ class AsyncDeploymentsClient:
             x_vercel_digest=x_vercel_digest,
             x_now_digest=x_now_digest,
             x_now_size=x_now_size,
-            token=self._bearer_token,
+            token=self._access_token,
             team_id=team_id,
             slug=slug,
             base_url=self._base_url,
