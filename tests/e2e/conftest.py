@@ -7,7 +7,18 @@ This module provides configuration and utilities for e2e tests.
 import pytest
 from typing import Any, Optional
 
-from tests.e2e.config import E2ETestConfig
+import sys
+from pathlib import Path
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+try:
+    from .config import E2ETestConfig
+except ImportError:
+    from tests.e2e.config import E2ETestConfig
 
 
 def skip_if_missing_token(token_name: str, token_value: Any) -> None:
