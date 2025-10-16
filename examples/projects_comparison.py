@@ -37,7 +37,7 @@ load_dotenv()
 async def async_operations(team_id: str | None = None) -> tuple[str, float]:
     """Perform async operations and return project ID and duration."""
     start_time = time.time()
-    
+
     # Create project
     test_project_name = f"vercel-py-async-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     create_response = await create_project_async(
@@ -49,7 +49,7 @@ async def async_operations(team_id: str | None = None) -> tuple[str, float]:
         team_id=team_id,
     )
     project_id = create_response.get("id")
-    
+
     # Update project
     await update_project_async(
         project_id,
@@ -59,13 +59,13 @@ async def async_operations(team_id: str | None = None) -> tuple[str, float]:
         },
         team_id=team_id,
     )
-    
+
     # List projects
-    projects_response = await get_projects_async(team_id=team_id)
-    
+    await get_projects_async(team_id=team_id)
+
     # Delete project
     await delete_project_async(project_id, team_id=team_id)
-    
+
     duration = time.time() - start_time
     return project_id, duration
 
@@ -73,7 +73,7 @@ async def async_operations(team_id: str | None = None) -> tuple[str, float]:
 def sync_operations(team_id: str | None = None) -> tuple[str, float]:
     """Perform sync operations and return project ID and duration."""
     start_time = time.time()
-    
+
     # Create project
     test_project_name = f"vercel-py-sync-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     create_response = create_project(
@@ -85,7 +85,7 @@ def sync_operations(team_id: str | None = None) -> tuple[str, float]:
         team_id=team_id,
     )
     project_id = create_response.get("id")
-    
+
     # Update project
     update_project(
         project_id,
@@ -95,13 +95,13 @@ def sync_operations(team_id: str | None = None) -> tuple[str, float]:
         },
         team_id=team_id,
     )
-    
+
     # List projects
-    projects_response = get_projects(team_id=team_id)
-    
+    get_projects(team_id=team_id)
+
     # Delete project
     delete_project(project_id, team_id=team_id)
-    
+
     duration = time.time() - start_time
     return project_id, duration
 
@@ -110,33 +110,33 @@ async def main() -> None:
     """Compare sync vs async performance."""
     print("🚀 Vercel Projects API - Sync vs Async Comparison")
     print("=" * 60)
-    
+
     # Check if we have a token
     token = os.getenv("VERCEL_TOKEN")
     if not token:
         print("❌ Error: VERCEL_TOKEN environment variable is required")
         print("   Set it with: export VERCEL_TOKEN=your_token_here")
         return
-    
+
     team_id = os.getenv("VERCEL_TEAM_ID")
     if team_id:
         print(f"📋 Using team ID: {team_id}")
     else:
         print("📋 Using personal account")
-    
+
     try:
         print("\n🔄 Running async operations...")
         async_project_id, async_duration = await async_operations(team_id)
         print(f"   ✅ Async operations completed in {async_duration:.2f} seconds")
-        
+
         print("\n🔄 Running sync operations...")
         sync_project_id, sync_duration = sync_operations(team_id)
         print(f"   ✅ Sync operations completed in {sync_duration:.2f} seconds")
-        
+
         print("\n📊 Performance Comparison:")
         print(f"   Async duration: {async_duration:.2f}s")
         print(f"   Sync duration:  {sync_duration:.2f}s")
-        
+
         if async_duration < sync_duration:
             improvement = ((sync_duration - async_duration) / sync_duration) * 100
             print(f"   🚀 Async is {improvement:.1f}% faster!")
@@ -145,16 +145,16 @@ async def main() -> None:
             print(f"   🐌 Sync is {improvement:.1f}% faster")
         else:
             print("   ⚖️  Both approaches performed similarly")
-        
+
         print("\n💡 Notes:")
         print("   - Async operations can run concurrently when possible")
         print("   - Sync operations are simpler but block the thread")
         print("   - Performance differences depend on network latency and API response times")
         print("   - For single operations, the difference may be minimal")
         print("   - Async shines when making multiple concurrent requests")
-        
+
         print("\n🎉 Comparison completed successfully!")
-        
+
     except Exception as e:
         print(f"\n❌ Error: {e}")
         print("   Make sure your VERCEL_TOKEN is valid and has the necessary permissions")
