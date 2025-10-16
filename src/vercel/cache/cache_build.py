@@ -114,10 +114,9 @@ class BuildCache(Cache):
             return False
 
     def __getitem__(self, key: str):
-        value = self.get(key)
-        if value is None:
-            raise KeyError(key)
-        return value
+        if key in self:
+            return self.get(key)
+        raise KeyError(key)
 
 
 class AsyncBuildCache(AsyncCache):
