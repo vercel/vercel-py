@@ -75,8 +75,8 @@ def create_deployment(
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
-    force_new: str | None = None,
-    skip_auto_detection_confirmation: str | None = None,
+    force_new: bool | None = None,
+    skip_auto_detection_confirmation: bool | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
@@ -90,10 +90,10 @@ def create_deployment(
         params["teamId"] = team_id
     if slug:
         params["slug"] = slug
-    if force_new in ("0", "1"):
-        params["forceNew"] = force_new
-    if skip_auto_detection_confirmation in ("0", "1"):
-        params["skipAutoDetectionConfirmation"] = skip_auto_detection_confirmation
+    if force_new is not None:
+        params["forceNew"] = "1" if force_new else "0"
+    if skip_auto_detection_confirmation is not None:
+        params["skipAutoDetectionConfirmation"] = "1" if skip_auto_detection_confirmation else "0"
 
     resp = _request(
         "POST",
@@ -223,8 +223,8 @@ async def create_deployment_async(
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
-    force_new: str | None = None,
-    skip_auto_detection_confirmation: str | None = None,
+    force_new: bool | None = None,
+    skip_auto_detection_confirmation: bool | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
@@ -238,10 +238,10 @@ async def create_deployment_async(
         params["teamId"] = team_id
     if slug:
         params["slug"] = slug
-    if force_new in ("0", "1"):
-        params["forceNew"] = force_new
-    if skip_auto_detection_confirmation in ("0", "1"):
-        params["skipAutoDetectionConfirmation"] = skip_auto_detection_confirmation
+    if force_new is not None:
+        params["forceNew"] = "1" if force_new else "0"
+    if skip_auto_detection_confirmation is not None:
+        params["skipAutoDetectionConfirmation"] = "1" if skip_auto_detection_confirmation else "0"
 
     resp = await _request_async(
         "POST",
