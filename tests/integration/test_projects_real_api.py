@@ -301,7 +301,7 @@ class TestProjectsRealAPI:
         )
 
         # Clean up - delete the project
-        await delete_project_async(project_id=result["id"], team_id=team_id)
+        await delete_project_async(result["id"], team_id=team_id)
 
     def test_error_handling_real_api(self, team_id):
         """Test error handling with real API."""
