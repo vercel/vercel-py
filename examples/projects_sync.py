@@ -113,7 +113,7 @@ def main() -> None:
                 delete_project(project_id, team_id=team_id)
                 print(f"   ✅ Deleted project: {project_name}")
             except Exception as cleanup_error:
-                print(f"   ⚠️  Failed to delete project {project_name}: {cleanup_error}")
+                print(f"   ⚠️  Failed to delete project: {cleanup_error}")
 
 
 if __name__ == "__main__":
