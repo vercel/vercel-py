@@ -92,6 +92,32 @@ class BuildCache(Cache):
             if self._on_error:
                 self._on_error(e)
 
+    def __contains__(self, key: str) -> bool:
+        try:
+            r = self._client.get(self._endpoint + key, headers=self._headers)
+            try:
+                if r.status_code == 404:
+                    return False
+                if r.status_code == 200:
+                    cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
+                    # Consider present only when fresh
+                    if cache_state and cache_state.lower() != "fresh":
+                        return False
+                    return True
+                return False
+            finally:
+                # Ensure the response is closed regardless of outcome
+                r.close()
+        except Exception as e:
+            if self._on_error:
+                self._on_error(e)
+            return False
+
+    def __getitem__(self, key: str):
+        if key in self:
+            return self.get(key)
+        raise KeyError(key)
+
 
 class AsyncBuildCache(AsyncCache):
     def __init__(
@@ -172,3 +198,22 @@ class AsyncBuildCache(AsyncCache):
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
+
+    async def contains(self, key: str) -> bool:
+        try:
+            r = await self._client.get(self._endpoint + key, headers=self._headers)
+            try:
+                if r.status_code == 404:
+                    return False
+                if r.status_code == 200:
+                    cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
+                    if cache_state and cache_state.lower() != "fresh":
+                        return False
+                    return True
+                return False
+            finally:
+                await r.aclose()
+        except Exception as e:
+            if self._on_error:
+                self._on_error(e)
+            return False

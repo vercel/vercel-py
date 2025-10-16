@@ -40,6 +40,15 @@ class RuntimeCache(Cache):
         # Tag invalidation is not namespaced/hashed by design
         return resolve_cache(sync=True).expire_tag(tag)
 
+    def __contains__(self, key: str) -> bool:
+        # Delegate membership to the underlying cache implementation with transformed key
+        return self._make_key(key) in resolve_cache(sync=True)
+
+    def __getitem__(self, key: str):
+        if key in self:
+            return self.get(key)
+        raise KeyError(key)
+
 
 class AsyncRuntimeCache(AsyncCache):
     def __init__(
@@ -62,6 +71,9 @@ class AsyncRuntimeCache(AsyncCache):
 
     async def expire_tag(self, tag: str | Sequence[str]):
         return await resolve_cache(sync=False).expire_tag(tag)
+
+    async def contains(self, key: str) -> bool:
+        return await resolve_cache(sync=False).contains(self._make_key(key))
 
 
 def get_cache(
