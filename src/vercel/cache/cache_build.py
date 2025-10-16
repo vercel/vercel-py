@@ -218,37 +218,3 @@ class AsyncBuildCache(AsyncCache):
             if self._on_error:
                 self._on_error(e)
             return False
-
-    def __contains__(self, key: str) -> bool:
-        # Guard: avoid blocking network calls when event loop is running
-        try:
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is not None and loop.is_running():
-            raise RuntimeError(
-                "Blocking __contains__ not allowed while event loop is running; use await contains()."
-            )
-        # Safe to block here if no running loop
-        import asyncio as _asyncio
-
-        return _asyncio.run(self.contains(key))
-
-    def __getitem__(self, key: str):
-        # Guard: avoid blocking network calls when event loop is running
-        try:
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is not None and loop.is_running():
-            raise RuntimeError(
-                "Blocking __getitem__ not allowed while event loop is running; use await get()."
-            )
-        # Safe to block here if no running loop
-        import asyncio as _asyncio
-
-        return _asyncio.run(self.get(key))  # type: ignore[arg-type]

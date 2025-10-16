@@ -48,15 +48,6 @@ class InMemoryCache(Cache):
             self._cache.pop(k, None)
 
     def __contains__(self, key: str) -> bool:
-        """
-        Example usage:
-        ```
-        if key in cache:
-            return cache[key]
-        else:
-            return None
-        ```
-        """
         entry = self._cache.get(key)
         if not entry:
             return False
@@ -95,13 +86,3 @@ class AsyncInMemoryCache(AsyncCache):
 
     async def contains(self, key: str) -> bool:
         return key in self.cache
-
-    def __contains__(self, key: str) -> bool:
-        # Delegates to synchronous in-memory cache without I/O
-        return key in self.cache
-
-    def __getitem__(self, key: str):
-        # Delegates to synchronous in-memory cache without I/O
-        if key in self.cache:
-            return self.cache.get(key)
-        raise KeyError(key)
