@@ -103,54 +103,57 @@ class TestProjectsRealAPI:
         project_body = {"name": test_project_name, "framework": "nextjs"}
 
         result = create_project(body=project_body, team_id=team_id)
+        project_id = result["id"]
 
-        # Validate response structure
-        assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        try:
+            # Validate response structure
+            assert isinstance(result, dict), f"Expected dict, got {type(result)}"
 
-        # Validate core fields
-        assert "id" in result, "Response missing 'id'"
-        assert "name" in result, "Response missing 'name'"
-        assert "accountId" in result, "Response missing 'accountId'"
-        assert "createdAt" in result, "Response missing 'createdAt'"
-        assert "updatedAt" in result, "Response missing 'updatedAt'"
+            # Validate core fields
+            assert "id" in result, "Response missing 'id'"
+            assert "name" in result, "Response missing 'name'"
+            assert "accountId" in result, "Response missing 'accountId'"
+            assert "createdAt" in result, "Response missing 'createdAt'"
+            assert "updatedAt" in result, "Response missing 'updatedAt'"
 
-        # Validate data types
-        assert isinstance(result["id"], str), f"Expected string, got {type(result['id'])}"
-        assert isinstance(result["name"], str), f"Expected string, got {type(result['name'])}"
-        assert isinstance(result["accountId"], str), (
-            f"Expected string, got {type(result['accountId'])}"
-        )
-        assert isinstance(result["createdAt"], int), (
-            f"Expected int, got {type(result['createdAt'])}"
-        )
-        assert isinstance(result["updatedAt"], int), (
-            f"Expected int, got {type(result['updatedAt'])}"
-        )
+            # Validate data types
+            assert isinstance(result["id"], str), f"Expected string, got {type(result['id'])}"
+            assert isinstance(result["name"], str), f"Expected string, got {type(result['name'])}"
+            assert isinstance(result["accountId"], str), (
+                f"Expected string, got {type(result['accountId'])}"
+            )
+            assert isinstance(result["createdAt"], int), (
+                f"Expected int, got {type(result['createdAt'])}"
+            )
+            assert isinstance(result["updatedAt"], int), (
+                f"Expected int, got {type(result['updatedAt'])}"
+            )
 
-        # Validate values match what we sent
-        assert result["name"] == test_project_name, (
-            f"Expected {test_project_name}, got {result['name']}"
-        )
-        assert result["accountId"] == team_id, f"Expected {team_id}, got {result['accountId']}"
+            # Validate values match what we sent
+            assert result["name"] == test_project_name, (
+                f"Expected {test_project_name}, got {result['name']}"
+            )
+            assert result["accountId"] == team_id, f"Expected {team_id}, got {result['accountId']}"
 
-        # Validate ID format
-        assert result["id"].startswith("prj_"), (
-            f"Project ID should start with 'prj_', got: {result['id']}"
-        )
+            # Validate ID format
+            assert result["id"].startswith("prj_"), (
+                f"Project ID should start with 'prj_', got: {result['id']}"
+            )
 
-        # Validate timestamps are recent (within last minute)
-        current_time = int(time.time() * 1000)
-        assert result["createdAt"] > current_time - 60000, (
-            f"Created timestamp too old: {result['createdAt']}"
-        )
-        assert result["updatedAt"] > current_time - 60000, (
-            f"Updated timestamp too old: {result['updatedAt']}"
-        )
+            # Validate timestamps are recent (within last minute)
+            current_time = int(time.time() * 1000)
+            assert result["createdAt"] > current_time - 60000, (
+                f"Created timestamp too old: {result['createdAt']}"
+            )
+            assert result["updatedAt"] > current_time - 60000, (
+                f"Updated timestamp too old: {result['updatedAt']}"
+            )
 
-        print(f"✅ Real API test passed: Created project {result['name']} with ID {result['id']}")
+            print(f"✅ Real API test passed: Created project {result['name']} with ID {result['id']}")
 
-        # Return project ID for cleanup
-        return result["id"]
+        finally:
+            # Clean up - delete the project
+            delete_project(project_id, team_id=team_id)
 
     def test_update_project_real_api(self, team_id, test_project_name):
         """Test update_project with real API and validate actual response."""
