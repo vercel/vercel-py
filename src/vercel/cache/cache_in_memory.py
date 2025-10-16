@@ -47,6 +47,34 @@ class InMemoryCache(Cache):
         for k in to_delete:
             self._cache.pop(k, None)
 
+    def __contains__(self, key: str) -> bool:
+        """
+        Example usage:
+        ```
+        if key in cache:
+            return cache[key]
+        else:
+            return None
+        ```
+        """
+        entry = self._cache.get(key)
+        if not entry:
+            return False
+        ttl = entry.get("ttl")
+        if (
+            ttl is not None
+            and entry["last_modified"] + ttl * 1000 < __import__("time").time() * 1000
+        ):
+            # Expired entries should not be considered present
+            self.delete(key)
+            return False
+        return True
+
+    def __getitem__(self, key: str):
+        if key in self:
+            return self.get(key)
+        raise KeyError(key)
+
 
 class AsyncInMemoryCache(AsyncCache):
     def __init__(self, delegate: InMemoryCache | None = None) -> None:
@@ -64,3 +92,16 @@ class AsyncInMemoryCache(AsyncCache):
 
     async def expire_tag(self, tag: str | Sequence[str]) -> None:
         self.cache.expire_tag(tag)
+
+    async def contains(self, key: str) -> bool:
+        return key in self.cache
+
+    def __contains__(self, key: str) -> bool:
+        # Delegates to synchronous in-memory cache without I/O
+        return key in self.cache
+
+    def __getitem__(self, key: str):
+        # Delegates to synchronous in-memory cache without I/O
+        if key in self.cache:
+            return self.cache.get(key)
+        raise KeyError(key)

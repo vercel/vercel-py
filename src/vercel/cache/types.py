@@ -8,6 +8,8 @@ class Cache(Protocol):
 
     def get(self, key: str) -> object | None: ...
 
+    def __contains__(self, key: str) -> bool: ...
+
     def set(
         self,
         key: str,
@@ -31,6 +33,8 @@ class AsyncCache(Protocol):
     ) -> None: ...
 
     async def expire_tag(self, tag: str | Sequence[str]) -> None: ...
+
+    async def contains(self, key: str) -> bool: ...
 
 
 class PurgeAPI(Protocol):

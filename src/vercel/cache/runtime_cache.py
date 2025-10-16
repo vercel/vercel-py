@@ -40,6 +40,16 @@ class RuntimeCache(Cache):
         # Tag invalidation is not namespaced/hashed by design
         return resolve_cache(sync=True).expire_tag(tag)
 
+    def __contains__(self, key: str) -> bool:
+        # Delegate membership to the underlying cache implementation with transformed key
+        return self._make_key(key) in resolve_cache(sync=True)
+
+    def __getitem__(self, key: str):
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
 
 class AsyncRuntimeCache(AsyncCache):
     def __init__(
@@ -62,6 +72,46 @@ class AsyncRuntimeCache(AsyncCache):
 
     async def expire_tag(self, tag: str | Sequence[str]):
         return await resolve_cache(sync=False).expire_tag(tag)
+
+    async def contains(self, key: str) -> bool:
+        return await resolve_cache(sync=False).contains(self._make_key(key))
+
+    def __contains__(self, key: str) -> bool:
+        # Guard: avoid blocking network calls when event loop is running
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            raise RuntimeError(
+                "Blocking __contains__ not allowed while event loop is running; use await contains()."
+            )
+        # Safe to block here if no running loop
+        import asyncio as _asyncio
+
+        return _asyncio.run(self.contains(key))
+
+    def __getitem__(self, key: str):
+        # Guard: avoid blocking network calls when event loop is running
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            raise RuntimeError(
+                "Blocking __getitem__ not allowed while event loop is running; use await get()."
+            )
+        # Safe to block here if no running loop
+        import asyncio as _asyncio
+
+        value = _asyncio.run(self.get(key))
+        if value is None:
+            raise KeyError(key)
+        return value
 
 
 def get_cache(

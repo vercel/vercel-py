@@ -92,6 +92,33 @@ class BuildCache(Cache):
             if self._on_error:
                 self._on_error(e)
 
+    def __contains__(self, key: str) -> bool:
+        try:
+            r = self._client.get(self._endpoint + key, headers=self._headers)
+            try:
+                if r.status_code == 404:
+                    return False
+                if r.status_code == 200:
+                    cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
+                    # Consider present only when fresh
+                    if cache_state and cache_state.lower() != "fresh":
+                        return False
+                    return True
+                return False
+            finally:
+                # Ensure the response is closed regardless of outcome
+                r.close()
+        except Exception as e:
+            if self._on_error:
+                self._on_error(e)
+            return False
+
+    def __getitem__(self, key: str):
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
 
 class AsyncBuildCache(AsyncCache):
     def __init__(
@@ -172,3 +199,56 @@ class AsyncBuildCache(AsyncCache):
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
+
+    async def contains(self, key: str) -> bool:
+        try:
+            r = await self._client.get(self._endpoint + key, headers=self._headers)
+            try:
+                if r.status_code == 404:
+                    return False
+                if r.status_code == 200:
+                    cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
+                    if cache_state and cache_state.lower() != "fresh":
+                        return False
+                    return True
+                return False
+            finally:
+                await r.aclose()
+        except Exception as e:
+            if self._on_error:
+                self._on_error(e)
+            return False
+
+    def __contains__(self, key: str) -> bool:
+        # Guard: avoid blocking network calls when event loop is running
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            raise RuntimeError(
+                "Blocking __contains__ not allowed while event loop is running; use await contains()."
+            )
+        # Safe to block here if no running loop
+        import asyncio as _asyncio
+
+        return _asyncio.run(self.contains(key))
+
+    def __getitem__(self, key: str):
+        # Guard: avoid blocking network calls when event loop is running
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            raise RuntimeError(
+                "Blocking __getitem__ not allowed while event loop is running; use await get()."
+            )
+        # Safe to block here if no running loop
+        import asyncio as _asyncio
+
+        return _asyncio.run(self.get(key))  # type: ignore[arg-type]
