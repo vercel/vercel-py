@@ -15,21 +15,12 @@ Usage:
 
 import asyncio
 import os
-import sys
 import time
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Add the src directory to the path so we can import vercel
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from vercel.projects import get_projects, create_project, update_project, delete_project
-from vercel.projects.projects import (
-    get_projects_async,
-    create_project_async,
-    update_project_async,
-    delete_project_async,
-)
+from vercel.projects.aio import get_projects as get_projects_async, create_project as create_project_async, update_project as update_project_async, delete_project as delete_project_async
 
 load_dotenv()
 

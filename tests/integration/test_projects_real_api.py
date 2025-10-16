@@ -319,6 +319,7 @@ class TestProjectsRealAPI:
     def test_full_crud_workflow_real_api(self, team_id, test_project_name):
         """Test complete CRUD workflow with real API."""
         project_body = {"name": test_project_name, "framework": "nextjs"}
+        project_id = None
 
         try:
             # CREATE
@@ -356,8 +357,9 @@ class TestProjectsRealAPI:
 
         except Exception as e:
             # Clean up on error
-            try:
-                delete_project(project_id, team_id=team_id)
-            except Exception:
-                pass
+            if project_id:
+                try:
+                    delete_project(project_id, team_id=team_id)
+                except Exception:
+                    pass
             raise e

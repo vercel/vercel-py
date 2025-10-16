@@ -15,19 +15,10 @@ Usage:
 
 import asyncio
 import os
-import sys
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Add the src directory to the path so we can import vercel
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from vercel.projects.projects import (
-    get_projects_async,
-    create_project_async,
-    update_project_async,
-    delete_project_async,
-)
+from vercel.projects.aio import get_projects, create_project, update_project, delete_project
 
 load_dotenv()
 
@@ -53,7 +44,7 @@ async def main() -> None:
     try:
         # 1. List existing projects
         print("\n1️⃣ Listing existing projects...")
-        projects_response = await get_projects_async(team_id=team_id)
+        projects_response = await get_projects(team_id=team_id)
         projects = projects_response.get("projects", [])
         print(f"   Found {len(projects)} existing projects")
 
@@ -66,7 +57,7 @@ async def main() -> None:
         print("\n2️⃣ Creating a new test project...")
         test_project_name = f"vercel-py-async-test-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
-        create_response = await create_project_async(
+        create_response = await create_project(
             body={
                 "name": test_project_name,
                 "framework": "nextjs",
@@ -81,7 +72,7 @@ async def main() -> None:
 
         # 3. Update the project
         print("\n3️⃣ Updating the project...")
-        update_response = await update_project_async(
+        update_response = await update_project(
             project_id,
             body={
                 "framework": "nextjs",
@@ -97,7 +88,7 @@ async def main() -> None:
 
         # 4. Get projects again to verify our project is there
         print("\n4️⃣ Verifying project appears in list...")
-        projects_response = await get_projects_async(team_id=team_id)
+        projects_response = await get_projects(team_id=team_id)
         projects = projects_response.get("projects", [])
 
         our_project = next((p for p in projects if p.get("id") == project_id), None)
@@ -108,7 +99,7 @@ async def main() -> None:
 
         # 5. Clean up - delete the test project
         print("\n5️⃣ Cleaning up - deleting test project...")
-        await delete_project_async(project_id, team_id=team_id)
+        await delete_project(project_id, team_id=team_id)
         print(f"   ✅ Deleted project: {project_name}")
 
         print("\n🎉 All operations completed successfully!")

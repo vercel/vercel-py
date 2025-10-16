@@ -14,12 +14,8 @@ Usage:
 """
 
 import os
-import sys
 from datetime import datetime
 from dotenv import load_dotenv
-
-# Add the src directory to the path so we can import vercel
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from vercel.projects import get_projects, create_project, update_project, delete_project
 
