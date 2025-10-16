@@ -202,10 +202,13 @@ class TestProjectsRealAPI:
         delete_project(project_id, team_id=team_id)
         print(f"✅ Real API test passed: Deleted project {project_id}")
 
-        # Verify project is actually deleted by trying to get it
+        # Verify project is actually deleted by checking it's not in the list
         try:
-            get_projects(team_id=team_id)
-            # If we get here, the project list doesn't include our deleted project
+            projects_list = get_projects(team_id=team_id)
+            project_ids = [p["id"] for p in projects_list["projects"]]
+            assert project_id not in project_ids, (
+                f"Project {project_id} still exists after deletion"
+            )
             print(f"✅ Verified project {project_id} was deleted")
         except Exception as e:
             pytest.fail(f"Failed to verify project deletion: {e}")
