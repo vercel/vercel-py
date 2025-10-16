@@ -28,34 +28,41 @@ load_dotenv()
 async def async_operations(team_id: str | None = None) -> tuple[str, float]:
     """Perform async operations and return project ID and duration."""
     start_time = time.time()
+    project_id = None
 
-    # Create project
-    test_project_name = f"vercel-py-async-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    create_response = await create_project_async(
-        body={
-            "name": test_project_name,
-            "framework": "nextjs",
-            "publicSource": False,
-        },
-        team_id=team_id,
-    )
-    project_id = create_response.get("id")
+    try:
+        # Create project
+        test_project_name = f"vercel-py-async-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        create_response = await create_project_async(
+            body={
+                "name": test_project_name,
+                "framework": "nextjs",
+                "publicSource": False,
+            },
+            team_id=team_id,
+        )
+        project_id = create_response.get("id")
 
-    # Update project
-    await update_project_async(
-        project_id,
-        body={
-            "framework": "nextjs",
-            "buildCommand": "npm run build",
-        },
-        team_id=team_id,
-    )
+        # Update project
+        await update_project_async(
+            project_id,
+            body={
+                "framework": "nextjs",
+                "buildCommand": "npm run build",
+            },
+            team_id=team_id,
+        )
 
-    # List projects
-    await get_projects_async(team_id=team_id)
+        # List projects
+        await get_projects_async(team_id=team_id)
 
-    # Delete project
-    await delete_project_async(project_id, team_id=team_id)
+    finally:
+        # Delete project if it was created
+        if project_id:
+            try:
+                await delete_project_async(project_id, team_id=team_id)
+            except Exception:
+                pass
 
     duration = time.time() - start_time
     return project_id, duration
@@ -64,34 +71,41 @@ async def async_operations(team_id: str | None = None) -> tuple[str, float]:
 def sync_operations(team_id: str | None = None) -> tuple[str, float]:
     """Perform sync operations and return project ID and duration."""
     start_time = time.time()
+    project_id = None
 
-    # Create project
-    test_project_name = f"vercel-py-sync-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    create_response = create_project(
-        body={
-            "name": test_project_name,
-            "framework": "nextjs",
-            "publicSource": False,
-        },
-        team_id=team_id,
-    )
-    project_id = create_response.get("id")
+    try:
+        # Create project
+        test_project_name = f"vercel-py-sync-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        create_response = create_project(
+            body={
+                "name": test_project_name,
+                "framework": "nextjs",
+                "publicSource": False,
+            },
+            team_id=team_id,
+        )
+        project_id = create_response.get("id")
 
-    # Update project
-    update_project(
-        project_id,
-        body={
-            "framework": "nextjs",
-            "buildCommand": "npm run build",
-        },
-        team_id=team_id,
-    )
+        # Update project
+        update_project(
+            project_id,
+            body={
+                "framework": "nextjs",
+                "buildCommand": "npm run build",
+            },
+            team_id=team_id,
+        )
 
-    # List projects
-    get_projects(team_id=team_id)
+        # List projects
+        get_projects(team_id=team_id)
 
-    # Delete project
-    delete_project(project_id, team_id=team_id)
+    finally:
+        # Delete project if it was created
+        if project_id:
+            try:
+                delete_project(project_id, team_id=team_id)
+            except Exception:
+                pass
 
     duration = time.time() - start_time
     return project_id, duration
