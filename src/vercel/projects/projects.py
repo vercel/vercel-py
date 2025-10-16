@@ -15,6 +15,7 @@ __all__ = [
 
 
 DEFAULT_API_BASE_URL = "https://api.vercel.com"
+DEFAULT_TIMEOUT = 60.0
 
 
 def _require_token(token: str | None) -> str:
@@ -33,7 +34,7 @@ def _request(
     base_url: str = DEFAULT_API_BASE_URL,
     params: dict[str, Any] | None = None,
     json: Any | None = None,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> httpx.Response:
     bearer = _require_token(token)
     url = base_url.rstrip("/") + path
@@ -60,7 +61,7 @@ async def _request_async(
     base_url: str = DEFAULT_API_BASE_URL,
     params: dict[str, Any] | None = None,
     json: Any | None = None,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> httpx.Response:
     bearer = _require_token(token)
     url = base_url.rstrip("/") + path
@@ -85,7 +86,7 @@ def get_projects(
     slug: str | None = None,
     query: dict[str, Any] | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Retrieve a list of projects.
 
@@ -133,7 +134,7 @@ async def get_projects_async(
     slug: str | None = None,
     query: dict[str, Any] | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Retrieve a list of projects.
 
@@ -181,7 +182,7 @@ def create_project(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Create a new project.
 
@@ -221,7 +222,7 @@ async def create_project_async(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Create a new project.
 
@@ -299,7 +300,7 @@ async def update_project_async(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Update an existing project by id or name."""
     params: dict[str, Any] = {}
@@ -335,7 +336,7 @@ def delete_project(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> None:
     """Delete a project by id or name. Returns None on success (204)."""
     params: dict[str, Any] = {}
@@ -370,7 +371,7 @@ async def delete_project_async(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> None:
     """Delete a project by id or name. Returns None on success (204)."""
     params: dict[str, Any] = {}

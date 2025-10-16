@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 
 DEFAULT_API_BASE_URL = "https://api.vercel.com"
+DEFAULT_TIMEOUT = 60.0
 
 
 def _require_token(token: str | None) -> str:
@@ -23,7 +24,7 @@ def _request(
     base_url: str = DEFAULT_API_BASE_URL,
     params: dict[str, Any] | None = None,
     json: Any | None = None,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> httpx.Response:
     bearer = _require_token(token)
     url = base_url.rstrip("/") + path
@@ -50,7 +51,7 @@ async def _request_async(
     base_url: str = DEFAULT_API_BASE_URL,
     params: dict[str, Any] | None = None,
     json: Any | None = None,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> httpx.Response:
     bearer = _require_token(token)
     url = base_url.rstrip("/") + path
@@ -78,7 +79,7 @@ def create_deployment(
     force_new: bool | None = None,
     skip_auto_detection_confirmation: bool | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Create a new deployment.
 
@@ -126,7 +127,7 @@ def upload_file(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Upload a single deployment file to Vercel.
 
@@ -180,7 +181,7 @@ async def upload_file_async(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Upload a single deployment file to Vercel (async)."""
     params: dict[str, Any] = {}
@@ -226,7 +227,7 @@ async def create_deployment_async(
     force_new: bool | None = None,
     skip_auto_detection_confirmation: bool | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 60.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Create a new deployment.
 
