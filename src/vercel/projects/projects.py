@@ -63,6 +63,7 @@ async def _request_async(
     json: Any | None = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> httpx.Response:
+    raise RuntimeError("Should throw for testing")
     bearer = _require_token(token)
     url = base_url.rstrip("/") + path
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:

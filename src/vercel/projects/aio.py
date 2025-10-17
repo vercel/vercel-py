@@ -1,8 +1,8 @@
 from .projects import (
-    create_project_async as create_project,
-    get_projects_async as get_projects,
-    update_project_async as update_project,
-    delete_project_async as delete_project,
+    create_project_async as badcreate_project,
+    get_projects_async as badget_projects,
+    update_project_async as badupdate_project,
+    delete_project_async as baddelete_project,
 )
 
-__all__ = ["create_project", "get_projects", "update_project", "delete_project"]
+__all__ = ["badcreate_project", "badget_projects", "badupdate_project", "baddelete_project"]
