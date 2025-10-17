@@ -32,7 +32,7 @@ def get_vercel_oidc_token_from_context() -> str:
     # fall back to environment variable like the TypeScript SDK.
     headers = get_headers()
     if headers:
-        # Normalize headers to lowercase keys without exceptions by checking types explicitly
+        # Normalize headers to lowercase keys
         lower_headers: dict[str, str] = {}
         if isinstance(headers, Mapping):
             for k, v in headers.items():
