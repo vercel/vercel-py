@@ -11,6 +11,10 @@ HEADERS_VERCEL_REVALIDATE = "x-vercel-revalidate"
 HEADERS_VERCEL_CACHE_TAGS = "x-vercel-cache-tags"
 HEADERS_VERCEL_CACHE_ITEM_NAME = "x-vercel-cache-item-name"
 
+# Use no keep-alive for async clients to avoid lingering background tasks
+ASYNC_CLIENT_LIMITS = httpx.Limits(max_keepalive_connections=0)
+DEFAULT_TIMEOUT = 30.0
+
 
 class BuildCache(Cache):
     def __init__(
@@ -133,20 +137,21 @@ class AsyncBuildCache(AsyncCache):
 
     async def get(self, key: str):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
+            ) as client:
                 r = await client.get(self._endpoint + key, headers=self._headers)
-                if r.status_code == 404:
-                    await r.aclose()
-                    return None
-                if r.status_code == 200:
-                    cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
-                    if cache_state and cache_state.lower() != "fresh":
-                        await r.aclose()
+                try:
+                    if r.status_code == 404:
                         return None
-                    data = r.json()
+                    if r.status_code == 200:
+                        cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
+                        if cache_state and cache_state.lower() != "fresh":
+                            return None
+                        return r.json()
+                    raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
+                finally:
                     await r.aclose()
-                    return data
-                raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -168,24 +173,38 @@ class AsyncBuildCache(AsyncCache):
             if options and (name := options.get("name")):
                 optional_headers[HEADERS_VERCEL_CACHE_ITEM_NAME] = name
 
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
+            ) as client:
                 r = await client.post(
                     self._endpoint + key,
                     headers={**self._headers, **optional_headers},
                     content=json.dumps(value),
                 )
-                if r.status_code != 200:
-                    raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
+                try:
+                    if r.status_code != 200:
+                        raise RuntimeError(
+                            f"Failed to set cache: {r.status_code} {r.reason_phrase}"
+                        )
+                finally:
+                    await r.aclose()
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
 
     async def delete(self, key: str) -> None:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
+            ) as client:
                 r = await client.delete(self._endpoint + key, headers=self._headers)
-                if r.status_code != 200:
-                    raise RuntimeError(f"Failed to delete cache: {r.status_code} {r.reason_phrase}")
+                try:
+                    if r.status_code != 200:
+                        raise RuntimeError(
+                            f"Failed to delete cache: {r.status_code} {r.reason_phrase}"
+                        )
+                finally:
+                    await r.aclose()
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -193,23 +212,30 @@ class AsyncBuildCache(AsyncCache):
     async def expire_tag(self, tag: str | Sequence[str]) -> None:
         try:
             tags = ",".join(tag) if isinstance(tag, (list, tuple, set)) else tag
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
+            ) as client:
                 r = await client.post(
                     f"{self._endpoint}revalidate",
                     params={"tags": tags},
                     headers=self._headers,
                 )
-                if r.status_code != 200:
-                    raise RuntimeError(
-                        f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}"
-                    )
+                try:
+                    if r.status_code != 200:
+                        raise RuntimeError(
+                            f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}"
+                        )
+                finally:
+                    await r.aclose()
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
 
     async def contains(self, key: str) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
+            ) as client:
                 r = await client.get(self._endpoint + key, headers=self._headers)
                 try:
                     if r.status_code == 404:
