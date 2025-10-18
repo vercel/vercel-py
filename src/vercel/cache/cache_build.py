@@ -141,17 +141,19 @@ class AsyncBuildCache(AsyncCache):
                 timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
             ) as client:
                 r = await client.get(self._endpoint + key, headers=self._headers)
-                try:
-                    if r.status_code == 404:
-                        return None
-                    if r.status_code == 200:
-                        cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
-                        if cache_state and cache_state.lower() != "fresh":
-                            return None
-                        return r.json()
-                    raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
-                finally:
+                if r.status_code == 404:
                     await r.aclose()
+                    return None
+                if r.status_code == 200:
+                    cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
+                    if cache_state and cache_state.lower() != "fresh":
+                        await r.aclose()
+                        return None
+                    data = r.json()
+                    await r.aclose()
+                    return data
+                await r.aclose()
+                raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -181,13 +183,10 @@ class AsyncBuildCache(AsyncCache):
                     headers={**self._headers, **optional_headers},
                     content=json.dumps(value),
                 )
-                try:
-                    if r.status_code != 200:
-                        raise RuntimeError(
-                            f"Failed to set cache: {r.status_code} {r.reason_phrase}"
-                        )
-                finally:
+                if r.status_code != 200:
                     await r.aclose()
+                    raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
+                await r.aclose()
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -198,13 +197,10 @@ class AsyncBuildCache(AsyncCache):
                 timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
             ) as client:
                 r = await client.delete(self._endpoint + key, headers=self._headers)
-                try:
-                    if r.status_code != 200:
-                        raise RuntimeError(
-                            f"Failed to delete cache: {r.status_code} {r.reason_phrase}"
-                        )
-                finally:
+                if r.status_code != 200:
                     await r.aclose()
+                    raise RuntimeError(f"Failed to delete cache: {r.status_code} {r.reason_phrase}")
+                await r.aclose()
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -220,13 +216,12 @@ class AsyncBuildCache(AsyncCache):
                     params={"tags": tags},
                     headers=self._headers,
                 )
-                try:
-                    if r.status_code != 200:
-                        raise RuntimeError(
-                            f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}"
-                        )
-                finally:
+                if r.status_code != 200:
                     await r.aclose()
+                    raise RuntimeError(
+                        f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}"
+                    )
+                await r.aclose()
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -237,17 +232,18 @@ class AsyncBuildCache(AsyncCache):
                 timeout=httpx.Timeout(DEFAULT_TIMEOUT), limits=ASYNC_CLIENT_LIMITS
             ) as client:
                 r = await client.get(self._endpoint + key, headers=self._headers)
-                try:
-                    if r.status_code == 404:
-                        return False
-                    if r.status_code == 200:
-                        cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
-                        if cache_state and cache_state.lower() != "fresh":
-                            return False
-                        return True
-                    return False
-                finally:
+                if r.status_code == 404:
                     await r.aclose()
+                    return False
+                if r.status_code == 200:
+                    cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
+                    if cache_state and cache_state.lower() != "fresh":
+                        await r.aclose()
+                        return False
+                    await r.aclose()
+                    return True
+                await r.aclose()
+                return False
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
