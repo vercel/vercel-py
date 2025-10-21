@@ -162,8 +162,6 @@ def comparison_example():
     """Compare the three approaches: automatic, uploader, and manual."""
     print("\n\n=== API Comparison ===\n")
 
-    data = b"X" * (10 * 1024 * 1024)  # 10 MB
-
     print("1. AUTOMATIC (Simplest - no control):")
     print("   from vercel.blob import auto_multipart_upload")
     print("   result = auto_multipart_upload('file.bin', data)")
