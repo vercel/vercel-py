@@ -35,6 +35,7 @@ from .ops import (
     iter_objects,
     iter_objects_async,
 )
+from .multipart.api import create_multipart_uploader, create_multipart_uploader_async
 
 
 class BlobClient:
@@ -177,6 +178,27 @@ class BlobClient:
             token=self.token,
             multipart=multipart,
             on_upload_progress=on_upload_progress,
+        )
+
+    def create_multipart_uploader(
+        self,
+        path: str,
+        *,
+        access: str = "public",
+        content_type: str | None = None,
+        add_random_suffix: bool = True,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+    ):
+        """Create a multipart uploader bound to this client's token."""
+        return create_multipart_uploader(
+            path,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=self.token,
         )
 
 
@@ -328,4 +350,25 @@ class AsyncBlobClient:
             token=self.token,
             multipart=multipart,
             on_upload_progress=on_upload_progress,
+        )
+
+    async def create_multipart_uploader(
+        self,
+        path: str,
+        *,
+        access: str = "public",
+        content_type: str | None = None,
+        add_random_suffix: bool = True,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+    ):
+        """Create an async multipart uploader bound to this client's token."""
+        return await create_multipart_uploader_async(
+            path,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=self.token,
         )

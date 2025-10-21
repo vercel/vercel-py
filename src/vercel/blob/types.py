@@ -46,3 +46,15 @@ class ListBlobResult:
 class CreateFolderResult:
     pathname: str
     url: str
+
+
+@dataclass(slots=True)
+class MultipartCreateResult:
+    upload_id: str
+    key: str
+
+
+@dataclass(slots=True)
+class MultipartPart:
+    part_number: int
+    etag: str

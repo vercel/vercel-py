@@ -7,7 +7,7 @@ from ..api import request_api, request_api_async
 from ..utils import UploadProgressEvent
 
 
-def _create_multipart_upload(
+def call_create_multipart_upload(
     path: str, headers: dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
     params = {"pathname": path}
@@ -20,7 +20,7 @@ def _create_multipart_upload(
     )
 
 
-async def _create_multipart_upload_async(
+async def call_create_multipart_upload_async(
     path: str, headers: dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
     params = {"pathname": path}
@@ -33,7 +33,7 @@ async def _create_multipart_upload_async(
     )
 
 
-def _upload_part(
+def call_upload_part(
     *,
     upload_id: str,
     key: str,
@@ -62,7 +62,7 @@ def _upload_part(
     )
 
 
-async def _upload_part_async(
+async def call_upload_part_async(
     *,
     upload_id: str,
     key: str,
@@ -93,7 +93,7 @@ async def _upload_part_async(
     )
 
 
-def _complete_multipart_upload(
+def call_complete_multipart_upload(
     *,
     upload_id: str,
     key: str,
@@ -119,7 +119,7 @@ def _complete_multipart_upload(
     )
 
 
-async def _complete_multipart_upload_async(
+async def call_complete_multipart_upload_async(
     *,
     upload_id: str,
     key: str,

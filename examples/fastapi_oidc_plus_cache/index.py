@@ -22,10 +22,8 @@ cache = AsyncRuntimeCache()
 
 @app.middleware("http")
 async def vercel_context_middleware(request: Request, call_next: Callable):
-    headers = {k.lower(): v for k, v in request.headers.items()}
-    set_headers(headers)
-    response = await call_next(request)
-    return response
+    set_headers(request.headers)
+    return await call_next(request)
 
 
 @app.get("/api/oidc")

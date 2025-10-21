@@ -13,6 +13,9 @@ jobs:
     environment: ci
     env:
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,7 +37,7 @@ jobs:
           uv run python -c "import vercel, vercel.cache, vercel.headers, vercel.oidc"
 
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run pytest -v --capture=tee-sys
 
       - name: Build package
         run: uv run python -m build
