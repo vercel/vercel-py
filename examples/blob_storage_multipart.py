@@ -55,16 +55,16 @@ def sync_example():
         print(f"Uploading part {i}...")
         part = uploader.upload_part(i, chunk)
         parts.append(part)
-        print(f"  Part {i} uploaded: {part['etag'][:20]}...\n")
+        print(f"  Part {i} uploaded: {part.etag[:20]}...\n")
 
     # Complete the upload (Phase 3: Complete)
     print("Completing multipart upload...")
     result = uploader.complete(parts)
 
     print(f"\nUpload completed!")
-    print(f"  URL: {result['url']}")
-    print(f"  Pathname: {result['pathname']}")
-    print(f"  Size: {result.get('size', 'N/A')} bytes")
+    print(f"  URL: {result.url}")
+    print(f"  Pathname: {result.pathname}")
+    print(f"  Size: {getattr(result, 'size', 'N/A')} bytes")
 
 
 async def async_example():
@@ -95,16 +95,16 @@ async def async_example():
     parts = await asyncio.gather(*tasks)
 
     for part in parts:
-        print(f"  Part {part['partNumber']} uploaded: {part['etag'][:20]}...")
+        print(f"  Part {part.part_number} uploaded: {part.etag[:20]}...")
 
     # Complete the upload
     print("\nCompleting multipart upload...")
     result = await uploader.complete(parts)
 
     print(f"\nUpload completed!")
-    print(f"  URL: {result['url']}")
-    print(f"  Pathname: {result['pathname']}")
-    print(f"  Size: {result.get('size', 'N/A')} bytes")
+    print(f"  URL: {result.url}")
+    print(f"  Pathname: {result.pathname}")
+    print(f"  Size: {getattr(result, 'size', 'N/A')} bytes")
 
 
 async def async_with_file_example():
@@ -149,9 +149,9 @@ async def async_with_file_example():
     result = await uploader.complete(parts)
 
     print(f"\nFile upload completed!")
-    print(f"  URL: {result['url']}")
-    print(f"  Pathname: {result['pathname']}")
-    print(f"  Size: {result.get('size', 'N/A')} bytes")
+    print(f"  URL: {result.url}")
+    print(f"  Pathname: {result.pathname}")
+    print(f"  Size: {getattr(result, 'size', 'N/A')} bytes")
 
     # Clean up test file
     os.remove(test_file_path)
