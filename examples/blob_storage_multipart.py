@@ -201,12 +201,7 @@ if __name__ == "__main__":
         print("Please set it to run these examples.")
         exit(1)
 
-    # Show comparison
     comparison_example()
-
-    # Run sync example
     sync_example()
-
-    # Run async examples
     asyncio.run(async_example())
     asyncio.run(async_with_file_example())
