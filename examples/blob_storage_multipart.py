@@ -205,18 +205,8 @@ if __name__ == "__main__":
     comparison_example()
 
     # Run sync example
-    try:
-        sync_example()
-    except Exception as e:
-        print(f"Sync example error: {e}")
+    sync_example()
 
     # Run async examples
-    try:
-        asyncio.run(async_example())
-    except Exception as e:
-        print(f"Async example error: {e}")
-
-    try:
-        asyncio.run(async_with_file_example())
-    except Exception as e:
-        print(f"Async file example error: {e}")
+    asyncio.run(async_example())
+    asyncio.run(async_with_file_example())
