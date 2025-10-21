@@ -8,12 +8,12 @@ from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator
 from ..utils import UploadProgressEvent, compute_body_length, create_put_headers, create_put_options
 from ..errors import BlobError
 from .core import (
-    _create_multipart_upload,
-    _create_multipart_upload_async,
-    _upload_part as _upload_part_sync,
-    _upload_part_async,
-    _complete_multipart_upload,
-    _complete_multipart_upload_async,
+    call_create_multipart_upload,
+    call_create_multipart_upload_async,
+    call_upload_part,
+    call_upload_part_async,
+    call_complete_multipart_upload,
+    call_complete_multipart_upload_async,
 )
 
 DEFAULT_PART_SIZE = 8 * 1024 * 1024  # 8MB
@@ -128,7 +128,7 @@ def auto_multipart_upload(
 
     part_size = _validate_part_size(part_size)
 
-    create_resp = _create_multipart_upload(path, headers, token=opts.get("token"))
+    create_resp = call_create_multipart_upload(path, headers, token=opts.get("token"))
     upload_id = create_resp["uploadId"]
     key = create_resp["key"]
 
@@ -148,7 +148,7 @@ def auto_multipart_upload(
                         UploadProgressEvent(loaded=loaded, total=total, percentage=pct)
                     )
 
-        resp = _upload_part_sync(
+        resp = call_upload_part(
             upload_id=upload_id,
             key=key,
             path=path,
@@ -183,7 +183,7 @@ def auto_multipart_upload(
     if on_upload_progress:
         on_upload_progress(UploadProgressEvent(loaded=total, total=total, percentage=100.0))
 
-    return _complete_multipart_upload(
+    return call_complete_multipart_upload(
         upload_id=upload_id,
         key=key,
         path=path,
@@ -223,7 +223,7 @@ async def auto_multipart_upload_async(
 
     part_size = _validate_part_size(part_size)
 
-    create_resp = await _create_multipart_upload_async(path, headers, token=opts.get("token"))
+    create_resp = await call_create_multipart_upload_async(path, headers, token=opts.get("token"))
     upload_id = create_resp["uploadId"]
     key = create_resp["key"]
 
@@ -257,7 +257,7 @@ async def auto_multipart_upload_async(
             return progress
 
     async def upload_one(part_number: int, content: bytes) -> dict:
-        resp = await _upload_part_async(
+        resp = await call_upload_part_async(
             upload_id=upload_id,
             key=key,
             path=path,
@@ -294,7 +294,7 @@ async def auto_multipart_upload_async(
         if asyncio.iscoroutine(result):
             await result
 
-    return await _complete_multipart_upload_async(
+    return await call_complete_multipart_upload_async(
         upload_id=upload_id,
         key=key,
         path=path,

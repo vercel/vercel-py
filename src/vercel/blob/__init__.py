@@ -40,6 +40,10 @@ from .multipart import (
     upload_part_async,
     complete_multipart_upload,
     complete_multipart_upload_async,
+    create_multipart_uploader,
+    create_multipart_uploader_async,
+    MultipartUploader,
+    AsyncMultipartUploader,
     auto_multipart_upload,
     auto_multipart_upload_async,
 )
@@ -54,6 +58,8 @@ from .types import (
     ListBlobResult,
     ListBlobItem,
     CreateFolderResult,
+    MultipartCreateResult,
+    MultipartPart,
 )
 from . import aio as aioblob
 
@@ -98,6 +104,10 @@ __all__ = [
     "upload_part_async",
     "complete_multipart_upload",
     "complete_multipart_upload_async",
+    "create_multipart_uploader",
+    "create_multipart_uploader_async",
+    "MultipartUploader",
+    "AsyncMultipartUploader",
     "auto_multipart_upload",
     "auto_multipart_upload_async",
     # client
@@ -113,6 +123,8 @@ __all__ = [
     "ListBlobResult",
     "ListBlobItem",
     "CreateFolderResult",
+    "MultipartCreateResult",
+    "MultipartPart",
     # aio
     "aioblob",
 ]
