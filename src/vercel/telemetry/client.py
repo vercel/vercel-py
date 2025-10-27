@@ -294,6 +294,9 @@ class TelemetryClient:
                 if response.status_code == 204:
                     if _TELEMETRY_DEBUG():
                         print(f"Telemetry events tracked")
+                    # Clear events only on successful delivery
+                    for event_type in self._events:
+                        self._events[event_type].clear()
                 else:
                     if _TELEMETRY_DEBUG():
                         print(f"Failed to send telemetry: {response.status_code}")
@@ -301,10 +304,6 @@ class TelemetryClient:
         except Exception as e:
             if _TELEMETRY_DEBUG():
                 print(f"Telemetry error: {e}")
-
-        # Clear all events after flushing
-        for event_type in self._events:
-            self._events[event_type].clear()
 
     def reset(self) -> None:
         """Clear accumulated events."""
