@@ -5,6 +5,7 @@ import httpx
 import json
 from .types import Cache, AsyncCache
 
+from ..telemetry.tracker import track_cache_set, track_cache_get
 
 HEADERS_VERCEL_CACHE_STATE = "x-vercel-cache-state"
 HEADERS_VERCEL_REVALIDATE = "x-vercel-revalidate"
@@ -33,12 +34,27 @@ class BuildCache(Cache):
         try:
             r = self._client.get(self._endpoint + key, headers=self._headers)
             if r.status_code == 404:
+                # Track cache miss
+                try:
+                    track_cache_get(hit=False)
+                except Exception:
+                    pass
                 return None
             if r.status_code == 200:
                 cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
                 if cache_state and cache_state.lower() != "fresh":
                     r.close()
+                    # Track cache miss (stale)
+                    try:
+                        track_cache_get(hit=False)
+                    except Exception:
+                        pass
                     return None
+                # Track cache hit
+                try:
+                    track_cache_get(hit=True)
+                except Exception:
+                    pass
                 return r.json()
             raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
         except Exception as e:
@@ -69,6 +85,11 @@ class BuildCache(Cache):
             )
             if r.status_code != 200:
                 raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
+            # Track telemetry
+            try:
+                track_cache_set(ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
+            except Exception:
+                pass
         except Exception as e:
             if self._on_error:
                 self._on_error(e)

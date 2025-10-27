@@ -25,6 +25,7 @@ from .types import (
 from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
 
+from ..telemetry.tracker import track_blob_put, track_blob_delete
 
 def put(
     path: str,
@@ -74,6 +75,8 @@ def put(
             token=token,
             on_upload_progress=on_upload_progress,
         )
+        # Track telemetry
+        track_blob_put(access=access, content_type=content_type, multipart=True, body=body)
         return PutBlobResultType(
             url=raw["url"],
             download_url=raw["downloadUrl"],
@@ -92,6 +95,8 @@ def put(
         body=body,
         on_upload_progress=on_upload_progress,
     )
+    # Track telemetry
+    track_blob_put(access=access, content_type=content_type, multipart=False, body=body)
     return PutBlobResultType(
         url=raw["url"],
         download_url=raw["downloadUrl"],
@@ -153,6 +158,8 @@ async def put_async(
             token=token,
             on_upload_progress=on_upload_progress,
         )
+        # Track telemetry
+        track_blob_put(access=access, content_type=content_type, multipart=True, body=body)
         return PutBlobResultType(
             url=raw["url"],
             download_url=raw["downloadUrl"],
@@ -171,6 +178,8 @@ async def put_async(
         body=body,
         on_upload_progress=on_upload_progress,
     )
+    # Track telemetry
+    track_blob_put(access=access, content_type=content_type, multipart=False, body=body)
     return PutBlobResultType(
         url=raw["url"],
         download_url=raw["downloadUrl"],
@@ -187,8 +196,10 @@ def delete(
 ) -> None:
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
+        count = len(urls)
     else:
         urls = [str(url_or_path)]
+        count = 1
     request_api(
         "/delete",
         "POST",
@@ -196,6 +207,8 @@ def delete(
         headers={"content-type": "application/json"},
         body={"urls": urls},
     )
+    # Track telemetry
+    track_blob_delete(count=count)
 
 
 async def delete_async(
@@ -205,8 +218,10 @@ async def delete_async(
 ) -> None:
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
+        count = len(urls)
     else:
         urls = [str(url_or_path)]
+        count = 1
     await request_api_async(
         "/delete",
         "POST",
@@ -214,6 +229,8 @@ async def delete_async(
         headers={"content-type": "application/json"},
         body={"urls": urls},
     )
+    # Track telemetry
+    track_blob_delete(count=count)
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:

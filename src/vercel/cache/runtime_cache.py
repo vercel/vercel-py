@@ -8,7 +8,6 @@ from .cache_build import BuildCache, AsyncBuildCache
 from .types import Cache, AsyncCache
 from .utils import create_key_transformer
 
-
 _in_memory_cache_instance: InMemoryCache | None = None
 _async_in_memory_cache_instance: AsyncInMemoryCache | None = None
 _build_cache_instance: BuildCache | None = None
