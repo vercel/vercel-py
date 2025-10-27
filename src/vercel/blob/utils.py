@@ -403,3 +403,12 @@ def normalize_common_args(
         ["cacheControl", "addRandomSuffix", "allowOverwrite", "contentType"], opts
     )
     return p, opts, headers
+
+
+def ensure_token(token: str | None) -> str:
+    token = token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
+    if not token:
+        raise BlobError(
+            "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` or `VERCEL_BLOB_READ_WRITE_TOKEN` environment variable, or pass in `token` as an argument."
+        )
+    return token

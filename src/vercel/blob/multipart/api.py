@@ -14,6 +14,7 @@ from .core import (
     call_complete_multipart_upload_async,
 )
 from ..types import MultipartCreateResult, MultipartPart, PutBlobResult
+from ..utils import ensure_token
 
 
 def create_multipart_upload(
@@ -26,6 +27,7 @@ def create_multipart_upload(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
@@ -52,6 +54,7 @@ async def create_multipart_upload_async(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
@@ -80,6 +83,7 @@ def upload_part(
     content_type: str | None = None,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> MultipartPart:
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
@@ -119,6 +123,7 @@ async def upload_part_async(
     | Callable[[UploadProgressEvent], Awaitable[None]]
     | None = None,
 ) -> MultipartPart:
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
@@ -154,6 +159,7 @@ def complete_multipart_upload(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
@@ -192,6 +198,7 @@ async def complete_multipart_upload_async(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
@@ -499,6 +506,7 @@ def create_multipart_uploader(
         ...     parts.append(part)
         >>> result = uploader.complete(parts)
     """
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
@@ -560,6 +568,7 @@ async def create_multipart_uploader_async(
         ...     parts.append(part)
         >>> result = await uploader.complete(parts)
     """
+    token = ensure_token(token)
     options: dict[str, Any] = {
         "access": access,
         "contentType": content_type,
