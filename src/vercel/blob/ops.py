@@ -26,6 +26,15 @@ from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
 
 
+def _validate_token(token: str | None) -> str:
+    token = token or os.getenv("BLOB_READ_WRITE_TOKEN")
+    if not token:
+        raise BlobError(
+            "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` environment variable, or pass in `token` as an argument."
+        )
+    return token
+
+
 def put(
     path: str,
     body: Any,
@@ -39,6 +48,8 @@ def put(
     multipart: bool = False,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
+    resolved_token = _validate_token(token)
+
     if body is None:
         raise BlobError("body is required")
 
@@ -53,7 +64,7 @@ def put(
         "addRandomSuffix": add_random_suffix,
         "allowOverwrite": overwrite,
         "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
+        "token": resolved_token,
         "multipart": multipart,
     }
 
@@ -71,7 +82,7 @@ def put(
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=token,
+            token=resolved_token,
             on_upload_progress=on_upload_progress,
         )
         return PutBlobResultType(
@@ -116,6 +127,7 @@ async def put_async(
     | Callable[[UploadProgressEvent], Awaitable[None]]
     | None = None,
 ) -> PutBlobResultType:
+    resolved_token = _validate_token(token)
     if body is None:
         raise BlobError("body is required")
 
@@ -131,7 +143,7 @@ async def put_async(
         "addRandomSuffix": add_random_suffix,
         "allowOverwrite": overwrite,
         "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
+        "token": resolved_token,
         "multipart": multipart,
     }
 
@@ -150,7 +162,7 @@ async def put_async(
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=token,
+            token=resolved_token,
             on_upload_progress=on_upload_progress,
         )
         return PutBlobResultType(
@@ -185,6 +197,7 @@ def delete(
     *,
     token: str | None = None,
 ) -> None:
+    resolved_token = _validate_token(token)
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
     else:
@@ -192,7 +205,7 @@ def delete(
     request_api(
         "/delete",
         "POST",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         headers={"content-type": "application/json"},
         body={"urls": urls},
     )
@@ -203,6 +216,7 @@ async def delete_async(
     *,
     token: str | None = None,
 ) -> None:
+    resolved_token = _validate_token(token)
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
     else:
@@ -210,18 +224,19 @@ async def delete_async(
     await request_api_async(
         "/delete",
         "POST",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         headers={"content-type": "application/json"},
         body={"urls": urls},
     )
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
+    resolved_token = _validate_token(token)
     params = {"url": url_or_path}
     resp = request_api(
         "",
         "GET",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         params=params,
     )
     uploaded_at = (
@@ -242,11 +257,12 @@ def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
 
 
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
+    resolved_token = _validate_token(token)
     params = {"url": url_or_path}
     resp = await request_api_async(
         "",
         "GET",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         params=params,
     )
     uploaded_at = (
@@ -272,11 +288,12 @@ def get(
     token: str | None = None,
     timeout: float | None = None,
 ) -> bytes:
+    resolved_token = _validate_token(token)
     target_url: str
     if is_url(url_or_path):
         target_url = url_or_path
     else:
-        metadata = head(url_or_path, token=token)
+        metadata = head(url_or_path, token=resolved_token)
         target_url = metadata.url
 
     try:
@@ -300,11 +317,12 @@ async def get_async(
     token: str | None = None,
     timeout: float | None = None,
 ) -> bytes:
+    resolved_token = _validate_token(token)
     target_url: str
     if is_url(url_or_path):
         target_url = url_or_path
     else:
-        metadata = await head_async(url_or_path, token=token)
+        metadata = await head_async(url_or_path, token=resolved_token)
         target_url = metadata.url
 
     try:
@@ -332,6 +350,7 @@ def list_objects(
     mode: str | None = None,
     token: str | None = None,
 ) -> ListBlobResultType:
+    resolved_token = _validate_token(token)
     params: dict[str, Any] = {}
     if limit is not None:
         params["limit"] = int(limit)
@@ -345,7 +364,7 @@ def list_objects(
     resp = request_api(
         "",
         "GET",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         params=params,
     )
     blobs_list: list[ListBlobItem] = []
@@ -380,6 +399,7 @@ async def list_objects_async(
     mode: str | None = None,
     token: str | None = None,
 ) -> ListBlobResultType:
+    resolved_token = _validate_token(token)
     params: dict[str, Any] = {}
     if limit is not None:
         params["limit"] = int(limit)
@@ -393,7 +413,7 @@ async def list_objects_async(
     resp = await request_api_async(
         "",
         "GET",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         params=params,
     )
     blobs_list: list[ListBlobItem] = []
@@ -429,6 +449,7 @@ def iter_objects(
     limit: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[ListBlobItem]:
+    resolved_token = _validate_token(token)
     next_cursor = cursor
     yielded_count = 0
     while True:
@@ -444,7 +465,7 @@ def iter_objects(
             prefix=prefix,
             cursor=next_cursor,
             mode=mode,
-            token=token,
+            token=resolved_token,
         )
         for item in page.blobs:
             yield item
@@ -466,6 +487,7 @@ async def iter_objects_async(
     limit: int | None = None,
     cursor: str | None = None,
 ) -> AsyncIterator[ListBlobItem]:
+    resolved_token = _validate_token(token)
     next_cursor = cursor
     yielded_count = 0
     while True:
@@ -481,7 +503,7 @@ async def iter_objects_async(
             prefix=prefix,
             cursor=next_cursor,
             mode=mode,
-            token=token,
+            token=resolved_token,
         )
         for item in page.blobs:
             yield item
@@ -505,6 +527,7 @@ def copy(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> PutBlobResultType:
+    resolved_token = _validate_token(token)
     if not is_url(src_path):
         meta = head(src_path, token=token)
         src_path = meta.url
@@ -515,7 +538,7 @@ def copy(
         "addRandomSuffix": add_random_suffix,
         "allowOverwrite": overwrite,
         "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
+        "token": resolved_token,
     }
     opts = create_put_options(path=dst_path, options=options)
     headers = create_put_headers(
@@ -549,6 +572,7 @@ async def copy_async(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> PutBlobResultType:
+    resolved_token = _validate_token(token)
     if not is_url(src_path):
         meta = head(src_path, token=token)
         src_path = meta.url
@@ -560,7 +584,7 @@ async def copy_async(
         "addRandomSuffix": add_random_suffix,
         "allowOverwrite": overwrite,
         "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
+        "token": resolved_token,
     }
     opts = create_put_options(path=dst_path, options=options)
     headers = create_put_headers(
@@ -589,6 +613,7 @@ def create_folder(
     token: str | None = None,
     overwrite: bool = False,
 ) -> CreateFolderResultType:
+    resolved_token = _validate_token(token)
     folder_path = path if path.endswith("/") else path + "/"
     headers = {PUT_OPTION_HEADER_MAP["addRandomSuffix"]: "0"}
     if overwrite:
@@ -597,7 +622,7 @@ def create_folder(
     raw = request_api(
         "",
         "PUT",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         headers=headers,
         params=params,
     )
@@ -610,6 +635,7 @@ async def create_folder_async(
     token: str | None = None,
     overwrite: bool = False,
 ) -> CreateFolderResultType:
+    resolved_token = _validate_token(token)
     folder_path = path if path.endswith("/") else path + "/"
     headers = {PUT_OPTION_HEADER_MAP["addRandomSuffix"]: "0"}
     if overwrite:
@@ -618,7 +644,7 @@ async def create_folder_async(
     raw = await request_api_async(
         "",
         "PUT",
-        options={"token": token} if token else {},
+        options={"token": resolved_token},
         headers=headers,
         params=params,
     )
@@ -638,6 +664,7 @@ def upload_file(
     multipart: bool = False,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
+    resolved_token = _validate_token(token)
     if not local_path:
         raise BlobError("src_path is required")
     if not path:
@@ -660,7 +687,7 @@ def upload_file(
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=token,
+            token=resolved_token,
             multipart=use_multipart,
             on_upload_progress=on_upload_progress,
         )
@@ -681,6 +708,7 @@ async def upload_file_async(
     | Callable[[UploadProgressEvent], Awaitable[None]]
     | None = None,
 ) -> PutBlobResultType:
+    resolved_token = _validate_token(token)
     if not local_path:
         raise BlobError("local_path is required")
     if not path:
@@ -703,7 +731,7 @@ async def upload_file_async(
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=token,
+            token=resolved_token,
             multipart=use_multipart,
             on_upload_progress=on_upload_progress,
         )
@@ -719,11 +747,12 @@ def download_file(
     create_parents: bool = True,
     progress: Callable[[int, int | None], None] | None = None,
 ) -> str:
+    resolved_token = _validate_token(token)
     # Resolve remote URL from url_or_path
     if is_url(url_or_path):
         target_url = url_or_path
     else:
-        meta = head(url_or_path, token=token)
+        meta = head(url_or_path, token=resolved_token)
         target_url = meta.download_url or meta.url
 
     # Prepare destination
@@ -773,11 +802,12 @@ async def download_file_async(
     | Callable[[int, int | None], Awaitable[None]]
     | None = None,
 ) -> str:
+    resolved_token = _validate_token(token)
     # Resolve remote URL from url_or_path
     if is_url(url_or_path):
         target_url = url_or_path
     else:
-        meta = await head_async(url_or_path, token=token)
+        meta = await head_async(url_or_path, token=resolved_token)
         target_url = meta.download_url or meta.url
 
     # Prepare destination
