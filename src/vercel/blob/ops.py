@@ -26,8 +26,8 @@ from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
 
 
-def _validate_token(token: str | None) -> str:
-    token = token or os.getenv("BLOB_READ_WRITE_TOKEN")
+def _ensure_token(token: str | None) -> str:
+    token = token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
     if not token:
         raise BlobError(
             "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` environment variable, or pass in `token` as an argument."
@@ -48,7 +48,7 @@ def put(
     multipart: bool = False,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
 
     if body is None:
         raise BlobError("body is required")
@@ -127,7 +127,7 @@ async def put_async(
     | Callable[[UploadProgressEvent], Awaitable[None]]
     | None = None,
 ) -> PutBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     if body is None:
         raise BlobError("body is required")
 
@@ -197,7 +197,7 @@ def delete(
     *,
     token: str | None = None,
 ) -> None:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
     else:
@@ -216,7 +216,7 @@ async def delete_async(
     *,
     token: str | None = None,
 ) -> None:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
     else:
@@ -231,7 +231,7 @@ async def delete_async(
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     params = {"url": url_or_path}
     resp = request_api(
         "",
@@ -257,7 +257,7 @@ def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
 
 
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     params = {"url": url_or_path}
     resp = await request_api_async(
         "",
@@ -288,7 +288,7 @@ def get(
     token: str | None = None,
     timeout: float | None = None,
 ) -> bytes:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     target_url: str
     if is_url(url_or_path):
         target_url = url_or_path
@@ -317,7 +317,7 @@ async def get_async(
     token: str | None = None,
     timeout: float | None = None,
 ) -> bytes:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     target_url: str
     if is_url(url_or_path):
         target_url = url_or_path
@@ -350,7 +350,7 @@ def list_objects(
     mode: str | None = None,
     token: str | None = None,
 ) -> ListBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     params: dict[str, Any] = {}
     if limit is not None:
         params["limit"] = int(limit)
@@ -399,7 +399,7 @@ async def list_objects_async(
     mode: str | None = None,
     token: str | None = None,
 ) -> ListBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     params: dict[str, Any] = {}
     if limit is not None:
         params["limit"] = int(limit)
@@ -449,7 +449,7 @@ def iter_objects(
     limit: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[ListBlobItem]:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     next_cursor = cursor
     yielded_count = 0
     while True:
@@ -487,7 +487,7 @@ async def iter_objects_async(
     limit: int | None = None,
     cursor: str | None = None,
 ) -> AsyncIterator[ListBlobItem]:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     next_cursor = cursor
     yielded_count = 0
     while True:
@@ -527,7 +527,7 @@ def copy(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> PutBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     if not is_url(src_path):
         meta = head(src_path, token=token)
         src_path = meta.url
@@ -572,7 +572,7 @@ async def copy_async(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> PutBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     if not is_url(src_path):
         meta = head(src_path, token=token)
         src_path = meta.url
@@ -613,7 +613,7 @@ def create_folder(
     token: str | None = None,
     overwrite: bool = False,
 ) -> CreateFolderResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     folder_path = path if path.endswith("/") else path + "/"
     headers = {PUT_OPTION_HEADER_MAP["addRandomSuffix"]: "0"}
     if overwrite:
@@ -635,7 +635,7 @@ async def create_folder_async(
     token: str | None = None,
     overwrite: bool = False,
 ) -> CreateFolderResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     folder_path = path if path.endswith("/") else path + "/"
     headers = {PUT_OPTION_HEADER_MAP["addRandomSuffix"]: "0"}
     if overwrite:
@@ -664,7 +664,7 @@ def upload_file(
     multipart: bool = False,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     if not local_path:
         raise BlobError("src_path is required")
     if not path:
@@ -708,7 +708,7 @@ async def upload_file_async(
     | Callable[[UploadProgressEvent], Awaitable[None]]
     | None = None,
 ) -> PutBlobResultType:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     if not local_path:
         raise BlobError("local_path is required")
     if not path:
@@ -747,7 +747,7 @@ def download_file(
     create_parents: bool = True,
     progress: Callable[[int, int | None], None] | None = None,
 ) -> str:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     # Resolve remote URL from url_or_path
     if is_url(url_or_path):
         target_url = url_or_path
@@ -802,7 +802,7 @@ async def download_file_async(
     | Callable[[int, int | None], Awaitable[None]]
     | None = None,
 ) -> str:
-    resolved_token = _validate_token(token)
+    resolved_token = _ensure_token(token)
     # Resolve remote URL from url_or_path
     if is_url(url_or_path):
         target_url = url_or_path
