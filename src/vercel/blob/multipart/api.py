@@ -469,7 +469,8 @@ def create_multipart_uploader(
         add_random_suffix: Whether to add a random suffix to the pathname (default: True)
         overwrite: Whether to allow overwriting existing files (default: False)
         cache_control_max_age: Cache duration in seconds (default: one year)
-        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or VERCEL_BLOB_READ_WRITE_TOKEN env var)
+        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or
+               VERCEL_BLOB_READ_WRITE_TOKEN env var)
 
     Returns:
         A MultipartUploader instance with upload_part() and complete() methods
@@ -527,7 +528,8 @@ async def create_multipart_uploader_async(
         add_random_suffix: Whether to add a random suffix to the pathname (default: True)
         overwrite: Whether to allow overwriting existing files (default: False)
         cache_control_max_age: Cache duration in seconds (default: one year)
-        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or VERCEL_BLOB_READ_WRITE_TOKEN env var)
+        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or
+            VERCEL_BLOB_READ_WRITE_TOKEN env var)
 
     Returns:
         An AsyncMultipartUploader instance with upload_part() and complete() methods
