@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-import httpx
-from typing import Any, Iterable
+from typing import Any
 
+import httpx
 
 DEFAULT_API_BASE_URL = "https://api.vercel.com"
 DEFAULT_TIMEOUT = 60.0
@@ -83,8 +83,11 @@ def create_deployment(
 ) -> dict[str, Any]:
     """Create a new deployment.
 
-    body: matches the Deployments Create request body (name, project, files|gitSource, target, projectSettings, etc.)
-    Optional query params: team_id -> teamId, slug -> slug, force_new -> forceNew, skip_auto_detection_confirmation -> skipAutoDetectionConfirmation
+    body: matches the Deployments Create request body (name, project,
+    files|gitSource, target, projectSettings, etc.)
+    Optional query params: team_id -> teamId, slug -> slug, force_new ->
+    forceNew, skip_auto_detection_confirmation ->
+    skipAutoDetectionConfirmation
     """
     params: dict[str, Any] = {}
     if team_id:
@@ -231,8 +234,11 @@ async def create_deployment_async(
 ) -> dict[str, Any]:
     """Create a new deployment.
 
-    body: matches the Deployments Create request body (name, project, files|gitSource, target, projectSettings, etc.)
-    Optional query params: team_id -> teamId, slug -> slug, force_new -> forceNew, skip_auto_detection_confirmation -> skipAutoDetectionConfirmation
+    body: matches the Deployments Create request body (name, project,
+    files|gitSource, target, projectSettings, etc.)
+    Optional query params: team_id -> teamId, slug -> slug, force_new ->
+    forceNew, skip_auto_detection_confirmation ->
+    skipAutoDetectionConfirmation
     """
     params: dict[str, Any] = {}
     if team_id:

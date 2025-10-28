@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable
-
-from fastapi import FastAPI, Request, HTTPException
 import logging
 import traceback
+from collections.abc import Callable
+
+from fastapi import FastAPI, HTTPException, Request
 
 from vercel.cache import AsyncRuntimeCache
-
 from vercel.headers import geolocation, ip_address, set_headers
 from vercel.oidc import decode_oidc_payload
 from vercel.oidc.aio import get_vercel_oidc_token
-
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
@@ -35,7 +33,7 @@ async def oidc_info():
     except Exception as e:
         logger.error(f"Error getting OIDC info: {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail="Error getting OIDC info")
+        raise HTTPException(status_code=500, detail="Error getting OIDC info") from None
 
 
 @app.get("/api/cache")

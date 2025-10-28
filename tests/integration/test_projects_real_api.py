@@ -6,12 +6,13 @@ They require VERCEL_TOKEN and VERCEL_TEAM_ID environment variables.
 """
 
 import os
-import pytest
 import time
 
+import pytest
+
 # Import the actual functions (not mocked)
-from vercel.projects import get_projects, create_project, update_project, delete_project
-from vercel.projects.projects import get_projects_async, create_project_async, delete_project_async
+from vercel.projects import create_project, delete_project, get_projects, update_project
+from vercel.projects.projects import create_project_async, delete_project_async, get_projects_async
 
 
 @pytest.mark.skipif(
@@ -149,7 +150,9 @@ class TestProjectsRealAPI:
                 f"Updated timestamp too old: {result['updatedAt']}"
             )
 
-            print(f"✅ Real API test passed: Created project {result['name']} with ID {result['id']}")
+            print(
+                f"✅ Real API test passed: Created project {result['name']} with ID {result['id']}"
+            )
 
         finally:
             # Clean up - delete the project
@@ -304,7 +307,8 @@ class TestProjectsRealAPI:
         )
 
         print(
-            f"✅ Real async API test passed: Created project {result['name']} with ID {result['id']}"
+            "✅ Real async API test passed: Created project "
+            f"{result['name']} with ID {result['id']}"
         )
 
         # Clean up - delete the project

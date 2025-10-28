@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
-from os import PathLike
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-import asyncio
-from typing import Any, Callable, Iterable, Protocol, Awaitable
+from os import PathLike
+from typing import Any, Callable, Protocol
 
 from .errors import BlobError
-
 
 DEFAULT_VERCEL_BLOB_API_URL = "https://vercel.com/api/blob"
 MAXIMUM_PATHNAME_LENGTH = 950
@@ -103,7 +103,8 @@ def get_token_from_options_or_env(options: dict[str, Any] | None = None) -> str:
     if env_token:
         return env_token
     raise BlobError(
-        "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` environment variable, or pass a `token` option to your calls."
+        "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` "
+        "environment variable, or pass a `token` option to your calls."
     )
 
 
@@ -318,7 +319,7 @@ def parse_datetime(value: str) -> datetime:
 
 def get_download_url(blob_url: str) -> str:
     try:
-        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
         parsed = urlparse(blob_url)
         q = dict(parse_qsl(parsed.query))
