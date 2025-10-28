@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Iterable, Iterator
 from os import PathLike
 from typing import Any, Callable
 
-from .errors import BlobError
+from .errors import BlobNoTokenProvidedError
 from .multipart.api import create_multipart_uploader, create_multipart_uploader_async
 from .ops import (
     copy,
@@ -31,17 +31,9 @@ from .ops import (
 )
 from .types import (
     CreateFolderResult as CreateFolderResultType,
-)
-from .types import (
     HeadBlobResult as HeadBlobResultType,
-)
-from .types import (
     ListBlobItem,
-)
-from .types import (
     ListBlobResult as ListBlobResultType,
-)
-from .types import (
     PutBlobResult as PutBlobResultType,
 )
 from .utils import UploadProgressEvent
@@ -49,12 +41,11 @@ from .utils import UploadProgressEvent
 
 class BlobClient:
     def __init__(self, token: str | None = None):
-        self.token = token or os.getenv("BLOB_READ_WRITE_TOKEN")
+        self.token = (
+            token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
+        )
         if not self.token:
-            raise BlobError(
-                "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` "
-                "environment variable, or pass a `token` option to your calls."
-            )
+            raise BlobNoTokenProvidedError()
 
     def put(
         self,
@@ -214,12 +205,11 @@ class BlobClient:
 
 class AsyncBlobClient:
     def __init__(self, token: str | None = None):
-        self.token = token or os.getenv("BLOB_READ_WRITE_TOKEN")
+        self.token = (
+            token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
+        )
         if not self.token:
-            raise BlobError(
-                "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` "
-                "environment variable, or pass a `token` option to your calls."
-            )
+            raise BlobNoTokenProvidedError()
 
     async def put(
         self,
@@ -232,9 +222,11 @@ class AsyncBlobClient:
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
         multipart: bool = False,
-        on_upload_progress: Callable[[UploadProgressEvent], None]
-        | Callable[[UploadProgressEvent], Awaitable[None]]
-        | None = None,
+        on_upload_progress: (
+            Callable[[UploadProgressEvent], None]
+            | Callable[[UploadProgressEvent], Awaitable[None]]
+            | None
+        ) = None,
     ) -> PutBlobResultType:
         return await put_async(
             path=path,
@@ -321,9 +313,9 @@ class AsyncBlobClient:
         timeout: float | None = None,
         overwrite: bool = True,
         create_parents: bool = True,
-        progress: Callable[[int, int | None], None]
-        | Callable[[int, int | None], Awaitable[None]]
-        | None = None,
+        progress: (
+            Callable[[int, int | None], None] | Callable[[int, int | None], Awaitable[None]] | None
+        ) = None,
     ) -> str:
         return await download_file_async(
             url_or_path,
@@ -346,9 +338,11 @@ class AsyncBlobClient:
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
         multipart: bool = False,
-        on_upload_progress: Callable[[UploadProgressEvent], None]
-        | Callable[[UploadProgressEvent], Awaitable[None]]
-        | None = None,
+        on_upload_progress: (
+            Callable[[UploadProgressEvent], None]
+            | Callable[[UploadProgressEvent], Awaitable[None]]
+            | None
+        ) = None,
     ) -> PutBlobResultType:
         return await upload_file_async(
             local_path,

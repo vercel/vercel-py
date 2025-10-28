@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, Mapping, cast
 import httpx
 
 from .errors import (
@@ -21,13 +21,14 @@ from .errors import (
 from .utils import (
     StreamingBodyWithProgress,
     UploadProgressEvent,
+    PutHeaders,
     compute_body_length,
     debug,
     get_api_url,
     get_api_version,
     get_proxy_through_alternative_api_header_from_env,
     get_retries,
-    get_token_from_options_or_env,
+    ensure_token,
     make_request_id,
     parse_rfc7231_retry_after,
     should_use_x_content_length,
@@ -93,21 +94,23 @@ def _is_network_error(exc: Exception) -> bool:
 def request_api(
     pathname: str,
     method: str,
-    options: dict[str, Any] | None = None,
     *,
-    headers: dict[str, str] | None = None,
+    token: str | None = None,
+    headers: PutHeaders | dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     body: Any = None,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     timeout: float | None = None,
 ) -> Any:
     """Synchronous HTTP caller with retries, headers, progress and error mapping."""
-    token = get_token_from_options_or_env(options or {})
-    request_id = make_request_id(store_id="")
+    token = ensure_token(token)
+    store_id = extract_store_id_from_token(token)
+    request_id = make_request_id(store_id)
     attempt = 0
     retries = get_retries()
     api_version = get_api_version()
     extra_headers = get_proxy_through_alternative_api_header_from_env()
+    headers = cast(dict[str, str], headers or {})
 
     send_body_length = bool(on_upload_progress) or should_use_x_content_length()
     total_length = compute_body_length(body) if send_body_length else 0
@@ -195,25 +198,27 @@ def request_api(
 async def request_api_async(
     pathname: str,
     method: str,
-    options: dict[str, Any] | None = None,
     *,
-    headers: dict[str, str] | None = None,
+    token: str | None = None,
+    headers: PutHeaders | dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     body: Any = None,
-    on_upload_progress: Callable[[UploadProgressEvent], None]
-    | Callable[[UploadProgressEvent], Awaitable[None]]
-    | None = None,
+    on_upload_progress: (
+        Callable[[UploadProgressEvent], None]
+        | Callable[[UploadProgressEvent], Awaitable[None]]
+        | None
+    ) = None,
     timeout: float | None = None,
 ) -> Any:
     """Core HTTP caller with retries, headers, progress and error mapping."""
-    token = get_token_from_options_or_env(options or {})
+    token = ensure_token(token)
     store_id = extract_store_id_from_token(token)
     request_id = make_request_id(store_id)
     attempt = 0
     retries = get_retries()
     api_version = get_api_version()
     extra_headers = get_proxy_through_alternative_api_header_from_env()
-
+    headers = cast(dict[str, str], headers or {})
     send_body_length = bool(on_upload_progress) or should_use_x_content_length()
     total_length = compute_body_length(body) if send_body_length else 0
 

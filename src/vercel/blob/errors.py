@@ -10,6 +10,15 @@ class BlobAccessError(BlobError):
         super().__init__("Access denied, please provide a valid token for this resource.")
 
 
+class BlobNoTokenProvidedError(BlobError):
+    def __init__(self) -> None:
+        super().__init__(
+            "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` "
+            "or `VERCEL_BLOB_READ_WRITE_TOKEN` environment variable, "
+            "or pass a `token` option to your calls."
+        )
+
+
 class BlobContentTypeNotAllowedError(BlobError):
     def __init__(self, message: str) -> None:
         super().__init__(f"Content type mismatch, {message}.")

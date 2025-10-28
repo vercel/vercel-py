@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, cast
 import inspect
 
-from ..utils import UploadProgressEvent, create_put_headers, create_put_options
+from ..utils import (
+    UploadProgressEvent,
+    PutHeaders,
+    create_put_headers,
+    validate_path,
+    require_public_access,
+)
 from ..errors import BlobError
 from .core import (
     call_create_multipart_upload,
@@ -14,6 +20,7 @@ from .core import (
     call_complete_multipart_upload_async,
 )
 from ..types import MultipartCreateResult, MultipartPart, PutBlobResult
+from ..utils import ensure_token
 
 
 def create_multipart_upload(
@@ -26,19 +33,18 @@ def create_multipart_upload(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "addRandomSuffix": add_random_suffix,
-        "allowOverwrite": overwrite,
-        "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
-    }
-    opts = create_put_options(path=path, options=options)
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
+
     headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
     )
-    resp = call_create_multipart_upload(path, headers, token=opts.get("token"))
+
+    resp = call_create_multipart_upload(path, headers, token=token)
     return MultipartCreateResult(upload_id=resp["uploadId"], key=resp["key"])
 
 
@@ -52,19 +58,16 @@ async def create_multipart_upload_async(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "addRandomSuffix": add_random_suffix,
-        "allowOverwrite": overwrite,
-        "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
-    }
-    opts = create_put_options(path=path, options=options)
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
     headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
     )
-    resp = await call_create_multipart_upload_async(path, headers, token=opts.get("token"))
+    resp = await call_create_multipart_upload_async(path, headers, token=token)
     return MultipartCreateResult(upload_id=resp["uploadId"], key=resp["key"])
 
 
@@ -80,29 +83,22 @@ def upload_part(
     content_type: str | None = None,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> MultipartPart:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "token": token,
-        "uploadId": upload_id,
-        "key": key,
-        "partNumber": part_number,
-    }
-    opts = create_put_options(path=path, options=options)
-    headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
-    )
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
+
+    headers = create_put_headers(content_type=content_type)
     resp = call_upload_part(
-        upload_id=opts["uploadId"],
-        key=opts["key"],
+        upload_id=upload_id,
+        key=key,
         path=path,
         headers=headers,
-        token=opts.get("token"),
-        part_number=opts["partNumber"],
+        token=token,
+        part_number=part_number,
         body=body,
         on_upload_progress=on_upload_progress,
     )
-    return MultipartPart(part_number=opts["partNumber"], etag=resp["etag"])
+    return MultipartPart(part_number=part_number, etag=resp["etag"])
 
 
 async def upload_part_async(
@@ -115,33 +111,28 @@ async def upload_part_async(
     key: str,
     part_number: int,
     content_type: str | None = None,
-    on_upload_progress: Callable[[UploadProgressEvent], None]
-    | Callable[[UploadProgressEvent], Awaitable[None]]
-    | None = None,
+    on_upload_progress: (
+        Callable[[UploadProgressEvent], None]
+        | Callable[[UploadProgressEvent], Awaitable[None]]
+        | None
+    ) = None,
 ) -> MultipartPart:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "token": token,
-        "uploadId": upload_id,
-        "key": key,
-        "partNumber": part_number,
-    }
-    opts = create_put_options(path=path, options=options)
-    headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
-    )
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
+
+    headers = create_put_headers(content_type=content_type)
     resp = await call_upload_part_async(
-        upload_id=opts["uploadId"],
-        key=opts["key"],
+        upload_id=upload_id,
+        key=key,
         path=path,
         headers=headers,
-        token=opts.get("token"),
-        part_number=opts["partNumber"],
+        token=token,
+        part_number=part_number,
         body=body,
         on_upload_progress=on_upload_progress,
     )
-    return MultipartPart(part_number=opts["partNumber"], etag=resp["etag"])
+    return MultipartPart(part_number=part_number, etag=resp["etag"])
 
 
 def complete_multipart_upload(
@@ -154,23 +145,17 @@ def complete_multipart_upload(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "token": token,
-        "uploadId": upload_id,
-        "key": key,
-    }
-    opts = create_put_options(path=path, options=options)
-    headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
-    )
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
+    headers = create_put_headers(content_type=content_type)
+
     resp = call_complete_multipart_upload(
-        upload_id=opts["uploadId"],
-        key=opts["key"],
+        upload_id=upload_id,
+        key=key,
         path=path,
         headers=headers,
-        token=opts.get("token"),
+        token=token,
         parts=[{"partNumber": p.part_number, "etag": p.etag} for p in parts],
     )
     return PutBlobResult(
@@ -192,23 +177,17 @@ async def complete_multipart_upload_async(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "token": token,
-        "uploadId": upload_id,
-        "key": key,
-    }
-    opts = create_put_options(path=path, options=options)
-    headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
-    )
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
+
+    headers = create_put_headers(content_type=content_type)
     resp = await call_complete_multipart_upload_async(
-        upload_id=opts["uploadId"],
-        key=opts["key"],
+        upload_id=upload_id,
+        key=key,
         path=path,
         headers=headers,
-        token=opts.get("token"),
+        token=token,
         parts=[{"partNumber": p.part_number, "etag": p.etag} for p in parts],
     )
     return PutBlobResult(
@@ -240,13 +219,13 @@ class MultipartUploader:
         path: str,
         upload_id: str,
         key: str,
-        headers: dict[str, str],
+        headers: PutHeaders | dict[str, str],
         token: str | None,
     ):
         self._path = path
         self._upload_id = upload_id
         self._key = key
-        self._headers = headers
+        self._headers: dict[str, str] = cast(dict[str, str], headers)
         self._token = token
 
     @property
@@ -358,13 +337,13 @@ class AsyncMultipartUploader:
         path: str,
         upload_id: str,
         key: str,
-        headers: dict[str, str],
+        headers: PutHeaders | dict[str, str],
         token: str | None,
     ):
         self._path = path
         self._upload_id = upload_id
         self._key = key
-        self._headers = headers
+        self._headers: dict[str, str] = cast(dict[str, str], headers)
         self._token = token
 
     @property
@@ -382,12 +361,16 @@ class AsyncMultipartUploader:
         part_number: int,
         body: Any,
         *,
-        on_upload_progress: Callable[[UploadProgressEvent], None]
-        | Callable[[UploadProgressEvent], Awaitable[None]]
-        | None = None,
-        per_part_progress: Callable[[int, UploadProgressEvent], None]
-        | Callable[[int, UploadProgressEvent], Awaitable[None]]
-        | None = None,
+        on_upload_progress: (
+            Callable[[UploadProgressEvent], None]
+            | Callable[[UploadProgressEvent], Awaitable[None]]
+            | None
+        ) = None,
+        per_part_progress: (
+            Callable[[int, UploadProgressEvent], None]
+            | Callable[[int, UploadProgressEvent], Awaitable[None]]
+            | None
+        ) = None,
     ) -> MultipartPart:
         """
         Upload a single part of the multipart upload.
@@ -486,7 +469,8 @@ def create_multipart_uploader(
         add_random_suffix: Whether to add a random suffix to the pathname (default: True)
         overwrite: Whether to allow overwriting existing files (default: False)
         cache_control_max_age: Cache duration in seconds (default: one year)
-        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN env var)
+        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or
+               VERCEL_BLOB_READ_WRITE_TOKEN env var)
 
     Returns:
         A MultipartUploader instance with upload_part() and complete() methods
@@ -499,27 +483,24 @@ def create_multipart_uploader(
         ...     parts.append(part)
         >>> result = uploader.complete(parts)
     """
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "addRandomSuffix": add_random_suffix,
-        "allowOverwrite": overwrite,
-        "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
-    }
-    opts = create_put_options(path=path, options=options)
-    headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
-    )
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
 
-    create_resp = call_create_multipart_upload(path, headers, token=opts.get("token"))
+    headers = create_put_headers(
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
+    )
+    create_resp = call_create_multipart_upload(path, headers, token=token)
 
     return MultipartUploader(
         path=path,
         upload_id=create_resp["uploadId"],
         key=create_resp["key"],
         headers=headers,
-        token=opts.get("token"),
+        token=token,
     )
 
 
@@ -547,7 +528,8 @@ async def create_multipart_uploader_async(
         add_random_suffix: Whether to add a random suffix to the pathname (default: True)
         overwrite: Whether to allow overwriting existing files (default: False)
         cache_control_max_age: Cache duration in seconds (default: one year)
-        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN env var)
+        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or
+            VERCEL_BLOB_READ_WRITE_TOKEN env var)
 
     Returns:
         An AsyncMultipartUploader instance with upload_part() and complete() methods
@@ -560,25 +542,22 @@ async def create_multipart_uploader_async(
         ...     parts.append(part)
         >>> result = await uploader.complete(parts)
     """
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "addRandomSuffix": add_random_suffix,
-        "allowOverwrite": overwrite,
-        "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
-    }
-    opts = create_put_options(path=path, options=options)
+    token = ensure_token(token)
+    validate_path(path)
+    require_public_access(access)
     headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
     )
 
-    create_resp = await call_create_multipart_upload_async(path, headers, token=opts.get("token"))
+    create_resp = await call_create_multipart_upload_async(path, headers, token=token)
 
     return AsyncMultipartUploader(
         path=path,
         upload_id=create_resp["uploadId"],
         key=create_resp["key"],
         headers=headers,
-        token=opts.get("token"),
+        token=token,
     )
