@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, Mapping
 from urllib.parse import quote
 
 from ..api import request_api, request_api_async
@@ -8,7 +8,7 @@ from ..utils import UploadProgressEvent
 
 
 def call_create_multipart_upload(
-    path: str, headers: dict[str, str], *, token: str | None = None
+    path: str, headers: Mapping[str, str], *, token: str | None = None
 ) -> dict[str, str]:
     params = {"pathname": path}
     return request_api(
@@ -21,7 +21,7 @@ def call_create_multipart_upload(
 
 
 async def call_create_multipart_upload_async(
-    path: str, headers: dict[str, str], *, token: str | None = None
+    path: str, headers: Mapping[str, str], *, token: str | None = None
 ) -> dict[str, str]:
     params = {"pathname": path}
     return await request_api_async(
@@ -38,7 +38,7 @@ def call_upload_part(
     upload_id: str,
     key: str,
     path: str,
-    headers: dict[str, str],
+    headers: Mapping[str, str],
     part_number: int,
     body: Any,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
@@ -67,7 +67,7 @@ async def call_upload_part_async(
     upload_id: str,
     key: str,
     path: str,
-    headers: dict[str, str],
+    headers: Mapping[str, str],
     part_number: int,
     body: Any,
     on_upload_progress: (
@@ -100,7 +100,7 @@ def call_complete_multipart_upload(
     upload_id: str,
     key: str,
     path: str,
-    headers: dict[str, str],
+    headers: Mapping[str, str],
     parts: list[dict[str, Any]],
     token: str | None = None,
 ) -> dict[str, Any]:
@@ -126,7 +126,7 @@ async def call_complete_multipart_upload_async(
     upload_id: str,
     key: str,
     path: str,
-    headers: dict[str, str],
+    headers: Mapping[str, str],
     parts: list[dict[str, Any]],
     token: str | None = None,
 ) -> dict[str, Any]:
