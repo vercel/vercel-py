@@ -591,7 +591,8 @@ def create_folder(
     token = ensure_token(token)
     folder_path = path if path.endswith("/") else path + "/"
     headers = create_put_headers(
-        add_random_suffix=overwrite,
+        add_random_suffix=False,
+        allow_overwrite=overwrite,
     )
     params = {"pathname": folder_path}
     raw = request_api(
@@ -613,7 +614,8 @@ async def create_folder_async(
     token = ensure_token(token)
     folder_path = path if path.endswith("/") else path + "/"
     headers = create_put_headers(
-        add_random_suffix=overwrite,
+        add_random_suffix=False,
+        allow_overwrite=overwrite,
     )
     params = {"pathname": folder_path}
     raw = await request_api_async(
