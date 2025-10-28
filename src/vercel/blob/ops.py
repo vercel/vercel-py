@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import inspect
 import os
-from collections.abc import AsyncIterator, Awaitable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from os import PathLike
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
@@ -13,17 +13,9 @@ from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
 from .types import (
     CreateFolderResult as CreateFolderResultType,
-)
-from .types import (
     HeadBlobResult as HeadBlobResultType,
-)
-from .types import (
     ListBlobItem,
-)
-from .types import (
     ListBlobResult as ListBlobResultType,
-)
-from .types import (
     PutBlobResult as PutBlobResultType,
 )
 from .utils import (
