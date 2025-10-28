@@ -18,7 +18,9 @@ class BlobContentTypeNotAllowedError(BlobError):
 class BlobPathnameMismatchError(BlobError):
     def __init__(self, message: str) -> None:
         super().__init__(
-            f"Pathname mismatch, {message}. Check the pathname used in upload() or put() matches the one from the client token."
+            f"Pathname mismatch, {message}. "
+            "Check the pathname used in upload() or put() "
+            "matches the one from the client token."
         )
 
 

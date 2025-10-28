@@ -54,7 +54,8 @@ def put(
 
     if isinstance(body, dict):
         raise BlobError(
-            "Body must be a string, buffer or stream. You sent a plain object, double check what you're trying to upload."
+            "Body must be a string, buffer or stream. "
+            "You sent a plain object, double check what you're trying to upload."
         )
 
     options: dict[str, Any] = {
@@ -132,7 +133,8 @@ async def put_async(
     # Reject plain dict (JS plain object equivalent) to match TS error semantics
     if isinstance(body, dict):
         raise BlobError(
-            "Body must be a string, buffer or stream. You sent a plain object, double check what you're trying to upload."
+            "Body must be a string, buffer or stream. "
+            "You sent a plain object, double check what you're trying to upload."
         )
 
     options: dict[str, Any] = {
