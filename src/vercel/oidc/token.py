@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
-import httpx
 from collections.abc import Mapping
 
+import httpx
+
 from ..cache.context import get_headers
+from .types import VercelTokenResponse
 from .utils import (
     find_project_info,
     get_token_payload,
@@ -13,8 +15,6 @@ from .utils import (
     load_token,
     save_token,
 )
-from .types import VercelTokenResponse
-
 
 BASE_URL = "https://api.vercel.com/v1"
 
@@ -54,7 +54,8 @@ def get_vercel_oidc_token_from_context() -> str:
     token_from_env = os.getenv("VERCEL_OIDC_TOKEN")
     if not token_from_env:
         raise VercelOidcTokenError(
-            "The 'x-vercel-oidc-token' header is missing from the request. Do you have the OIDC option enabled in the Vercel project settings?"
+            "The 'x-vercel-oidc-token' header is missing from the request. "
+            "Do you have the OIDC option enabled in the Vercel project settings?"
         )
     return token_from_env
 
@@ -124,13 +125,13 @@ def get_vercel_oidc_token() -> str:
                 raise VercelOidcTokenError(
                     "Missing OIDC request header and no local project context (.vercel) available",
                     e,
-                )
+                ) from e
             refresh_token()
             token = get_vercel_oidc_token_from_context()
     except Exception as e:
         if err and isinstance(e, Exception) and getattr(err, "message", None):
             e.args = (f"{err}\n{e}",)
-        raise VercelOidcTokenError("Failed to refresh OIDC token", e)
+        raise VercelOidcTokenError("Failed to refresh OIDC token", e) from e
     return token
 
 
@@ -152,13 +153,13 @@ async def get_vercel_oidc_token_async() -> str:
                 raise VercelOidcTokenError(
                     "Missing OIDC request header and no local project context (.vercel) available",
                     e,
-                )
+                ) from e
             await refresh_token_async()
             token = get_vercel_oidc_token_from_context()
     except Exception as e:
         if err and isinstance(e, Exception) and getattr(err, "message", None):
             e.args = (f"{err}\n{e}",)
-        raise VercelOidcTokenError("Failed to refresh OIDC token", e)
+        raise VercelOidcTokenError("Failed to refresh OIDC token", e) from e
     return token
 
 

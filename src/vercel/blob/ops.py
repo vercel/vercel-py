@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import inspect
-from os import PathLike
 import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from os import PathLike
+from typing import Any
+
 import httpx
-from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator
 
 from .utils import (
     PutHeaders,
@@ -17,15 +19,15 @@ from .utils import (
     validate_path,
 )
 from .api import request_api, request_api_async
+from .errors import BlobError, BlobNotFoundError
+from .multipart import auto_multipart_upload, auto_multipart_upload_async
 from .types import (
-    PutBlobResult as PutBlobResultType,
+    CreateFolderResult as CreateFolderResultType,
     HeadBlobResult as HeadBlobResultType,
     ListBlobItem,
     ListBlobResult as ListBlobResultType,
-    CreateFolderResult as CreateFolderResultType,
+    PutBlobResult as PutBlobResultType,
 )
-from .errors import BlobError, BlobNotFoundError
-from .multipart import auto_multipart_upload, auto_multipart_upload_async
 
 
 def put(
@@ -49,7 +51,8 @@ def put(
         raise BlobError("body is required")
     if isinstance(body, dict):
         raise BlobError(
-            "Body must be a string, buffer or stream. You sent a plain object, double check what you're trying to upload."
+            "Body must be a string, buffer or stream. "
+            "You sent a plain object, double check what you're trying to upload."
         )
 
     headers = create_put_headers(
@@ -124,7 +127,8 @@ async def put_async(
     # Reject plain dict (JS plain object equivalent) to match TS error semantics
     if isinstance(body, dict):
         raise BlobError(
-            "Body must be a string, buffer or stream. You sent a plain object, double check what you're trying to upload."
+            "Body must be a string, buffer or stream. "
+            "You sent a plain object, double check what you're trying to upload."
         )
 
     headers: PutHeaders = create_put_headers(
@@ -800,24 +804,26 @@ async def download_file_async(
     bytes_read = 0
 
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=httpx.Timeout(timeout or 120.0),
-        ) as client:
-            async with client.stream("GET", target_url) as resp:
-                if resp.status_code == 404:
-                    raise BlobNotFoundError()
-                resp.raise_for_status()
-                total = int(resp.headers.get("Content-Length", "0")) or None
-                with open(tmp, "wb") as f:
-                    async for chunk in resp.aiter_bytes():
-                        if chunk:
-                            f.write(chunk)
-                            bytes_read += len(chunk)
-                            if progress:
-                                maybe = progress(bytes_read, total)
-                                if inspect.isawaitable(maybe):
-                                    await maybe
+        async with (
+            httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(timeout or 120.0),
+            ) as client,
+            client.stream("GET", target_url) as resp,
+        ):
+            if resp.status_code == 404:
+                raise BlobNotFoundError()
+            resp.raise_for_status()
+            total = int(resp.headers.get("Content-Length", "0")) or None
+            with open(tmp, "wb") as f:
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        f.write(chunk)
+                        bytes_read += len(chunk)
+                        if progress:
+                            maybe = progress(bytes_read, total)
+                            if inspect.isawaitable(maybe):
+                                await maybe
 
         os.replace(tmp, dst)  # atomic finalize
     except Exception:

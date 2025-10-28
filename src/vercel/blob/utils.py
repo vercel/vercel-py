@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-import asyncio
 from typing import Any, Callable, Iterable, Protocol, Awaitable, TypedDict
 
-from .errors import BlobError
-
+from .errors import BlobError, BlobNoTokenProvidedError
 
 DEFAULT_VERCEL_BLOB_API_URL = "https://vercel.com/api/blob"
 MAXIMUM_PATHNAME_LENGTH = 950
@@ -300,7 +299,7 @@ def parse_datetime(value: str) -> datetime:
 
 def get_download_url(blob_url: str) -> str:
     try:
-        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
         parsed = urlparse(blob_url)
         q = dict(parse_qsl(parsed.query))
@@ -356,7 +355,5 @@ def create_put_headers(
 def ensure_token(token: str | None) -> str:
     token = token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
     if not token:
-        raise BlobError(
-            "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` or `VERCEL_BLOB_READ_WRITE_TOKEN` environment variable, or pass in `token` as an argument."
-        )
+        raise BlobNoTokenProvidedError()
     return token
