@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Callable, Awaitable, Mapping
+from typing import Any, Callable, Awaitable, Mapping, cast
 import httpx
 
 from .errors import (
@@ -21,6 +21,7 @@ from .errors import (
 from .utils import (
     StreamingBodyWithProgress,
     UploadProgressEvent,
+    PutHeaders,
     compute_body_length,
     debug,
     get_api_url,
@@ -95,7 +96,7 @@ def request_api(
     method: str,
     *,
     token: str | None = None,
-    headers: Mapping[str, str] | None = None,
+    headers: PutHeaders | dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     body: Any = None,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
@@ -109,6 +110,7 @@ def request_api(
     retries = get_retries()
     api_version = get_api_version()
     extra_headers = get_proxy_through_alternative_api_header_from_env()
+    headers = cast(dict[str, str], headers or {})
 
     send_body_length = bool(on_upload_progress) or should_use_x_content_length()
     total_length = compute_body_length(body) if send_body_length else 0
@@ -198,7 +200,7 @@ async def request_api_async(
     method: str,
     *,
     token: str | None = None,
-    headers: Mapping[str, str] | None = None,
+    headers: PutHeaders | dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
     body: Any = None,
     on_upload_progress: (
@@ -216,7 +218,7 @@ async def request_api_async(
     retries = get_retries()
     api_version = get_api_version()
     extra_headers = get_proxy_through_alternative_api_header_from_env()
-
+    headers = cast(dict[str, str], headers or {})
     send_body_length = bool(on_upload_progress) or should_use_x_content_length()
     total_length = compute_body_length(body) if send_body_length else 0
 

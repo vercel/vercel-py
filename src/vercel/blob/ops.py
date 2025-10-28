@@ -52,7 +52,7 @@ def put(
             "Body must be a string, buffer or stream. You sent a plain object, double check what you're trying to upload."
         )
 
-    headers: PutHeaders = create_put_headers(
+    headers = create_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
@@ -346,7 +346,7 @@ def list_objects(
     resp = request_api(
         "",
         "GET",
-        options={"token": token},
+        token=token,
         params=params,
     )
     blobs_list: list[ListBlobItem] = []
@@ -395,7 +395,7 @@ async def list_objects_async(
     resp = await request_api_async(
         "",
         "GET",
-        options={"token": token},
+        token=token,
         params=params,
     )
     blobs_list: list[ListBlobItem] = []

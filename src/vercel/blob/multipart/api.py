@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, cast
 import inspect
 
 from ..utils import (
     UploadProgressEvent,
+    PutHeaders,
     create_put_headers,
     validate_path,
     require_public_access,
@@ -218,13 +219,13 @@ class MultipartUploader:
         path: str,
         upload_id: str,
         key: str,
-        headers: dict[str, str],
+        headers: PutHeaders | dict[str, str],
         token: str | None,
     ):
         self._path = path
         self._upload_id = upload_id
         self._key = key
-        self._headers = headers
+        self._headers: dict[str, str] = cast(dict[str, str], headers)
         self._token = token
 
     @property
@@ -336,13 +337,13 @@ class AsyncMultipartUploader:
         path: str,
         upload_id: str,
         key: str,
-        headers: dict[str, str],
+        headers: PutHeaders | dict[str, str],
         token: str | None,
     ):
         self._path = path
         self._upload_id = upload_id
         self._key = key
-        self._headers = headers
+        self._headers: dict[str, str] = cast(dict[str, str], headers)
         self._token = token
 
     @property
