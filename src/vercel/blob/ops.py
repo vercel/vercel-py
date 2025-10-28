@@ -1,29 +1,39 @@
 from __future__ import annotations
 
 import inspect
-from os import PathLike
 import os
-import httpx
-from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator, List
+from collections.abc import AsyncIterator, Awaitable, Iterable, Iterator
+from os import PathLike
+from typing import Any, Callable
 
-from .utils import (
-    UploadProgressEvent,
-    parse_datetime,
-    is_url,
-    create_put_headers,
-    create_put_options,
-    PUT_OPTION_HEADER_MAP,
-)
+import httpx
+
 from .api import request_api, request_api_async
-from .types import (
-    PutBlobResult as PutBlobResultType,
-    HeadBlobResult as HeadBlobResultType,
-    ListBlobItem,
-    ListBlobResult as ListBlobResultType,
-    CreateFolderResult as CreateFolderResultType,
-)
 from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
+from .types import (
+    CreateFolderResult as CreateFolderResultType,
+)
+from .types import (
+    HeadBlobResult as HeadBlobResultType,
+)
+from .types import (
+    ListBlobItem,
+)
+from .types import (
+    ListBlobResult as ListBlobResultType,
+)
+from .types import (
+    PutBlobResult as PutBlobResultType,
+)
+from .utils import (
+    PUT_OPTION_HEADER_MAP,
+    UploadProgressEvent,
+    create_put_headers,
+    create_put_options,
+    is_url,
+    parse_datetime,
+)
 
 
 def put(
@@ -348,7 +358,7 @@ def list_objects(
         options={"token": token} if token else {},
         params=params,
     )
-    blobs_list: List[ListBlobItem] = []
+    blobs_list: list[ListBlobItem] = []
     for b in resp.get("blobs", []):
         uploaded_at = (
             parse_datetime(b["uploadedAt"])
@@ -791,24 +801,26 @@ async def download_file_async(
     bytes_read = 0
 
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=httpx.Timeout(timeout or 120.0),
-        ) as client:
-            async with client.stream("GET", target_url) as resp:
-                if resp.status_code == 404:
-                    raise BlobNotFoundError()
-                resp.raise_for_status()
-                total = int(resp.headers.get("Content-Length", "0")) or None
-                with open(tmp, "wb") as f:
-                    async for chunk in resp.aiter_bytes():
-                        if chunk:
-                            f.write(chunk)
-                            bytes_read += len(chunk)
-                            if progress:
-                                maybe = progress(bytes_read, total)
-                                if inspect.isawaitable(maybe):
-                                    await maybe
+        async with (
+            httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(timeout or 120.0),
+            ) as client,
+            client.stream("GET", target_url) as resp,
+        ):
+            if resp.status_code == 404:
+                raise BlobNotFoundError()
+            resp.raise_for_status()
+            total = int(resp.headers.get("Content-Length", "0")) or None
+            with open(tmp, "wb") as f:
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        f.write(chunk)
+                        bytes_read += len(chunk)
+                        if progress:
+                            maybe = progress(bytes_read, total)
+                            if inspect.isawaitable(maybe):
+                                await maybe
 
         os.replace(tmp, dst)  # atomic finalize
     except Exception:
