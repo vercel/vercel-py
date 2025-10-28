@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable, Mapping, cast
+from typing import Any, Callable, Awaitable, cast
 from urllib.parse import quote
 
 from ..api import request_api, request_api_async
@@ -11,7 +11,7 @@ def call_create_multipart_upload(
     path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
     params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers)
+    request_headers = cast(dict[str, str], headers).copy()
     request_headers["x-mpu-action"] = "create"
     return request_api(
         "/mpu",
@@ -26,7 +26,7 @@ async def call_create_multipart_upload_async(
     path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
     params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers)
+    request_headers = cast(dict[str, str], headers).copy()
     request_headers["x-mpu-action"] = "create"
     return await request_api_async(
         "/mpu",
@@ -49,7 +49,7 @@ def call_upload_part(
     token: str | None = None,
 ):
     params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers)
+    request_headers = cast(dict[str, str], headers).copy()
     request_headers["x-mpu-action"] = "upload"
     request_headers["x-mpu-key"] = quote(key, safe="")
     request_headers["x-mpu-upload-id"] = upload_id
@@ -81,7 +81,7 @@ async def call_upload_part_async(
     token: str | None = None,
 ):
     params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers)
+    request_headers = cast(dict[str, str], headers).copy()
     request_headers["x-mpu-action"] = "upload"
     request_headers["x-mpu-key"] = quote(key, safe="")
     request_headers["x-mpu-upload-id"] = upload_id
@@ -107,7 +107,7 @@ def call_complete_multipart_upload(
     token: str | None = None,
 ) -> dict[str, Any]:
     params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers)
+    request_headers = cast(dict[str, str], headers).copy()
     request_headers["content-type"] = "application/json"
     request_headers["x-mpu-action"] = "complete"
     request_headers["x-mpu-upload-id"] = upload_id
@@ -132,7 +132,7 @@ async def call_complete_multipart_upload_async(
     token: str | None = None,
 ) -> dict[str, Any]:
     params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers)
+    request_headers = cast(dict[str, str], headers).copy()
     request_headers["content-type"] = "application/json"
     request_headers["x-mpu-action"] = "complete"
     request_headers["x-mpu-upload-id"] = upload_id
