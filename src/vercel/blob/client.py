@@ -1,41 +1,50 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Iterable, Iterator
 from os import PathLike
-from typing import Any, Callable, Awaitable, Iterable, Iterator
+from typing import Any, Callable
 
 from .errors import BlobError
-from .utils import UploadProgressEvent
-from .types import (
-    PutBlobResult as PutBlobResultType,
-    HeadBlobResult as HeadBlobResultType,
-    ListBlobResult as ListBlobResultType,
-    ListBlobItem,
-    CreateFolderResult as CreateFolderResultType,
-)
+from .multipart.api import create_multipart_uploader, create_multipart_uploader_async
 from .ops import (
-    put,
-    put_async,
-    delete,
-    delete_async,
-    head,
-    head_async,
-    get,
-    get_async,
-    list_objects,
-    list_objects_async,
     copy,
     copy_async,
     create_folder,
     create_folder_async,
+    delete,
+    delete_async,
     download_file,
     download_file_async,
-    upload_file,
-    upload_file_async,
+    get,
+    get_async,
+    head,
+    head_async,
     iter_objects,
     iter_objects_async,
+    list_objects,
+    list_objects_async,
+    put,
+    put_async,
+    upload_file,
+    upload_file_async,
 )
-from .multipart.api import create_multipart_uploader, create_multipart_uploader_async
+from .types import (
+    CreateFolderResult as CreateFolderResultType,
+)
+from .types import (
+    HeadBlobResult as HeadBlobResultType,
+)
+from .types import (
+    ListBlobItem,
+)
+from .types import (
+    ListBlobResult as ListBlobResultType,
+)
+from .types import (
+    PutBlobResult as PutBlobResultType,
+)
+from .utils import UploadProgressEvent
 
 
 class BlobClient:
@@ -43,7 +52,8 @@ class BlobClient:
         self.token = token or os.getenv("BLOB_READ_WRITE_TOKEN")
         if not self.token:
             raise BlobError(
-                "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` environment variable, or pass a `token` option to your calls."
+                "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` "
+                "environment variable, or pass a `token` option to your calls."
             )
 
     def put(
@@ -207,7 +217,8 @@ class AsyncBlobClient:
         self.token = token or os.getenv("BLOB_READ_WRITE_TOKEN")
         if not self.token:
             raise BlobError(
-                "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` environment variable, or pass a `token` option to your calls."
+                "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` "
+                "environment variable, or pass a `token` option to your calls."
             )
 
     async def put(
