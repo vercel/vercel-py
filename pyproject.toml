@@ -53,9 +53,16 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = [
-    "E",  # pycodestyle errors
-    "F",  # pyflakes
-    "UP", # pyupgrade rules (enforce modern Python syntax)
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # isort
+    "I",
 ]
 
 [tool.ruff.lint.pyupgrade]

@@ -125,13 +125,13 @@ def get_vercel_oidc_token() -> str:
                 raise VercelOidcTokenError(
                     "Missing OIDC request header and no local project context (.vercel) available",
                     e,
-                )
+                ) from e
             refresh_token()
             token = get_vercel_oidc_token_from_context()
     except Exception as e:
         if err and isinstance(e, Exception) and getattr(err, "message", None):
             e.args = (f"{err}\n{e}",)
-        raise VercelOidcTokenError("Failed to refresh OIDC token", e)
+        raise VercelOidcTokenError("Failed to refresh OIDC token", e) from e
     return token
 
 
@@ -153,13 +153,13 @@ async def get_vercel_oidc_token_async() -> str:
                 raise VercelOidcTokenError(
                     "Missing OIDC request header and no local project context (.vercel) available",
                     e,
-                )
+                ) from e
             await refresh_token_async()
             token = get_vercel_oidc_token_from_context()
     except Exception as e:
         if err and isinstance(e, Exception) and getattr(err, "message", None):
             e.args = (f"{err}\n{e}",)
-        raise VercelOidcTokenError("Failed to refresh OIDC token", e)
+        raise VercelOidcTokenError("Failed to refresh OIDC token", e) from e
     return token
 
 
