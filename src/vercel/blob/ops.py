@@ -4,7 +4,7 @@ import inspect
 from os import PathLike
 import os
 import httpx
-from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator
+from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator, List
 
 from .utils import (
     UploadProgressEvent,
@@ -348,7 +348,7 @@ def list_objects(
         options={"token": token} if token else {},
         params=params,
     )
-    blobs_list: list[ListBlobItem] = []
+    blobs_list: List[ListBlobItem] = []
     for b in resp.get("blobs", []):
         uploaded_at = (
             parse_datetime(b["uploadedAt"])
