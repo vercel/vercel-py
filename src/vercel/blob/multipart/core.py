@@ -14,7 +14,7 @@ def call_create_multipart_upload(
     return request_api(
         "/mpu",
         "POST",
-        options={"token": token} if token else {},
+        token=token,
         headers={**headers, "x-mpu-action": "create"},
         params=params,
     )
@@ -27,7 +27,7 @@ async def call_create_multipart_upload_async(
     return await request_api_async(
         "/mpu",
         "POST",
-        options={"token": token} if token else {},
+        token=token,
         headers={**headers, "x-mpu-action": "create"},
         params=params,
     )
@@ -48,7 +48,7 @@ def call_upload_part(
     return request_api(
         "/mpu",
         "POST",
-        options={"token": token} if token else {},
+        token=token,
         headers={
             **headers,
             "x-mpu-action": "upload",
@@ -70,16 +70,18 @@ async def call_upload_part_async(
     headers: dict[str, str],
     part_number: int,
     body: Any,
-    on_upload_progress: Callable[[UploadProgressEvent], None]
-    | Callable[[UploadProgressEvent], Awaitable[None]]
-    | None = None,
+    on_upload_progress: (
+        Callable[[UploadProgressEvent], None]
+        | Callable[[UploadProgressEvent], Awaitable[None]]
+        | None
+    ) = None,
     token: str | None = None,
 ):
     params = {"pathname": path}
     return await request_api_async(
         "/mpu",
         "POST",
-        options={"token": token} if token else {},
+        token=token,
         headers={
             **headers,
             "x-mpu-action": "upload",
@@ -106,7 +108,7 @@ def call_complete_multipart_upload(
     return request_api(
         "/mpu",
         "POST",
-        options={"token": token} if token else {},
+        token=token,
         headers={
             **headers,
             "content-type": "application/json",
@@ -132,7 +134,7 @@ async def call_complete_multipart_upload_async(
     return await request_api_async(
         "/mpu",
         "POST",
-        options={"token": token} if token else {},
+        token=token,
         headers={
             **headers,
             "content-type": "application/json",
