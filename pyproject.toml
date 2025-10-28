@@ -49,3 +49,21 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "UP"]
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = false
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "UP", # pyupgrade rules (enforce modern Python syntax)
+]
+
+[tool.ruff.lint.pyupgrade]
+# Target Python 3.10 to prefer builtins (list, dict, tuple) and PEP 604 unions (X | Y)
+target-version = "py310"
