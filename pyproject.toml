@@ -49,6 +49,7 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
+target-version = "py39"
 
 [tool.ruff.lint]
 select = [
@@ -58,5 +59,4 @@ select = [
 ]
 
 [tool.ruff.lint.pyupgrade]
-# Target Python 3.10 to prefer builtins (list, dict, tuple) and PEP 604 unions (X | Y)
-target-version = "py310"
+keep-runtime-typing = false
