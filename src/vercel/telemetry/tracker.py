@@ -85,7 +85,10 @@ def with_telemetry(
     Create a decorator that automatically tracks telemetry for a function.
     
     Usage:
-        @with_telemetry(action="blob_put", extract_metadata=lambda self, args, kwargs: {"size": kwargs.get("size")})
+        @with_telemetry(
+            action="blob_put",
+            extract_metadata=lambda self, args, kwargs: {"size": kwargs.get("size")}
+        )
         def put(self, path, size=None):
             ...
     
@@ -202,4 +205,5 @@ def with_telemetry(
     return decorator
 
 
-# Specific wrapper functions are intentionally removed; use generic `track(action, **fields)` instead.
+# Specific wrapper functions are intentionally removed;
+# use generic `track(action, **fields)` instead.
