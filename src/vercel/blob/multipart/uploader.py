@@ -5,7 +5,12 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator
 
-from ..utils import UploadProgressEvent, compute_body_length, create_put_headers, create_put_options
+from ..utils import (
+    UploadProgressEvent,
+    compute_body_length,
+    create_put_headers,
+    require_public_access,
+)
 from ..errors import BlobError
 from .core import (
     call_create_multipart_upload,
@@ -113,22 +118,17 @@ def auto_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "addRandomSuffix": add_random_suffix,
-        "allowOverwrite": overwrite,
-        "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
-    }
-    opts = create_put_options(path=path, options=options)
+    require_public_access(access)
     headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
     )
 
     part_size = _validate_part_size(part_size)
 
-    create_resp = call_create_multipart_upload(path, headers, token=opts.get("token"))
+    create_resp = call_create_multipart_upload(path, headers, token=token)
     upload_id = create_resp["uploadId"]
     key = create_resp["key"]
 
@@ -153,7 +153,7 @@ def auto_multipart_upload(
             key=key,
             path=path,
             headers=headers,
-            token=opts.get("token"),
+            token=token,
             part_number=part_number,
             body=content,
             on_upload_progress=progress,
@@ -188,7 +188,7 @@ def auto_multipart_upload(
         key=key,
         path=path,
         headers=headers,
-        token=opts.get("token"),
+        token=token,
         parts=results,
     )
 
@@ -203,27 +203,24 @@ async def auto_multipart_upload_async(
     overwrite: bool = False,
     cache_control_max_age: int | None = None,
     token: str | None = None,
-    on_upload_progress: Callable[[UploadProgressEvent], None]
-    | Callable[[UploadProgressEvent], Awaitable[None]]
-    | None = None,
+    on_upload_progress: (
+        Callable[[UploadProgressEvent], None]
+        | Callable[[UploadProgressEvent], Awaitable[None]]
+        | None
+    ) = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "addRandomSuffix": add_random_suffix,
-        "allowOverwrite": overwrite,
-        "cacheControlMaxAge": cache_control_max_age,
-        "token": token,
-    }
-    opts = create_put_options(path=path, options=options)
+    require_public_access(access)
     headers = create_put_headers(
-        ["cacheControlMaxAge", "addRandomSuffix", "allowOverwrite", "contentType"], opts
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
     )
 
     part_size = _validate_part_size(part_size)
 
-    create_resp = await call_create_multipart_upload_async(path, headers, token=opts.get("token"))
+    create_resp = await call_create_multipart_upload_async(path, headers, token=token)
     upload_id = create_resp["uploadId"]
     key = create_resp["key"]
 
@@ -265,7 +262,7 @@ async def auto_multipart_upload_async(
             part_number=part_number,
             body=content,
             on_upload_progress=_make_progress(part_number),
-            token=opts.get("token"),
+            token=token,
         )
         return {"partNumber": part_number, "etag": resp["etag"]}
 
@@ -299,6 +296,6 @@ async def auto_multipart_upload_async(
         key=key,
         path=path,
         headers=headers,
-        token=opts.get("token"),
+        token=token,
         parts=results,
     )

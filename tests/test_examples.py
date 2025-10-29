@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -26,7 +26,9 @@ def test_examples_run(capsys=None) -> None:
             timeout=45,
         )
         assert result.returncode == 0, (
-            f"{script_path.name} failed with code {result.returncode}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            f"{script_path.name} failed with code {result.returncode}\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}"
         )
 
     print("All examples ran successfully")

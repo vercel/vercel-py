@@ -1,26 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
-from os import PathLike
 from dataclasses import dataclass
 from datetime import datetime
-import asyncio
-from typing import Any, Callable, Iterable, Protocol, Awaitable
+from typing import Any, Callable, Iterable, Protocol, Awaitable, TypedDict
 
-from .errors import BlobError
-
+from .errors import BlobError, BlobNoTokenProvidedError
 
 DEFAULT_VERCEL_BLOB_API_URL = "https://vercel.com/api/blob"
 MAXIMUM_PATHNAME_LENGTH = 950
 DISALLOWED_PATHNAME_CHARACTERS = ["//"]
-PUT_OPTION_HEADER_MAP: dict[str, str] = {
-    "cacheControlMaxAge": "x-cache-control-max-age",
-    "addRandomSuffix": "x-add-random-suffix",
-    "allowOverwrite": "x-allow-overwrite",
-    "contentType": "x-content-type",
-}
 
 
 def debug(message: str, *args: Any) -> None:
@@ -96,17 +88,6 @@ def get_proxy_through_alternative_api_header_from_env() -> dict[str, str]:
     return headers
 
 
-def get_token_from_options_or_env(options: dict[str, Any] | None = None) -> str:
-    if options and "token" in options and options["token"]:
-        return str(options["token"])
-    env_token = os.getenv("BLOB_READ_WRITE_TOKEN")
-    if env_token:
-        return env_token
-    raise BlobError(
-        "No token found. Either configure the `BLOB_READ_WRITE_TOKEN` environment variable, or pass a `token` option to your calls."
-    )
-
-
 def extract_store_id_from_token(token: str) -> str:
     try:
         parts = token.split("_")
@@ -125,8 +106,8 @@ def validate_path(path: str) -> None:
             raise BlobError(f'path cannot contain "{invalid}", please encode it if needed')
 
 
-def require_public_access(options: dict[str, Any]) -> None:
-    if options.get("access") != "public":
+def require_public_access(access: str) -> None:
+    if access != "public":
         raise BlobError('access must be "public"')
 
 
@@ -318,7 +299,7 @@ def parse_datetime(value: str) -> datetime:
 
 def get_download_url(blob_url: str) -> str:
     try:
-        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
         parsed = urlparse(blob_url)
         q = dict(parse_qsl(parsed.query))
@@ -340,66 +321,39 @@ def get_download_url(blob_url: str) -> str:
         return f"{blob_url}{sep}download=1"
 
 
-def create_put_headers(allowed_options: list[str], options: dict[str, Any]) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    if "contentType" in allowed_options and options.get("contentType"):
-        headers[PUT_OPTION_HEADER_MAP["contentType"]] = str(options["contentType"])
-    if "addRandomSuffix" in allowed_options and options.get("addRandomSuffix") is not None:
-        headers[PUT_OPTION_HEADER_MAP["addRandomSuffix"]] = (
-            "1" if options.get("addRandomSuffix") else "0"
-        )
-    if "allowOverwrite" in allowed_options and options.get("allowOverwrite") is not None:
-        headers[PUT_OPTION_HEADER_MAP["allowOverwrite"]] = (
-            "1" if options.get("allowOverwrite") else "0"
-        )
-    if "cacheControlMaxAge" in allowed_options and options.get("cacheControlMaxAge") is not None:
-        headers[PUT_OPTION_HEADER_MAP["cacheControlMaxAge"]] = str(options["cacheControlMaxAge"])
+# TypedDict with real HTTP header keys. Use functional syntax to allow hyphens.
+PutHeaders = TypedDict(
+    "PutHeaders",
+    {
+        "x-cache-control-max-age": str,
+        "x-add-random-suffix": str,
+        "x-allow-overwrite": str,
+        "x-content-type": str,
+    },
+    total=False,
+)
+
+
+def create_put_headers(
+    content_type: str | None = None,
+    add_random_suffix: bool | None = None,
+    allow_overwrite: bool | None = None,
+    cache_control_max_age: int | None = None,
+) -> PutHeaders:
+    headers: PutHeaders = {}
+    if content_type:
+        headers["x-content-type"] = content_type
+    if add_random_suffix is not None:
+        headers["x-add-random-suffix"] = "1" if add_random_suffix else "0"
+    if allow_overwrite is not None:
+        headers["x-allow-overwrite"] = "1" if allow_overwrite else "0"
+    if cache_control_max_age is not None:
+        headers["x-cache-control-max-age"] = str(cache_control_max_age)
     return headers
 
 
-def create_put_options(
-    *,
-    path: str,
-    options: dict[str, Any] | None,
-    extra_checks: Callable[[dict[str, Any]], None] | None = None,
-    get_token: Callable[[str, dict[str, Any]], str] | None = None,
-) -> dict[str, Any]:
-    validate_path(path)
-    if not options:
-        raise BlobError("missing options, see usage")
-    require_public_access(options)
-    if extra_checks:
-        extra_checks(options)
-    if get_token:
-        options["token"] = get_token(path, options)
-    return options
-
-
-def normalize_common_args(
-    *,
-    path: str | PathLike,
-    access: str,
-    content_type: str | None,
-    overwrite: bool,
-    cache_control: str | None,
-    max_age: int | None,
-    add_random_suffix: bool,
-    token: str | None,
-) -> tuple[str, dict[str, Any], dict[str, str]]:
-    p = normalize_path(path)
-    cc = build_cache_control(cache_control, max_age)
-
-    options: dict[str, Any] = {
-        "access": access,
-        "contentType": content_type,
-        "addRandomSuffix": add_random_suffix,
-        "allowOverwrite": overwrite,
-        "cacheControlMaxAge": None,  # deprecated; keep None
-        "cacheControl": cc,  # preferred
-        "token": token,
-    }
-    opts = create_put_options(path=p, options=options)
-    headers = create_put_headers(
-        ["cacheControl", "addRandomSuffix", "allowOverwrite", "contentType"], opts
-    )
-    return p, opts, headers
+def ensure_token(token: str | None) -> str:
+    token = token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
+    if not token:
+        raise BlobNoTokenProvidedError()
+    return token

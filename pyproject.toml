@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vercel"
-version = "0.3.4"
+version = "0.3.5"
 description = "Python SDK for Vercel"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
@@ -49,3 +49,22 @@ ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+isort = { combine-as-imports = true, known-first-party = ["vercel"] }
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = false
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = ["E501"]
