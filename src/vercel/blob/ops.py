@@ -84,6 +84,7 @@ def put(
                 size_bytes = len(body.encode())
             track(
                 "blob_put",
+                token=token,
                 access=access,
                 content_type=content_type,
                 multipart=True,
@@ -118,6 +119,7 @@ def put(
             size_bytes = len(body.encode())
         track(
             "blob_put",
+            token=token,
             access=access,
             content_type=content_type,
             multipart=False,
@@ -193,6 +195,7 @@ async def put_async(
                 size_bytes = len(body.encode())
             track(
                 "blob_put",
+                token=token,
                 access=access,
                 content_type=content_type,
                 multipart=True,
@@ -227,6 +230,7 @@ async def put_async(
             size_bytes = len(body.encode())
         track(
             "blob_put",
+            token=token,
             access=access,
             content_type=content_type,
             multipart=False,
@@ -264,7 +268,7 @@ def delete(
     )
     # Track telemetry
     try:
-        track("blob_delete", count=count)
+        track("blob_delete", token=token, count=count)
     except Exception:
         pass
 
@@ -290,7 +294,7 @@ async def delete_async(
     )
     # Track telemetry
     try:
-        track("blob_delete", count=count)
+        track("blob_delete", token=token, count=count)
     except Exception:
         pass
 

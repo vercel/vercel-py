@@ -116,25 +116,25 @@ def with_telemetry(
             
             if extract_metadata:
                 try:
-                    metadata = extract_metadata(*args, **kwargs)
+                    metadata = extract_metadata(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             
             if extract_token:
                 try:
-                    token = extract_token(*args, **kwargs)
+                    token = extract_token(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             
             if extract_team_id:
                 try:
-                    team_id = extract_team_id(*args, **kwargs)
+                    team_id = extract_team_id(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             
             if extract_project_id:
                 try:
-                    project_id = extract_project_id(*args, **kwargs)
+                    project_id = extract_project_id(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             
@@ -162,25 +162,25 @@ def with_telemetry(
             
             if extract_metadata:
                 try:
-                    metadata = extract_metadata(*args, **kwargs)
+                    metadata = extract_metadata(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             
             if extract_token:
                 try:
-                    token = extract_token(*args, **kwargs)
+                    token = extract_token(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             
             if extract_team_id:
                 try:
-                    team_id = extract_team_id(*args, **kwargs)
+                    team_id = extract_team_id(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             
             if extract_project_id:
                 try:
-                    project_id = extract_project_id(*args, **kwargs)
+                    project_id = extract_project_id(args[0] if args else None, args, kwargs)
                 except Exception:
                     pass
             

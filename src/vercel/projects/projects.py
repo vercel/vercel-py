@@ -216,7 +216,7 @@ def create_project(
         )
     # Track telemetry
     try:
-        track("project_create")
+        track("project_create", token=token)
     except Exception:
         pass
     return resp.json()
@@ -261,7 +261,7 @@ async def create_project_async(
         )
     # Track telemetry
     try:
-        track("project_create")
+        track("project_create", token=token)
     except Exception:
         pass
     return resp.json()
@@ -303,7 +303,7 @@ def update_project(
         )
     # Track telemetry
     try:
-        track("project_update")
+        track("project_update", token=token)
     except Exception:
         pass
     return resp.json()
@@ -345,7 +345,7 @@ async def update_project_async(
         )
     # Track telemetry
     try:
-        track("project_update")
+        track("project_update", token=token)
     except Exception:
         pass
     return resp.json()
@@ -385,7 +385,7 @@ def delete_project(
         )
     # Track telemetry
     try:
-        track("project_delete")
+        track("project_delete", token=token)
     except Exception:
         pass
     return None
@@ -425,7 +425,7 @@ async def delete_project_async(
         )
     # Track telemetry
     try:
-        track("project_delete")
+        track("project_delete", token=token)
     except Exception:
         pass
     return None

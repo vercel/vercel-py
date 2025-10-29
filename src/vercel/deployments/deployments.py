@@ -122,7 +122,7 @@ def create_deployment(
         target = None
         if isinstance(body, dict):
             target = body.get("target")
-        track("deployment_create", target=target, force_new=bool(force_new) if force_new is not None else None)
+        track("deployment_create", token=token, target=target, force_new=bool(force_new) if force_new is not None else None)
     except Exception:
         pass
     return resp.json()
@@ -281,7 +281,7 @@ async def create_deployment_async(
         target = None
         if isinstance(body, dict):
             target = body.get("target")
-        track("deployment_create", target=target, force_new=bool(force_new) if force_new is not None else None)
+        track("deployment_create", token=token, target=target, force_new=bool(force_new) if force_new is not None else None)
     except Exception:
         pass
     return resp.json()
