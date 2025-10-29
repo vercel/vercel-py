@@ -51,7 +51,7 @@ class TelemetryClient:
             team_id: Optional team ID
             project_id: Optional project ID
             token: Optional token to extract credentials from
-            metadata: Optional metadata dictionary - will be converted to map format
+            **fields: Additional event fields (whitelisted by schema)
         """
         if not self._enabled:
             return

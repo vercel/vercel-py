@@ -55,7 +55,7 @@ def track(
         team_id: Optional team ID  
         project_id: Optional project ID
         token: Optional token to extract credentials from
-        metadata: Optional metadata dictionary
+        **fields: Additional event fields (whitelisted by schema)
     """
     try:
         client = _get_telemetry_client()
