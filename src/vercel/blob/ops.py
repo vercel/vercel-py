@@ -25,7 +25,7 @@ from .types import (
 from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
 
-from ..telemetry.tracker import track_blob_put, track_blob_delete
+from ..telemetry.tracker import track
 
 def put(
     path: str,
@@ -75,8 +75,24 @@ def put(
             token=token,
             on_upload_progress=on_upload_progress,
         )
-        # Track telemetry
-        track_blob_put(access=access, content_type=content_type, multipart=True, body=body)
+    # Track telemetry (best-effort)
+    try:
+        size_bytes = None
+        if isinstance(body, (bytes, bytearray)):
+            size_bytes = len(body)
+        elif isinstance(body, str):
+            size_bytes = len(body.encode())
+        track(
+            "blob_put",
+            metadata={
+                "access": access,
+                "content_type": content_type,
+                "multipart": True,
+                "size_bytes": size_bytes,
+            },
+        )
+    except Exception:
+        pass
         return PutBlobResultType(
             url=raw["url"],
             download_url=raw["downloadUrl"],
@@ -95,8 +111,24 @@ def put(
         body=body,
         on_upload_progress=on_upload_progress,
     )
-    # Track telemetry
-    track_blob_put(access=access, content_type=content_type, multipart=False, body=body)
+    # Track telemetry (best-effort)
+    try:
+        size_bytes = None
+        if isinstance(body, (bytes, bytearray)):
+            size_bytes = len(body)
+        elif isinstance(body, str):
+            size_bytes = len(body.encode())
+        track(
+            "blob_put",
+            metadata={
+                "access": access,
+                "content_type": content_type,
+                "multipart": False,
+                "size_bytes": size_bytes,
+            },
+        )
+    except Exception:
+        pass
     return PutBlobResultType(
         url=raw["url"],
         download_url=raw["downloadUrl"],

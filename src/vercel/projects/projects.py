@@ -6,7 +6,7 @@ import urllib.parse
 
 import httpx
 
-from ..telemetry.tracker import track_project_create, track_project_update, track_project_delete
+from ..telemetry.tracker import track
 
 __all__ = [
     "get_projects",
@@ -215,7 +215,10 @@ def create_project(
             f"Failed to create project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_project_create()
+    try:
+        track("project_create")
+    except Exception:
+        pass
     return resp.json()
 
 
@@ -257,7 +260,10 @@ async def create_project_async(
             f"Failed to create project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_project_create()
+    try:
+        track("project_create")
+    except Exception:
+        pass
     return resp.json()
 
 
@@ -296,7 +302,10 @@ def update_project(
             f"Failed to update project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_project_update()
+    try:
+        track("project_update")
+    except Exception:
+        pass
     return resp.json()
 
 
@@ -335,7 +344,10 @@ async def update_project_async(
             f"Failed to update project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_project_update()
+    try:
+        track("project_update")
+    except Exception:
+        pass
     return resp.json()
 
 
@@ -372,7 +384,10 @@ def delete_project(
             f"Failed to delete project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_project_delete()
+    try:
+        track("project_delete")
+    except Exception:
+        pass
     return None
 
 
@@ -409,5 +424,8 @@ async def delete_project_async(
             f"Failed to delete project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_project_delete()
+    try:
+        track("project_delete")
+    except Exception:
+        pass
     return None

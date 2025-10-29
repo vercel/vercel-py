@@ -4,7 +4,7 @@ import os
 import httpx
 from typing import Any, Iterable
 
-from ..telemetry.tracker import track_deployment_create
+from ..telemetry.tracker import track
 
 DEFAULT_API_BASE_URL = "https://api.vercel.com"
 DEFAULT_TIMEOUT = 60.0
@@ -115,7 +115,13 @@ def create_deployment(
             f"Failed to create deployment: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_deployment_create()
+    try:
+        target = None
+        if isinstance(body, dict):
+            target = body.get("target")
+        track("deployment_create", metadata={"target": target, "force_new": bool(force_new) if force_new is not None else None})
+    except Exception:
+        pass
     return resp.json()
 
 
