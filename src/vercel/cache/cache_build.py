@@ -166,7 +166,7 @@ class AsyncBuildCache(AsyncCache):
                     await r.aclose()
                     # Track cache miss
                     try:
-                        track("cache_get", metadata={"hit": False})
+                        track("cache_get", hit=False)
                     except Exception:
                         pass
                     return None
@@ -176,7 +176,7 @@ class AsyncBuildCache(AsyncCache):
                         await r.aclose()
                         # Track cache miss (stale)
                         try:
-                            track("cache_get", metadata={"hit": False})
+                            track("cache_get", hit=False)
                         except Exception:
                             pass
                         return None
@@ -184,7 +184,7 @@ class AsyncBuildCache(AsyncCache):
                     await r.aclose()
                     # Track cache hit
                     try:
-                        track("cache_get", metadata={"hit": True})
+                        track("cache_get", hit=True)
                     except Exception:
                         pass
                     return data
@@ -225,7 +225,7 @@ class AsyncBuildCache(AsyncCache):
                 await r.aclose()
             # Track telemetry
             try:
-                track("cache_set", metadata={"ttl_seconds": options.get("ttl") if options else None, "has_tags": bool(options and options.get("tags"))})
+                track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
             except Exception:
                 pass
         except Exception as e:

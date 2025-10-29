@@ -14,7 +14,7 @@ class InMemoryCache(Cache):
         if not entry:
             # Track cache miss
             try:
-                track("cache_get", metadata={"hit": False})
+                track("cache_get", hit=False)
             except Exception:
                 pass
             return None
@@ -26,13 +26,13 @@ class InMemoryCache(Cache):
             self.delete(key)
             # Track cache miss (expired)
             try:
-                track("cache_get", metadata={"hit": False})
+                track("cache_get", hit=False)
             except Exception:
                 pass
             return None
         # Track cache hit
         try:
-            track("cache_get", metadata={"hit": True})
+            track("cache_get", hit=True)
         except Exception:
             pass
         return entry["value"]
@@ -51,7 +51,7 @@ class InMemoryCache(Cache):
         }
         # Track telemetry
         try:
-            track("cache_set", metadata={"ttl_seconds": ttl, "has_tags": len(tags) > 0})
+            track("cache_set", ttl_seconds=ttl, has_tags=len(tags) > 0)
         except Exception:
             pass
 

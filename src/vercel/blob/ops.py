@@ -84,12 +84,10 @@ def put(
             size_bytes = len(body.encode())
         track(
             "blob_put",
-            metadata={
-                "access": access,
-                "content_type": content_type,
-                "multipart": True,
-                "size_bytes": size_bytes,
-            },
+            access=access,
+            content_type=content_type,
+            multipart=True,
+            size_bytes=size_bytes,
         )
     except Exception:
         pass
@@ -120,12 +118,10 @@ def put(
             size_bytes = len(body.encode())
         track(
             "blob_put",
-            metadata={
-                "access": access,
-                "content_type": content_type,
-                "multipart": False,
-                "size_bytes": size_bytes,
-            },
+            access=access,
+            content_type=content_type,
+            multipart=False,
+            size_bytes=size_bytes,
         )
     except Exception:
         pass

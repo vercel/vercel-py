@@ -30,7 +30,7 @@ def track(
     team_id: Optional[str] = None,
     project_id: Optional[str] = None,
     token: Optional[str] = None,
-    metadata: Optional[dict[str, Any]] = None,
+    **fields: Any,
 ) -> None:
     """
     Track a telemetry event using the generic track method.
@@ -50,14 +50,13 @@ def track(
         client = _get_telemetry_client()
         if client is None:
             return
-        # Expand metadata keys as direct fields if provided (and safe)
         client.track(
             action,
             user_id=user_id,
             team_id=team_id,
             project_id=project_id,
             token=token,
-            **(metadata or {}),
+            **fields,
         )
     except Exception:
         # Silently fail - don't impact user's operation

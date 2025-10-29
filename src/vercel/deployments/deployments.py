@@ -119,7 +119,7 @@ def create_deployment(
         target = None
         if isinstance(body, dict):
             target = body.get("target")
-        track("deployment_create", metadata={"target": target, "force_new": bool(force_new) if force_new is not None else None})
+        track("deployment_create", target=target, force_new=bool(force_new) if force_new is not None else None)
     except Exception:
         pass
     return resp.json()
