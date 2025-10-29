@@ -130,7 +130,7 @@ def with_telemetry(
                 token=token,
                 team_id=team_id,
                 project_id=project_id,
-                metadata=metadata,
+                **(metadata or {}),
             )
             
             return result
@@ -176,7 +176,7 @@ def with_telemetry(
                 token=token,
                 team_id=team_id,
                 project_id=project_id,
-                metadata=metadata,
+                **(metadata or {}),
             )
             
             return result
@@ -191,4 +191,4 @@ def with_telemetry(
     return decorator
 
 
-# Specific wrapper functions are intentionally removed; use generic `track(action, metadata={...})` instead.
+# Specific wrapper functions are intentionally removed; use generic `track(action, **fields)` instead.
