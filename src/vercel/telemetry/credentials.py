@@ -6,13 +6,8 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple
 if TYPE_CHECKING:
     from ..oidc.types import ProjectInfo
 
-try:
-    from ..oidc.token import decode_oidc_payload
-    from ..oidc.utils import find_project_info
-except ImportError:
-    # OIDC modules may not be available in all contexts
-    decode_oidc_payload: Optional[Callable[[str], dict[str, Any]]] = None
-    find_project_info: Optional[Callable[[], "ProjectInfo"]] = None
+# Note: Avoid module-level optional imports that shadow names with different types,
+# which can trigger mypy redefinition errors. We import lazily inside functions.
 
 
 def extract_credentials(
@@ -46,9 +41,12 @@ def extract_credentials(
         resolved_team_id = os.getenv("VERCEL_TEAM_ID")
     
     # Try to extract from OIDC token if available
-    if token and decode_oidc_payload is not None:
+    if token:
         try:
-            payload = decode_oidc_payload(token)
+            # Import lazily to avoid hard dependency in all environments
+            from ..oidc.token import decode_oidc_payload as _decode_oidc_payload  # type: ignore
+
+            payload = _decode_oidc_payload(token)
             if not resolved_project_id:
                 resolved_project_id = payload.get("project_id")
             if not resolved_team_id:
@@ -59,9 +57,12 @@ def extract_credentials(
             pass
     
     # Try to extract from .vercel/project.json for local dev
-    if (not resolved_project_id or not resolved_team_id) and find_project_info is not None:
+    if (not resolved_project_id or not resolved_team_id):
         try:
-            project_info = find_project_info()
+            # Import lazily to avoid hard dependency in all environments
+            from ..oidc.utils import find_project_info as _find_project_info  # type: ignore
+
+            project_info = _find_project_info()
             if not resolved_project_id and project_info.get("projectId"):
                 resolved_project_id = project_info["projectId"]
             if not resolved_team_id and project_info.get("teamId"):
