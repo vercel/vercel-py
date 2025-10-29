@@ -2,25 +2,36 @@
 
 import functools
 import os
+import threading
 from typing import Any, Callable, Optional, TypeVar
 
-# Singleton telemetry client instance
+# Singleton telemetry client instance with thread-safe initialization
 _telemetry_client = None
+_telemetry_client_lock = threading.Lock()
 
 T = TypeVar("T", bound=Callable[..., Any])
 
 
 def _get_telemetry_client():
-    """Get or create the telemetry client singleton."""
+    """Get or create the telemetry client singleton (thread-safe)."""
     global _telemetry_client
-    if _telemetry_client is None:
-        try:
-            from .client import TelemetryClient
-
-            _telemetry_client = TelemetryClient()
-        except Exception:
-            pass
-    return _telemetry_client
+    # Fast path without lock
+    client = _telemetry_client
+    if client is not None:
+        return client
+    # Slow path with double-checked locking
+    try:
+        from .client import TelemetryClient
+    except Exception:
+        return None
+    with _telemetry_client_lock:
+        client = _telemetry_client
+        if client is None:
+            try:
+                _telemetry_client = TelemetryClient()
+            except Exception:
+                _telemetry_client = None
+        return _telemetry_client
 
 
 def track(
