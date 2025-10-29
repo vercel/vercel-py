@@ -75,22 +75,22 @@ def put(
             token=token,
             on_upload_progress=on_upload_progress,
         )
-    # Track telemetry (best-effort)
-    try:
-        size_bytes = None
-        if isinstance(body, (bytes, bytearray)):
-            size_bytes = len(body)
-        elif isinstance(body, str):
-            size_bytes = len(body.encode())
-        track(
-            "blob_put",
-            access=access,
-            content_type=content_type,
-            multipart=True,
-            size_bytes=size_bytes,
-        )
-    except Exception:
-        pass
+        # Track telemetry (best-effort)
+        try:
+            size_bytes = None
+            if isinstance(body, (bytes, bytearray)):
+                size_bytes = len(body)
+            elif isinstance(body, str):
+                size_bytes = len(body.encode())
+            track(
+                "blob_put",
+                access=access,
+                content_type=content_type,
+                multipart=True,
+                size_bytes=size_bytes,
+            )
+        except Exception:
+            pass
         return PutBlobResultType(
             url=raw["url"],
             download_url=raw["downloadUrl"],
@@ -187,7 +187,21 @@ async def put_async(
             on_upload_progress=on_upload_progress,
         )
         # Track telemetry
-        track_blob_put(access=access, content_type=content_type, multipart=True, body=body)
+        try:
+            size_bytes = None
+            if isinstance(body, (bytes, bytearray)):
+                size_bytes = len(body)
+            elif isinstance(body, str):
+                size_bytes = len(body.encode())
+            track(
+                "blob_put",
+                access=access,
+                content_type=content_type,
+                multipart=True,
+                size_bytes=size_bytes,
+            )
+        except Exception:
+            pass
         return PutBlobResultType(
             url=raw["url"],
             download_url=raw["downloadUrl"],
@@ -207,7 +221,21 @@ async def put_async(
         on_upload_progress=on_upload_progress,
     )
     # Track telemetry
-    track_blob_put(access=access, content_type=content_type, multipart=False, body=body)
+    try:
+        size_bytes = None
+        if isinstance(body, (bytes, bytearray)):
+            size_bytes = len(body)
+        elif isinstance(body, str):
+            size_bytes = len(body.encode())
+        track(
+            "blob_put",
+            access=access,
+            content_type=content_type,
+            multipart=False,
+            size_bytes=size_bytes,
+        )
+    except Exception:
+        pass
     return PutBlobResultType(
         url=raw["url"],
         download_url=raw["downloadUrl"],
@@ -236,7 +264,10 @@ def delete(
         body={"urls": urls},
     )
     # Track telemetry
-    track_blob_delete(count=count)
+    try:
+        track("blob_delete", count=count)
+    except Exception:
+        pass
 
 
 async def delete_async(
@@ -258,7 +289,10 @@ async def delete_async(
         body={"urls": urls},
     )
     # Track telemetry
-    track_blob_delete(count=count)
+    try:
+        track("blob_delete", count=count)
+    except Exception:
+        pass
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:

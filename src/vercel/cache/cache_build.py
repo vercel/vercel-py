@@ -36,7 +36,7 @@ class BuildCache(Cache):
             if r.status_code == 404:
                 # Track cache miss
                 try:
-                    track_cache_get(hit=False)
+                    track("cache_get", hit=False)
                 except Exception:
                     pass
                 return None
@@ -46,13 +46,13 @@ class BuildCache(Cache):
                     r.close()
                     # Track cache miss (stale)
                     try:
-                        track_cache_get(hit=False)
+                        track("cache_get", hit=False)
                     except Exception:
                         pass
                     return None
                 # Track cache hit
                 try:
-                    track_cache_get(hit=True)
+                    track("cache_get", hit=True)
                 except Exception:
                     pass
                 return r.json()
@@ -87,7 +87,7 @@ class BuildCache(Cache):
                 raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
             # Track telemetry
             try:
-                track_cache_set(ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
+                track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
             except Exception:
                 pass
         except Exception as e:

@@ -271,5 +271,11 @@ async def create_deployment_async(
             f"Failed to create deployment: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track_deployment_create()
+    try:
+        target = None
+        if isinstance(body, dict):
+            target = body.get("target")
+        track("deployment_create", target=target, force_new=bool(force_new) if force_new is not None else None)
+    except Exception:
+        pass
     return resp.json()
