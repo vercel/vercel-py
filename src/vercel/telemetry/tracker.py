@@ -76,10 +76,10 @@ def track(
 
 def with_telemetry(
     action: str,
-    extract_metadata: Optional[Callable[[Any, tuple, dict], dict[str, Any]]] = None,
-    extract_token: Optional[Callable[[Any, tuple, dict], Optional[str]]] = None,
-    extract_team_id: Optional[Callable[[Any, tuple, dict], Optional[str]]] = None,
-    extract_project_id: Optional[Callable[[Any, tuple, dict], Optional[str]]] = None,
+    extract_metadata: Optional[Callable[..., dict[str, Any]]] = None,
+    extract_token: Optional[Callable[..., Optional[str]]] = None,
+    extract_team_id: Optional[Callable[..., Optional[str]]] = None,
+    extract_project_id: Optional[Callable[..., Optional[str]]] = None,
 ) -> Callable[[T], T]:
     """
     Create a decorator that automatically tracks telemetry for a function.
@@ -87,7 +87,7 @@ def with_telemetry(
     Usage:
         @with_telemetry(
             action="blob_put",
-            extract_metadata=lambda self, args, kwargs: {"size": kwargs.get("size")}
+            extract_metadata=lambda self, path, size=None: {"size": size}
         )
         def put(self, path, size=None):
             ...
@@ -116,25 +116,25 @@ def with_telemetry(
             
             if extract_metadata:
                 try:
-                    metadata = extract_metadata(args[0] if args else None, args, kwargs)
+                    metadata = extract_metadata(*args, **kwargs)
                 except Exception:
                     pass
             
             if extract_token:
                 try:
-                    token = extract_token(args[0] if args else None, args, kwargs)
+                    token = extract_token(*args, **kwargs)
                 except Exception:
                     pass
             
             if extract_team_id:
                 try:
-                    team_id = extract_team_id(args[0] if args else None, args, kwargs)
+                    team_id = extract_team_id(*args, **kwargs)
                 except Exception:
                     pass
             
             if extract_project_id:
                 try:
-                    project_id = extract_project_id(args[0] if args else None, args, kwargs)
+                    project_id = extract_project_id(*args, **kwargs)
                 except Exception:
                     pass
             
@@ -162,25 +162,25 @@ def with_telemetry(
             
             if extract_metadata:
                 try:
-                    metadata = extract_metadata(args[0] if args else None, args, kwargs)
+                    metadata = extract_metadata(*args, **kwargs)
                 except Exception:
                     pass
             
             if extract_token:
                 try:
-                    token = extract_token(args[0] if args else None, args, kwargs)
+                    token = extract_token(*args, **kwargs)
                 except Exception:
                     pass
             
             if extract_team_id:
                 try:
-                    team_id = extract_team_id(args[0] if args else None, args, kwargs)
+                    team_id = extract_team_id(*args, **kwargs)
                 except Exception:
                     pass
             
             if extract_project_id:
                 try:
-                    project_id = extract_project_id(args[0] if args else None, args, kwargs)
+                    project_id = extract_project_id(*args, **kwargs)
                 except Exception:
                     pass
             
