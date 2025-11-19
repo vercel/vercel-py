@@ -1,12 +1,12 @@
 """Telemetry tracking helpers for SDK operations."""
 
+from __future__ import annotations
+
 import functools
 import inspect
 import os
 import threading
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
-
-from .client import TelemetryClient
 
 # Singleton telemetry client instance with thread-safe initialization
 _telemetry_client = None
@@ -31,6 +31,7 @@ def get_client() -> Optional[TelemetryClient]:
         client = _telemetry_client
         if client is None:
             try:
+                from .client import TelemetryClient
                 _telemetry_client = TelemetryClient()
             except Exception:
                 _telemetry_client = None
