@@ -76,10 +76,10 @@ def track(
 
 def with_telemetry(
     action: str,
-    extract_metadata: Optional[Callable[[Any, tuple, dict], dict[str, Any]]] = None,
-    extract_token: Optional[Callable[[Any, tuple, dict], Optional[str]]] = None,
-    extract_team_id: Optional[Callable[[Any, tuple, dict], Optional[str]]] = None,
-    extract_project_id: Optional[Callable[[Any, tuple, dict], Optional[str]]] = None,
+    extract_metadata: Optional[Callable[..., dict[str, Any]]] = None,
+    extract_token: Optional[Callable[..., Optional[str]]] = None,
+    extract_team_id: Optional[Callable[..., Optional[str]]] = None,
+    extract_project_id: Optional[Callable[..., Optional[str]]] = None,
 ) -> Callable[[T], T]:
     """
     Create a decorator that automatically tracks telemetry for a function.
@@ -87,7 +87,7 @@ def with_telemetry(
     Usage:
         @with_telemetry(
             action="blob_put",
-            extract_metadata=lambda self, args, kwargs: {"size": kwargs.get("size")}
+            extract_metadata=lambda self, path, size=None: {"size": size}
         )
         def put(self, path, size=None):
             ...
