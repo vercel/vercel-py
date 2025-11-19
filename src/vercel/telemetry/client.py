@@ -1,5 +1,6 @@
 """Telemetry client for tracking SDK usage."""
 
+import atexit
 import os
 import time
 import uuid
@@ -47,6 +48,8 @@ class TelemetryClient:
             "deployment_create": [],
         }
         self._enabled = _TELEMETRY_ENABLED
+        # Register flush at exit so telemetry events are sent before program termination
+        atexit.register(self._flush_at_exit)
 
     def track_blob_put(
         self,
@@ -309,6 +312,15 @@ class TelemetryClient:
         """Clear accumulated events."""
         for event_type in self._events:
             self._events[event_type].clear()
+
+    def _flush_at_exit(self) -> None:
+        """Flush events at program exit (called by atexit)."""
+        import asyncio
+        try:
+            asyncio.run(self.flush())
+        except Exception:
+            # Silently fail - don't interrupt program exit
+            pass
 
 
 def _TELEMETRY_DEBUG() -> bool:
