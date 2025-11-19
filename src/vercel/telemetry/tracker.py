@@ -2,24 +2,30 @@
 
 import functools
 import os
+import threading
 from typing import Any, Callable, Optional, TypeVar
 
 # Singleton telemetry client instance
 _telemetry_client = None
+_telemetry_client_lock = threading.Lock()
 
 T = TypeVar("T", bound=Callable[..., Any])
 
 
 def _get_telemetry_client():
-    """Get or create the telemetry client singleton."""
+    """Get or create the telemetry client singleton in a thread-safe manner."""
     global _telemetry_client
+    # First check without lock (optimization)
     if _telemetry_client is None:
-        try:
-            from .client import TelemetryClient
+        with _telemetry_client_lock:
+            # Second check with lock (double-checked locking pattern)
+            if _telemetry_client is None:
+                try:
+                    from .client import TelemetryClient
 
-            _telemetry_client = TelemetryClient()
-        except Exception:
-            pass
+                    _telemetry_client = TelemetryClient()
+                except Exception:
+                    pass
     return _telemetry_client
 
 
