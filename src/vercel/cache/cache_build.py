@@ -164,14 +164,29 @@ class AsyncBuildCache(AsyncCache):
                 r = await client.get(self._endpoint + key, headers=self._headers)
                 if r.status_code == 404:
                     await r.aclose()
+                    # Track cache miss
+                    try:
+                        track_cache_get(hit=False)
+                    except Exception:
+                        pass
                     return None
                 if r.status_code == 200:
                     cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
                     if cache_state and cache_state.lower() != "fresh":
                         await r.aclose()
+                        # Track cache miss (stale)
+                        try:
+                            track_cache_get(hit=False)
+                        except Exception:
+                            pass
                         return None
                     data = r.json()
                     await r.aclose()
+                    # Track cache hit
+                    try:
+                        track_cache_get(hit=True)
+                    except Exception:
+                        pass
                     return data
                 await r.aclose()
                 raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
@@ -208,6 +223,11 @@ class AsyncBuildCache(AsyncCache):
                     await r.aclose()
                     raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
                 await r.aclose()
+            # Track telemetry
+            try:
+                track_cache_set(ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
+            except Exception:
+                pass
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
