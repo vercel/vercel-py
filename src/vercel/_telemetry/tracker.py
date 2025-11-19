@@ -6,7 +6,10 @@ import functools
 import inspect
 import os
 import threading
-from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
+
+if TYPE_CHECKING:
+    from .client import TelemetryClient
 
 # Singleton telemetry client instance with thread-safe initialization
 _telemetry_client = None
