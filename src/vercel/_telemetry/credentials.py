@@ -3,11 +3,10 @@
 import os
 from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple
 
+from ..oidc.token import decode_oidc_payload
+
 if TYPE_CHECKING:
     from ..oidc.types import ProjectInfo
-
-# Note: Avoid module-level optional imports that shadow names with different types,
-# which can trigger mypy redefinition errors. We import lazily inside functions.
 
 
 def extract_credentials(
@@ -43,10 +42,7 @@ def extract_credentials(
     # Try to extract from OIDC token if available
     if token:
         try:
-            # Import lazily to avoid hard dependency in all environments
-            from ..oidc.token import decode_oidc_payload as _decode_oidc_payload  # type: ignore
-
-            payload = _decode_oidc_payload(token)
+            payload = decode_oidc_payload(token)
             if not resolved_project_id:
                 resolved_project_id = payload.get("project_id")
             if not resolved_team_id:

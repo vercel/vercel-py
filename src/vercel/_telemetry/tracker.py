@@ -1,9 +1,10 @@
 """Telemetry tracking helpers for SDK operations."""
 
 import functools
+import inspect
 import os
 import threading
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
 # Singleton telemetry client instance with thread-safe initialization
 _telemetry_client = None
@@ -12,8 +13,12 @@ _telemetry_client_lock = threading.Lock()
 T = TypeVar("T", bound=Callable[..., Any])
 
 
-def _get_telemetry_client():
-    """Get or create the telemetry client singleton (thread-safe)."""
+def get_client() -> Optional["TelemetryClient"]:
+    """Get or create the telemetry client singleton (thread-safe).
+    
+    Returns:
+        TelemetryClient instance, or None if initialization fails.
+    """
     global _telemetry_client
     # Fast path without lock
     client = _telemetry_client
@@ -34,41 +39,22 @@ def _get_telemetry_client():
         return _telemetry_client
 
 
-def track(
-    action: str,
-    *,
-    user_id: Optional[str] = None,
-    team_id: Optional[str] = None,
-    project_id: Optional[str] = None,
-    token: Optional[str] = None,
-    **fields: Any,
-) -> None:
-    """
-    Track a telemetry event using the generic track method.
+def track(event: str, **attrs: Any) -> None:
+    """Track a telemetry event.
     
     This is the main entry point for tracking telemetry events.
-    It automatically extracts credentials from environment/tokens if not provided.
+    All attributes are passed through to the client's track method,
+    which handles credential extraction and field whitelisting.
     
     Args:
-        action: The action being tracked (e.g., 'blob_put', 'cache_get')
-        user_id: Optional user ID
-        team_id: Optional team ID  
-        project_id: Optional project ID
-        token: Optional token to extract credentials from
-        **fields: Additional event fields (whitelisted by schema)
+        event: The event/action being tracked (e.g., 'blob_put', 'cache_get')
+        **attrs: Additional event attributes (e.g., user_id, team_id, token, etc.)
     """
+    client = get_client()
+    if client is None:
+        return
     try:
-        client = _get_telemetry_client()
-        if client is None:
-            return
-        client.track(
-            action,
-            user_id=user_id,
-            team_id=team_id,
-            project_id=project_id,
-            token=token,
-            **fields,
-        )
+        client.track(event, **attrs)
     except Exception:
         # Silently fail - don't impact user's operation
         pass
@@ -205,5 +191,96 @@ def with_telemetry(
     return decorator
 
 
+def telemetry(
+    event: str,
+    capture: Sequence[str] | None = None,
+    derive: Mapping[str, Callable[[tuple, dict, Any], Any]] | None = None,
+    when: Literal["before", "after"] = "after",
+) -> Callable[[T], T]:
+    """Decorator to emit telemetry around a function call.
+
+    Args:
+        event: The event name to track
+        capture: List of parameter names to capture from args/kwargs.
+            Names are resolved against the function signature so positional calls
+            are handled correctly.
+        derive: Mapping of output field -> lambda(args, kwargs, result).
+            The callable receives (args, kwargs, result) and should return
+            the value for that field.
+        when: Emit "before" the call, or "after" the call (default: "after").
+
+    Returns:
+        Decorator function
+
+    Example:
+        @telemetry(
+            event="blob_delete",
+            capture=["token"],
+            derive={"count": lambda args, kwargs, rv: len(kwargs.get("urls", []))},
+            when="after",
+        )
+        def delete(urls: list[str], *, token: str | None = None) -> None:
+            ...
+    """
+    def decorator(func: T) -> T:
+        is_coro = inspect.iscoroutinefunction(func)
+        sig = inspect.signature(func)
+
+        def _emit(ev: str, args: tuple, kwargs: dict, result: Any) -> None:
+            try:
+                attrs: dict[str, Any] = {}
+                # Bind parameters for positional resolution
+                try:
+                    bound = sig.bind_partial(*args, **kwargs)
+                    params: dict[str, Any] = dict(bound.arguments)  # name -> value
+                except Exception:
+                    params = {}
+
+                # Capture selected params by name
+                if capture:
+                    for name in capture:
+                        if name in kwargs:
+                            attrs[name] = kwargs[name]
+                        elif name in params:
+                            attrs[name] = params[name]
+                        # else: silently skip if not provided
+
+                # Derived attributes
+                if derive:
+                    for field, getter in derive.items():
+                        try:
+                            attrs[field] = getter(args, kwargs, result)
+                        except Exception:
+                            # ignore individual derivation errors
+                            pass
+
+                track(ev, **attrs)
+            except Exception:
+                # Silently fail - don't impact user's operation
+                pass
+
+        @functools.wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            if when == "before":
+                _emit(event, args, kwargs, None)
+            result = await func(*args, **kwargs)
+            if when == "after":
+                _emit(event, args, kwargs, result)
+            return result
+
+        @functools.wraps(func)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            if when == "before":
+                _emit(event, args, kwargs, None)
+            result = func(*args, **kwargs)
+            if when == "after":
+                _emit(event, args, kwargs, result)
+            return result
+
+        return async_wrapper if is_coro else sync_wrapper  # type: ignore
+
+    return decorator
+
+
 # Specific wrapper functions are intentionally removed;
-# use generic `track(action, **fields)` instead.
+# use generic `track(event, **attrs)` or the `telemetry` decorator instead.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Sequence
 from .types import Cache, AsyncCache
 
-from ..telemetry.tracker import track
+from .._telemetry.tracker import track
 
 class InMemoryCache(Cache):
     def __init__(self) -> None:
@@ -13,10 +13,7 @@ class InMemoryCache(Cache):
         entry = self._cache.get(key)
         if not entry:
             # Track cache miss
-            try:
-                track("cache_get", hit=False)
-            except Exception:
-                pass
+            track("cache_get", hit=False)
             return None
         ttl = entry.get("ttl")
         if (
@@ -25,16 +22,10 @@ class InMemoryCache(Cache):
         ):
             self.delete(key)
             # Track cache miss (expired)
-            try:
-                track("cache_get", hit=False)
-            except Exception:
-                pass
+            track("cache_get", hit=False)
             return None
         # Track cache hit
-        try:
-            track("cache_get", hit=True)
-        except Exception:
-            pass
+        track("cache_get", hit=True)
         return entry["value"]
 
     def set(self, key: str, value: object, options: dict | None = None) -> None:
@@ -50,10 +41,7 @@ class InMemoryCache(Cache):
             "ttl": ttl,
         }
         # Track telemetry
-        try:
-            track("cache_set", ttl_seconds=ttl, has_tags=len(tags) > 0)
-        except Exception:
-            pass
+        track("cache_set", ttl_seconds=ttl, has_tags=len(tags) > 0)
 
     def delete(self, key: str) -> None:
         self._cache.pop(key, None)

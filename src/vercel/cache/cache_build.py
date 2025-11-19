@@ -5,7 +5,7 @@ import httpx
 import json
 from .types import Cache, AsyncCache
 
-from ..telemetry.tracker import track
+from .._telemetry.tracker import track
 
 HEADERS_VERCEL_CACHE_STATE = "x-vercel-cache-state"
 HEADERS_VERCEL_REVALIDATE = "x-vercel-revalidate"
@@ -35,26 +35,17 @@ class BuildCache(Cache):
             r = self._client.get(self._endpoint + key, headers=self._headers)
             if r.status_code == 404:
                 # Track cache miss
-                try:
-                    track("cache_get", hit=False)
-                except Exception:
-                    pass
+                track("cache_get", hit=False)
                 return None
             if r.status_code == 200:
                 cache_state = r.headers.get(HEADERS_VERCEL_CACHE_STATE)
                 if cache_state and cache_state.lower() != "fresh":
                     r.close()
                     # Track cache miss (stale)
-                    try:
-                        track("cache_get", hit=False)
-                    except Exception:
-                        pass
+                    track("cache_get", hit=False)
                     return None
                 # Track cache hit
-                try:
-                    track("cache_get", hit=True)
-                except Exception:
-                    pass
+                track("cache_get", hit=True)
                 return r.json()
             raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
         except Exception as e:
@@ -86,10 +77,7 @@ class BuildCache(Cache):
             if r.status_code != 200:
                 raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
             # Track telemetry
-            try:
-                track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
-            except Exception:
-                pass
+            track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -224,10 +212,7 @@ class AsyncBuildCache(AsyncCache):
                     raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
                 await r.aclose()
             # Track telemetry
-            try:
-                track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
-            except Exception:
-                pass
+            track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
         except Exception as e:
             if self._on_error:
                 self._on_error(e)

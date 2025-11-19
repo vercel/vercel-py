@@ -29,7 +29,7 @@ from .types import (
     PutBlobResult as PutBlobResultType,
 )
 
-from ..telemetry.tracker import track
+from .._telemetry.tracker import telemetry, track
 
 def put(
     path: str,
@@ -76,22 +76,19 @@ def put(
             on_upload_progress=on_upload_progress,
         )
         # Track telemetry (best-effort)
-        try:
-            size_bytes = None
-            if isinstance(body, (bytes, bytearray)):
-                size_bytes = len(body)
-            elif isinstance(body, str):
-                size_bytes = len(body.encode())
-            track(
-                "blob_put",
-                token=token,
-                access=access,
-                content_type=content_type,
-                multipart=True,
-                size_bytes=size_bytes,
-            )
-        except Exception:
-            pass
+        size_bytes = None
+        if isinstance(body, (bytes, bytearray)):
+            size_bytes = len(body)
+        elif isinstance(body, str):
+            size_bytes = len(body.encode())
+        track(
+            "blob_put",
+            token=token,
+            access=access,
+            content_type=content_type,
+            multipart=True,
+            size_bytes=size_bytes,
+        )
         return PutBlobResultType(
             url=raw["url"],
             download_url=raw["downloadUrl"],
@@ -111,22 +108,19 @@ def put(
         on_upload_progress=on_upload_progress,
     )
     # Track telemetry (best-effort)
-    try:
-        size_bytes = None
-        if isinstance(body, (bytes, bytearray)):
-            size_bytes = len(body)
-        elif isinstance(body, str):
-            size_bytes = len(body.encode())
-        track(
-            "blob_put",
-            token=token,
-            access=access,
-            content_type=content_type,
-            multipart=False,
-            size_bytes=size_bytes,
-        )
-    except Exception:
-        pass
+    size_bytes = None
+    if isinstance(body, (bytes, bytearray)):
+        size_bytes = len(body)
+    elif isinstance(body, str):
+        size_bytes = len(body.encode())
+    track(
+        "blob_put",
+        token=token,
+        access=access,
+        content_type=content_type,
+        multipart=False,
+        size_bytes=size_bytes,
+    )
     return PutBlobResultType(
         url=raw["url"],
         download_url=raw["downloadUrl"],
@@ -187,22 +181,19 @@ async def put_async(
             on_upload_progress=on_upload_progress,
         )
         # Track telemetry
-        try:
-            size_bytes = None
-            if isinstance(body, (bytes, bytearray)):
-                size_bytes = len(body)
-            elif isinstance(body, str):
-                size_bytes = len(body.encode())
-            track(
-                "blob_put",
-                token=token,
-                access=access,
-                content_type=content_type,
-                multipart=True,
-                size_bytes=size_bytes,
-            )
-        except Exception:
-            pass
+        size_bytes = None
+        if isinstance(body, (bytes, bytearray)):
+            size_bytes = len(body)
+        elif isinstance(body, str):
+            size_bytes = len(body.encode())
+        track(
+            "blob_put",
+            token=token,
+            access=access,
+            content_type=content_type,
+            multipart=True,
+            size_bytes=size_bytes,
+        )
         return PutBlobResultType(
             url=raw["url"],
             download_url=raw["downloadUrl"],
@@ -222,22 +213,19 @@ async def put_async(
         on_upload_progress=on_upload_progress,
     )
     # Track telemetry
-    try:
-        size_bytes = None
-        if isinstance(body, (bytes, bytearray)):
-            size_bytes = len(body)
-        elif isinstance(body, str):
-            size_bytes = len(body.encode())
-        track(
-            "blob_put",
-            token=token,
-            access=access,
-            content_type=content_type,
-            multipart=False,
-            size_bytes=size_bytes,
-        )
-    except Exception:
-        pass
+    size_bytes = None
+    if isinstance(body, (bytes, bytearray)):
+        size_bytes = len(body)
+    elif isinstance(body, str):
+        size_bytes = len(body.encode())
+    track(
+        "blob_put",
+        token=token,
+        access=access,
+        content_type=content_type,
+        multipart=False,
+        size_bytes=size_bytes,
+    )
     return PutBlobResultType(
         url=raw["url"],
         download_url=raw["downloadUrl"],
@@ -247,6 +235,26 @@ async def put_async(
     )
 
 
+def _derive_delete_count(args: tuple, kwargs: dict, result: Any) -> int:
+    """Derive the count of URLs being deleted."""
+    url_or_path = kwargs.get("url_or_path", args[0] if args else None)
+    if url_or_path is None:
+        return 1
+    if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
+        # Convert to list to get accurate count
+        try:
+            return len(list(url_or_path))
+        except Exception:
+            return 1
+    return 1
+
+
+@telemetry(
+    event="blob_delete",
+    capture=["token"],
+    derive={"count": _derive_delete_count},
+    when="after",
+)
 def delete(
     url_or_path: str | Iterable[str],
     *,
@@ -255,10 +263,8 @@ def delete(
     token = ensure_token(token)
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
-        count = len(urls)
     else:
         urls = [str(url_or_path)]
-        count = 1
     request_api(
         "/delete",
         "POST",
@@ -266,13 +272,14 @@ def delete(
         headers={"content-type": "application/json"},
         body={"urls": urls},
     )
-    # Track telemetry
-    try:
-        track("blob_delete", token=token, count=count)
-    except Exception:
-        pass
 
 
+@telemetry(
+    event="blob_delete",
+    capture=["token"],
+    derive={"count": _derive_delete_count},
+    when="after",
+)
 async def delete_async(
     url_or_path: str | Iterable[str],
     *,
@@ -281,10 +288,8 @@ async def delete_async(
     token = ensure_token(token)
     if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
         urls = [str(u) for u in url_or_path]
-        count = len(urls)
     else:
         urls = [str(url_or_path)]
-        count = 1
     await request_api_async(
         "/delete",
         "POST",
@@ -292,11 +297,6 @@ async def delete_async(
         headers={"content-type": "application/json"},
         body={"urls": urls},
     )
-    # Track telemetry
-    try:
-        track("blob_delete", token=token, count=count)
-    except Exception:
-        pass
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:

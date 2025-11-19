@@ -34,7 +34,7 @@ class TelemetryClient:
 
     def track(
         self,
-        action: str,
+        event: str,
         *,
         user_id: Optional[str] = None,
         team_id: Optional[str] = None,
@@ -45,8 +45,12 @@ class TelemetryClient:
         """
         Track a generic telemetry event.
         
+        This is the single entry point for tracking all telemetry events.
+        Use the @telemetry decorator or track() function from tracker module
+        instead of calling this directly.
+        
         Args:
-            action: The action or operation being tracked (e.g., 'blob_put', 'cache_get')
+            event: The event/action being tracked (e.g., 'blob_put', 'cache_get')
             user_id: Optional user ID
             team_id: Optional team ID
             project_id: Optional project ID
@@ -90,26 +94,30 @@ class TelemetryClient:
                 else:
                     event_fields[k] = v
 
-        event: Dict[str, Any] = {
+        event_data: Dict[str, Any] = {
             "id": str(uuid.uuid4()),
             "event_time": int(time.time() * 1000),
             "session_id": self.session_id,
-            "action": action,
+            "action": event,
         }
 
         if final_user_id:
-            event["user_id"] = final_user_id
+            event_data["user_id"] = final_user_id
         if final_team_id:
-            event["team_id"] = final_team_id
+            event_data["team_id"] = final_team_id
         if final_project_id:
-            event["project_id"] = final_project_id
+            event_data["project_id"] = final_project_id
 
         # Merge whitelisted fields
-        event.update(event_fields)
-        self._events.append(event)
+        event_data.update(event_fields)
+        self._events.append(event_data)
 
-    async def flush(self) -> None:
-        """Flush all accumulated events to the telemetry bridge."""
+    def flush(self) -> None:
+        """Flush all accumulated events to the telemetry bridge.
+        
+        This is a synchronous method that can be safely called from atexit
+        handlers or from within existing event loops.
+        """
         if not self._enabled or not self._events:
             return
 
@@ -133,8 +141,8 @@ class TelemetryClient:
             # Group all events under "generic" key since we're using generic schema
             payload = {"generic": [event for events in batch.values() for event in events]}
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
                     _TELEMETRY_BRIDGE_URL,
                     headers=headers,
                     json=payload,
@@ -159,9 +167,8 @@ class TelemetryClient:
 
     def _flush_at_exit(self) -> None:
         """Flush events at program exit (called by atexit)."""
-        import asyncio
         try:
-            asyncio.run(self.flush())
+            self.flush()
         except Exception:
             # Silently fail - don't interrupt program exit
             pass

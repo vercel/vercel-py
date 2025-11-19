@@ -6,7 +6,7 @@ import urllib.parse
 
 import httpx
 
-from ..telemetry.tracker import track
+from .._telemetry.tracker import track
 
 __all__ = [
     "get_projects",
@@ -215,10 +215,7 @@ def create_project(
             f"Failed to create project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    try:
-        track("project_create", token=token)
-    except Exception:
-        pass
+    track("project_create", token=token)
     return resp.json()
 
 
@@ -260,10 +257,7 @@ async def create_project_async(
             f"Failed to create project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    try:
-        track("project_create", token=token)
-    except Exception:
-        pass
+    track("project_create", token=token)
     return resp.json()
 
 
@@ -302,10 +296,7 @@ def update_project(
             f"Failed to update project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    try:
-        track("project_update", token=token)
-    except Exception:
-        pass
+    track("project_update", token=token)
     return resp.json()
 
 
@@ -344,10 +335,7 @@ async def update_project_async(
             f"Failed to update project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    try:
-        track("project_update", token=token)
-    except Exception:
-        pass
+    track("project_update", token=token)
     return resp.json()
 
 
@@ -384,10 +372,7 @@ def delete_project(
             f"Failed to delete project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    try:
-        track("project_delete", token=token)
-    except Exception:
-        pass
+    track("project_delete", token=token)
     return None
 
 
@@ -424,8 +409,5 @@ async def delete_project_async(
             f"Failed to delete project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    try:
-        track("project_delete", token=token)
-    except Exception:
-        pass
+    track("project_delete", token=token)
     return None
