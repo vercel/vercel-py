@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from .._telemetry.tracker import track
 import httpx
 
 DEFAULT_API_BASE_URL = "https://api.vercel.com"
@@ -89,6 +90,8 @@ def create_deployment(
     forceNew, skip_auto_detection_confirmation ->
     skipAutoDetectionConfirmation
     """
+    if not isinstance(body, dict):
+        raise ValueError("body must be a dict")
     params: dict[str, Any] = {}
     if team_id:
         params["teamId"] = team_id
@@ -116,6 +119,8 @@ def create_deployment(
         raise RuntimeError(
             f"Failed to create deployment: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("deployment_create", token=token, target=body.get("target"), force_new=bool(force_new) if force_new is not None else None)
     return resp.json()
 
 
@@ -240,6 +245,8 @@ async def create_deployment_async(
     forceNew, skip_auto_detection_confirmation ->
     skipAutoDetectionConfirmation
     """
+    if not isinstance(body, dict):
+        raise ValueError("body must be a dict")
     params: dict[str, Any] = {}
     if team_id:
         params["teamId"] = team_id
@@ -267,4 +274,6 @@ async def create_deployment_async(
         raise RuntimeError(
             f"Failed to create deployment: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("deployment_create", token=token, target=body.get("target"), force_new=bool(force_new) if force_new is not None else None)
     return resp.json()

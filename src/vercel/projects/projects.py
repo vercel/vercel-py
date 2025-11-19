@@ -6,6 +6,8 @@ import urllib.parse
 
 import httpx
 
+from .._telemetry.tracker import track
+
 __all__ = [
     "get_projects",
     "create_project",
@@ -212,6 +214,8 @@ def create_project(
         raise RuntimeError(
             f"Failed to create project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("project_create", token=token)
     return resp.json()
 
 
@@ -252,6 +256,8 @@ async def create_project_async(
         raise RuntimeError(
             f"Failed to create project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("project_create", token=token)
     return resp.json()
 
 
@@ -289,6 +295,8 @@ def update_project(
         raise RuntimeError(
             f"Failed to update project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("project_update", token=token)
     return resp.json()
 
 
@@ -326,6 +334,8 @@ async def update_project_async(
         raise RuntimeError(
             f"Failed to update project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("project_update", token=token)
     return resp.json()
 
 
@@ -361,6 +371,8 @@ def delete_project(
         raise RuntimeError(
             f"Failed to delete project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("project_delete", token=token)
     return None
 
 
@@ -396,4 +408,6 @@ async def delete_project_async(
         raise RuntimeError(
             f"Failed to delete project: {resp.status_code} {resp.reason_phrase} - {data}"
         )
+    # Track telemetry
+    track("project_delete", token=token)
     return None
