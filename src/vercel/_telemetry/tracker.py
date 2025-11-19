@@ -6,6 +6,8 @@ import os
 import threading
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
+from .client import TelemetryClient
+
 # Singleton telemetry client instance with thread-safe initialization
 _telemetry_client = None
 _telemetry_client_lock = threading.Lock()
@@ -13,7 +15,7 @@ _telemetry_client_lock = threading.Lock()
 T = TypeVar("T", bound=Callable[..., Any])
 
 
-def get_client() -> Optional["TelemetryClient"]:
+def get_client() -> Optional[TelemetryClient]:
     """Get or create the telemetry client singleton (thread-safe).
     
     Returns:
@@ -25,10 +27,6 @@ def get_client() -> Optional["TelemetryClient"]:
     if client is not None:
         return client
     # Slow path with double-checked locking
-    try:
-        from .client import TelemetryClient
-    except Exception:
-        return None
     with _telemetry_client_lock:
         client = _telemetry_client
         if client is None:
