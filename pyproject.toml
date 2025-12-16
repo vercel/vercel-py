@@ -18,6 +18,9 @@ dependencies = [
     "python-dotenv"
 ]
 
+[project.scripts]
+vercel = "vercel.__main__:main"
+
 [project.optional-dependencies]
 dev = [
     "ruff>=0.5.0",
