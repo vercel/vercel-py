@@ -33,6 +33,7 @@ dev = [
 
 [tool.uv]
 default-groups = ["dev"]
+package = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
