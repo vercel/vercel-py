@@ -16,9 +16,10 @@ Usage:
 import asyncio
 import os
 from datetime import datetime
+
 from dotenv import load_dotenv
 
-from vercel.projects.aio import get_projects, create_project, update_project, delete_project
+from vercel.projects.aio import create_project, delete_project, get_projects, update_project
 
 load_dotenv()
 

@@ -4,9 +4,10 @@ import asyncio
 import os
 import time
 import uuid
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Iterable, Protocol, Awaitable, TypedDict
+from typing import Any, Protocol, TypedDict
 
 from .errors import BlobError, BlobNoTokenProvidedError
 

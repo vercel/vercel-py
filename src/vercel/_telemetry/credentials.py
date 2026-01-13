@@ -1,19 +1,19 @@
 """Utilities for extracting credentials (user_id, team_id, project_id) from various sources."""
 
 import os
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..oidc.types import ProjectInfo
+    pass
 
 
 def extract_credentials(
     *,
-    token: Optional[str] = None,
-    team_id: Optional[str] = None,
-    project_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    token: str | None = None,
+    team_id: str | None = None,
+    project_id: str | None = None,
+    user_id: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
     """
     Extract user_id, team_id, and project_id from various sources.
 

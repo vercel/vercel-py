@@ -17,10 +17,16 @@ import asyncio
 import os
 import time
 from datetime import datetime
+
 from dotenv import load_dotenv
 
-from vercel.projects import get_projects, create_project, update_project, delete_project
-from vercel.projects.aio import get_projects as get_projects_async, create_project as create_project_async, update_project as update_project_async, delete_project as delete_project_async
+from vercel.projects import create_project, delete_project, get_projects, update_project
+from vercel.projects.aio import (
+    create_project as create_project_async,
+    delete_project as delete_project_async,
+    get_projects as get_projects_async,
+    update_project as update_project_async,
+)
 
 load_dotenv()
 

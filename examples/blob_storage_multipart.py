@@ -12,11 +12,12 @@ The uploader pattern:
 - You control part creation and concurrency
 """
 
-import os
 import asyncio
+import os
+
 from dotenv import load_dotenv
 
-from vercel.blob import BlobClient, AsyncBlobClient
+from vercel.blob import AsyncBlobClient, BlobClient
 
 load_dotenv()
 
@@ -45,7 +46,7 @@ def sync_example():
         add_random_suffix=True,
     )
 
-    print(f"Created uploader with:")
+    print("Created uploader with:")
     print(f"  Upload ID: {uploader.upload_id}")
     print(f"  Key: {uploader.key}\n")
 
@@ -61,7 +62,7 @@ def sync_example():
     print("Completing multipart upload...")
     result = uploader.complete(parts)
 
-    print(f"\nUpload completed!")
+    print("\nUpload completed!")
     print(f"  URL: {result.url}")
     print(f"  Pathname: {result.pathname}")
     print(f"  Size: {getattr(result, 'size', 'N/A')} bytes")
@@ -85,7 +86,7 @@ async def async_example():
         add_random_suffix=True,
     )
 
-    print(f"Created uploader with:")
+    print("Created uploader with:")
     print(f"  Upload ID: {uploader.upload_id}")
     print(f"  Key: {uploader.key}\n")
 
@@ -101,7 +102,7 @@ async def async_example():
     print("\nCompleting multipart upload...")
     result = await uploader.complete(parts)
 
-    print(f"\nUpload completed!")
+    print("\nUpload completed!")
     print(f"  URL: {result.url}")
     print(f"  Pathname: {result.pathname}")
     print(f"  Size: {getattr(result, 'size', 'N/A')} bytes")
@@ -126,7 +127,7 @@ async def async_with_file_example():
         content_type="application/octet-stream",
     )
 
-    print(f"\nCreated uploader for file upload")
+    print("\nCreated uploader for file upload")
     print(f"  Upload ID: {uploader.upload_id}")
     print(f"  Key: {uploader.key}\n")
 
@@ -148,7 +149,7 @@ async def async_with_file_example():
     print("\nCompleting multipart upload...")
     result = await uploader.complete(parts)
 
-    print(f"\nFile upload completed!")
+    print("\nFile upload completed!")
     print(f"  URL: {result.url}")
     print(f"  Pathname: {result.pathname}")
     print(f"  Size: {getattr(result, 'size', 'N/A')} bytes")

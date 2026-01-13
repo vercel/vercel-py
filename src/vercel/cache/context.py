@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Mapping
 
 from .types import PurgeAPI
-
 
 _cv_wait_until: ContextVar[Callable[[Awaitable[object]], None] | None] = ContextVar(
     "vercel_wait_until", default=None

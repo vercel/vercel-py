@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Callable, Awaitable, Mapping, cast
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+
 import httpx
 
 from .errors import (
@@ -12,6 +14,7 @@ from .errors import (
     BlobError,
     BlobFileTooLargeError,
     BlobNotFoundError,
+    BlobPathnameMismatchError,
     BlobServiceNotAvailable,
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
@@ -19,22 +22,21 @@ from .errors import (
     BlobUnknownError,
 )
 from .utils import (
+    PutHeaders,
     StreamingBodyWithProgress,
     UploadProgressEvent,
-    PutHeaders,
     compute_body_length,
     debug,
+    ensure_token,
+    extract_store_id_from_token,
     get_api_url,
     get_api_version,
     get_proxy_through_alternative_api_header_from_env,
     get_retries,
-    ensure_token,
     make_request_id,
     parse_rfc7231_retry_after,
     should_use_x_content_length,
-    extract_store_id_from_token,
 )
-from .errors import BlobPathnameMismatchError
 
 
 def _map_error(response: httpx.Response) -> tuple[str, BlobError]:

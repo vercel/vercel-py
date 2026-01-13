@@ -7,16 +7,17 @@ parts of the requests including parameters, body content, and error handling.
 """
 
 import os
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 # Import both sync and async functions
-from vercel.projects import get_projects, create_project, update_project, delete_project
+from vercel.projects import create_project, delete_project, get_projects, update_project
 from vercel.projects.projects import (
-    get_projects_async,
     create_project_async,
-    update_project_async,
     delete_project_async,
+    get_projects_async,
+    update_project_async,
 )
 
 

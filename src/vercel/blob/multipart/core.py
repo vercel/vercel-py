@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable, cast
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 from urllib.parse import quote
 
 from ..api import request_api, request_api_async
-from ..utils import UploadProgressEvent, PutHeaders
+from ..utils import PutHeaders, UploadProgressEvent
 
 
 def call_create_multipart_upload(
