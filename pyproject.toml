@@ -21,7 +21,7 @@ dependencies = [
 [project.scripts]
 vercel = "vercel.__main__:main"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "ruff>=0.5.0",
     "pytest>=7.0.0",
@@ -30,6 +30,9 @@ dev = [
     "build",
     "twine",
 ]
+
+[tool.uv]
+default-groups = ["dev"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
