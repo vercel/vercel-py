@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import TypedDict
 from dataclasses import dataclass
+from typing import TypedDict
 
 
 class ProjectInfo(TypedDict):

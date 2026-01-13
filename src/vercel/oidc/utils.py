@@ -39,7 +39,7 @@ def get_vercel_cli_token() -> str | None:
     if not os.path.exists(token_path):
         return None
     try:
-        with open(token_path, "r", encoding="utf-8") as f:
+        with open(token_path, encoding="utf-8") as f:
             data = json.load(f)
         token = data.get("token")
         if isinstance(token, str) and token:
@@ -70,7 +70,7 @@ def find_project_info() -> ProjectInfo:
     if not os.path.exists(prj_path):
         raise RuntimeError("project.json not found")
     try:
-        with open(prj_path, "r", encoding="utf-8") as f:
+        with open(prj_path, encoding="utf-8") as f:
             prj = json.load(f)
         project_id = prj.get("projectId")
         team_id = prj.get("orgId") if isinstance(prj.get("orgId"), str) else None
@@ -113,7 +113,7 @@ def load_token(project_id: str) -> VercelTokenResponse | None:
     if not os.path.exists(token_path):
         return None
     try:
-        with open(token_path, "r", encoding="utf-8") as f:
+        with open(token_path, encoding="utf-8") as f:
             data = json.load(f)
         token = data.get("token")
         if isinstance(token, str):

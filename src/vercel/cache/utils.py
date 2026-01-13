@@ -1,4 +1,4 @@
-from typing import Callable
+from collections.abc import Callable
 
 _DEFAULT_NAMESPACE_SEPARATOR = "$"
 

@@ -9,16 +9,7 @@ from typing import Any
 
 import httpx
 
-from .utils import (
-    PutHeaders,
-    UploadProgressEvent,
-    parse_datetime,
-    is_url,
-    require_public_access,
-    ensure_token,
-    create_put_headers,
-    validate_path,
-)
+from .._telemetry.tracker import telemetry, track
 from .api import request_api, request_api_async
 from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
@@ -29,8 +20,16 @@ from .types import (
     ListBlobResult as ListBlobResultType,
     PutBlobResult as PutBlobResultType,
 )
-
-from .._telemetry.tracker import telemetry, track
+from .utils import (
+    PutHeaders,
+    UploadProgressEvent,
+    create_put_headers,
+    ensure_token,
+    is_url,
+    parse_datetime,
+    require_public_access,
+    validate_path,
+)
 
 # Context variable to store the delete count for telemetry
 # This allows the derive function to access the count after the iterable is consumed
@@ -245,21 +244,21 @@ async def put_async(
 
 class _CountedIterable:
     """Wrapper for iterables that preserves count even after consumption.
-    
+
     This is used to handle generators and other single-use iterables
     passed to delete/delete_async. The wrapper converts the iterable
     to a list once, so that the count is preserved even after the
     iterable is fully consumed by the function.
     """
-    
+
     def __init__(self, iterable: Iterable[str]) -> None:
         """Convert the iterable to a list to preserve it for later counting."""
         self.items = [str(item) for item in iterable]
-    
+
     def __iter__(self) -> Iterator[str]:
         """Allow iteration over the preserved items."""
         return iter(self.items)
-    
+
     def __len__(self) -> int:
         """Return the count of items."""
         return len(self.items)
@@ -272,7 +271,7 @@ def _derive_delete_count(args: tuple, kwargs: dict, result: Any) -> int:
     if count is not None:
         _delete_count_context.set(None)  # Clear it for the next call
         return count
-    
+
     # Fallback: try to derive from the argument
     url_or_path = kwargs.get("url_or_path", args[0] if args else None)
     if url_or_path is None:
@@ -308,7 +307,7 @@ def delete(
     else:
         urls = [str(url_or_path)]
         _delete_count_context.set(1)
-    
+
     request_api(
         "/delete",
         "POST",
@@ -337,7 +336,7 @@ async def delete_async(
     else:
         urls = [str(url_or_path)]
         _delete_count_context.set(1)
-    
+
     await request_api_async(
         "/delete",
         "POST",

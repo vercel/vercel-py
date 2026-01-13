@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .projects.client import ProjectsClient, AsyncProjectsClient
-from .deployments.client import DeploymentsClient, AsyncDeploymentsClient
+from .deployments.client import AsyncDeploymentsClient, DeploymentsClient
+from .projects.client import AsyncProjectsClient, ProjectsClient
 
 
 class Vercel:

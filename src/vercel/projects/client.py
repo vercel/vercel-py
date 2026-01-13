@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from typing import Any
-from .projects import create_project, update_project, delete_project, get_projects
+
 from .aio import (
     create_project as acreate_project,
-    update_project as aupdate_project,
     delete_project as adelete_project,
     get_projects as aget_projects,
+    update_project as aupdate_project,
 )
+from .projects import create_project, delete_project, get_projects, update_project
 
 
 class ProjectsClient:

@@ -1,14 +1,14 @@
 from .api import (
-    create_multipart_upload,
-    create_multipart_upload_async,
-    upload_part,
-    upload_part_async,
+    AsyncMultipartUploader,
+    MultipartUploader,
     complete_multipart_upload,
     complete_multipart_upload_async,
+    create_multipart_upload,
+    create_multipart_upload_async,
     create_multipart_uploader,
     create_multipart_uploader_async,
-    MultipartUploader,
-    AsyncMultipartUploader,
+    upload_part,
+    upload_part_async,
 )
 from .uploader import (
     auto_multipart_upload,

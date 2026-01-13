@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Sequence, Mapping, Callable
-import httpx
 import json
-from .types import Cache, AsyncCache
+from collections.abc import Callable, Mapping, Sequence
+
+import httpx
 
 from .._telemetry.tracker import track
+from .types import AsyncCache, Cache
 
 HEADERS_VERCEL_CACHE_STATE = "x-vercel-cache-state"
 HEADERS_VERCEL_REVALIDATE = "x-vercel-revalidate"
@@ -77,7 +78,11 @@ class BuildCache(Cache):
             if r.status_code != 200:
                 raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
             # Track telemetry
-            track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
+            track(
+                "cache_set",
+                ttl_seconds=options.get("ttl") if options else None,
+                has_tags=bool(options and options.get("tags")),
+            )
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
@@ -212,7 +217,11 @@ class AsyncBuildCache(AsyncCache):
                     raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
                 await r.aclose()
             # Track telemetry
-            track("cache_set", ttl_seconds=options.get("ttl") if options else None, has_tags=bool(options and options.get("tags")))
+            track(
+                "cache_set",
+                ttl_seconds=options.get("ttl") if options else None,
+                has_tags=bool(options and options.get("tags")),
+            )
         except Exception as e:
             if self._on_error:
                 self._on_error(e)

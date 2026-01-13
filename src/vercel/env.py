@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, asdict
-from typing import Mapping
-
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 
 __all__ = ["Env", "get_env"]
 

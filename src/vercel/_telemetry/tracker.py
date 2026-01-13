@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import functools
 import inspect
-import os
 import threading
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 if TYPE_CHECKING:
     from .client import TelemetryClient
@@ -18,9 +18,9 @@ _telemetry_client_lock = threading.Lock()
 T = TypeVar("T", bound=Callable[..., Any])
 
 
-def get_client() -> Optional[TelemetryClient]:
+def get_client() -> TelemetryClient | None:
     """Get or create the telemetry client singleton (thread-safe).
-    
+
     Returns:
         TelemetryClient instance, or None if initialization fails.
     """
@@ -35,6 +35,7 @@ def get_client() -> Optional[TelemetryClient]:
         if client is None:
             try:
                 from .client import TelemetryClient
+
                 _telemetry_client = TelemetryClient()
             except Exception:
                 _telemetry_client = None
@@ -43,11 +44,11 @@ def get_client() -> Optional[TelemetryClient]:
 
 def track(event: str, **attrs: Any) -> None:
     """Track a telemetry event.
-    
+
     This is the main entry point for tracking telemetry events.
     All attributes are passed through to the client's track method,
     which handles credential extraction and field whitelisting.
-    
+
     Args:
         event: The event/action being tracked (e.g., 'blob_put', 'cache_get')
         **attrs: Additional event attributes (e.g., user_id, team_id, token, etc.)
@@ -64,14 +65,14 @@ def track(event: str, **attrs: Any) -> None:
 
 def with_telemetry(
     action: str,
-    extract_metadata: Optional[Callable[..., dict[str, Any]]] = None,
-    extract_token: Optional[Callable[..., Optional[str]]] = None,
-    extract_team_id: Optional[Callable[..., Optional[str]]] = None,
-    extract_project_id: Optional[Callable[..., Optional[str]]] = None,
+    extract_metadata: Callable[..., dict[str, Any]] | None = None,
+    extract_token: Callable[..., str | None] | None = None,
+    extract_team_id: Callable[..., str | None] | None = None,
+    extract_project_id: Callable[..., str | None] | None = None,
 ) -> Callable[[T], T]:
     """
     Create a decorator that automatically tracks telemetry for a function.
-    
+
     Usage:
         @with_telemetry(
             action="blob_put",
@@ -79,53 +80,54 @@ def with_telemetry(
         )
         def put(self, path, size=None):
             ...
-    
+
     Args:
         action: The action name to track
         extract_metadata: Optional function to extract metadata from function call
         extract_token: Optional function to extract token from function call
         extract_team_id: Optional function to extract team_id from function call
         extract_project_id: Optional function to extract project_id from function call
-    
+
     Returns:
         Decorator function
     """
+
     def decorator(func: T) -> T:
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
             # Execute the original function
             result = func(*args, **kwargs)
-            
+
             # Extract metadata and credentials
             metadata = None
             token = None
             team_id = None
             project_id = None
-            
+
             if extract_metadata:
                 try:
                     metadata = extract_metadata(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             if extract_token:
                 try:
                     token = extract_token(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             if extract_team_id:
                 try:
                     team_id = extract_team_id(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             if extract_project_id:
                 try:
                     project_id = extract_project_id(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             # Track the event
             track(
                 action,
@@ -134,44 +136,44 @@ def with_telemetry(
                 project_id=project_id,
                 **(metadata or {}),
             )
-            
+
             return result
-        
+
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
             # Execute the original function
             result = await func(*args, **kwargs)
-            
+
             # Extract metadata and credentials (same as sync)
             metadata = None
             token = None
             team_id = None
             project_id = None
-            
+
             if extract_metadata:
                 try:
                     metadata = extract_metadata(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             if extract_token:
                 try:
                     token = extract_token(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             if extract_team_id:
                 try:
                     team_id = extract_team_id(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             if extract_project_id:
                 try:
                     project_id = extract_project_id(*args, **kwargs)
                 except Exception:
                     pass
-            
+
             # Track the event
             track(
                 action,
@@ -180,16 +182,17 @@ def with_telemetry(
                 project_id=project_id,
                 **(metadata or {}),
             )
-            
+
             return result
-        
+
         # Return appropriate wrapper based on whether function is async
         import inspect
+
         if inspect.iscoroutinefunction(func):
             return async_wrapper  # type: ignore
         else:
             return sync_wrapper  # type: ignore
-    
+
     return decorator
 
 
@@ -224,6 +227,7 @@ def telemetry(
         def delete(urls: list[str], *, token: str | None = None) -> None:
             ...
     """
+
     def decorator(func: T) -> T:
         is_coro = inspect.iscoroutinefunction(func)
         sig = inspect.signature(func)

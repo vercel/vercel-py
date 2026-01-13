@@ -2,23 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from typing import Any, Callable, Awaitable, Iterable, Iterator, AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Any
 
+from ..errors import BlobError
 from ..utils import (
     UploadProgressEvent,
     compute_body_length,
     create_put_headers,
     require_public_access,
 )
-from ..errors import BlobError
 from .core import (
+    call_complete_multipart_upload,
+    call_complete_multipart_upload_async,
     call_create_multipart_upload,
     call_create_multipart_upload_async,
     call_upload_part,
     call_upload_part_async,
-    call_complete_multipart_upload,
-    call_complete_multipart_upload_async,
 )
 
 DEFAULT_PART_SIZE = 8 * 1024 * 1024  # 8MB

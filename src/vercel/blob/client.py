@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from os import PathLike
-from typing import Any, Callable
+from typing import Any
 
 from .errors import BlobNoTokenProvidedError
 from .multipart.api import create_multipart_uploader, create_multipart_uploader_async

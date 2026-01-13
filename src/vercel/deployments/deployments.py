@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .._telemetry.tracker import track
 import httpx
+
+from .._telemetry.tracker import track
 
 DEFAULT_API_BASE_URL = "https://api.vercel.com"
 DEFAULT_TIMEOUT = 60.0
@@ -120,7 +121,12 @@ def create_deployment(
             f"Failed to create deployment: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track("deployment_create", token=token, target=body.get("target"), force_new=bool(force_new) if force_new is not None else None)
+    track(
+        "deployment_create",
+        token=token,
+        target=body.get("target"),
+        force_new=bool(force_new) if force_new is not None else None,
+    )
     return resp.json()
 
 
@@ -275,5 +281,10 @@ async def create_deployment_async(
             f"Failed to create deployment: {resp.status_code} {resp.reason_phrase} - {data}"
         )
     # Track telemetry
-    track("deployment_create", token=token, target=body.get("target"), force_new=bool(force_new) if force_new is not None else None)
+    track(
+        "deployment_create",
+        token=token,
+        target=body.get("target"),
+        force_new=bool(force_new) if force_new is not None else None,
+    )
     return resp.json()

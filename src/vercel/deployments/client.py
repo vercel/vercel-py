@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .deployments import create_deployment, upload_file
 from .aio import create_deployment as acreate_deployment, upload_file as aupload_file
+from .deployments import create_deployment, upload_file
 
 
 class DeploymentsClient:

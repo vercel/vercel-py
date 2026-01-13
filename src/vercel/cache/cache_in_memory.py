@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Sequence
-from .types import Cache, AsyncCache
+from collections.abc import Sequence
 
 from .._telemetry.tracker import track
+from .types import AsyncCache, Cache
+
 
 class InMemoryCache(Cache):
     def __init__(self) -> None:

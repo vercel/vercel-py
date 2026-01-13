@@ -31,8 +31,12 @@ jobs:
 
       - name: Lint
         run: |
-          uv run ruff format
-          uv run ruff check --fix .
+          # The CI ensures that the code is formatted and complain if not.
+          # It's on US to commit already formatted clean code.
+          uv run ruff check
+
+      - name: Typecheck
+        run: |
           uv run mypy src
           uv run python -c "import vercel, vercel.cache, vercel.headers, vercel.oidc"
 
