@@ -1,37 +1,58 @@
+"""Projects API client classes."""
+
 from __future__ import annotations
 
 from typing import Any
 
-from .aio import (
-    create_project as acreate_project,
-    delete_project as adelete_project,
-    get_projects as aget_projects,
-    update_project as aupdate_project,
+from .._http import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_TIMEOUT,
+    AsyncTransport,
+    BlockingTransport,
+    HTTPConfig,
+    iter_coroutine,
 )
-from .projects import create_project, delete_project, get_projects, update_project
+from ._core import _BaseProjectsClient
 
 
-class ProjectsClient:
+class ProjectsClient(_BaseProjectsClient):
+    """Synchronous client for Vercel Projects API."""
+
     def __init__(
         self,
         access_token: str | None = None,
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        self._access_token = access_token
-        self._base_url = base_url or "https://api.vercel.com"
-        self._timeout = timeout or 30.0
+        config = HTTPConfig(
+            base_url=base_url or DEFAULT_API_BASE_URL,
+            timeout=timeout or DEFAULT_TIMEOUT,
+            token=access_token,
+        )
+        self._transport = BlockingTransport(config)
+
+    def get_projects(
+        self,
+        *,
+        team_id: str | None = None,
+        slug: str | None = None,
+        query: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retrieve a list of projects."""
+        return iter_coroutine(
+            self._get_projects(team_id=team_id, slug=slug, query=query)
+        )
 
     def create_project(
-        self, *, body: dict[str, Any], team_id: str | None = None, slug: str | None = None
+        self,
+        *,
+        body: dict[str, Any],
+        team_id: str | None = None,
+        slug: str | None = None,
     ) -> dict[str, Any]:
-        return create_project(
-            body=body,
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            base_url=self._base_url,
-            timeout=self._timeout,
+        """Create a new project."""
+        return iter_coroutine(
+            self._create_project(body=body, team_id=team_id, slug=slug)
         )
 
     def update_project(
@@ -42,67 +63,59 @@ class ProjectsClient:
         team_id: str | None = None,
         slug: str | None = None,
     ) -> dict[str, Any]:
-        return update_project(
-            id_or_name=id_or_name,
-            body=body,
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            base_url=self._base_url,
-            timeout=self._timeout,
+        """Update an existing project by id or name."""
+        return iter_coroutine(
+            self._update_project(id_or_name, body=body, team_id=team_id, slug=slug)
         )
 
     def delete_project(
-        self, *, id_or_name: str, team_id: str | None = None, slug: str | None = None
-    ) -> None:
-        return delete_project(
-            id_or_name=id_or_name,
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            base_url=self._base_url,
-            timeout=self._timeout,
-        )
-
-    def get_projects(
         self,
         *,
+        id_or_name: str,
         team_id: str | None = None,
         slug: str | None = None,
-        query: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return get_projects(
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            query=query,
-            base_url=self._base_url,
-            timeout=self._timeout,
+    ) -> None:
+        """Delete a project by id or name."""
+        return iter_coroutine(
+            self._delete_project(id_or_name, team_id=team_id, slug=slug)
         )
 
 
-class AsyncProjectsClient:
+class AsyncProjectsClient(_BaseProjectsClient):
+    """Asynchronous client for Vercel Projects API."""
+
     def __init__(
         self,
         access_token: str | None = None,
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        self._access_token = access_token
-        self._base_url = base_url or "https://api.vercel.com"
-        self._timeout = timeout or 30.0
+        config = HTTPConfig(
+            base_url=base_url or DEFAULT_API_BASE_URL,
+            timeout=timeout or DEFAULT_TIMEOUT,
+            token=access_token,
+        )
+        self._transport = AsyncTransport(config)
+
+    async def get_projects(
+        self,
+        *,
+        team_id: str | None = None,
+        slug: str | None = None,
+        query: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retrieve a list of projects."""
+        return await self._get_projects(team_id=team_id, slug=slug, query=query)
 
     async def create_project(
-        self, *, body: dict[str, Any], team_id: str | None = None, slug: str | None = None
+        self,
+        *,
+        body: dict[str, Any],
+        team_id: str | None = None,
+        slug: str | None = None,
     ) -> dict[str, Any]:
-        return await acreate_project(
-            body=body,
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            base_url=self._base_url,
-            timeout=self._timeout,
-        )
+        """Create a new project."""
+        return await self._create_project(body=body, team_id=team_id, slug=slug)
 
     async def update_project(
         self,
@@ -112,43 +125,18 @@ class AsyncProjectsClient:
         team_id: str | None = None,
         slug: str | None = None,
     ) -> dict[str, Any]:
-        return await aupdate_project(
-            id_or_name=id_or_name,
-            body=body,
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            base_url=self._base_url,
-            timeout=self._timeout,
-        )
+        """Update an existing project by id or name."""
+        return await self._update_project(id_or_name, body=body, team_id=team_id, slug=slug)
 
     async def delete_project(
-        self, *, id_or_name: str, team_id: str | None = None, slug: str | None = None
-    ) -> None:
-        return await adelete_project(
-            id_or_name=id_or_name,
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            base_url=self._base_url,
-            timeout=self._timeout,
-        )
-
-    async def get_projects(
         self,
         *,
+        id_or_name: str,
         team_id: str | None = None,
         slug: str | None = None,
-        query: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await aget_projects(
-            token=self._access_token,
-            team_id=team_id,
-            slug=slug,
-            query=query,
-            base_url=self._base_url,
-            timeout=self._timeout,
-        )
+    ) -> None:
+        """Delete a project by id or name."""
+        return await self._delete_project(id_or_name, team_id=team_id, slug=slug)
 
 
 __all__ = [
