@@ -10,6 +10,13 @@ from typing import Any
 import httpx
 
 from .._telemetry.tracker import telemetry, track
+from ._core import (
+    build_create_folder_result,
+    build_head_blob_result,
+    build_list_blob_result,
+    build_list_params,
+    build_put_blob_result,
+)
 from .api import request_api, request_api_async
 from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
@@ -26,7 +33,6 @@ from .utils import (
     create_put_headers,
     ensure_token,
     is_url,
-    parse_datetime,
     require_public_access,
     validate_path,
 )
@@ -96,13 +102,7 @@ def put(
             multipart=True,
             size_bytes=size_bytes,
         )
-        return PutBlobResultType(
-            url=raw["url"],
-            download_url=raw["downloadUrl"],
-            pathname=raw["pathname"],
-            content_type=raw["contentType"],
-            content_disposition=raw["contentDisposition"],
-        )
+        return build_put_blob_result(raw)
 
     params = {"pathname": path}
     raw = request_api(
@@ -128,13 +128,7 @@ def put(
         multipart=False,
         size_bytes=size_bytes,
     )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
-    )
+    return build_put_blob_result(raw)
 
 
 async def put_async(
@@ -201,13 +195,7 @@ async def put_async(
             multipart=True,
             size_bytes=size_bytes,
         )
-        return PutBlobResultType(
-            url=raw["url"],
-            download_url=raw["downloadUrl"],
-            pathname=raw["pathname"],
-            content_type=raw["contentType"],
-            content_disposition=raw["contentDisposition"],
-        )
+        return build_put_blob_result(raw)
 
     params = {"pathname": path}
     raw = await request_api_async(
@@ -233,13 +221,7 @@ async def put_async(
         multipart=False,
         size_bytes=size_bytes,
     )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
-    )
+    return build_put_blob_result(raw)
 
 
 class _CountedIterable:
@@ -355,21 +337,7 @@ def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
         token=token,
         params=params,
     )
-    uploaded_at = (
-        parse_datetime(resp["uploadedAt"])
-        if isinstance(resp.get("uploadedAt"), str)
-        else resp["uploadedAt"]
-    )
-    return HeadBlobResultType(
-        size=resp["size"],
-        uploaded_at=uploaded_at,
-        pathname=resp["pathname"],
-        content_type=resp["contentType"],
-        content_disposition=resp["contentDisposition"],
-        url=resp["url"],
-        download_url=resp["downloadUrl"],
-        cache_control=resp["cacheControl"],
-    )
+    return build_head_blob_result(resp)
 
 
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
@@ -381,21 +349,7 @@ async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobR
         token=token,
         params=params,
     )
-    uploaded_at = (
-        parse_datetime(resp["uploadedAt"])
-        if isinstance(resp.get("uploadedAt"), str)
-        else resp["uploadedAt"]
-    )
-    return HeadBlobResultType(
-        size=resp["size"],
-        uploaded_at=uploaded_at,
-        pathname=resp["pathname"],
-        content_type=resp["contentType"],
-        content_disposition=resp["contentDisposition"],
-        url=resp["url"],
-        download_url=resp["downloadUrl"],
-        cache_control=resp["cacheControl"],
-    )
+    return build_head_blob_result(resp)
 
 
 def get(
@@ -467,44 +421,14 @@ def list_objects(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    params: dict[str, Any] = {}
-    if limit is not None:
-        params["limit"] = int(limit)
-    if prefix is not None:
-        params["prefix"] = prefix
-    if cursor is not None:
-        params["cursor"] = cursor
-    if mode is not None:
-        params["mode"] = mode
-
+    params = build_list_params(limit, prefix, cursor, mode)
     resp = request_api(
         "",
         "GET",
         token=token,
         params=params,
     )
-    blobs_list: list[ListBlobItem] = []
-    for b in resp.get("blobs", []):
-        uploaded_at = (
-            parse_datetime(b["uploadedAt"])
-            if isinstance(b.get("uploadedAt"), str)
-            else b["uploadedAt"]
-        )
-        blobs_list.append(
-            ListBlobItem(
-                url=b["url"],
-                download_url=b["downloadUrl"],
-                pathname=b["pathname"],
-                size=b["size"],
-                uploaded_at=uploaded_at,
-            )
-        )
-    return ListBlobResultType(
-        blobs=blobs_list,
-        cursor=resp.get("cursor"),
-        has_more=resp.get("hasMore", False),
-        folders=resp.get("folders"),
-    )
+    return build_list_blob_result(resp)
 
 
 async def list_objects_async(
@@ -516,44 +440,14 @@ async def list_objects_async(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    params: dict[str, Any] = {}
-    if limit is not None:
-        params["limit"] = int(limit)
-    if prefix is not None:
-        params["prefix"] = prefix
-    if cursor is not None:
-        params["cursor"] = cursor
-    if mode is not None:
-        params["mode"] = mode
-
+    params = build_list_params(limit, prefix, cursor, mode)
     resp = await request_api_async(
         "",
         "GET",
         token=token,
         params=params,
     )
-    blobs_list: list[ListBlobItem] = []
-    for b in resp.get("blobs", []):
-        uploaded_at = (
-            parse_datetime(b["uploadedAt"])
-            if isinstance(b.get("uploadedAt"), str)
-            else b["uploadedAt"]
-        )
-        blobs_list.append(
-            ListBlobItem(
-                url=b["url"],
-                download_url=b["downloadUrl"],
-                pathname=b["pathname"],
-                size=b["size"],
-                uploaded_at=uploaded_at,
-            )
-        )
-    return ListBlobResultType(
-        blobs=blobs_list,
-        cursor=resp.get("cursor"),
-        has_more=resp.get("hasMore", False),
-        folders=resp.get("folders"),
-    )
+    return build_list_blob_result(resp)
 
 
 def iter_objects(
@@ -664,13 +558,7 @@ def copy(
         headers=headers,
         params=params,
     )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
-    )
+    return build_put_blob_result(raw)
 
 
 async def copy_async(
@@ -707,13 +595,7 @@ async def copy_async(
         headers=headers,
         params=params,
     )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
-    )
+    return build_put_blob_result(raw)
 
 
 def create_folder(
@@ -736,7 +618,7 @@ def create_folder(
         headers=headers,
         params=params,
     )
-    return CreateFolderResultType(pathname=raw["pathname"], url=raw["url"])
+    return build_create_folder_result(raw)
 
 
 async def create_folder_async(
@@ -759,7 +641,7 @@ async def create_folder_async(
         headers=headers,
         params=params,
     )
-    return CreateFolderResultType(pathname=raw["pathname"], url=raw["url"])
+    return build_create_folder_result(raw)
 
 
 def upload_file(
