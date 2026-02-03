@@ -40,8 +40,11 @@ jobs:
       url: https://pypi.org/p/vercel
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - uses: astral-sh/setup-uv@v3
-      - run: uv venv --python 3.12
+      - run: uv venv --python 3.14
       - run: uv pip install build
       - name: Create tag from version
         run: |
