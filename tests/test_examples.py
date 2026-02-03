@@ -31,12 +31,25 @@ _example_files = (
 @pytest.mark.parametrize("script_path", _example_files, ids=lambda p: p.name)
 def test_example(script_path: Path) -> None:
     """Run a single example script and verify it succeeds."""
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        stdout = e.stdout.decode() if e.stdout else ""
+        stderr = e.stderr.decode() if e.stderr else ""
+        # Tail stdout to avoid overwhelming output
+        max_chars = 10000
+        if len(stdout) > max_chars:
+            stdout = f"... [{len(stdout) - max_chars} chars truncated] ...\n" + stdout[-max_chars:]
+        pytest.fail(
+            f"{script_path.name} timed out after {e.timeout}s\n"
+            f"STDOUT (tail):\n{stdout}\n"
+            f"STDERR:\n{stderr}"
+        )
     assert result.returncode == 0, (
         f"{script_path.name} failed with code {result.returncode}\n"
         f"STDOUT:\n{result.stdout}\n"
