@@ -3,11 +3,30 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from .config import HTTPConfig, require_token
+
+
+@dataclass(frozen=True, slots=True)
+class JSONBody:
+    """JSON request body - automatically sets Content-Type to application/json."""
+
+    data: Any
+
+
+@dataclass(frozen=True, slots=True)
+class BytesBody:
+    """Raw bytes request body with explicit content type."""
+
+    data: bytes
+    content_type: str = "application/octet-stream"
+
+
+RequestBody = JSONBody | BytesBody | None
 
 
 class BaseTransport(abc.ABC):
@@ -27,7 +46,8 @@ class BaseTransport(abc.ABC):
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json: Any | None = None,
+        body: RequestBody = None,
+        headers: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send an HTTP request and return the response."""
@@ -63,14 +83,26 @@ class BlockingTransport(BaseTransport):
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json: Any | None = None,
+        body: RequestBody = None,
+        headers: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send a synchronous HTTP request (wrapped as async for iter_coroutine)."""
         bearer = self._require_token()
         url = self._config.base_url.rstrip("/") + path
         effective_timeout = timeout if timeout is not None else self._config.timeout
-        headers = self._config.get_headers(bearer)
+        request_headers = self._config.get_headers(bearer)
+        if headers:
+            request_headers.update(headers)
+
+        # Unpack content based on type
+        json_data: Any | None = None
+        raw_content: bytes | None = None
+        if isinstance(body, JSONBody):
+            json_data = body.data
+        elif isinstance(body, BytesBody):
+            raw_content = body.data
+            request_headers["Content-Type"] = body.content_type
 
         # Use a fresh client for each request (ephemeral pattern)
         with httpx.Client(timeout=httpx.Timeout(effective_timeout)) as client:
@@ -78,8 +110,9 @@ class BlockingTransport(BaseTransport):
                 method,
                 url,
                 params=params or None,
-                json=json,
-                headers=headers,
+                json=json_data,
+                content=raw_content,
+                headers=request_headers,
             )
         return resp
 
@@ -103,14 +136,26 @@ class AsyncTransport(BaseTransport):
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json: Any | None = None,
+        body: RequestBody = None,
+        headers: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send an asynchronous HTTP request."""
         bearer = self._require_token()
         url = self._config.base_url.rstrip("/") + path
         effective_timeout = timeout if timeout is not None else self._config.timeout
-        headers = self._config.get_headers(bearer)
+        request_headers = self._config.get_headers(bearer)
+        if headers:
+            request_headers.update(headers)
+
+        # Unpack content based on type
+        json_data: Any | None = None
+        raw_content: bytes | None = None
+        if isinstance(body, JSONBody):
+            json_data = body.data
+        elif isinstance(body, BytesBody):
+            raw_content = body.data
+            request_headers["Content-Type"] = body.content_type
 
         # Use a fresh client for each request (ephemeral pattern)
         async with httpx.AsyncClient(timeout=httpx.Timeout(effective_timeout)) as client:
@@ -118,8 +163,9 @@ class AsyncTransport(BaseTransport):
                 method,
                 url,
                 params=params or None,
-                json=json,
-                headers=headers,
+                json=json_data,
+                content=raw_content,
+                headers=request_headers,
             )
         return resp
 
@@ -128,4 +174,11 @@ class AsyncTransport(BaseTransport):
         pass
 
 
-__all__ = ["BaseTransport", "BlockingTransport", "AsyncTransport"]
+__all__ = [
+    "BaseTransport",
+    "BlockingTransport",
+    "AsyncTransport",
+    "JSONBody",
+    "BytesBody",
+    "RequestBody",
+]

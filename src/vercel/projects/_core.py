@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .._http import BaseTransport
+from .._http import BaseTransport, JSONBody
 from .._telemetry.tracker import track
 
 
@@ -110,7 +110,7 @@ class _BaseProjectsClient:
             "POST",
             "/v11/projects",
             params=params,
-            json=body,
+            body=JSONBody(body),
             timeout=timeout,
         )
 
@@ -148,7 +148,7 @@ class _BaseProjectsClient:
             "PATCH",
             f"/v9/projects/{urllib.parse.quote(id_or_name, safe='')}",
             params=params,
-            json=body,
+            body=JSONBody(body),
             timeout=timeout,
         )
 
