@@ -71,7 +71,7 @@ class BlockingTransport(BaseTransport):
         super().__init__(config)
         self._client: httpx.Client | None = None
 
-    def _get_client(self, timeout: float) -> httpx.Client:
+    def _get_client(self, timeout: float | None) -> httpx.Client:
         """Get or create the HTTP client."""
         if self._client is None:
             self._client = httpx.Client(timeout=httpx.Timeout(timeout))

@@ -41,9 +41,7 @@ def _handle_error_response(
         data = resp.json()
     except Exception:
         data = {"error": resp.text}
-    raise RuntimeError(
-        f"Failed to {operation}: {resp.status_code} {resp.reason_phrase} - {data}"
-    )
+    raise RuntimeError(f"Failed to {operation}: {resp.status_code} {resp.reason_phrase} - {data}")
 
 
 class _BaseProjectsClient:

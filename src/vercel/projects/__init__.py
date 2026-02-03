@@ -34,9 +34,7 @@ def get_projects(
     Returns: dict with keys like {"projects": [...], "pagination": {...}}
     """
     client = SyncProjectsClient(token, base_url, timeout)
-    return iter_coroutine(
-        client._get_projects(team_id=team_id, slug=slug, query=query)
-    )
+    return iter_coroutine(client._get_projects(team_id=team_id, slug=slug, query=query))
 
 
 def create_project(
@@ -54,9 +52,7 @@ def create_project(
     Optional query params: team_id -> teamId, slug -> slug
     """
     client = SyncProjectsClient(token, base_url, timeout)
-    return iter_coroutine(
-        client._create_project(body=body, team_id=team_id, slug=slug)
-    )
+    return iter_coroutine(client._create_project(body=body, team_id=team_id, slug=slug))
 
 
 def update_project(
@@ -71,9 +67,7 @@ def update_project(
 ) -> dict[str, Any]:
     """Update an existing project by id or name."""
     client = SyncProjectsClient(token, base_url, timeout)
-    return iter_coroutine(
-        client._update_project(id_or_name, body=body, team_id=team_id, slug=slug)
-    )
+    return iter_coroutine(client._update_project(id_or_name, body=body, team_id=team_id, slug=slug))
 
 
 def delete_project(
@@ -87,9 +81,7 @@ def delete_project(
 ) -> None:
     """Delete a project by id or name. Returns None on success (204)."""
     client = SyncProjectsClient(token, base_url, timeout)
-    return iter_coroutine(
-        client._delete_project(id_or_name, team_id=team_id, slug=slug)
-    )
+    return iter_coroutine(client._delete_project(id_or_name, team_id=team_id, slug=slug))
 
 
 __all__ = ["get_projects", "create_project", "update_project", "delete_project"]

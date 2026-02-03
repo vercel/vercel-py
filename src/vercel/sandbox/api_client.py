@@ -273,9 +273,7 @@ class APIClient(_SyncAPIClient):
         self, *, sandbox_id: str, cmd_id: str, wait: bool = False
     ) -> CommandResponse | CommandFinishedResponse:
         """Get command status."""
-        return iter_coroutine(
-            self._get_command(sandbox_id=sandbox_id, cmd_id=cmd_id, wait=wait)
-        )
+        return iter_coroutine(self._get_command(sandbox_id=sandbox_id, cmd_id=cmd_id, wait=wait))
 
     def get_logs(self, *, sandbox_id: str, cmd_id: str) -> Generator[LogLine, None, None]:
         """Stream command logs (cannot be unified - uses sync generator)."""

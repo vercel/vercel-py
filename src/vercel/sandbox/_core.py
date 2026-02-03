@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import os
-import posixpath
 import sys
-import tarfile
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,7 +13,6 @@ from .._http import (
     AsyncTransport,
     BaseTransport,
     BlockingTransport,
-    BytesBody,
     HTTPConfig,
     JSONBody,
 )
@@ -27,7 +23,6 @@ from .models import (
     SandboxAndRoutesResponse,
     SandboxResponse,
     SnapshotResponse,
-    WriteFile,
 )
 
 VERSION = "0.1.0"

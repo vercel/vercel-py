@@ -165,9 +165,7 @@ def fetch_vercel_oidc_token(
     auth_token: str, project_id: str, team_id: str | None
 ) -> VercelTokenResponse | None:
     client = SyncOidcClient()
-    return iter_coroutine(
-        client._fetch_vercel_oidc_token(auth_token, project_id, team_id)
-    )
+    return iter_coroutine(client._fetch_vercel_oidc_token(auth_token, project_id, team_id))
 
 
 async def fetch_vercel_oidc_token_async(

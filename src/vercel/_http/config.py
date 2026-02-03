@@ -14,7 +14,7 @@ class HTTPConfig:
     """Configuration for HTTP requests to Vercel API."""
 
     base_url: str = DEFAULT_API_BASE_URL
-    timeout: float = DEFAULT_TIMEOUT
+    timeout: float | None = DEFAULT_TIMEOUT
     token: str | None = None
     default_headers: dict[str, str] = field(default_factory=dict)
 

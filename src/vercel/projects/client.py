@@ -39,9 +39,7 @@ class ProjectsClient(_BaseProjectsClient):
         query: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Retrieve a list of projects."""
-        return iter_coroutine(
-            self._get_projects(team_id=team_id, slug=slug, query=query)
-        )
+        return iter_coroutine(self._get_projects(team_id=team_id, slug=slug, query=query))
 
     def create_project(
         self,
@@ -51,9 +49,7 @@ class ProjectsClient(_BaseProjectsClient):
         slug: str | None = None,
     ) -> dict[str, Any]:
         """Create a new project."""
-        return iter_coroutine(
-            self._create_project(body=body, team_id=team_id, slug=slug)
-        )
+        return iter_coroutine(self._create_project(body=body, team_id=team_id, slug=slug))
 
     def update_project(
         self,
@@ -76,9 +72,7 @@ class ProjectsClient(_BaseProjectsClient):
         slug: str | None = None,
     ) -> None:
         """Delete a project by id or name."""
-        return iter_coroutine(
-            self._delete_project(id_or_name, team_id=team_id, slug=slug)
-        )
+        return iter_coroutine(self._delete_project(id_or_name, team_id=team_id, slug=slug))
 
 
 class AsyncProjectsClient(_BaseProjectsClient):
