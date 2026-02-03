@@ -28,6 +28,7 @@ dev = [
     "ruff>=0.5.0",
     "pytest>=7.0.0",
     "pytest-asyncio",
+    "pytest-xdist",
     "mypy",
     "build",
     "twine",

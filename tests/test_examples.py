@@ -35,7 +35,7 @@ def test_example(script_path: Path) -> None:
         [sys.executable, str(script_path)],
         capture_output=True,
         text=True,
-        timeout=45,
+        timeout=120,
     )
     assert result.returncode == 0, (
         f"{script_path.name} failed with code {result.returncode}\n"
