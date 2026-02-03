@@ -7,7 +7,15 @@ from typing import Any
 
 import httpx
 
-from .._http import BaseTransport, JSONBody
+from .._http import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_TIMEOUT,
+    AsyncTransport,
+    BaseTransport,
+    BlockingTransport,
+    HTTPConfig,
+    JSONBody,
+)
 from .._telemetry.tracker import track
 
 
@@ -194,4 +202,43 @@ class _BaseProjectsClient:
         track("project_delete", token=self._transport._config.token)
 
 
-__all__ = ["_BaseProjectsClient", "_build_team_params", "_handle_error_response"]
+class SyncProjectsClient(_BaseProjectsClient):
+    """Sync client for Projects API operations."""
+
+    def __init__(
+        self,
+        token: str | None,
+        base_url: str = DEFAULT_API_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        config = HTTPConfig(
+            base_url=base_url,
+            timeout=timeout,
+            token=token,
+        )
+        self._transport = BlockingTransport(config)
+
+
+class AsyncProjectsClient(_BaseProjectsClient):
+    """Async client for Projects API operations."""
+
+    def __init__(
+        self,
+        token: str | None,
+        base_url: str = DEFAULT_API_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        config = HTTPConfig(
+            base_url=base_url,
+            timeout=timeout,
+            token=token,
+        )
+        self._transport = AsyncTransport(config)
+
+
+__all__ = [
+    "SyncProjectsClient",
+    "AsyncProjectsClient",
+    "_build_team_params",
+    "_handle_error_response",
+]

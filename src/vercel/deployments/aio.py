@@ -7,27 +7,8 @@ from typing import Any
 from .._http import (
     DEFAULT_API_BASE_URL,
     DEFAULT_TIMEOUT,
-    AsyncTransport,
-    HTTPConfig,
 )
-from ._core import _BaseDeploymentsClient
-
-
-class _EphemeralAsyncClient(_BaseDeploymentsClient):
-    """Internal async client for module-level functions."""
-
-    def __init__(
-        self,
-        token: str | None,
-        base_url: str,
-        timeout: float,
-    ) -> None:
-        config = HTTPConfig(
-            base_url=base_url,
-            timeout=timeout,
-            token=token,
-        )
-        self._transport = AsyncTransport(config)
+from ._core import AsyncDeploymentsClient
 
 
 async def create_deployment(
@@ -49,7 +30,7 @@ async def create_deployment(
     forceNew, skip_auto_detection_confirmation ->
     skipAutoDetectionConfirmation
     """
-    client = _EphemeralAsyncClient(token, base_url, timeout)
+    client = AsyncDeploymentsClient(token, base_url, timeout)
     return await client._create_deployment(
         body=body,
         team_id=team_id,
@@ -73,7 +54,7 @@ async def upload_file(
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Upload a single deployment file to Vercel (async)."""
-    client = _EphemeralAsyncClient(token, base_url, timeout)
+    client = AsyncDeploymentsClient(token, base_url, timeout)
     return await client._upload_file(
         content=content,
         content_length=content_length,

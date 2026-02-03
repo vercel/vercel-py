@@ -7,28 +7,9 @@ from typing import Any
 from .._http import (
     DEFAULT_API_BASE_URL,
     DEFAULT_TIMEOUT,
-    BlockingTransport,
-    HTTPConfig,
     iter_coroutine,
 )
-from ._core import _BaseDeploymentsClient
-
-
-class _EphemeralSyncClient(_BaseDeploymentsClient):
-    """Internal sync client for module-level functions."""
-
-    def __init__(
-        self,
-        token: str | None,
-        base_url: str,
-        timeout: float,
-    ) -> None:
-        config = HTTPConfig(
-            base_url=base_url,
-            timeout=timeout,
-            token=token,
-        )
-        self._transport = BlockingTransport(config)
+from ._core import SyncDeploymentsClient
 
 
 def create_deployment(
@@ -50,7 +31,7 @@ def create_deployment(
     forceNew, skip_auto_detection_confirmation ->
     skipAutoDetectionConfirmation
     """
-    client = _EphemeralSyncClient(token, base_url, timeout)
+    client = SyncDeploymentsClient(token, base_url, timeout)
     return iter_coroutine(
         client._create_deployment(
             body=body,
@@ -76,7 +57,7 @@ def upload_file(
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Upload a single deployment file to Vercel."""
-    client = _EphemeralSyncClient(token, base_url, timeout)
+    client = SyncDeploymentsClient(token, base_url, timeout)
     return iter_coroutine(
         client._upload_file(
             content=content,

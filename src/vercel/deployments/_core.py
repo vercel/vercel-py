@@ -6,7 +6,16 @@ from typing import Any
 
 import httpx
 
-from .._http import BaseTransport, BytesBody, JSONBody
+from .._http import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_TIMEOUT,
+    AsyncTransport,
+    BaseTransport,
+    BlockingTransport,
+    BytesBody,
+    HTTPConfig,
+    JSONBody,
+)
 from .._telemetry.tracker import track
 
 
@@ -143,4 +152,43 @@ class _BaseDeploymentsClient:
         return resp.json()
 
 
-__all__ = ["_BaseDeploymentsClient", "_build_team_params", "_handle_error_response"]
+class SyncDeploymentsClient(_BaseDeploymentsClient):
+    """Sync client for Deployments API operations."""
+
+    def __init__(
+        self,
+        token: str | None,
+        base_url: str = DEFAULT_API_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        config = HTTPConfig(
+            base_url=base_url,
+            timeout=timeout,
+            token=token,
+        )
+        self._transport = BlockingTransport(config)
+
+
+class AsyncDeploymentsClient(_BaseDeploymentsClient):
+    """Async client for Deployments API operations."""
+
+    def __init__(
+        self,
+        token: str | None,
+        base_url: str = DEFAULT_API_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        config = HTTPConfig(
+            base_url=base_url,
+            timeout=timeout,
+            token=token,
+        )
+        self._transport = AsyncTransport(config)
+
+
+__all__ = [
+    "SyncDeploymentsClient",
+    "AsyncDeploymentsClient",
+    "_build_team_params",
+    "_handle_error_response",
+]
