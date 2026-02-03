@@ -38,7 +38,7 @@ jobs:
       - name: Typecheck
         run: |
           uv run mypy src
-          uv run python -c "import vercel, vercel.cache, vercel.headers, vercel.oidc"
+          uv run python -c "import vercel, vercel.cache, vercel.headers, vercel.oidc, vercel.sandbox"
 
       - name: Run tests
         run: uv run pytest -v --capture=tee-sys

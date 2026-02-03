@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 
+# Required on CI, optional locally
+_is_ci = bool(os.getenv("CI"))
+_has_credentials = bool(
+    os.getenv("BLOB_READ_WRITE_TOKEN")
+    and os.getenv("VERCEL_TOKEN")
+    and os.getenv("VERCEL_PROJECT_ID")
+    and os.getenv("VERCEL_TEAM_ID")
+)
+
+
+@pytest.mark.skipif(
+    not _is_ci and not _has_credentials,
+    reason="Requires BLOB_READ_WRITE_TOKEN, VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID",
+)
 def test_examples_run(capsys=None) -> None:
     examples_dir = Path(__file__).resolve().parents[1] / "examples"
     assert examples_dir.is_dir()
