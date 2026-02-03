@@ -145,7 +145,9 @@ async def test():
         print("4. Connecting to WebSocket...")
         host = sandbox.domain(sandbox.interactive_port)
         host = host.replace("https://", "").replace("http://", "")
-        ws_url = f"wss://{host}/ws/client?token={conn_info['token']}&processId={conn_info['processId']}"
+        ws_url = (
+            f"wss://{host}/ws/client?token={conn_info['token']}&processId={conn_info['processId']}"
+        )
 
         # Small delay to ensure server is ready
         await asyncio.sleep(0.5)

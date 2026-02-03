@@ -6,14 +6,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # Source types for Sandbox.create()
 
+
 class _GitSourceRequired(TypedDict):
     """Required fields for GitSource."""
+
     type: Literal["git"]
     url: str
 
 
 class GitSource(_GitSourceRequired, total=False):
     """Git repository source for creating a sandbox."""
+
     depth: int
     revision: str
     username: str
@@ -22,12 +25,14 @@ class GitSource(_GitSourceRequired, total=False):
 
 class TarballSource(TypedDict):
     """Tarball URL source for creating a sandbox."""
+
     type: Literal["tarball"]
     url: str
 
 
 class SnapshotSource(TypedDict):
     """Snapshot source for creating a sandbox."""
+
     type: Literal["snapshot"]
     snapshot_id: str
 
@@ -37,6 +42,7 @@ Source = GitSource | TarballSource | SnapshotSource
 
 class Sandbox(BaseModel):
     """Sandbox metadata from the API."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
@@ -61,6 +67,7 @@ class Sandbox(BaseModel):
 
 class SandboxRoute(BaseModel):
     """Route mapping for a sandbox port."""
+
     url: str
     subdomain: str
     port: int
@@ -68,6 +75,7 @@ class SandboxRoute(BaseModel):
 
 class Pagination(BaseModel):
     """Pagination metadata for list responses."""
+
     count: int
     next: int | None = None
     prev: int | None = None
@@ -75,6 +83,7 @@ class Pagination(BaseModel):
 
 class Command(BaseModel):
     """Command metadata from the API."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
@@ -88,54 +97,64 @@ class Command(BaseModel):
 
 class CommandFinished(Command):
     """Completed command with exit code."""
+
     exit_code: int = Field(alias="exitCode")
 
 
 class SandboxResponse(BaseModel):
     """API response containing a sandbox."""
+
     sandbox: Sandbox
 
 
 class SandboxAndRoutesResponse(SandboxResponse):
     """API response containing a sandbox and its routes."""
+
     routes: list[SandboxRoute]
 
 
 class CommandResponse(BaseModel):
     """API response containing a command."""
+
     command: Command
 
 
 class CommandFinishedResponse(BaseModel):
     """API response containing a finished command."""
+
     command: CommandFinished
 
 
 class EmptyResponse(BaseModel):
     """Empty API response."""
+
     pass
 
 
 class LogLine(BaseModel):
     """Log line from command output."""
+
     stream: Literal["stdout", "stderr"]
     data: str
 
 
 class SandboxesResponse(BaseModel):
     """API response containing a list of sandboxes."""
+
     sandboxes: list[Sandbox]
     pagination: Pagination
 
 
 class WriteFile(TypedDict):
     """File to write to the sandbox."""
+
     path: str
     content: bytes
 
 
 class Snapshot(BaseModel):
     """Snapshot metadata from the API."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
@@ -150,10 +169,12 @@ class Snapshot(BaseModel):
 
 class SnapshotResponse(BaseModel):
     """API response containing a snapshot."""
+
     snapshot: Snapshot
 
 
 class CreateSnapshotResponse(BaseModel):
     """API response containing a snapshot and the stopped sandbox."""
+
     snapshot: Snapshot
     sandbox: Sandbox

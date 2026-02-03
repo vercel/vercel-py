@@ -36,10 +36,12 @@ async def async_demo() -> None:
 
         # Write some files to simulate a "setup" step
         print("\n[2] Writing files to simulate environment setup...")
-        await sandbox1.write_files([
-            {"path": "config.json", "content": b'{"version": "1.0", "env": "async"}'},
-            {"path": "data/users.txt", "content": b"alice\nbob\ncharlie"},
-        ])
+        await sandbox1.write_files(
+            [
+                {"path": "config.json", "content": b'{"version": "1.0", "env": "async"}'},
+                {"path": "data/users.txt", "content": b"alice\nbob\ncharlie"},
+            ]
+        )
 
         config = await sandbox1.read_file("config.json")
         print(f"    Created config.json: {config.decode()}")
@@ -103,10 +105,12 @@ def sync_demo() -> None:
 
         # Write some files to simulate a "setup" step
         print("\n[2] Writing files to simulate environment setup...")
-        sandbox1.write_files([
-            {"path": "config.json", "content": b'{"version": "1.0", "env": "sync"}'},
-            {"path": "data/users.txt", "content": b"alice\nbob\ncharlie"},
-        ])
+        sandbox1.write_files(
+            [
+                {"path": "config.json", "content": b'{"version": "1.0", "env": "sync"}'},
+                {"path": "data/users.txt", "content": b"alice\nbob\ncharlie"},
+            ]
+        )
 
         config = sandbox1.read_file("config.json")
         print(f"    Created config.json: {config.decode()}")

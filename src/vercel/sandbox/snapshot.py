@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from vercel.oidc import Credentials, get_credentials
-
+from ..oidc import Credentials, get_credentials
 from .api_client import APIClient, AsyncAPIClient
 from .models import Snapshot as SnapshotModel
 
@@ -111,4 +110,3 @@ class Snapshot:
         """Delete this snapshot."""
         resp = self.client.delete_snapshot(snapshot_id=self.snapshot.id)
         self.snapshot = resp.snapshot
-

@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from vercel.oidc import Credentials, get_credentials
-
+from ..oidc import Credentials, get_credentials
 from .api_client import APIClient, AsyncAPIClient
 from .command import (
     AsyncCommand,
@@ -123,9 +122,7 @@ class AsyncSandbox:
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> AsyncSandbox:
-        creds: Credentials = get_credentials(
-            token=token, project_id=project_id, team_id=team_id
-        )
+        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         client = AsyncAPIClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = await client.get_sandbox(sandbox_id=sandbox_id)
         return AsyncSandbox(
