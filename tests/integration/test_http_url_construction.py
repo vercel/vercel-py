@@ -13,7 +13,12 @@ import pytest
 import respx
 from httpx import Response
 
-from vercel._http import AsyncTransport, BlockingTransport, HTTPConfig
+from vercel._http import (
+    AsyncTransport,
+    BlockingTransport,
+    create_base_async_client,
+    create_base_client,
+)
 
 
 class TestUrlNormalization:
@@ -54,8 +59,8 @@ class TestUrlNormalization:
         """Test that BlockingTransport normalizes URLs consistently."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = BlockingTransport(config)
+        client = create_base_client(timeout=30.0, base_url=base_url)
+        transport = BlockingTransport(client)
 
         try:
             from vercel._http import iter_coroutine
@@ -90,8 +95,8 @@ class TestUrlNormalization:
         """Test that AsyncTransport normalizes URLs consistently."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = AsyncTransport(config)
+        client = create_base_async_client(timeout=30.0, base_url=base_url)
+        transport = AsyncTransport(client)
 
         try:
             response = await transport.send("GET", path)
@@ -133,8 +138,8 @@ class TestEdgeCases:
         """Test edge cases for URL construction."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = BlockingTransport(config)
+        client = create_base_client(timeout=30.0, base_url=base_url)
+        transport = BlockingTransport(client)
 
         try:
             from vercel._http import iter_coroutine
@@ -163,8 +168,8 @@ class TestCacheUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"data": "cached"}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = BlockingTransport(config)
+        client = create_base_client(timeout=30.0, base_url=base_url)
+        transport = BlockingTransport(client)
 
         try:
             from vercel._http import iter_coroutine
@@ -184,8 +189,8 @@ class TestCacheUrlPatterns:
 
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = BlockingTransport(config)
+        client = create_base_client(timeout=30.0, base_url=base_url)
+        transport = BlockingTransport(client)
 
         try:
             from vercel._http import JSONBody, iter_coroutine
@@ -206,8 +211,8 @@ class TestCacheUrlPatterns:
 
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = BlockingTransport(config)
+        client = create_base_client(timeout=30.0, base_url=base_url)
+        transport = BlockingTransport(client)
 
         try:
             from vercel._http import iter_coroutine
@@ -234,8 +239,8 @@ class TestApiUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"projects": []}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = BlockingTransport(config)
+        client = create_base_client(timeout=30.0, base_url=base_url)
+        transport = BlockingTransport(client)
 
         try:
             from vercel._http import iter_coroutine
@@ -256,8 +261,8 @@ class TestApiUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"id": project_id}))
 
-        config = HTTPConfig(base_url=base_url, timeout=30.0)
-        transport = BlockingTransport(config)
+        client = create_base_client(timeout=30.0, base_url=base_url)
+        transport = BlockingTransport(client)
 
         try:
             from vercel._http import iter_coroutine

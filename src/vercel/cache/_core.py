@@ -9,7 +9,6 @@ from .._http import (
     AsyncTransport,
     BaseTransport,
     BlockingTransport,
-    HTTPConfig,
     JSONBody,
     create_headers_async_client,
     create_headers_client,
@@ -165,8 +164,7 @@ class SyncBuildCache(_BaseBuildCache, Cache):
         self._endpoint = endpoint
         self._on_error = on_error
         client = create_headers_client(headers, timeout=DEFAULT_TIMEOUT, base_url=endpoint)
-        config = HTTPConfig(base_url=endpoint, timeout=DEFAULT_TIMEOUT)
-        self._transport = BlockingTransport(config, client=client)
+        self._transport = BlockingTransport(client)
 
     def get(self, key: str) -> Any:
         from .._http import iter_coroutine
@@ -217,8 +215,7 @@ class AsyncBuildCache(_BaseBuildCache, AsyncCache):
         self._endpoint = endpoint
         self._on_error = on_error
         client = create_headers_async_client(headers, timeout=DEFAULT_TIMEOUT, base_url=endpoint)
-        config = HTTPConfig(base_url=endpoint, timeout=DEFAULT_TIMEOUT)
-        self._transport = AsyncTransport(config, client=client)
+        self._transport = AsyncTransport(client)
 
     async def get(self, key: str) -> Any:
         return await self._get(key)

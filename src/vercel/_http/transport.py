@@ -8,13 +8,6 @@ from typing import Any
 
 import httpx
 
-from .config import HTTPConfig
-
-
-def _normalize_base_url(base_url: str) -> str:
-    """Ensure base_url ends with a trailing slash for consistent URL joining."""
-    return base_url.rstrip("/") + "/"
-
 
 def _normalize_path(path: str) -> str:
     """Strip leading slash from path for consistent URL joining with base_url."""
@@ -41,9 +34,6 @@ RequestBody = JSONBody | BytesBody | None
 
 class BaseTransport(abc.ABC):
     """Abstract base class for HTTP transports."""
-
-    def __init__(self, config: HTTPConfig) -> None:
-        self._config = config
 
     @abc.abstractmethod
     async def send(
@@ -73,19 +63,8 @@ class BlockingTransport(BaseTransport):
     allowing them to be executed via iter_coroutine().
     """
 
-    def __init__(
-        self,
-        config: HTTPConfig,
-        client: httpx.Client | None = None,
-    ) -> None:
-        super().__init__(config)
-        self._client: httpx.Client | None = client
-
-    def _get_client(self) -> httpx.Client:
-        """Get or create the HTTP client."""
-        if self._client is None:
-            self._client = httpx.Client(base_url=_normalize_base_url(self._config.base_url))
-        return self._client
+    def __init__(self, client: httpx.Client) -> None:
+        self._client = client
 
     async def send(
         self,
@@ -98,10 +77,7 @@ class BlockingTransport(BaseTransport):
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send a synchronous HTTP request (wrapped as async for iter_coroutine)."""
-        effective_timeout = timeout if timeout is not None else self._config.timeout
-
-        # Merge default_headers with per-request headers
-        request_headers = dict(self._config.default_headers)
+        request_headers: dict[str, str] = {}
         if headers:
             request_headers.update(headers)
 
@@ -114,40 +90,28 @@ class BlockingTransport(BaseTransport):
             raw_content = body.data
             request_headers["Content-Type"] = body.content_type
 
-        client = self._get_client()
-        return client.request(
-            method,
-            _normalize_path(path),
-            params=params or None,
-            json=json_data,
-            content=raw_content,
-            headers=request_headers,
-            timeout=httpx.Timeout(effective_timeout),
-        )
+        # Build request kwargs, only including timeout if explicitly provided
+        kwargs: dict[str, Any] = {
+            "params": params or None,
+            "json": json_data,
+            "content": raw_content,
+            "headers": request_headers if request_headers else None,
+        }
+        if timeout is not None:
+            kwargs["timeout"] = httpx.Timeout(timeout)
+
+        return self._client.request(method, _normalize_path(path), **kwargs)
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        self._client.close()
 
 
 class AsyncTransport(BaseTransport):
     """Asynchronous HTTP transport using httpx.AsyncClient."""
 
-    def __init__(
-        self,
-        config: HTTPConfig,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        super().__init__(config)
-        self._client: httpx.AsyncClient | None = client
-
-    def _get_client(self) -> httpx.AsyncClient:
-        """Get or create the HTTP client."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(base_url=_normalize_base_url(self._config.base_url))
-        return self._client
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self._client = client
 
     async def send(
         self,
@@ -160,10 +124,7 @@ class AsyncTransport(BaseTransport):
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send an asynchronous HTTP request."""
-        effective_timeout = timeout if timeout is not None else self._config.timeout
-
-        # Merge default_headers with per-request headers
-        request_headers = dict(self._config.default_headers)
+        request_headers: dict[str, str] = {}
         if headers:
             request_headers.update(headers)
 
@@ -176,27 +137,25 @@ class AsyncTransport(BaseTransport):
             raw_content = body.data
             request_headers["Content-Type"] = body.content_type
 
-        client = self._get_client()
-        return await client.request(
-            method,
-            _normalize_path(path),
-            params=params or None,
-            json=json_data,
-            content=raw_content,
-            headers=request_headers,
-            timeout=httpx.Timeout(effective_timeout),
-        )
+        # Build request kwargs, only including timeout if explicitly provided
+        kwargs: dict[str, Any] = {
+            "params": params or None,
+            "json": json_data,
+            "content": raw_content,
+            "headers": request_headers if request_headers else None,
+        }
+        if timeout is not None:
+            kwargs["timeout"] = httpx.Timeout(timeout)
+
+        return await self._client.request(method, _normalize_path(path), **kwargs)
 
     def close(self) -> None:
-        """Close the underlying HTTP client."""
-        if self._client is not None:
-            self._client = None
+        """Close the underlying HTTP client (sync no-op, use aclose)."""
+        pass
 
     async def aclose(self) -> None:
         """Asynchronously close the underlying HTTP client."""
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        await self._client.aclose()
 
 
 __all__ = [

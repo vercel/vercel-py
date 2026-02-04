@@ -6,7 +6,8 @@ from .._http import (
     AsyncTransport,
     BaseTransport,
     BlockingTransport,
-    HTTPConfig,
+    create_base_async_client,
+    create_base_client,
 )
 from .types import VercelTokenResponse
 
@@ -74,8 +75,8 @@ class SyncOidcClient(_BaseOidcClient):
         self,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(base_url=BASE_URL, timeout=timeout)
-        self._transport = BlockingTransport(config)
+        client = create_base_client(timeout=timeout, base_url=BASE_URL)
+        self._transport = BlockingTransport(client)
 
 
 class AsyncOidcClient(_BaseOidcClient):
@@ -85,8 +86,8 @@ class AsyncOidcClient(_BaseOidcClient):
         self,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(base_url=BASE_URL, timeout=timeout)
-        self._transport = AsyncTransport(config)
+        client = create_base_async_client(timeout=timeout, base_url=BASE_URL)
+        self._transport = AsyncTransport(client)
 
 
 __all__ = [

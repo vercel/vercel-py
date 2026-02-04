@@ -9,7 +9,6 @@ from .._http import (
     DEFAULT_TIMEOUT,
     AsyncTransport,
     BlockingTransport,
-    HTTPConfig,
     create_vercel_async_client,
     create_vercel_client,
     iter_coroutine,
@@ -29,9 +28,10 @@ class DeploymentsClient(_BaseDeploymentsClient):
         self._token = access_token
         effective_base_url = base_url or DEFAULT_API_BASE_URL
         effective_timeout = timeout or DEFAULT_TIMEOUT
-        client = create_vercel_client(token=access_token, timeout=effective_timeout)
-        config = HTTPConfig(base_url=effective_base_url, timeout=effective_timeout)
-        self._transport = BlockingTransport(config, client=client)
+        client = create_vercel_client(
+            token=access_token, timeout=effective_timeout, base_url=effective_base_url
+        )
+        self._transport = BlockingTransport(client)
 
     def create_deployment(
         self,
@@ -90,9 +90,10 @@ class AsyncDeploymentsClient(_BaseDeploymentsClient):
         self._token = access_token
         effective_base_url = base_url or DEFAULT_API_BASE_URL
         effective_timeout = timeout or DEFAULT_TIMEOUT
-        client = create_vercel_async_client(token=access_token, timeout=effective_timeout)
-        config = HTTPConfig(base_url=effective_base_url, timeout=effective_timeout)
-        self._transport = AsyncTransport(config, client=client)
+        client = create_vercel_async_client(
+            token=access_token, timeout=effective_timeout, base_url=effective_base_url
+        )
+        self._transport = AsyncTransport(client)
 
     async def create_deployment(
         self,

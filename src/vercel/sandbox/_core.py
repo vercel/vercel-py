@@ -13,8 +13,9 @@ from .._http import (
     AsyncTransport,
     BaseTransport,
     BlockingTransport,
-    HTTPConfig,
     JSONBody,
+    create_vercel_async_client,
+    create_vercel_client,
 )
 from .models import (
     CommandFinishedResponse,
@@ -289,17 +290,15 @@ class SyncAPIClient(_BaseAPIClient):
         self._host = host.rstrip("/")
         self._team_id = team_id
         self._token = token
-        config = HTTPConfig(
-            base_url=self._host,
-            timeout=None,  # No timeout for sandbox operations
-            token=token,
-        )
-        self._transport = BlockingTransport(config)
+        # No timeout for sandbox operations
+        client = create_vercel_client(token=token, timeout=None, base_url=self._host)
+        self._transport = BlockingTransport(client)
         # Keep a raw httpx client for operations that need streaming/raw access
         self._client = httpx.Client(base_url=self._host, timeout=httpx.Timeout(None))
 
     def close(self) -> None:
         """Close the client."""
+        self._transport.close()
         self._client.close()
 
 
@@ -310,17 +309,15 @@ class AsyncAPIClient(_BaseAPIClient):
         self._host = host.rstrip("/")
         self._team_id = team_id
         self._token = token
-        config = HTTPConfig(
-            base_url=self._host,
-            timeout=None,  # No timeout for sandbox operations
-            token=token,
-        )
-        self._transport = AsyncTransport(config)
+        # No timeout for sandbox operations
+        client = create_vercel_async_client(token=token, timeout=None, base_url=self._host)
+        self._transport = AsyncTransport(client)
         # Keep a raw httpx client for operations that need streaming/raw access
         self._client = httpx.AsyncClient(base_url=self._host, timeout=httpx.Timeout(None))
 
     async def aclose(self) -> None:
         """Close the client."""
+        await self._transport.aclose()
         await self._client.aclose()
 
 

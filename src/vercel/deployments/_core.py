@@ -13,7 +13,6 @@ from .._http import (
     BaseTransport,
     BlockingTransport,
     BytesBody,
-    HTTPConfig,
     JSONBody,
     create_vercel_async_client,
     create_vercel_client,
@@ -164,8 +163,7 @@ class SyncDeploymentsClient(_BaseDeploymentsClient):
     ) -> None:
         self._token = token
         client = create_vercel_client(token=token, timeout=timeout, base_url=base_url)
-        config = HTTPConfig(base_url=base_url, timeout=timeout)
-        self._transport = BlockingTransport(config, client=client)
+        self._transport = BlockingTransport(client)
 
 
 class AsyncDeploymentsClient(_BaseDeploymentsClient):
@@ -179,8 +177,7 @@ class AsyncDeploymentsClient(_BaseDeploymentsClient):
     ) -> None:
         self._token = token
         client = create_vercel_async_client(token=token, timeout=timeout, base_url=base_url)
-        config = HTTPConfig(base_url=base_url, timeout=timeout)
-        self._transport = AsyncTransport(config, client=client)
+        self._transport = AsyncTransport(client)
 
 
 __all__ = [
