@@ -10,6 +10,8 @@ from .._http import (
     AsyncTransport,
     BlockingTransport,
     HTTPConfig,
+    create_vercel_async_client,
+    create_vercel_client,
     iter_coroutine,
 )
 from ._core import _BaseProjectsClient
@@ -24,12 +26,12 @@ class ProjectsClient(_BaseProjectsClient):
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        config = HTTPConfig(
-            base_url=base_url or DEFAULT_API_BASE_URL,
-            timeout=timeout or DEFAULT_TIMEOUT,
-            token=access_token,
-        )
-        self._transport = BlockingTransport(config)
+        self._token = access_token
+        effective_base_url = base_url or DEFAULT_API_BASE_URL
+        effective_timeout = timeout or DEFAULT_TIMEOUT
+        client = create_vercel_client(token=access_token, timeout=effective_timeout)
+        config = HTTPConfig(base_url=effective_base_url, timeout=effective_timeout)
+        self._transport = BlockingTransport(config, client=client)
 
     def get_projects(
         self,
@@ -84,12 +86,12 @@ class AsyncProjectsClient(_BaseProjectsClient):
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        config = HTTPConfig(
-            base_url=base_url or DEFAULT_API_BASE_URL,
-            timeout=timeout or DEFAULT_TIMEOUT,
-            token=access_token,
-        )
-        self._transport = AsyncTransport(config)
+        self._token = access_token
+        effective_base_url = base_url or DEFAULT_API_BASE_URL
+        effective_timeout = timeout or DEFAULT_TIMEOUT
+        client = create_vercel_async_client(token=access_token, timeout=effective_timeout)
+        config = HTTPConfig(base_url=effective_base_url, timeout=effective_timeout)
+        self._transport = AsyncTransport(config, client=client)
 
     async def get_projects(
         self,
