@@ -96,9 +96,11 @@ class Command(BaseModel):
 
 
 class CommandFinished(Command):
-    """Completed command with exit code."""
+    """Completed command with exit code and output."""
 
     exit_code: int = Field(alias="exitCode")
+    stdout: str = ""
+    stderr: str = ""
 
 
 class SandboxResponse(BaseModel):

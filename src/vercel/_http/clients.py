@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
+from typing import Any
 
 import httpx
 
@@ -27,7 +28,7 @@ def _require_token(token: str | None) -> str:
 def _create_vercel_auth_hook(
     token: str,
 ) -> Callable[[httpx.Request], httpx.Request]:
-    """Create a request hook that adds Vercel API auth headers.
+    """Create a sync request hook that adds Vercel API auth headers.
 
     The hook adds:
     - Authorization: Bearer <token>
@@ -46,10 +47,31 @@ def _create_vercel_auth_hook(
     return hook
 
 
+def _create_vercel_auth_hook_async(
+    token: str,
+) -> Callable[[httpx.Request], Coroutine[Any, Any, None]]:
+    """Create an async request hook that adds Vercel API auth headers.
+
+    The hook adds:
+    - Authorization: Bearer <token>
+    - Accept: application/json
+    - Content-Type: application/json
+
+    Uses setdefault so user-provided headers take precedence.
+    """
+
+    async def hook(request: httpx.Request) -> None:
+        request.headers.setdefault("authorization", f"Bearer {token}")
+        request.headers.setdefault("accept", "application/json")
+        request.headers.setdefault("content-type", "application/json")
+
+    return hook
+
+
 def _create_static_headers_hook(
     headers: Mapping[str, str],
 ) -> Callable[[httpx.Request], httpx.Request]:
-    """Create a request hook that adds static headers to every request.
+    """Create a sync request hook that adds static headers to every request.
 
     Uses setdefault so user-provided headers take precedence.
     """
@@ -62,9 +84,30 @@ def _create_static_headers_hook(
     return hook
 
 
+def _create_static_headers_hook_async(
+    headers: Mapping[str, str],
+) -> Callable[[httpx.Request], Coroutine[Any, Any, None]]:
+    """Create an async request hook that adds static headers to every request.
+
+    Uses setdefault so user-provided headers take precedence.
+    """
+
+    async def hook(request: httpx.Request) -> None:
+        for key, value in headers.items():
+            request.headers.setdefault(key, value)
+
+    return hook
+
+
+# Type alias for sync request hooks (returns Request)
+SyncRequestHook = Callable[[httpx.Request], httpx.Request]
+# Type alias for async request hooks (returns coroutine)
+AsyncRequestHook = Callable[[httpx.Request], Coroutine[Any, Any, None]]
+
+
 def _prepend_request_hooks(
     client: httpx.Client | httpx.AsyncClient,
-    hooks: Sequence[Callable[[httpx.Request], httpx.Request]],
+    hooks: Sequence[SyncRequestHook | AsyncRequestHook],
 ) -> None:
     """Prepend request hooks to an existing client's event hooks.
 
@@ -73,7 +116,7 @@ def _prepend_request_hooks(
 
     Args:
         client: The httpx client to modify.
-        hooks: Request hooks to prepend.
+        hooks: Request hooks to prepend (sync or async).
     """
     existing_hooks = list(client.event_hooks.get("request", []))
     client.event_hooks["request"] = list(hooks) + existing_hooks
@@ -143,7 +186,7 @@ def create_vercel_async_client(
         RuntimeError: If no token is provided and VERCEL_TOKEN is not set.
     """
     resolved_token = _require_token(token)
-    auth_hook = _create_vercel_auth_hook(resolved_token)
+    auth_hook = _create_vercel_auth_hook_async(resolved_token)
 
     if client is not None:
         _prepend_request_hooks(client, [auth_hook])
@@ -219,7 +262,7 @@ def create_headers_async_client(
     Returns:
         An httpx.AsyncClient with static headers event hook configured.
     """
-    headers_hook = _create_static_headers_hook(headers)
+    headers_hook = _create_static_headers_hook_async(headers)
 
     if client is not None:
         _prepend_request_hooks(client, [headers_hook])

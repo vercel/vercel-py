@@ -6,7 +6,12 @@ from dataclasses import dataclass
 import httpx
 
 from .api_client import APIClient, AsyncAPIClient
-from .models import Command as CommandModel, CommandFinishedResponse, LogLine
+from .models import (
+    Command as CommandModel,
+    CommandFinished as CommandFinishedModel,
+    CommandFinishedResponse,
+    LogLine,
+)
 
 
 @dataclass
@@ -70,7 +75,18 @@ class AsyncCommand:
 
 @dataclass
 class AsyncCommandFinished(AsyncCommand):
+    cmd: CommandFinishedModel  # type: ignore[assignment]
     exit_code: int
+
+    @property
+    def stdout(self) -> str:  # type: ignore[override]
+        """Return stdout from the completed command."""
+        return self.cmd.stdout
+
+    @property
+    def stderr(self) -> str:  # type: ignore[override]
+        """Return stderr from the completed command."""
+        return self.cmd.stderr
 
     async def wait(self) -> AsyncCommandFinished:
         return self
@@ -136,7 +152,18 @@ class Command:
 
 @dataclass
 class CommandFinished(Command):
+    cmd: CommandFinishedModel  # type: ignore[assignment]
     exit_code: int
+
+    @property
+    def stdout(self) -> str:  # type: ignore[override]
+        """Return stdout from the completed command."""
+        return self.cmd.stdout
+
+    @property
+    def stderr(self) -> str:  # type: ignore[override]
+        """Return stderr from the completed command."""
+        return self.cmd.stderr
 
     def wait(self) -> CommandFinished:
         return self
