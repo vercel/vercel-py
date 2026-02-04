@@ -215,6 +215,16 @@ class SyncProjectsClient(_BaseProjectsClient):
         client = create_vercel_client(token=token, timeout=timeout, base_url=base_url)
         self._transport = BlockingTransport(client)
 
+    def close(self) -> None:
+        """Close the underlying HTTP client."""
+        self._transport.close()
+
+    def __enter__(self) -> SyncProjectsClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
 
 class AsyncProjectsClient(_BaseProjectsClient):
     """Async client for Projects API operations."""
@@ -228,6 +238,16 @@ class AsyncProjectsClient(_BaseProjectsClient):
         self._token = token
         client = create_vercel_async_client(token=token, timeout=timeout, base_url=base_url)
         self._transport = AsyncTransport(client)
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._transport.aclose()
+
+    async def __aenter__(self) -> AsyncProjectsClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
 
 __all__ = [

@@ -31,16 +31,16 @@ def create_deployment(
     forceNew, skip_auto_detection_confirmation ->
     skipAutoDetectionConfirmation
     """
-    client = SyncDeploymentsClient(token, base_url, timeout)
-    return iter_coroutine(
-        client._create_deployment(
-            body=body,
-            team_id=team_id,
-            slug=slug,
-            force_new=force_new,
-            skip_auto_detection_confirmation=skip_auto_detection_confirmation,
+    with SyncDeploymentsClient(token, base_url, timeout) as client:
+        return iter_coroutine(
+            client._create_deployment(
+                body=body,
+                team_id=team_id,
+                slug=slug,
+                force_new=force_new,
+                skip_auto_detection_confirmation=skip_auto_detection_confirmation,
+            )
         )
-    )
 
 
 def upload_file(
@@ -57,18 +57,18 @@ def upload_file(
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Upload a single deployment file to Vercel."""
-    client = SyncDeploymentsClient(token, base_url, timeout)
-    return iter_coroutine(
-        client._upload_file(
-            content=content,
-            content_length=content_length,
-            x_vercel_digest=x_vercel_digest,
-            x_now_digest=x_now_digest,
-            x_now_size=x_now_size,
-            team_id=team_id,
-            slug=slug,
+    with SyncDeploymentsClient(token, base_url, timeout) as client:
+        return iter_coroutine(
+            client._upload_file(
+                content=content,
+                content_length=content_length,
+                x_vercel_digest=x_vercel_digest,
+                x_now_digest=x_now_digest,
+                x_now_size=x_now_size,
+                team_id=team_id,
+                slug=slug,
+            )
         )
-    )
 
 
 __all__ = ["create_deployment", "upload_file"]

@@ -78,6 +78,16 @@ class SyncOidcClient(_BaseOidcClient):
         client = create_base_client(timeout=timeout, base_url=BASE_URL)
         self._transport = BlockingTransport(client)
 
+    def close(self) -> None:
+        """Close the underlying HTTP client."""
+        self._transport.close()
+
+    def __enter__(self) -> SyncOidcClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
 
 class AsyncOidcClient(_BaseOidcClient):
     """Async client for OIDC operations."""
@@ -88,6 +98,16 @@ class AsyncOidcClient(_BaseOidcClient):
     ) -> None:
         client = create_base_async_client(timeout=timeout, base_url=BASE_URL)
         self._transport = AsyncTransport(client)
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._transport.aclose()
+
+    async def __aenter__(self) -> AsyncOidcClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
 
 __all__ = [

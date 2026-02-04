@@ -166,6 +166,16 @@ class SyncBuildCache(_BaseBuildCache, Cache):
         client = create_headers_client(headers, timeout=DEFAULT_TIMEOUT, base_url=endpoint)
         self._transport = BlockingTransport(client)
 
+    def close(self) -> None:
+        """Close the underlying HTTP client."""
+        self._transport.close()
+
+    def __enter__(self) -> SyncBuildCache:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
     def get(self, key: str) -> Any:
         from .._http import iter_coroutine
 
@@ -216,6 +226,16 @@ class AsyncBuildCache(_BaseBuildCache, AsyncCache):
         self._on_error = on_error
         client = create_headers_async_client(headers, timeout=DEFAULT_TIMEOUT, base_url=endpoint)
         self._transport = AsyncTransport(client)
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._transport.aclose()
+
+    async def __aenter__(self) -> AsyncBuildCache:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
     async def get(self, key: str) -> Any:
         return await self._get(key)

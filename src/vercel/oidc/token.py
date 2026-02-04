@@ -164,15 +164,15 @@ async def get_vercel_oidc_token_async() -> str:
 def fetch_vercel_oidc_token(
     auth_token: str, project_id: str, team_id: str | None
 ) -> VercelTokenResponse | None:
-    client = SyncOidcClient()
-    return iter_coroutine(client._fetch_vercel_oidc_token(auth_token, project_id, team_id))
+    with SyncOidcClient() as client:
+        return iter_coroutine(client._fetch_vercel_oidc_token(auth_token, project_id, team_id))
 
 
 async def fetch_vercel_oidc_token_async(
     auth_token: str, project_id: str, team_id: str | None
 ) -> VercelTokenResponse | None:
-    client = AsyncOidcClient()
-    return await client._fetch_vercel_oidc_token(auth_token, project_id, team_id)
+    async with AsyncOidcClient() as client:
+        return await client._fetch_vercel_oidc_token(auth_token, project_id, team_id)
 
 
 def decode_oidc_payload(token: str) -> dict:

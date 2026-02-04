@@ -49,11 +49,6 @@ class BaseTransport(abc.ABC):
         """Send an HTTP request and return the response."""
         ...
 
-    @abc.abstractmethod
-    def close(self) -> None:
-        """Close any underlying resources."""
-        ...
-
 
 class BlockingTransport(BaseTransport):
     """
@@ -148,10 +143,6 @@ class AsyncTransport(BaseTransport):
             kwargs["timeout"] = httpx.Timeout(timeout)
 
         return await self._client.request(method, _normalize_path(path), **kwargs)
-
-    def close(self) -> None:
-        """Close the underlying HTTP client (sync no-op, use aclose)."""
-        pass
 
     async def aclose(self) -> None:
         """Asynchronously close the underlying HTTP client."""
