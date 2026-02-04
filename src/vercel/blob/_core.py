@@ -68,7 +68,7 @@ def build_list_blob_result(resp: dict[str, Any]) -> ListBlobResultType:
         blobs=blobs_list,
         cursor=resp.get("cursor"),
         has_more=resp.get("hasMore", False),
-        folders=resp.get("folders") or [],
+        folders=resp.get("folders"),
     )
 
 

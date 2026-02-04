@@ -182,7 +182,7 @@ class TestBlobLive:
         # List should show the folder
         listing = list_objects(prefix=f"test-folders/{unique_test_name}", token=blob_token)
         # Verify the folder appears in the listing (as a folder or blob depending on mode)
-        folder_urls = [b.url for b in listing.blobs] + [f.url for f in listing.folders]
+        folder_urls = [b.url for b in listing.blobs] + list(listing.folders or [])
         assert result.url in folder_urls, f"Created folder {result.url} not found in listing"
 
         # Cleanup
