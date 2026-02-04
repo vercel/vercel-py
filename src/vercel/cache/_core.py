@@ -25,35 +25,23 @@ DEFAULT_TIMEOUT = 30.0
 
 
 class _BaseBuildCache:
-    """
-    Base class containing shared business logic for Build Cache operations.
-
-    All methods are async and use the abstract _transport property for HTTP requests.
-    Subclasses must provide a concrete transport implementation.
-    """
+    """Base class for Build Cache with shared async implementation."""
 
     _transport: BaseTransport
     _endpoint: str
     _on_error: Callable[[Exception], None] | None
 
     async def _get(self, key: str) -> Any:
-        """Get a value from the cache."""
         try:
-            resp = await self._transport.send(
-                "GET",
-                key,
-            )
+            resp = await self._transport.send("GET", key)
             if resp.status_code == 404:
-                # Track cache miss
                 track("cache_get", hit=False)
                 return None
             if resp.status_code == 200:
                 cache_state = resp.headers.get(HEADERS_VERCEL_CACHE_STATE)
                 if cache_state and cache_state.lower() != "fresh":
-                    # Track cache miss (stale)
                     track("cache_get", hit=False)
                     return None
-                # Track cache hit
                 track("cache_get", hit=True)
                 return resp.json()
             raise RuntimeError(f"Failed to get cache: {resp.status_code} {resp.reason_phrase}")
@@ -68,7 +56,6 @@ class _BaseBuildCache:
         value: object,
         options: dict | None = None,
     ) -> None:
-        """Set a value in the cache."""
         try:
             optional_headers: dict[str, str] = {}
             if options and (ttl := options.get("ttl")):
@@ -87,7 +74,6 @@ class _BaseBuildCache:
             )
             if resp.status_code != 200:
                 raise RuntimeError(f"Failed to set cache: {resp.status_code} {resp.reason_phrase}")
-            # Track telemetry
             track(
                 "cache_set",
                 ttl_seconds=options.get("ttl") if options else None,
@@ -98,12 +84,8 @@ class _BaseBuildCache:
                 self._on_error(e)
 
     async def _delete(self, key: str) -> None:
-        """Delete a value from the cache."""
         try:
-            resp = await self._transport.send(
-                "DELETE",
-                key,
-            )
+            resp = await self._transport.send("DELETE", key)
             if resp.status_code != 200:
                 raise RuntimeError(
                     f"Failed to delete cache: {resp.status_code} {resp.reason_phrase}"
@@ -113,14 +95,9 @@ class _BaseBuildCache:
                 self._on_error(e)
 
     async def _expire_tag(self, tag: str | Sequence[str]) -> None:
-        """Expire cache entries by tag."""
         try:
             tags = ",".join(tag) if isinstance(tag, (list, tuple, set)) else tag
-            resp = await self._transport.send(
-                "POST",
-                "revalidate",
-                params={"tags": tags},
-            )
+            resp = await self._transport.send("POST", "revalidate", params={"tags": tags})
             if resp.status_code != 200:
                 raise RuntimeError(
                     f"Failed to revalidate tag: {resp.status_code} {resp.reason_phrase}"
@@ -130,17 +107,12 @@ class _BaseBuildCache:
                 self._on_error(e)
 
     async def _contains(self, key: str) -> bool:
-        """Check if a key exists in the cache."""
         try:
-            resp = await self._transport.send(
-                "GET",
-                key,
-            )
+            resp = await self._transport.send("GET", key)
             if resp.status_code == 404:
                 return False
             if resp.status_code == 200:
                 cache_state = resp.headers.get(HEADERS_VERCEL_CACHE_STATE)
-                # Consider present only when fresh
                 if cache_state and cache_state.lower() != "fresh":
                     return False
                 return True
@@ -152,8 +124,6 @@ class _BaseBuildCache:
 
 
 class SyncBuildCache(_BaseBuildCache, Cache):
-    """Sync client for Build Cache operations."""
-
     def __init__(
         self,
         *,
@@ -167,7 +137,6 @@ class SyncBuildCache(_BaseBuildCache, Cache):
         self._transport = BlockingTransport(client)
 
     def close(self) -> None:
-        """Close the underlying HTTP client."""
         self._transport.close()
 
     def __enter__(self) -> SyncBuildCache:
@@ -213,8 +182,6 @@ class SyncBuildCache(_BaseBuildCache, Cache):
 
 
 class AsyncBuildCache(_BaseBuildCache, AsyncCache):
-    """Async client for Build Cache operations."""
-
     def __init__(
         self,
         *,
@@ -228,7 +195,6 @@ class AsyncBuildCache(_BaseBuildCache, AsyncCache):
         self._transport = AsyncTransport(client)
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client."""
         await self._transport.aclose()
 
     async def __aenter__(self) -> AsyncBuildCache:

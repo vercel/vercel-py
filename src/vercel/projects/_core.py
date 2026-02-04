@@ -24,7 +24,6 @@ def _build_team_params(
     team_id: str | None = None,
     slug: str | None = None,
 ) -> dict[str, Any]:
-    """Build query params for team scoping."""
     params: dict[str, Any] = {}
     if team_id:
         params["teamId"] = team_id
@@ -33,11 +32,7 @@ def _build_team_params(
     return params
 
 
-def _handle_error_response(
-    resp: httpx.Response,
-    operation: str,
-) -> None:
-    """Raise RuntimeError with formatted error message if response indicates failure."""
+def _handle_error_response(resp: httpx.Response, operation: str) -> None:
     try:
         data = resp.json()
     except Exception:
@@ -46,12 +41,7 @@ def _handle_error_response(
 
 
 class _BaseProjectsClient:
-    """
-    Base class containing shared business logic for Projects API operations.
-
-    All methods are async and use the abstract _transport property for HTTP requests.
-    Subclasses must provide a concrete transport implementation.
-    """
+    """Base class for Projects API with shared async implementation."""
 
     _transport: BaseTransport
     _token: str | None
@@ -64,16 +54,6 @@ class _BaseProjectsClient:
         query: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Retrieve a list of projects.
-
-        Parameters:
-        - team_id: optional team to scope the query (maps to teamId)
-        - slug: optional team slug (maps to slug)
-        - query: additional query params (e.g. search, limit, repo, from, etc.)
-        - timeout: request timeout in seconds (uses client default if not specified)
-
-        Returns: dict with keys like {"projects": [...], "pagination": {...}}
-        """
         params: dict[str, Any] = {}
         if query:
             params.update(query)
@@ -102,16 +82,6 @@ class _BaseProjectsClient:
         slug: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Create a new project.
-
-        Parameters:
-        - body: JSON payload (must include at least name)
-        - team_id: optional team ID (maps to teamId)
-        - slug: optional team slug (maps to slug)
-        - timeout: request timeout in seconds (uses client default if not specified)
-
-        Returns: dict with the created project data
-        """
         params = _build_team_params(team_id, slug)
 
         resp = await self._transport.send(
@@ -125,7 +95,6 @@ class _BaseProjectsClient:
         if not (200 <= resp.status_code < 300):
             _handle_error_response(resp, "create project")
 
-        # Track telemetry
         track("project_create", token=self._token)
 
         return resp.json()
@@ -139,17 +108,6 @@ class _BaseProjectsClient:
         slug: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Update an existing project by id or name.
-
-        Parameters:
-        - id_or_name: project ID or name
-        - body: JSON payload with fields to update
-        - team_id: optional team ID (maps to teamId)
-        - slug: optional team slug (maps to slug)
-        - timeout: request timeout in seconds (uses client default if not specified)
-
-        Returns: dict with the updated project data
-        """
         params = _build_team_params(team_id, slug)
 
         resp = await self._transport.send(
@@ -163,7 +121,6 @@ class _BaseProjectsClient:
         if resp.status_code != 200:
             _handle_error_response(resp, "update project")
 
-        # Track telemetry
         track("project_update", token=self._token)
 
         return resp.json()
@@ -176,16 +133,6 @@ class _BaseProjectsClient:
         slug: str | None = None,
         timeout: float | None = None,
     ) -> None:
-        """Delete a project by id or name.
-
-        Parameters:
-        - id_or_name: project ID or name
-        - team_id: optional team ID (maps to teamId)
-        - slug: optional team slug (maps to slug)
-        - timeout: request timeout in seconds (uses client default if not specified)
-
-        Returns: None on success (204)
-        """
         params = _build_team_params(team_id, slug)
 
         resp = await self._transport.send(
@@ -198,13 +145,10 @@ class _BaseProjectsClient:
         if resp.status_code != 204:
             _handle_error_response(resp, "delete project")
 
-        # Track telemetry
         track("project_delete", token=self._token)
 
 
 class SyncProjectsClient(_BaseProjectsClient):
-    """Sync client for Projects API operations."""
-
     def __init__(
         self,
         token: str | None,
@@ -216,7 +160,6 @@ class SyncProjectsClient(_BaseProjectsClient):
         self._transport = BlockingTransport(client)
 
     def close(self) -> None:
-        """Close the underlying HTTP client."""
         self._transport.close()
 
     def __enter__(self) -> SyncProjectsClient:
@@ -227,8 +170,6 @@ class SyncProjectsClient(_BaseProjectsClient):
 
 
 class AsyncProjectsClient(_BaseProjectsClient):
-    """Async client for Projects API operations."""
-
     def __init__(
         self,
         token: str | None,
@@ -240,7 +181,6 @@ class AsyncProjectsClient(_BaseProjectsClient):
         self._transport = AsyncTransport(client)
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client."""
         await self._transport.aclose()
 
     async def __aenter__(self) -> AsyncProjectsClient:

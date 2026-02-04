@@ -17,7 +17,6 @@ from .utils import (
 
 
 def build_put_blob_result(raw: dict[str, Any]) -> PutBlobResultType:
-    """Build PutBlobResult from raw API response."""
     return PutBlobResultType(
         url=raw["url"],
         download_url=raw["downloadUrl"],
@@ -28,7 +27,6 @@ def build_put_blob_result(raw: dict[str, Any]) -> PutBlobResultType:
 
 
 def build_head_blob_result(resp: dict[str, Any]) -> HeadBlobResultType:
-    """Build HeadBlobResult from raw API response."""
     uploaded_at = (
         parse_datetime(resp["uploadedAt"])
         if isinstance(resp.get("uploadedAt"), str)
@@ -47,7 +45,6 @@ def build_head_blob_result(resp: dict[str, Any]) -> HeadBlobResultType:
 
 
 def build_list_blob_result(resp: dict[str, Any]) -> ListBlobResultType:
-    """Build ListBlobResult from raw API response."""
     blobs_list: list[ListBlobItem] = []
     for b in resp.get("blobs", []):
         uploaded_at = (
@@ -73,7 +70,6 @@ def build_list_blob_result(resp: dict[str, Any]) -> ListBlobResultType:
 
 
 def build_create_folder_result(raw: dict[str, Any]) -> CreateFolderResultType:
-    """Build CreateFolderResult from raw API response."""
     return CreateFolderResultType(pathname=raw["pathname"], url=raw["url"])
 
 
@@ -83,7 +79,6 @@ def build_list_params(
     cursor: str | None = None,
     mode: str | None = None,
 ) -> dict[str, Any]:
-    """Build query parameters for list_objects."""
     params: dict[str, Any] = {}
     if limit is not None:
         params["limit"] = int(limit)
@@ -97,7 +92,6 @@ def build_list_params(
 
 
 def normalize_delete_urls(url_or_path: str | list[str] | tuple[str, ...]) -> list[str]:
-    """Normalize delete URL input to a list of URL strings."""
     if isinstance(url_or_path, (list, tuple)):
         return [str(u) for u in url_or_path]
     return [str(url_or_path)]

@@ -24,7 +24,6 @@ def _build_team_params(
     team_id: str | None = None,
     slug: str | None = None,
 ) -> dict[str, Any]:
-    """Build query params for team scoping."""
     params: dict[str, Any] = {}
     if team_id:
         params["teamId"] = team_id
@@ -33,11 +32,7 @@ def _build_team_params(
     return params
 
 
-def _handle_error_response(
-    resp: httpx.Response,
-    operation: str,
-) -> None:
-    """Raise RuntimeError with formatted error message if response indicates failure."""
+def _handle_error_response(resp: httpx.Response, operation: str) -> None:
     try:
         data = resp.json()
     except Exception:
@@ -46,12 +41,7 @@ def _handle_error_response(
 
 
 class _BaseDeploymentsClient:
-    """
-    Base class containing shared business logic for Deployments API operations.
-
-    All methods are async and use the abstract _transport property for HTTP requests.
-    Subclasses must provide a concrete transport implementation.
-    """
+    """Base class for Deployments API with shared async implementation."""
 
     _transport: BaseTransport
     _token: str | None
@@ -66,14 +56,6 @@ class _BaseDeploymentsClient:
         skip_auto_detection_confirmation: bool | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Create a new deployment.
-
-        body: matches the Deployments Create request body (name, project,
-        files|gitSource, target, projectSettings, etc.)
-        Optional query params: team_id -> teamId, slug -> slug, force_new ->
-        forceNew, skip_auto_detection_confirmation ->
-        skipAutoDetectionConfirmation
-        """
         if not isinstance(body, dict):
             raise ValueError("body must be a dict")
 
@@ -96,7 +78,6 @@ class _BaseDeploymentsClient:
         if not (200 <= resp.status_code < 300):
             _handle_error_response(resp, "create deployment")
 
-        # Track telemetry
         track(
             "deployment_create",
             token=self._token,
@@ -118,13 +99,6 @@ class _BaseDeploymentsClient:
         slug: str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Upload a single deployment file to Vercel.
-
-        Headers required:
-        - Content-Length: size in bytes
-        - x-vercel-digest or x-now-digest: sha1 digest (one of them supported)
-        - x-now-size: alternative file size
-        """
         params = _build_team_params(team_id, slug)
 
         headers: dict[str, str] = {
@@ -153,8 +127,6 @@ class _BaseDeploymentsClient:
 
 
 class SyncDeploymentsClient(_BaseDeploymentsClient):
-    """Sync client for Deployments API operations."""
-
     def __init__(
         self,
         token: str | None,
@@ -166,7 +138,6 @@ class SyncDeploymentsClient(_BaseDeploymentsClient):
         self._transport = BlockingTransport(client)
 
     def close(self) -> None:
-        """Close the underlying HTTP client."""
         self._transport.close()
 
     def __enter__(self) -> SyncDeploymentsClient:
@@ -177,8 +148,6 @@ class SyncDeploymentsClient(_BaseDeploymentsClient):
 
 
 class AsyncDeploymentsClient(_BaseDeploymentsClient):
-    """Async client for Deployments API operations."""
-
     def __init__(
         self,
         token: str | None,
@@ -190,7 +159,6 @@ class AsyncDeploymentsClient(_BaseDeploymentsClient):
         self._transport = AsyncTransport(client)
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client."""
         await self._transport.aclose()
 
     async def __aenter__(self) -> AsyncDeploymentsClient:

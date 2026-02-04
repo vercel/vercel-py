@@ -8,22 +8,7 @@ _T = typing.TypeVar("_T")
 
 
 def iter_coroutine(coro: typing.Coroutine[None, None, _T]) -> _T:
-    """
-    Execute a coroutine that completes in a single iteration.
-
-    This function runs a coroutine synchronously by sending None to it once.
-    It only works for coroutines that don't actually suspend (i.e., they
-    complete immediately without yielding to an event loop).
-
-    Args:
-        coro: A coroutine that completes without suspending.
-
-    Returns:
-        The return value of the coroutine.
-
-    Raises:
-        RuntimeError: If the coroutine doesn't complete in one iteration.
-    """
+    """Execute a non-suspending coroutine synchronously."""
     try:
         coro.send(None)
     except StopIteration as ex:

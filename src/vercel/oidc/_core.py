@@ -16,12 +16,7 @@ DEFAULT_TIMEOUT = 30.0
 
 
 class _BaseOidcClient:
-    """
-    Base class containing shared business logic for OIDC operations.
-
-    All methods are async and use the abstract _transport property for HTTP requests.
-    Subclasses must provide a concrete transport implementation.
-    """
+    """Base class for OIDC with shared async implementation."""
 
     _transport: BaseTransport
 
@@ -31,20 +26,6 @@ class _BaseOidcClient:
         project_id: str,
         team_id: str | None,
     ) -> VercelTokenResponse | None:
-        """Fetch OIDC token from Vercel API.
-
-        Args:
-            auth_token: The authentication token.
-            project_id: The project ID.
-            team_id: Optional team ID.
-
-        Returns:
-            VercelTokenResponse with the token, or None if failed.
-
-        Raises:
-            RuntimeError: If the API returns an error status.
-            TypeError: If the response doesn't contain a valid token.
-        """
         params = {"source": "vercel-oidc-refresh"}
         if team_id:
             params["teamId"] = team_id
@@ -69,17 +50,11 @@ class _BaseOidcClient:
 
 
 class SyncOidcClient(_BaseOidcClient):
-    """Sync client for OIDC operations."""
-
-    def __init__(
-        self,
-        timeout: float = DEFAULT_TIMEOUT,
-    ) -> None:
+    def __init__(self, timeout: float = DEFAULT_TIMEOUT) -> None:
         client = create_base_client(timeout=timeout, base_url=BASE_URL)
         self._transport = BlockingTransport(client)
 
     def close(self) -> None:
-        """Close the underlying HTTP client."""
         self._transport.close()
 
     def __enter__(self) -> SyncOidcClient:
@@ -90,17 +65,11 @@ class SyncOidcClient(_BaseOidcClient):
 
 
 class AsyncOidcClient(_BaseOidcClient):
-    """Async client for OIDC operations."""
-
-    def __init__(
-        self,
-        timeout: float = DEFAULT_TIMEOUT,
-    ) -> None:
+    def __init__(self, timeout: float = DEFAULT_TIMEOUT) -> None:
         client = create_base_async_client(timeout=timeout, base_url=BASE_URL)
         self._transport = AsyncTransport(client)
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client."""
         await self._transport.aclose()
 
     async def __aenter__(self) -> AsyncOidcClient:

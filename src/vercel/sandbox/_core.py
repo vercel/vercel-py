@@ -35,8 +35,6 @@ DEFAULT_HOST = "https://api.vercel.com"
 
 
 class APIError(Exception):
-    """Error from the Sandbox API."""
-
     def __init__(self, response: httpx.Response, message: str, *, data: Any | None = None):
         super().__init__(message)
         self.response = response
@@ -45,7 +43,6 @@ class APIError(Exception):
 
 
 def _parse_error_message(response: httpx.Response) -> tuple[str, Any | None]:
-    """Parse error message from API response."""
     parsed: Any | None = None
     message = f"HTTP {response.status_code}"
     try:
@@ -63,7 +60,6 @@ def _parse_error_message(response: httpx.Response) -> tuple[str, Any | None]:
                     if code:
                         message = f"{message} (code={code})"
     except Exception:
-        # JSON parsing failed, fall back to raw text below
         parsed = None
 
     if parsed is None:
@@ -73,7 +69,6 @@ def _parse_error_message(response: httpx.Response) -> tuple[str, Any | None]:
                 snippet = text if len(text) <= 500 else text[:500] + "..."
                 message = f"{message}: {snippet}"
         except Exception:
-            # Could not read response text, use status code message only
             pass
 
     return message, parsed
@@ -81,10 +76,10 @@ def _parse_error_message(response: httpx.Response) -> tuple[str, Any | None]:
 
 class _BaseAPIClient:
     """
-    Base class containing shared business logic for Sandbox API operations.
+    Base class for Sandbox API operations.
 
-    All methods are async and use the abstract _transport property for HTTP requests.
-    Subclasses must provide a concrete transport implementation.
+    All methods are async and use _transport for HTTP requests.
+    Subclasses provide sync or async transport implementations.
     """
 
     _transport: BaseTransport
@@ -93,7 +88,6 @@ class _BaseAPIClient:
     _host: str
 
     def _build_headers(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-        """Build request headers."""
         headers = {
             "user-agent": USER_AGENT,
             "content-type": "application/json",
@@ -103,7 +97,6 @@ class _BaseAPIClient:
         return headers
 
     def _build_params(self, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        """Build query parameters with teamId."""
         params: dict[str, Any] = {"teamId": self._team_id}
         if extra:
             params.update({k: v for k, v in extra.items() if v is not None})
@@ -118,7 +111,6 @@ class _BaseAPIClient:
         query: Mapping[str, Any] | None = None,
         json_body: Any | None = None,
     ) -> httpx.Response:
-        """Make an API request."""
         req_headers = self._build_headers(headers)
         params = self._build_params(query)
 
@@ -144,7 +136,6 @@ class _BaseAPIClient:
         path: str,
         **kwargs: Any,
     ) -> Any:
-        """Make an API request and return JSON response."""
         resp = await self._request(method, path, **kwargs)
         return resp.json()
 
@@ -159,7 +150,6 @@ class _BaseAPIClient:
         runtime: str | None = None,
         interactive: bool = False,
     ) -> SandboxAndRoutesResponse:
-        """Create a new sandbox."""
         body: dict[str, Any] = {"projectId": project_id}
         if ports:
             body["ports"] = ports
@@ -178,7 +168,6 @@ class _BaseAPIClient:
         return SandboxAndRoutesResponse.model_validate(data)
 
     async def _get_sandbox(self, *, sandbox_id: str) -> SandboxAndRoutesResponse:
-        """Get sandbox by ID."""
         data = await self._request_json("GET", f"/v1/sandboxes/{sandbox_id}")
         return SandboxAndRoutesResponse.model_validate(data)
 
@@ -192,7 +181,6 @@ class _BaseAPIClient:
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> CommandResponse:
-        """Run a command in the sandbox."""
         body: dict[str, Any] = {
             "command": command,
             "args": args,
@@ -211,7 +199,6 @@ class _BaseAPIClient:
     async def _get_command(
         self, *, sandbox_id: str, cmd_id: str, wait: bool = False
     ) -> CommandResponse | CommandFinishedResponse:
-        """Get command status."""
         data = await self._request_json(
             "GET",
             f"/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}",
@@ -222,12 +209,10 @@ class _BaseAPIClient:
         return CommandResponse.model_validate(data)
 
     async def _stop_sandbox(self, *, sandbox_id: str) -> SandboxResponse:
-        """Stop a sandbox."""
         data = await self._request_json("POST", f"/v1/sandboxes/{sandbox_id}/stop")
         return SandboxResponse.model_validate(data)
 
     async def _mk_dir(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> None:
-        """Create a directory in the sandbox."""
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
@@ -240,7 +225,6 @@ class _BaseAPIClient:
     async def _read_file(
         self, *, sandbox_id: str, path: str, cwd: str | None = None
     ) -> bytes | None:
-        """Read a file from the sandbox."""
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
@@ -259,7 +243,6 @@ class _BaseAPIClient:
         return resp.content
 
     async def _extend_timeout(self, *, sandbox_id: str, duration: int) -> SandboxResponse:
-        """Extend sandbox timeout."""
         data = await self._request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/extend-timeout",
@@ -268,55 +251,44 @@ class _BaseAPIClient:
         return SandboxResponse.model_validate(data)
 
     async def _create_snapshot(self, *, sandbox_id: str) -> CreateSnapshotResponse:
-        """Create a snapshot of the sandbox."""
         data = await self._request_json("POST", f"/v1/sandboxes/{sandbox_id}/snapshot")
         return CreateSnapshotResponse.model_validate(data)
 
     async def _get_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        """Get snapshot by ID."""
         data = await self._request_json("GET", f"/v1/sandboxes/snapshots/{snapshot_id}")
         return SnapshotResponse.model_validate(data)
 
     async def _delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        """Delete a snapshot."""
         data = await self._request_json("DELETE", f"/v1/sandboxes/snapshots/{snapshot_id}")
         return SnapshotResponse.model_validate(data)
 
 
 class SyncAPIClient(_BaseAPIClient):
-    """Sync client for Sandbox API operations."""
-
     def __init__(self, *, host: str = DEFAULT_HOST, team_id: str, token: str):
         self._host = host.rstrip("/")
         self._team_id = team_id
         self._token = token
-        # No timeout for sandbox operations
         client = create_vercel_client(token=token, timeout=None, base_url=self._host)
         self._transport = BlockingTransport(client)
-        # Keep a raw httpx client for operations that need streaming/raw access
+        # Raw httpx client for streaming/raw access
         self._client = httpx.Client(base_url=self._host, timeout=httpx.Timeout(None))
 
     def close(self) -> None:
-        """Close the client."""
         self._transport.close()
         self._client.close()
 
 
 class AsyncAPIClient(_BaseAPIClient):
-    """Async client for Sandbox API operations."""
-
     def __init__(self, *, host: str = DEFAULT_HOST, team_id: str, token: str):
         self._host = host.rstrip("/")
         self._team_id = team_id
         self._token = token
-        # No timeout for sandbox operations
         client = create_vercel_async_client(token=token, timeout=None, base_url=self._host)
         self._transport = AsyncTransport(client)
-        # Keep a raw httpx client for operations that need streaming/raw access
+        # Raw httpx client for streaming/raw access
         self._client = httpx.AsyncClient(base_url=self._host, timeout=httpx.Timeout(None))
 
     async def aclose(self) -> None:
-        """Close the client."""
         await self._transport.aclose()
         await self._client.aclose()
 
