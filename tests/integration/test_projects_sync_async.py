@@ -423,7 +423,9 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "PATCH"  # method
-            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
+            assert (
+                f"v9/projects/{project_id}" in call_args[0][1]
+            )  # url contains path (leading / stripped)
 
             # Validate request body
             assert call_args[1]["json"] == update_body
@@ -455,7 +457,9 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "PATCH"  # method
-            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
+            assert (
+                f"v9/projects/{project_id}" in call_args[0][1]
+            )  # url contains path (leading / stripped)
 
             # Validate request body
             assert call_args[1]["json"] == update_body
@@ -484,7 +488,9 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "DELETE"  # method
-            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
+            assert (
+                f"v9/projects/{project_id}" in call_args[0][1]
+            )  # url contains path (leading / stripped)
 
     @pytest.mark.asyncio
     async def test_delete_project_async(self, mock_token):
@@ -511,7 +517,9 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "DELETE"  # method
-            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
+            assert (
+                f"v9/projects/{project_id}" in call_args[0][1]
+            )  # url contains path (leading / stripped)
 
     def test_get_projects_with_team_id_sync(self, mock_token):
         """Test sync get_projects with team_id parameter validation."""
@@ -779,7 +787,7 @@ class TestProjectsAPI:
             custom_base_url = "https://custom-api.example.com"
             await get_projects_async(token=mock_token, base_url=custom_base_url)
 
-            # Validate base_url was passed to httpx.AsyncClient constructor (normalized with trailing /)
+            # Validate base_url was passed to AsyncClient (normalized with trailing /)
             call_kwargs = mock_client_class.call_args.kwargs
             assert call_kwargs.get("base_url") == custom_base_url + "/"
 

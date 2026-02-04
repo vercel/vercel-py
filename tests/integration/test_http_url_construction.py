@@ -195,9 +195,7 @@ class TestCacheUrlPatterns:
         try:
             from vercel._http import JSONBody, iter_coroutine
 
-            response = iter_coroutine(
-                transport.send("POST", key, body=JSONBody({"value": "test"}))
-            )
+            response = iter_coroutine(transport.send("POST", key, body=JSONBody({"value": "test"})))
             assert response.status_code == 200
             assert route.called
         finally:
