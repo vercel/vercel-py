@@ -104,7 +104,7 @@ class TestSandboxLive:
             result = sandbox.run_command("echo", ["Hello from sandbox"])
 
             assert result.exit_code == 0
-            assert "Hello from sandbox" in result.stdout
+            assert "Hello from sandbox" in result.stdout()
 
             # Stop the sandbox
             sandbox.stop()
@@ -139,7 +139,7 @@ class TestSandboxLive:
             result = await sandbox.run_command("echo", ["Async hello"])
 
             assert result.exit_code == 0
-            assert "Async hello" in result.stdout
+            assert "Async hello" in await result.stdout()
 
         # Context manager should have stopped the sandbox
 
@@ -196,7 +196,7 @@ class TestSandboxLive:
             )
 
             assert result.exit_code == 0
-            assert "test_value_123" in result.stdout
+            assert "test_value_123" in result.stdout()
 
         finally:
             try:
