@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .config import HTTPConfig, require_token
+from .config import HTTPConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,10 +34,6 @@ class BaseTransport(abc.ABC):
 
     def __init__(self, config: HTTPConfig) -> None:
         self._config = config
-
-    def _require_token(self) -> str:
-        """Resolve and validate the API token."""
-        return require_token(self._config.token)
 
     @abc.abstractmethod
     async def send(
@@ -67,9 +63,13 @@ class BlockingTransport(BaseTransport):
     allowing them to be executed via iter_coroutine().
     """
 
-    def __init__(self, config: HTTPConfig) -> None:
+    def __init__(
+        self,
+        config: HTTPConfig,
+        client: httpx.Client | None = None,
+    ) -> None:
         super().__init__(config)
-        self._client: httpx.Client | None = None
+        self._client: httpx.Client | None = client
 
     def _get_client(self) -> httpx.Client:
         """Get or create the HTTP client."""
@@ -88,10 +88,11 @@ class BlockingTransport(BaseTransport):
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send a synchronous HTTP request (wrapped as async for iter_coroutine)."""
-        bearer = self._require_token()
         url = self._config.base_url.rstrip("/") + path
         effective_timeout = timeout if timeout is not None else self._config.timeout
-        request_headers = self._config.get_headers(bearer)
+
+        # Merge default_headers with per-request headers
+        request_headers = dict(self._config.default_headers)
         if headers:
             request_headers.update(headers)
 
@@ -125,9 +126,13 @@ class BlockingTransport(BaseTransport):
 class AsyncTransport(BaseTransport):
     """Asynchronous HTTP transport using httpx.AsyncClient."""
 
-    def __init__(self, config: HTTPConfig) -> None:
+    def __init__(
+        self,
+        config: HTTPConfig,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
         super().__init__(config)
-        self._client: httpx.AsyncClient | None = None
+        self._client: httpx.AsyncClient | None = client
 
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
@@ -146,10 +151,11 @@ class AsyncTransport(BaseTransport):
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send an asynchronous HTTP request."""
-        bearer = self._require_token()
         url = self._config.base_url.rstrip("/") + path
         effective_timeout = timeout if timeout is not None else self._config.timeout
-        request_headers = self._config.get_headers(bearer)
+
+        # Merge default_headers with per-request headers
+        request_headers = dict(self._config.default_headers)
         if headers:
             request_headers.update(headers)
 

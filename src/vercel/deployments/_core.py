@@ -15,6 +15,8 @@ from .._http import (
     BytesBody,
     HTTPConfig,
     JSONBody,
+    create_vercel_async_client,
+    create_vercel_client,
 )
 from .._telemetry.tracker import track
 
@@ -53,6 +55,7 @@ class _BaseDeploymentsClient:
     """
 
     _transport: BaseTransport
+    _token: str | None
 
     async def _create_deployment(
         self,
@@ -97,7 +100,7 @@ class _BaseDeploymentsClient:
         # Track telemetry
         track(
             "deployment_create",
-            token=self._transport._config.token,
+            token=self._token,
             target=body.get("target"),
             force_new=bool(force_new) if force_new is not None else None,
         )
@@ -159,12 +162,10 @@ class SyncDeploymentsClient(_BaseDeploymentsClient):
         base_url: str = DEFAULT_API_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(
-            base_url=base_url,
-            timeout=timeout,
-            token=token,
-        )
-        self._transport = BlockingTransport(config)
+        self._token = token
+        client = create_vercel_client(token=token, timeout=timeout)
+        config = HTTPConfig(base_url=base_url, timeout=timeout)
+        self._transport = BlockingTransport(config, client=client)
 
 
 class AsyncDeploymentsClient(_BaseDeploymentsClient):
@@ -176,12 +177,10 @@ class AsyncDeploymentsClient(_BaseDeploymentsClient):
         base_url: str = DEFAULT_API_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(
-            base_url=base_url,
-            timeout=timeout,
-            token=token,
-        )
-        self._transport = AsyncTransport(config)
+        self._token = token
+        client = create_vercel_async_client(token=token, timeout=timeout)
+        config = HTTPConfig(base_url=base_url, timeout=timeout)
+        self._transport = AsyncTransport(config, client=client)
 
 
 __all__ = [

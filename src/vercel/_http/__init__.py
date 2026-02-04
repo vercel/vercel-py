@@ -1,6 +1,12 @@
 """Shared HTTP infrastructure for Vercel API clients."""
 
-from .config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT, HTTPConfig, require_token
+from .clients import (
+    create_headers_async_client,
+    create_headers_client,
+    create_vercel_async_client,
+    create_vercel_client,
+)
+from .config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT, HTTPConfig
 from .iter_coroutine import iter_coroutine
 from .transport import (
     AsyncTransport,
@@ -15,7 +21,6 @@ __all__ = [
     "HTTPConfig",
     "DEFAULT_API_BASE_URL",
     "DEFAULT_TIMEOUT",
-    "require_token",
     "iter_coroutine",
     "BaseTransport",
     "BlockingTransport",
@@ -23,4 +28,8 @@ __all__ = [
     "JSONBody",
     "BytesBody",
     "RequestBody",
+    "create_vercel_client",
+    "create_vercel_async_client",
+    "create_headers_client",
+    "create_headers_async_client",
 ]

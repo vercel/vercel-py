@@ -11,6 +11,8 @@ from .._http import (
     BlockingTransport,
     HTTPConfig,
     JSONBody,
+    create_headers_async_client,
+    create_headers_client,
 )
 from .._telemetry.tracker import track
 from .types import AsyncCache, Cache
@@ -33,7 +35,6 @@ class _BaseBuildCache:
 
     _transport: BaseTransport
     _endpoint: str
-    _headers: dict[str, str]
     _on_error: Callable[[Exception], None] | None
 
     async def _get(self, key: str) -> Any:
@@ -42,7 +43,6 @@ class _BaseBuildCache:
             resp = await self._transport.send(
                 "GET",
                 key,
-                headers=self._headers,
             )
             if resp.status_code == 404:
                 # Track cache miss
@@ -83,7 +83,7 @@ class _BaseBuildCache:
             resp = await self._transport.send(
                 "POST",
                 key,
-                headers={**self._headers, **optional_headers},
+                headers=optional_headers if optional_headers else None,
                 body=JSONBody(value),
             )
             if resp.status_code != 200:
@@ -104,7 +104,6 @@ class _BaseBuildCache:
             resp = await self._transport.send(
                 "DELETE",
                 key,
-                headers=self._headers,
             )
             if resp.status_code != 200:
                 raise RuntimeError(
@@ -122,7 +121,6 @@ class _BaseBuildCache:
                 "POST",
                 "revalidate",
                 params={"tags": tags},
-                headers=self._headers,
             )
             if resp.status_code != 200:
                 raise RuntimeError(
@@ -138,7 +136,6 @@ class _BaseBuildCache:
             resp = await self._transport.send(
                 "GET",
                 key,
-                headers=self._headers,
             )
             if resp.status_code == 404:
                 return False
@@ -166,14 +163,10 @@ class SyncBuildCache(_BaseBuildCache, Cache):
         on_error: Callable[[Exception], None] | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/") + "/"
-        self._headers = dict(headers)
         self._on_error = on_error
-        config = HTTPConfig(
-            base_url=self._endpoint,
-            timeout=DEFAULT_TIMEOUT,
-            token=None,  # Token is passed via headers
-        )
-        self._transport = BlockingTransport(config)
+        client = create_headers_client(headers, timeout=DEFAULT_TIMEOUT)
+        config = HTTPConfig(base_url=self._endpoint, timeout=DEFAULT_TIMEOUT)
+        self._transport = BlockingTransport(config, client=client)
 
     def get(self, key: str) -> Any:
         from .._http import iter_coroutine
@@ -222,14 +215,10 @@ class AsyncBuildCache(_BaseBuildCache, AsyncCache):
         on_error: Callable[[Exception], None] | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/") + "/"
-        self._headers = dict(headers)
         self._on_error = on_error
-        config = HTTPConfig(
-            base_url=self._endpoint,
-            timeout=DEFAULT_TIMEOUT,
-            token=None,  # Token is passed via headers
-        )
-        self._transport = AsyncTransport(config)
+        client = create_headers_async_client(headers, timeout=DEFAULT_TIMEOUT)
+        config = HTTPConfig(base_url=self._endpoint, timeout=DEFAULT_TIMEOUT)
+        self._transport = AsyncTransport(config, client=client)
 
     async def get(self, key: str) -> Any:
         return await self._get(key)

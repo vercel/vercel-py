@@ -74,11 +74,7 @@ class SyncOidcClient(_BaseOidcClient):
         self,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(
-            base_url=BASE_URL,
-            timeout=timeout,
-            token=None,  # Token is passed per-request for OIDC
-        )
+        config = HTTPConfig(base_url=BASE_URL, timeout=timeout)
         self._transport = BlockingTransport(config)
 
 
@@ -89,11 +85,7 @@ class AsyncOidcClient(_BaseOidcClient):
         self,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(
-            base_url=BASE_URL,
-            timeout=timeout,
-            token=None,  # Token is passed per-request for OIDC
-        )
+        config = HTTPConfig(base_url=BASE_URL, timeout=timeout)
         self._transport = AsyncTransport(config)
 
 

@@ -15,6 +15,8 @@ from .._http import (
     BlockingTransport,
     HTTPConfig,
     JSONBody,
+    create_vercel_async_client,
+    create_vercel_client,
 )
 from .._telemetry.tracker import track
 
@@ -53,6 +55,7 @@ class _BaseProjectsClient:
     """
 
     _transport: BaseTransport
+    _token: str | None
 
     async def _get_projects(
         self,
@@ -124,7 +127,7 @@ class _BaseProjectsClient:
             _handle_error_response(resp, "create project")
 
         # Track telemetry
-        track("project_create", token=self._transport._config.token)
+        track("project_create", token=self._token)
 
         return resp.json()
 
@@ -162,7 +165,7 @@ class _BaseProjectsClient:
             _handle_error_response(resp, "update project")
 
         # Track telemetry
-        track("project_update", token=self._transport._config.token)
+        track("project_update", token=self._token)
 
         return resp.json()
 
@@ -197,7 +200,7 @@ class _BaseProjectsClient:
             _handle_error_response(resp, "delete project")
 
         # Track telemetry
-        track("project_delete", token=self._transport._config.token)
+        track("project_delete", token=self._token)
 
 
 class SyncProjectsClient(_BaseProjectsClient):
@@ -209,12 +212,10 @@ class SyncProjectsClient(_BaseProjectsClient):
         base_url: str = DEFAULT_API_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(
-            base_url=base_url,
-            timeout=timeout,
-            token=token,
-        )
-        self._transport = BlockingTransport(config)
+        self._token = token
+        client = create_vercel_client(token=token, timeout=timeout)
+        config = HTTPConfig(base_url=base_url, timeout=timeout)
+        self._transport = BlockingTransport(config, client=client)
 
 
 class AsyncProjectsClient(_BaseProjectsClient):
@@ -226,12 +227,10 @@ class AsyncProjectsClient(_BaseProjectsClient):
         base_url: str = DEFAULT_API_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
-        config = HTTPConfig(
-            base_url=base_url,
-            timeout=timeout,
-            token=token,
-        )
-        self._transport = AsyncTransport(config)
+        self._token = token
+        client = create_vercel_async_client(token=token, timeout=timeout)
+        config = HTTPConfig(base_url=base_url, timeout=timeout)
+        self._transport = AsyncTransport(config, client=client)
 
 
 __all__ = [
