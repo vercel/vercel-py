@@ -9,24 +9,46 @@ permissions:
   id-token: write  # required for Trusted Publishing (OIDC)
 
 jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should-publish: ${{ steps.version-check.outputs.should-publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Check if version already published
+        id: version-check
+        run: |
+          VERSION=$(python scripts/get-version.py)
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/vercel/$VERSION/json")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Version $VERSION already exists on PyPI, skipping publish"
+            echo "should-publish=false" >> $GITHUB_OUTPUT
+          else
+            echo "Version $VERSION not found on PyPI, proceeding with publish"
+            echo "should-publish=true" >> $GITHUB_OUTPUT
+          fi
+
   publish:
+    needs: check-version
+    if: needs.check-version.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/vercel
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - uses: astral-sh/setup-uv@v3
-      - run: uv venv --python 3.12
+      - run: uv venv --python 3.14
       - run: uv pip install build
       - name: Create tag from version
         run: |
-          VERSION=$(python - <<'PY'
-          import tomllib
-          import sys
-          print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])
-          PY
-          )
+          VERSION=$(python scripts/get-version.py)
           TAG="v$VERSION"
           # Check if tag already exists
           if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -40,12 +62,7 @@ jobs:
           fi
       - name: Verify tag matches version
         run: |
-          VERSION=$(python - <<'PY'
-          import tomllib
-          import sys
-          print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])
-          PY
-          )
+          VERSION=$(python scripts/get-version.py)
           TAG="v$VERSION"
           echo "Verifying tag $TAG matches version $VERSION"
       - name: Build
