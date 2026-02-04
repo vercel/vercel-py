@@ -162,10 +162,10 @@ class SyncBuildCache(_BaseBuildCache, Cache):
         headers: Mapping[str, str],
         on_error: Callable[[Exception], None] | None = None,
     ) -> None:
-        self._endpoint = endpoint.rstrip("/") + "/"
+        self._endpoint = endpoint
         self._on_error = on_error
-        client = create_headers_client(headers, timeout=DEFAULT_TIMEOUT)
-        config = HTTPConfig(base_url=self._endpoint, timeout=DEFAULT_TIMEOUT)
+        client = create_headers_client(headers, timeout=DEFAULT_TIMEOUT, base_url=endpoint)
+        config = HTTPConfig(base_url=endpoint, timeout=DEFAULT_TIMEOUT)
         self._transport = BlockingTransport(config, client=client)
 
     def get(self, key: str) -> Any:
@@ -214,10 +214,10 @@ class AsyncBuildCache(_BaseBuildCache, AsyncCache):
         headers: Mapping[str, str],
         on_error: Callable[[Exception], None] | None = None,
     ) -> None:
-        self._endpoint = endpoint.rstrip("/") + "/"
+        self._endpoint = endpoint
         self._on_error = on_error
-        client = create_headers_async_client(headers, timeout=DEFAULT_TIMEOUT)
-        config = HTTPConfig(base_url=self._endpoint, timeout=DEFAULT_TIMEOUT)
+        client = create_headers_async_client(headers, timeout=DEFAULT_TIMEOUT, base_url=endpoint)
+        config = HTTPConfig(base_url=endpoint, timeout=DEFAULT_TIMEOUT)
         self._transport = AsyncTransport(config, client=client)
 
     async def get(self, key: str) -> Any:

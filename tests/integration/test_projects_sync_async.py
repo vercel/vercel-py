@@ -263,7 +263,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "GET"  # method
-            assert "/v10/projects" in call_args[0][1]  # url contains path
+            assert "v10/projects" in call_args[0][1]  # url contains path (leading / stripped)
 
     @pytest.mark.asyncio
     async def test_get_projects_async(self, mock_token, mock_projects_response):
@@ -291,7 +291,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "GET"  # method
-            assert "/v10/projects" in call_args[0][1]  # url contains path
+            assert "v10/projects" in call_args[0][1]  # url contains path (leading / stripped)
 
     def test_create_project_sync(self, mock_token, mock_project_data):
         """Test sync create_project function with comprehensive output validation."""
@@ -361,7 +361,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "POST"  # method
-            assert "/v11/projects" in call_args[0][1]  # url contains path
+            assert "v11/projects" in call_args[0][1]  # url contains path (leading / stripped)
 
             # Validate request body
             assert call_args[1]["json"] == project_body
@@ -392,7 +392,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "POST"  # method
-            assert "/v11/projects" in call_args[0][1]  # url contains path
+            assert "v11/projects" in call_args[0][1]  # url contains path (leading / stripped)
 
             # Validate request body
             assert call_args[1]["json"] == project_body
@@ -423,7 +423,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "PATCH"  # method
-            assert f"/v9/projects/{project_id}" in call_args[0][1]  # url contains path
+            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
 
             # Validate request body
             assert call_args[1]["json"] == update_body
@@ -455,7 +455,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "PATCH"  # method
-            assert f"/v9/projects/{project_id}" in call_args[0][1]  # url contains path
+            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
 
             # Validate request body
             assert call_args[1]["json"] == update_body
@@ -484,7 +484,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "DELETE"  # method
-            assert f"/v9/projects/{project_id}" in call_args[0][1]  # url contains path
+            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
 
     @pytest.mark.asyncio
     async def test_delete_project_async(self, mock_token):
@@ -511,7 +511,7 @@ class TestProjectsAPI:
 
             # Validate HTTP method and path
             assert call_args[0][0] == "DELETE"  # method
-            assert f"/v9/projects/{project_id}" in call_args[0][1]  # url contains path
+            assert f"v9/projects/{project_id}" in call_args[0][1]  # url contains path (leading / stripped)
 
     def test_get_projects_with_team_id_sync(self, mock_token):
         """Test sync get_projects with team_id parameter validation."""
@@ -744,7 +744,7 @@ class TestProjectsAPI:
 
     def test_base_url_parameter_sync(self, mock_token):
         """Test sync functions accept base_url parameter."""
-        with patch("vercel._http.transport.httpx.Client") as mock_client_class:
+        with patch("vercel._http.clients.httpx.Client") as mock_client_class:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -758,14 +758,14 @@ class TestProjectsAPI:
             custom_base_url = "https://custom-api.example.com"
             get_projects(token=mock_token, base_url=custom_base_url)
 
-            # Validate base_url was used in the request URL
-            call_args = mock_client.request.call_args
-            assert custom_base_url in call_args[0][1]
+            # Validate base_url was passed to httpx.Client constructor (normalized with trailing /)
+            call_kwargs = mock_client_class.call_args.kwargs
+            assert call_kwargs.get("base_url") == custom_base_url + "/"
 
     @pytest.mark.asyncio
     async def test_base_url_parameter_async(self, mock_token):
         """Test async functions accept base_url parameter."""
-        with patch("vercel._http.transport.httpx.AsyncClient") as mock_client_class:
+        with patch("vercel._http.clients.httpx.AsyncClient") as mock_client_class:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -779,9 +779,9 @@ class TestProjectsAPI:
             custom_base_url = "https://custom-api.example.com"
             await get_projects_async(token=mock_token, base_url=custom_base_url)
 
-            # Validate base_url was used in the request URL
-            call_args = mock_client.request.call_args
-            assert custom_base_url in call_args[0][1]
+            # Validate base_url was passed to httpx.AsyncClient constructor (normalized with trailing /)
+            call_kwargs = mock_client_class.call_args.kwargs
+            assert call_kwargs.get("base_url") == custom_base_url + "/"
 
 
 class TestConsistency:

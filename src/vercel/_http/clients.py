@@ -10,6 +10,11 @@ import httpx
 from .config import DEFAULT_TIMEOUT
 
 
+def _normalize_base_url(base_url: str) -> str:
+    """Ensure base_url ends with a trailing slash for consistent URL joining."""
+    return base_url.rstrip("/") + "/"
+
+
 def _require_token(token: str | None) -> str:
     """Resolve token from argument or environment, raising if not found."""
     env_token = os.getenv("VERCEL_TOKEN")
@@ -55,12 +60,14 @@ def _create_static_headers_hook(
 def create_vercel_client(
     token: str | None = None,
     timeout: float | None = None,
+    base_url: str | None = None,
 ) -> httpx.Client:
     """Create a sync httpx client pre-configured for Vercel API.
 
     Args:
         token: API token. Falls back to VERCEL_TOKEN env var if not provided.
         timeout: Request timeout in seconds. Defaults to DEFAULT_TIMEOUT.
+        base_url: Base URL for API requests.
 
     Returns:
         An httpx.Client with auth event hook configured.
@@ -70,21 +77,26 @@ def create_vercel_client(
     """
     resolved_token = _require_token(token)
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    return httpx.Client(
-        timeout=httpx.Timeout(effective_timeout),
-        event_hooks={"request": [_create_vercel_auth_hook(resolved_token)]},
-    )
+    kwargs: dict = {
+        "timeout": httpx.Timeout(effective_timeout),
+        "event_hooks": {"request": [_create_vercel_auth_hook(resolved_token)]},
+    }
+    if base_url is not None:
+        kwargs["base_url"] = _normalize_base_url(base_url)
+    return httpx.Client(**kwargs)
 
 
 def create_vercel_async_client(
     token: str | None = None,
     timeout: float | None = None,
+    base_url: str | None = None,
 ) -> httpx.AsyncClient:
     """Create an async httpx client pre-configured for Vercel API.
 
     Args:
         token: API token. Falls back to VERCEL_TOKEN env var if not provided.
         timeout: Request timeout in seconds. Defaults to DEFAULT_TIMEOUT.
+        base_url: Base URL for API requests.
 
     Returns:
         An httpx.AsyncClient with auth event hook configured.
@@ -94,15 +106,19 @@ def create_vercel_async_client(
     """
     resolved_token = _require_token(token)
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(effective_timeout),
-        event_hooks={"request": [_create_vercel_auth_hook(resolved_token)]},
-    )
+    kwargs: dict = {
+        "timeout": httpx.Timeout(effective_timeout),
+        "event_hooks": {"request": [_create_vercel_auth_hook(resolved_token)]},
+    }
+    if base_url is not None:
+        kwargs["base_url"] = _normalize_base_url(base_url)
+    return httpx.AsyncClient(**kwargs)
 
 
 def create_headers_client(
     headers: Mapping[str, str],
     timeout: float | None = None,
+    base_url: str | None = None,
 ) -> httpx.Client:
     """Create a sync httpx client with static headers.
 
@@ -111,20 +127,25 @@ def create_headers_client(
     Args:
         headers: Static headers to add to every request.
         timeout: Request timeout in seconds. Defaults to DEFAULT_TIMEOUT.
+        base_url: Base URL for API requests.
 
     Returns:
         An httpx.Client with static headers event hook configured.
     """
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    return httpx.Client(
-        timeout=httpx.Timeout(effective_timeout),
-        event_hooks={"request": [_create_static_headers_hook(headers)]},
-    )
+    kwargs: dict = {
+        "timeout": httpx.Timeout(effective_timeout),
+        "event_hooks": {"request": [_create_static_headers_hook(headers)]},
+    }
+    if base_url is not None:
+        kwargs["base_url"] = _normalize_base_url(base_url)
+    return httpx.Client(**kwargs)
 
 
 def create_headers_async_client(
     headers: Mapping[str, str],
     timeout: float | None = None,
+    base_url: str | None = None,
 ) -> httpx.AsyncClient:
     """Create an async httpx client with static headers.
 
@@ -133,15 +154,19 @@ def create_headers_async_client(
     Args:
         headers: Static headers to add to every request.
         timeout: Request timeout in seconds. Defaults to DEFAULT_TIMEOUT.
+        base_url: Base URL for API requests.
 
     Returns:
         An httpx.AsyncClient with static headers event hook configured.
     """
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(effective_timeout),
-        event_hooks={"request": [_create_static_headers_hook(headers)]},
-    )
+    kwargs: dict = {
+        "timeout": httpx.Timeout(effective_timeout),
+        "event_hooks": {"request": [_create_static_headers_hook(headers)]},
+    }
+    if base_url is not None:
+        kwargs["base_url"] = _normalize_base_url(base_url)
+    return httpx.AsyncClient(**kwargs)
 
 
 __all__ = [

@@ -213,7 +213,7 @@ class SyncProjectsClient(_BaseProjectsClient):
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._token = token
-        client = create_vercel_client(token=token, timeout=timeout)
+        client = create_vercel_client(token=token, timeout=timeout, base_url=base_url)
         config = HTTPConfig(base_url=base_url, timeout=timeout)
         self._transport = BlockingTransport(config, client=client)
 
@@ -228,7 +228,7 @@ class AsyncProjectsClient(_BaseProjectsClient):
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._token = token
-        client = create_vercel_async_client(token=token, timeout=timeout)
+        client = create_vercel_async_client(token=token, timeout=timeout, base_url=base_url)
         config = HTTPConfig(base_url=base_url, timeout=timeout)
         self._transport = AsyncTransport(config, client=client)
 

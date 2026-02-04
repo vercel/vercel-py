@@ -11,6 +11,16 @@ import httpx
 from .config import HTTPConfig
 
 
+def _normalize_base_url(base_url: str) -> str:
+    """Ensure base_url ends with a trailing slash for consistent URL joining."""
+    return base_url.rstrip("/") + "/"
+
+
+def _normalize_path(path: str) -> str:
+    """Strip leading slash from path for consistent URL joining with base_url."""
+    return path.lstrip("/")
+
+
 @dataclass(frozen=True, slots=True)
 class JSONBody:
     """JSON request body - automatically sets Content-Type to application/json."""
@@ -74,7 +84,7 @@ class BlockingTransport(BaseTransport):
     def _get_client(self) -> httpx.Client:
         """Get or create the HTTP client."""
         if self._client is None:
-            self._client = httpx.Client()
+            self._client = httpx.Client(base_url=_normalize_base_url(self._config.base_url))
         return self._client
 
     async def send(
@@ -88,7 +98,6 @@ class BlockingTransport(BaseTransport):
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send a synchronous HTTP request (wrapped as async for iter_coroutine)."""
-        url = self._config.base_url.rstrip("/") + path
         effective_timeout = timeout if timeout is not None else self._config.timeout
 
         # Merge default_headers with per-request headers
@@ -108,7 +117,7 @@ class BlockingTransport(BaseTransport):
         client = self._get_client()
         return client.request(
             method,
-            url,
+            _normalize_path(path),
             params=params or None,
             json=json_data,
             content=raw_content,
@@ -137,7 +146,7 @@ class AsyncTransport(BaseTransport):
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
         if self._client is None:
-            self._client = httpx.AsyncClient()
+            self._client = httpx.AsyncClient(base_url=_normalize_base_url(self._config.base_url))
         return self._client
 
     async def send(
@@ -151,7 +160,6 @@ class AsyncTransport(BaseTransport):
         timeout: float | None = None,
     ) -> httpx.Response:
         """Send an asynchronous HTTP request."""
-        url = self._config.base_url.rstrip("/") + path
         effective_timeout = timeout if timeout is not None else self._config.timeout
 
         # Merge default_headers with per-request headers
@@ -171,7 +179,7 @@ class AsyncTransport(BaseTransport):
         client = self._get_client()
         return await client.request(
             method,
-            url,
+            _normalize_path(path),
             params=params or None,
             json=json_data,
             content=raw_content,
