@@ -71,10 +71,10 @@ class BlockingTransport(BaseTransport):
         super().__init__(config)
         self._client: httpx.Client | None = None
 
-    def _get_client(self, timeout: float | None) -> httpx.Client:
+    def _get_client(self) -> httpx.Client:
         """Get or create the HTTP client."""
         if self._client is None:
-            self._client = httpx.Client(timeout=httpx.Timeout(timeout))
+            self._client = httpx.Client()
         return self._client
 
     async def send(
@@ -104,17 +104,16 @@ class BlockingTransport(BaseTransport):
             raw_content = body.data
             request_headers["Content-Type"] = body.content_type
 
-        # Use a fresh client for each request (ephemeral pattern)
-        with httpx.Client(timeout=httpx.Timeout(effective_timeout)) as client:
-            resp = client.request(
-                method,
-                url,
-                params=params or None,
-                json=json_data,
-                content=raw_content,
-                headers=request_headers,
-            )
-        return resp
+        client = self._get_client()
+        return client.request(
+            method,
+            url,
+            params=params or None,
+            json=json_data,
+            content=raw_content,
+            headers=request_headers,
+            timeout=httpx.Timeout(effective_timeout),
+        )
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -129,6 +128,12 @@ class AsyncTransport(BaseTransport):
     def __init__(self, config: HTTPConfig) -> None:
         super().__init__(config)
         self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the HTTP client."""
+        if self._client is None:
+            self._client = httpx.AsyncClient()
+        return self._client
 
     async def send(
         self,
@@ -157,21 +162,27 @@ class AsyncTransport(BaseTransport):
             raw_content = body.data
             request_headers["Content-Type"] = body.content_type
 
-        # Use a fresh client for each request (ephemeral pattern)
-        async with httpx.AsyncClient(timeout=httpx.Timeout(effective_timeout)) as client:
-            resp = await client.request(
-                method,
-                url,
-                params=params or None,
-                json=json_data,
-                content=raw_content,
-                headers=request_headers,
-            )
-        return resp
+        client = self._get_client()
+        return await client.request(
+            method,
+            url,
+            params=params or None,
+            json=json_data,
+            content=raw_content,
+            headers=request_headers,
+            timeout=httpx.Timeout(effective_timeout),
+        )
 
     def close(self) -> None:
-        """Close the underlying HTTP client (no-op for ephemeral pattern)."""
-        pass
+        """Close the underlying HTTP client."""
+        if self._client is not None:
+            self._client = None
+
+    async def aclose(self) -> None:
+        """Asynchronously close the underlying HTTP client."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
 
 __all__ = [
