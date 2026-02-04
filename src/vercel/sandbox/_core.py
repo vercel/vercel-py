@@ -62,6 +62,7 @@ def _parse_error_message(response: httpx.Response) -> tuple[str, Any | None]:
                     if code:
                         message = f"{message} (code={code})"
     except Exception:
+        # JSON parsing failed, fall back to raw text below
         parsed = None
 
     if parsed is None:
@@ -71,6 +72,7 @@ def _parse_error_message(response: httpx.Response) -> tuple[str, Any | None]:
                 snippet = text if len(text) <= 500 else text[:500] + "..."
                 message = f"{message}: {snippet}"
         except Exception:
+            # Could not read response text, use status code message only
             pass
 
     return message, parsed

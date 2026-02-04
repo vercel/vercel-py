@@ -43,6 +43,7 @@ class TestSandboxLive:
             try:
                 sandbox.stop()
             except Exception:
+                # Sandbox may already be stopped or unreachable
                 pass
             sandbox.client.close()
 
@@ -100,6 +101,7 @@ class TestSandboxLive:
             try:
                 sandbox.stop()
             except Exception:
+                # Sandbox may already be stopped or unreachable
                 pass
             sandbox.client.close()
 
@@ -128,6 +130,7 @@ class TestSandboxLive:
             try:
                 sandbox.stop()
             except Exception:
+                # Sandbox may already be stopped or unreachable
                 pass
             sandbox.client.close()
 
@@ -155,6 +158,7 @@ class TestSandboxLive:
             try:
                 sandbox.stop()
             except Exception:
+                # Sandbox may already be stopped or unreachable
                 pass
             sandbox.client.close()
 
@@ -201,6 +205,7 @@ class TestSandboxLive:
             try:
                 original.stop()
             except Exception:
+                # Sandbox may already be stopped or unreachable
                 pass
             original.client.close()
 
@@ -226,5 +231,6 @@ class TestSandboxLive:
             try:
                 sandbox.stop()
             except Exception:
+                # Sandbox may already be stopped or unreachable
                 pass
             sandbox.client.close()
