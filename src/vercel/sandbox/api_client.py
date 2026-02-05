@@ -1,13 +1,22 @@
+"""Vercel Sandbox API Client."""
+
 from __future__ import annotations
 
-import os
-import sys
+import io
+import posixpath
+import tarfile
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
 import httpx
 
-from .base_client import APIError, AsyncBaseClient, BaseClient
+from .._http import iter_coroutine
+from ._core import (
+    USER_AGENT,
+    APIError,
+    AsyncAPIClient as _AsyncAPIClient,
+    SyncAPIClient as _SyncAPIClient,
+)
 from .models import (
     CommandFinishedResponse,
     CommandResponse,
@@ -19,30 +28,20 @@ from .models import (
     WriteFile,
 )
 
-VERSION = "0.1.0"
-USER_AGENT = (
-    f"vercel/sandbox/{VERSION} (Python/{sys.version}; {os.uname().sysname}/{os.uname().machine})"
-)
+# Re-export APIError for backwards compatibility
+__all__ = ["APIClient", "AsyncAPIClient", "APIError"]
 
 
-class AsyncAPIClient(AsyncBaseClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str):
-        super().__init__(host=host, token=token)
-        self._team_id = team_id
+class AsyncAPIClient(_AsyncAPIClient):
+    """Async client for Sandbox API operations."""
 
-    async def request(self, method: str, path: str, **kwargs):
-        headers = kwargs.pop("headers", {})
-        headers = {
-            "user-agent": USER_AGENT,
-            **headers,
-        }
-        query = kwargs.pop("query", {})
-        query = {"teamId": self._team_id, **(query or {})}
-        return await super().request(method, path, headers=headers, query=query, **kwargs)
+    async def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Make an API request (for backwards compatibility)."""
+        return await self._request(method, path, **kwargs)
 
-    async def request_json(self, method: str, path: str, **kwargs):
-        r = await self.request(method, path, **kwargs)
-        return r.json()
+    async def request_json(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Make an API request and return JSON (for backwards compatibility)."""
+        return await self._request_json(method, path, **kwargs)
 
     async def create_sandbox(
         self,
@@ -55,27 +54,20 @@ class AsyncAPIClient(AsyncBaseClient):
         runtime: str | None = None,
         interactive: bool = False,
     ) -> SandboxAndRoutesResponse:
-        # Build body with only provided values to avoid sending nulls
-        body: dict[str, Any] = {"projectId": project_id}
-        if ports:
-            body["ports"] = ports
-        if source is not None:
-            body["source"] = source
-        if timeout is not None:
-            body["timeout"] = timeout
-        if resources is not None:
-            body["resources"] = resources
-        if runtime is not None:
-            body["runtime"] = runtime
-        if interactive:
-            body["__interactive"] = True
-
-        data = await self.request_json("POST", "/v1/sandboxes", json_body=body)
-        return SandboxAndRoutesResponse.model_validate(data)
+        """Create a new sandbox."""
+        return await self._create_sandbox(
+            project_id=project_id,
+            ports=ports,
+            source=source,
+            timeout=timeout,
+            resources=resources,
+            runtime=runtime,
+            interactive=interactive,
+        )
 
     async def get_sandbox(self, *, sandbox_id: str) -> SandboxAndRoutesResponse:
-        data = await self.request_json("GET", f"/v1/sandboxes/{sandbox_id}")
-        return SandboxAndRoutesResponse.model_validate(data)
+        """Get sandbox by ID."""
+        return await self._get_sandbox(sandbox_id=sandbox_id)
 
     async def run_command(
         self,
@@ -87,34 +79,24 @@ class AsyncAPIClient(AsyncBaseClient):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> CommandResponse:
-        body: dict[str, Any] = {
-            "command": command,
-            "args": args,
-            "env": env or {},
-            "sudo": sudo,
-        }
-        if cwd is not None:
-            body["cwd"] = cwd
-        data = await self.request_json(
-            "POST",
-            f"/v1/sandboxes/{sandbox_id}/cmd",
-            json_body=body,
+        """Run a command in the sandbox."""
+        return await self._run_command(
+            sandbox_id=sandbox_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
         )
-        return CommandResponse.model_validate(data)
 
     async def get_command(
         self, *, sandbox_id: str, cmd_id: str, wait: bool = False
     ) -> CommandResponse | CommandFinishedResponse:
-        data = await self.request_json(
-            "GET",
-            f"/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}",
-            query={"wait": "true"} if wait else None,
-        )
-        if wait:
-            return CommandFinishedResponse.model_validate(data)
-        return CommandResponse.model_validate(data)
+        """Get command status."""
+        return await self._get_command(sandbox_id=sandbox_id, cmd_id=cmd_id, wait=wait)
 
     async def get_logs(self, *, sandbox_id: str, cmd_id: str) -> AsyncGenerator[LogLine, None]:
+        """Stream command logs (cannot be unified - uses async generator)."""
         try:
             async with self._client.stream(
                 "GET",
@@ -133,7 +115,6 @@ class AsyncAPIClient(AsyncBaseClient):
                     try:
                         yield LogLine.model_validate_json(line)
                     except Exception:
-                        # Ignore lines that are not valid JSON log payloads
                         continue
         except (
             httpx.RemoteProtocolError,
@@ -141,42 +122,21 @@ class AsyncAPIClient(AsyncBaseClient):
             httpx.ProtocolError,
             httpx.TransportError,
         ):
-            # Treat abrupt stream termination as normal end-of-logs
             return
 
     async def stop_sandbox(self, *, sandbox_id: str) -> SandboxResponse:
-        data = await self.request_json("POST", f"/v1/sandboxes/{sandbox_id}/stop")
-        return SandboxResponse.model_validate(data)
+        """Stop a sandbox."""
+        return await self._stop_sandbox(sandbox_id=sandbox_id)
 
     async def mk_dir(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> None:
-        body: dict[str, Any] = {"path": path}
-        if cwd is not None:
-            body["cwd"] = cwd
-        await self.request_json(
-            "POST",
-            f"/v1/sandboxes/{sandbox_id}/fs/mkdir",
-            json_body=body,
-        )
+        """Create a directory in the sandbox."""
+        await self._mk_dir(sandbox_id=sandbox_id, path=path, cwd=cwd)
 
     async def read_file(
         self, *, sandbox_id: str, path: str, cwd: str | None = None
     ) -> bytes | None:
-        body: dict[str, Any] = {"path": path}
-        if cwd is not None:
-            body["cwd"] = cwd
-        try:
-            resp = await self.request(
-                "POST",
-                f"/v1/sandboxes/{sandbox_id}/fs/read",
-                json_body=body,
-            )
-        except APIError as e:
-            if e.status_code == 404:
-                return None
-            raise
-        if resp.content is None:
-            return None
-        return resp.content
+        """Read a file from the sandbox."""
+        return await self._read_file(sandbox_id=sandbox_id, path=path, cwd=cwd)
 
     async def write_files(
         self,
@@ -186,25 +146,21 @@ class AsyncAPIClient(AsyncBaseClient):
         extract_dir: str,
         cwd: str,
     ) -> None:
-        import io
-        import posixpath
-        import tarfile
+        """Write files to the sandbox (uses raw httpx for binary content)."""
 
         def normalize_path(file_path: str) -> str:
-            # Mirror TS normalizePath: basePath is absolute path. If relative, resolve against cwd.
             base_path = (
                 posixpath.normpath(file_path)
                 if posixpath.isabs(file_path)
                 else posixpath.normpath(posixpath.join(cwd, file_path))
             )
-            # Return path relative to extract_dir
             return posixpath.relpath(base_path, extract_dir)
 
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
             for f in files:
                 data = f["content"]
-                rel = normalize_path(f["path"])  # e.g., vercel/sandbox/foo.txt
+                rel = normalize_path(f["path"])
                 info = tarfile.TarInfo(name=rel)
                 info.size = len(data)
                 tar.addfile(info, io.BytesIO(data))
@@ -225,54 +181,43 @@ class AsyncAPIClient(AsyncBaseClient):
         r.raise_for_status()
 
     async def kill_command(self, *, sandbox_id: str, command_id: str, signal: int = 15) -> None:
+        """Kill a running command."""
         r = await self._client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/cmd/{command_id}/kill",
             params={"teamId": self._team_id},
-            headers={"user-agent": USER_AGENT},
+            headers={"user-agent": USER_AGENT, "authorization": f"Bearer {self._token}"},
             json={"signal": signal},
         )
         r.raise_for_status()
 
     async def extend_timeout(self, *, sandbox_id: str, duration: int) -> SandboxResponse:
-        data = await self.request_json(
-            "POST",
-            f"/v1/sandboxes/{sandbox_id}/extend-timeout",
-            json_body={"duration": duration},
-        )
-        return SandboxResponse.model_validate(data)
+        """Extend sandbox timeout."""
+        return await self._extend_timeout(sandbox_id=sandbox_id, duration=duration)
 
     async def create_snapshot(self, *, sandbox_id: str) -> CreateSnapshotResponse:
-        data = await self.request_json("POST", f"/v1/sandboxes/{sandbox_id}/snapshot")
-        return CreateSnapshotResponse.model_validate(data)
+        """Create a snapshot of the sandbox."""
+        return await self._create_snapshot(sandbox_id=sandbox_id)
 
     async def get_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        data = await self.request_json("GET", f"/v1/sandboxes/snapshots/{snapshot_id}")
-        return SnapshotResponse.model_validate(data)
+        """Get snapshot by ID."""
+        return await self._get_snapshot(snapshot_id=snapshot_id)
 
     async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        data = await self.request_json("DELETE", f"/v1/sandboxes/snapshots/{snapshot_id}")
-        return SnapshotResponse.model_validate(data)
+        """Delete a snapshot."""
+        return await self._delete_snapshot(snapshot_id=snapshot_id)
 
 
-class APIClient(BaseClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str):
-        super().__init__(host=host, token=token)
-        self._team_id = team_id
+class APIClient(_SyncAPIClient):
+    """Sync client for Sandbox API operations."""
 
-    def request(self, method: str, path: str, **kwargs):
-        headers = kwargs.pop("headers", {})
-        headers = {
-            "user-agent": USER_AGENT,
-            **headers,
-        }
-        query = kwargs.pop("query", {})
-        query = {"teamId": self._team_id, **(query or {})}
-        return super().request(method, path, headers=headers, query=query, **kwargs)
+    def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Make an API request (for backwards compatibility)."""
+        return iter_coroutine(self._request(method, path, **kwargs))
 
-    def request_json(self, method: str, path: str, **kwargs):
-        r = self.request(method, path, **kwargs)
-        return r.json()
+    def request_json(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Make an API request and return JSON (for backwards compatibility)."""
+        return iter_coroutine(self._request_json(method, path, **kwargs))
 
     def create_sandbox(
         self,
@@ -285,26 +230,22 @@ class APIClient(BaseClient):
         runtime: str | None = None,
         interactive: bool = False,
     ) -> SandboxAndRoutesResponse:
-        body: dict[str, Any] = {"projectId": project_id}
-        if ports:
-            body["ports"] = ports
-        if source is not None:
-            body["source"] = source
-        if timeout is not None:
-            body["timeout"] = timeout
-        if resources is not None:
-            body["resources"] = resources
-        if runtime is not None:
-            body["runtime"] = runtime
-        if interactive:
-            body["__interactive"] = True
-
-        data = self.request_json("POST", "/v1/sandboxes", json_body=body)
-        return SandboxAndRoutesResponse.model_validate(data)
+        """Create a new sandbox."""
+        return iter_coroutine(
+            self._create_sandbox(
+                project_id=project_id,
+                ports=ports,
+                source=source,
+                timeout=timeout,
+                resources=resources,
+                runtime=runtime,
+                interactive=interactive,
+            )
+        )
 
     def get_sandbox(self, *, sandbox_id: str) -> SandboxAndRoutesResponse:
-        data = self.request_json("GET", f"/v1/sandboxes/{sandbox_id}")
-        return SandboxAndRoutesResponse.model_validate(data)
+        """Get sandbox by ID."""
+        return iter_coroutine(self._get_sandbox(sandbox_id=sandbox_id))
 
     def run_command(
         self,
@@ -316,34 +257,26 @@ class APIClient(BaseClient):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> CommandResponse:
-        body: dict[str, Any] = {
-            "command": command,
-            "args": args,
-            "env": env or {},
-            "sudo": sudo,
-        }
-        if cwd is not None:
-            body["cwd"] = cwd
-        data = self.request_json(
-            "POST",
-            f"/v1/sandboxes/{sandbox_id}/cmd",
-            json_body=body,
+        """Run a command in the sandbox."""
+        return iter_coroutine(
+            self._run_command(
+                sandbox_id=sandbox_id,
+                command=command,
+                args=args,
+                cwd=cwd,
+                env=env,
+                sudo=sudo,
+            )
         )
-        return CommandResponse.model_validate(data)
 
     def get_command(
         self, *, sandbox_id: str, cmd_id: str, wait: bool = False
     ) -> CommandResponse | CommandFinishedResponse:
-        data = self.request_json(
-            "GET",
-            f"/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}",
-            query={"wait": "true"} if wait else None,
-        )
-        if wait:
-            return CommandFinishedResponse.model_validate(data)
-        return CommandResponse.model_validate(data)
+        """Get command status."""
+        return iter_coroutine(self._get_command(sandbox_id=sandbox_id, cmd_id=cmd_id, wait=wait))
 
     def get_logs(self, *, sandbox_id: str, cmd_id: str) -> Generator[LogLine, None, None]:
+        """Stream command logs (cannot be unified - uses sync generator)."""
         try:
             with self._client.stream(
                 "GET",
@@ -362,7 +295,6 @@ class APIClient(BaseClient):
                     try:
                         yield LogLine.model_validate_json(line)
                     except Exception:
-                        # Ignore lines that are not valid JSON log payloads
                         continue
         except (
             httpx.RemoteProtocolError,
@@ -370,40 +302,19 @@ class APIClient(BaseClient):
             httpx.ProtocolError,
             httpx.TransportError,
         ):
-            # Treat abrupt stream termination as normal end-of-logs
             return
 
     def stop_sandbox(self, *, sandbox_id: str) -> SandboxResponse:
-        data = self.request_json("POST", f"/v1/sandboxes/{sandbox_id}/stop")
-        return SandboxResponse.model_validate(data)
+        """Stop a sandbox."""
+        return iter_coroutine(self._stop_sandbox(sandbox_id=sandbox_id))
 
     def mk_dir(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> None:
-        body: dict[str, Any] = {"path": path}
-        if cwd is not None:
-            body["cwd"] = cwd
-        self.request_json(
-            "POST",
-            f"/v1/sandboxes/{sandbox_id}/fs/mkdir",
-            json_body=body,
-        )
+        """Create a directory in the sandbox."""
+        iter_coroutine(self._mk_dir(sandbox_id=sandbox_id, path=path, cwd=cwd))
 
     def read_file(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> bytes | None:
-        body: dict[str, Any] = {"path": path}
-        if cwd is not None:
-            body["cwd"] = cwd
-        try:
-            resp = self.request(
-                "POST",
-                f"/v1/sandboxes/{sandbox_id}/fs/read",
-                json_body=body,
-            )
-        except APIError as e:
-            if e.status_code == 404:
-                return None
-            raise
-        if resp.content is None:
-            return None
-        return resp.content
+        """Read a file from the sandbox."""
+        return iter_coroutine(self._read_file(sandbox_id=sandbox_id, path=path, cwd=cwd))
 
     def write_files(
         self,
@@ -413,9 +324,7 @@ class APIClient(BaseClient):
         extract_dir: str,
         cwd: str,
     ) -> None:
-        import io
-        import posixpath
-        import tarfile
+        """Write files to the sandbox (uses raw httpx for binary content)."""
 
         def normalize_path(file_path: str) -> str:
             base_path = (
@@ -429,7 +338,7 @@ class APIClient(BaseClient):
         with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
             for f in files:
                 data = f["content"]
-                rel = normalize_path(f["path"])  # e.g., vercel/sandbox/foo.txt
+                rel = normalize_path(f["path"])
                 info = tarfile.TarInfo(name=rel)
                 info.size = len(data)
                 tar.addfile(info, io.BytesIO(data))
@@ -450,31 +359,28 @@ class APIClient(BaseClient):
         r.raise_for_status()
 
     def kill_command(self, *, sandbox_id: str, command_id: str, signal: int = 15) -> None:
+        """Kill a running command."""
         r = self._client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/cmd/{command_id}/kill",
             params={"teamId": self._team_id},
-            headers={"user-agent": USER_AGENT},
+            headers={"user-agent": USER_AGENT, "authorization": f"Bearer {self._token}"},
             json={"signal": signal},
         )
         r.raise_for_status()
 
     def extend_timeout(self, *, sandbox_id: str, duration: int) -> SandboxResponse:
-        data = self.request_json(
-            "POST",
-            f"/v1/sandboxes/{sandbox_id}/extend-timeout",
-            json_body={"duration": duration},
-        )
-        return SandboxResponse.model_validate(data)
+        """Extend sandbox timeout."""
+        return iter_coroutine(self._extend_timeout(sandbox_id=sandbox_id, duration=duration))
 
     def create_snapshot(self, *, sandbox_id: str) -> CreateSnapshotResponse:
-        data = self.request_json("POST", f"/v1/sandboxes/{sandbox_id}/snapshot")
-        return CreateSnapshotResponse.model_validate(data)
+        """Create a snapshot of the sandbox."""
+        return iter_coroutine(self._create_snapshot(sandbox_id=sandbox_id))
 
     def get_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        data = self.request_json("GET", f"/v1/sandboxes/snapshots/{snapshot_id}")
-        return SnapshotResponse.model_validate(data)
+        """Get snapshot by ID."""
+        return iter_coroutine(self._get_snapshot(snapshot_id=snapshot_id))
 
     def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        data = self.request_json("DELETE", f"/v1/sandboxes/snapshots/{snapshot_id}")
-        return SnapshotResponse.model_validate(data)
+        """Delete a snapshot."""
+        return iter_coroutine(self._delete_snapshot(snapshot_id=snapshot_id))

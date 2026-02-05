@@ -1,0 +1,176 @@
+"""Core business logic for Vercel Deployments API."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+
+from .._http import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_TIMEOUT,
+    AsyncTransport,
+    BaseTransport,
+    BlockingTransport,
+    BytesBody,
+    JSONBody,
+    create_vercel_async_client,
+    create_vercel_client,
+)
+from .._telemetry.tracker import track
+
+
+def _build_team_params(
+    team_id: str | None = None,
+    slug: str | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if team_id:
+        params["teamId"] = team_id
+    if slug:
+        params["slug"] = slug
+    return params
+
+
+def _handle_error_response(resp: httpx.Response, operation: str) -> None:
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"error": resp.text}
+    raise RuntimeError(f"Failed to {operation}: {resp.status_code} {resp.reason_phrase} - {data}")
+
+
+class _BaseDeploymentsClient:
+    """Base class for Deployments API with shared async implementation."""
+
+    _transport: BaseTransport
+    _token: str | None
+
+    async def _create_deployment(
+        self,
+        *,
+        body: dict[str, Any],
+        team_id: str | None = None,
+        slug: str | None = None,
+        force_new: bool | None = None,
+        skip_auto_detection_confirmation: bool | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise ValueError("body must be a dict")
+
+        params = _build_team_params(team_id, slug)
+        if force_new is not None:
+            params["forceNew"] = "1" if force_new else "0"
+        if skip_auto_detection_confirmation is not None:
+            params["skipAutoDetectionConfirmation"] = (
+                "1" if skip_auto_detection_confirmation else "0"
+            )
+
+        resp = await self._transport.send(
+            "POST",
+            "/v13/deployments",
+            params=params,
+            body=JSONBody(body),
+            timeout=timeout,
+        )
+
+        if not (200 <= resp.status_code < 300):
+            _handle_error_response(resp, "create deployment")
+
+        track(
+            "deployment_create",
+            token=self._token,
+            target=body.get("target"),
+            force_new=bool(force_new) if force_new is not None else None,
+        )
+
+        return resp.json()
+
+    async def _upload_file(
+        self,
+        *,
+        content: bytes | bytearray | memoryview,
+        content_length: int,
+        x_vercel_digest: str | None = None,
+        x_now_digest: str | None = None,
+        x_now_size: int | None = None,
+        team_id: str | None = None,
+        slug: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        params = _build_team_params(team_id, slug)
+
+        headers: dict[str, str] = {
+            "Content-Length": str(content_length),
+        }
+        if x_vercel_digest:
+            headers["x-vercel-digest"] = x_vercel_digest
+        if x_now_digest:
+            headers["x-now-digest"] = x_now_digest
+        if x_now_size is not None:
+            headers["x-now-size"] = str(x_now_size)
+
+        resp = await self._transport.send(
+            "POST",
+            "/v2/files",
+            params=params,
+            body=BytesBody(bytes(content)),
+            headers=headers,
+            timeout=timeout,
+        )
+
+        if not (200 <= resp.status_code < 300):
+            _handle_error_response(resp, "upload file")
+
+        return resp.json()
+
+
+class SyncDeploymentsClient(_BaseDeploymentsClient):
+    def __init__(
+        self,
+        token: str | None,
+        base_url: str = DEFAULT_API_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        self._token = token
+        client = create_vercel_client(token=token, timeout=timeout, base_url=base_url)
+        self._transport = BlockingTransport(client)
+
+    def close(self) -> None:
+        self._transport.close()
+
+    def __enter__(self) -> SyncDeploymentsClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+class AsyncDeploymentsClient(_BaseDeploymentsClient):
+    def __init__(
+        self,
+        token: str | None,
+        base_url: str = DEFAULT_API_BASE_URL,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        self._token = token
+        client = create_vercel_async_client(token=token, timeout=timeout, base_url=base_url)
+        self._transport = AsyncTransport(client)
+
+    async def aclose(self) -> None:
+        await self._transport.aclose()
+
+    async def __aenter__(self) -> AsyncDeploymentsClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+
+__all__ = [
+    "SyncDeploymentsClient",
+    "AsyncDeploymentsClient",
+    "_build_team_params",
+    "_handle_error_response",
+]
