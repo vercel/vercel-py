@@ -38,7 +38,8 @@ class BaseTransport(abc.ABC):
         body: RequestBody = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
-    ) -> httpx.Response: ...
+    ) -> httpx.Response:
+        raise NotImplementedError
 
 
 class BlockingTransport(BaseTransport):
