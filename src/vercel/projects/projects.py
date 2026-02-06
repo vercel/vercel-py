@@ -269,7 +269,7 @@ def update_project(
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
     """Update an existing project by id or name."""
     params: dict[str, Any] = {}
