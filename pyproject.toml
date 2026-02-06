@@ -33,6 +33,7 @@ dev = [
     "mypy",
     "build",
     "twine",
+    "unasyncd>=0.7.0",
 ]
 
 [tool.uv]
@@ -82,3 +83,16 @@ keep-runtime-typing = false
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**/*.py" = ["E501"]
+
+[tool.unasyncd]
+ruff_fix = true
+ruff_format = true
+add_editors_note = true
+
+[tool.unasyncd.add_replacements]
+AsyncClient = "Client"
+aclose = "close"
+aiter_bytes = "iter_bytes"
+aiter_lines = "iter_lines"
+
+[tool.unasyncd.files]

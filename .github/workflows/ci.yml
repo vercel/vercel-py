@@ -29,6 +29,9 @@ jobs:
       - name: Install dependencies
         run: uv pip install -e .[dev]
 
+      - name: Check generated sync code is up to date
+        run: uv run unasyncd --check
+
       - name: Lint
         run: |
           # The CI ensures that the code is formatted and complain if not.
