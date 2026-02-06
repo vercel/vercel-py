@@ -83,6 +83,7 @@ keep-runtime-typing = false
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**/*.py" = ["E501"]
+"src/vercel/**/_sync/**" = ["F401"]
 
 [tool.unasyncd]
 ruff_fix = true
@@ -96,3 +97,6 @@ aiter_bytes = "iter_bytes"
 aiter_lines = "iter_lines"
 
 [tool.unasyncd.files]
+"src/vercel/projects/_async/projects.py" = "src/vercel/projects/_sync/projects.py"
+"src/vercel/projects/_async/client.py" = "src/vercel/projects/_sync/client.py"
+"src/vercel/projects/_async/__init__.py" = "src/vercel/projects/_sync/__init__.py"
