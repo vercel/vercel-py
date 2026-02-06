@@ -33,7 +33,7 @@ dev = [
     "mypy",
     "build",
     "twine",
-    "unasyncd>=0.7.0",
+    "unasyncd>=0.10.0",
 ]
 
 [tool.uv]
