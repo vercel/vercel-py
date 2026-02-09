@@ -7,7 +7,7 @@ parts of the requests including parameters, body content, and error handling.
 """
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -19,6 +19,9 @@ from vercel.projects.projects import (
     get_projects_async,
     update_project_async,
 )
+
+_ASYNC_REQUEST = "vercel.projects._async.projects._request"
+_SYNC_REQUEST = "vercel.projects._sync.projects._request"
 
 
 class TestProjectsAPI:
@@ -180,7 +183,7 @@ class TestProjectsAPI:
 
     def test_get_projects_sync(self, mock_token, mock_projects_response):
         """Test sync get_projects function with comprehensive output validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = mock_projects_response
@@ -269,7 +272,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_get_projects_async(self, mock_token, mock_projects_response):
         """Test async get_projects_async function with request validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = mock_projects_response
@@ -280,8 +283,8 @@ class TestProjectsAPI:
             # Validate response
             assert result == mock_projects_response
 
-            # Validate request was made correctly
-            mock_request.assert_called_once()
+            # Validate request was awaited correctly
+            mock_request.assert_awaited_once()
             call_args = mock_request.call_args
 
             # Validate HTTP method and path
@@ -296,7 +299,7 @@ class TestProjectsAPI:
 
     def test_create_project_sync(self, mock_token, mock_project_data):
         """Test sync create_project function with comprehensive output validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
             mock_response.json.return_value = mock_project_data
@@ -368,7 +371,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_create_project_async(self, mock_token, mock_project_data):
         """Test async create_project_async function with request validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
             mock_response.json.return_value = mock_project_data
@@ -380,8 +383,8 @@ class TestProjectsAPI:
             # Validate response
             assert result == mock_project_data
 
-            # Validate request was made correctly
-            mock_request.assert_called_once()
+            # Validate request was awaited correctly
+            mock_request.assert_awaited_once()
             call_args = mock_request.call_args
 
             # Validate HTTP method and path
@@ -396,7 +399,7 @@ class TestProjectsAPI:
 
     def test_update_project_sync(self, mock_token, mock_project_data):
         """Test sync update_project function with request validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = mock_project_data
@@ -426,7 +429,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_update_project_async(self, mock_token, mock_project_data):
         """Test async update_project_async function with request validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = mock_project_data
@@ -439,8 +442,8 @@ class TestProjectsAPI:
             # Validate response
             assert result == mock_project_data
 
-            # Validate request was made correctly
-            mock_request.assert_called_once()
+            # Validate request was awaited correctly
+            mock_request.assert_awaited_once()
             call_args = mock_request.call_args
 
             # Validate HTTP method and path
@@ -455,7 +458,7 @@ class TestProjectsAPI:
 
     def test_delete_project_sync(self, mock_token):
         """Test sync delete_project function with request validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 204
             mock_request.return_value = mock_response
@@ -483,7 +486,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_delete_project_async(self, mock_token):
         """Test async delete_project_async function with request validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 204
             mock_request.return_value = mock_response
@@ -494,8 +497,8 @@ class TestProjectsAPI:
             # Validate response
             assert result is None
 
-            # Validate request was made correctly
-            mock_request.assert_called_once()
+            # Validate request was awaited correctly
+            mock_request.assert_awaited_once()
             call_args = mock_request.call_args
 
             # Validate HTTP method and path
@@ -510,7 +513,7 @@ class TestProjectsAPI:
 
     def test_get_projects_with_team_id_sync(self, mock_token):
         """Test sync get_projects with team_id parameter validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -527,7 +530,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_get_projects_with_team_id_async(self, mock_token):
         """Test async get_projects_async with team_id parameter validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -543,7 +546,7 @@ class TestProjectsAPI:
 
     def test_get_projects_with_query_params_sync(self, mock_token):
         """Test sync get_projects with query parameters validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -561,7 +564,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_get_projects_with_query_params_async(self, mock_token):
         """Test async get_projects_async with query parameters validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -578,7 +581,7 @@ class TestProjectsAPI:
 
     def test_create_project_with_team_id_sync(self, mock_token, mock_project_data):
         """Test sync create_project with team_id parameter validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
             mock_response.json.return_value = mock_project_data
@@ -596,7 +599,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_create_project_with_team_id_async(self, mock_token, mock_project_data):
         """Test async create_project_async with team_id parameter validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 201
             mock_response.json.return_value = mock_project_data
@@ -613,7 +616,7 @@ class TestProjectsAPI:
 
     def test_error_handling_sync(self, mock_token):
         """Test sync error handling with comprehensive output validation."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 400
             mock_response.reason_phrase = "Bad Request"
@@ -637,7 +640,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_error_handling_async(self, mock_token):
         """Test async error handling with detailed validation."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 400
             mock_response.reason_phrase = "Bad Request"
@@ -662,7 +665,7 @@ class TestProjectsAPI:
 
     def test_timeout_parameter_sync(self, mock_token):
         """Test sync functions accept timeout parameter."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -677,7 +680,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_timeout_parameter_async(self, mock_token):
         """Test async functions accept timeout parameter."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -691,7 +694,7 @@ class TestProjectsAPI:
 
     def test_base_url_parameter_sync(self, mock_token):
         """Test sync functions accept base_url parameter."""
-        with patch("vercel.projects._sync.projects._request") as mock_request:
+        with patch(_SYNC_REQUEST) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -707,7 +710,7 @@ class TestProjectsAPI:
     @pytest.mark.asyncio
     async def test_base_url_parameter_async(self, mock_token):
         """Test async functions accept base_url parameter."""
-        with patch("vercel.projects._async.projects._request") as mock_request:
+        with patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_request:
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"projects": []}
@@ -734,8 +737,8 @@ class TestConsistency:
 
         # Mock both sync and async request functions
         with (
-            patch("vercel.projects._sync.projects._request") as mock_sync_request,
-            patch("vercel.projects._async.projects._request") as mock_async_request,
+            patch(_SYNC_REQUEST) as mock_sync_request,
+            patch(_ASYNC_REQUEST, new_callable=AsyncMock) as mock_async_request,
         ):
             # Setup mock responses
             mock_sync_response = MagicMock()
