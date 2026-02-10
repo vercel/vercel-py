@@ -627,15 +627,10 @@ def download_file(
 
         os.replace(tmp, dst)  # atomic finalize
     except Exception:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        finally:
-            if response is not None:
-                response.close()
-            transport.close()
-            raise
-    else:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    finally:
         if response is not None:
             response.close()
         transport.close()
@@ -699,15 +694,10 @@ async def download_file_async(
 
         os.replace(tmp, dst)  # atomic finalize
     except Exception:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        finally:
-            if response is not None:
-                await response.aclose()
-            await transport.aclose()
-            raise
-    else:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    finally:
         if response is not None:
             await response.aclose()
         await transport.aclose()
