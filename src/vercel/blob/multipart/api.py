@@ -15,24 +15,7 @@ from ..utils import (
     require_public_access,
     validate_path,
 )
-from .core import (
-    call_complete_multipart_upload,
-    call_complete_multipart_upload_async,
-    call_create_multipart_upload,
-    call_create_multipart_upload_async,
-    call_upload_part,
-    call_upload_part_async,
-)
-
-SyncProgressCallback = Callable[[UploadProgressEvent], None]
-AsyncProgressCallback = (
-    Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
-)
-SyncPerPartProgressCallback = Callable[[int, UploadProgressEvent], None]
-AsyncPerPartProgressCallback = (
-    Callable[[int, UploadProgressEvent], None]
-    | Callable[[int, UploadProgressEvent], Awaitable[None]]
-)
+from .core import _AsyncMultipartClient, _SyncMultipartClient
 
 
 def _validate_multipart_context(path: str, access: str, token: str | None) -> str:
@@ -93,220 +76,6 @@ def _validate_part_upload_inputs(part_number: int, body: Any) -> None:
         )
 
 
-class _BaseMultipartApiClient:
-    async def _call_create(
-        self,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        *,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    async def _call_upload(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        part_number: int,
-        body: Any,
-        on_upload_progress: AsyncProgressCallback | None = None,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    async def _call_complete(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        parts: list[dict[str, Any]],
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    async def create_multipart_upload(
-        self,
-        path: str,
-        *,
-        access: str = "public",
-        content_type: str | None = None,
-        add_random_suffix: bool = False,
-        overwrite: bool = False,
-        cache_control_max_age: int | None = None,
-        token: str | None = None,
-    ) -> MultipartCreateResult:
-        resolved_token = _validate_multipart_context(path, access, token)
-        headers = _build_put_headers(
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-        )
-        response = await self._call_create(path, headers, token=resolved_token)
-        return _build_multipart_create_result(response)
-
-    async def upload_part(
-        self,
-        path: str,
-        body: Any,
-        *,
-        access: str = "public",
-        token: str | None = None,
-        upload_id: str,
-        key: str,
-        part_number: int,
-        content_type: str | None = None,
-        on_upload_progress: AsyncProgressCallback | None = None,
-    ) -> MultipartPart:
-        resolved_token = _validate_multipart_context(path, access, token)
-        headers = _build_put_headers(content_type=content_type)
-        response = await self._call_upload(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            token=resolved_token,
-            part_number=part_number,
-            body=body,
-            on_upload_progress=on_upload_progress,
-        )
-        return _build_multipart_part_result(part_number, response)
-
-    async def complete_multipart_upload(
-        self,
-        path: str,
-        parts: list[MultipartPart],
-        *,
-        access: str = "public",
-        content_type: str | None = None,
-        token: str | None = None,
-        upload_id: str,
-        key: str,
-    ) -> PutBlobResult:
-        resolved_token = _validate_multipart_context(path, access, token)
-        headers = _build_put_headers(content_type=content_type)
-        response = await self._call_complete(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            token=resolved_token,
-            parts=_normalize_complete_parts(parts),
-        )
-        return _build_put_blob_result(response)
-
-
-class _SyncMultipartApiClient(_BaseMultipartApiClient):
-    async def _call_create(
-        self,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        *,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        return call_create_multipart_upload(path, headers, token=token)
-
-    async def _call_upload(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        part_number: int,
-        body: Any,
-        on_upload_progress: AsyncProgressCallback | None = None,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        return call_upload_part(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            token=token,
-            part_number=part_number,
-            body=body,
-            on_upload_progress=cast(SyncProgressCallback | None, on_upload_progress),
-        )
-
-    async def _call_complete(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        parts: list[dict[str, Any]],
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        return call_complete_multipart_upload(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            token=token,
-            parts=parts,
-        )
-
-
-class _AsyncMultipartApiClient(_BaseMultipartApiClient):
-    async def _call_create(
-        self,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        *,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        return await call_create_multipart_upload_async(path, headers, token=token)
-
-    async def _call_upload(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        part_number: int,
-        body: Any,
-        on_upload_progress: AsyncProgressCallback | None = None,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        return await call_upload_part_async(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            token=token,
-            part_number=part_number,
-            body=body,
-            on_upload_progress=on_upload_progress,
-        )
-
-    async def _call_complete(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        parts: list[dict[str, Any]],
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        return await call_complete_multipart_upload_async(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            token=token,
-            parts=parts,
-        )
-
-
 def create_multipart_upload(
     path: str,
     *,
@@ -317,17 +86,17 @@ def create_multipart_upload(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
-    return iter_coroutine(
-        _SyncMultipartApiClient().create_multipart_upload(
-            path,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-        )
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
     )
+    response = iter_coroutine(
+        _SyncMultipartClient().create_multipart_upload(path, headers, token=resolved_token)
+    )
+    return _build_multipart_create_result(response)
 
 
 async def create_multipart_upload_async(
@@ -340,15 +109,17 @@ async def create_multipart_upload_async(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
-    return await _AsyncMultipartApiClient().create_multipart_upload(
-        path,
-        access=access,
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-        token=token,
     )
+    response = await _AsyncMultipartClient().create_multipart_upload(
+        path, headers, token=resolved_token
+    )
+    return _build_multipart_create_result(response)
 
 
 def upload_part(
@@ -363,19 +134,22 @@ def upload_part(
     content_type: str | None = None,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> MultipartPart:
-    return iter_coroutine(
-        _SyncMultipartApiClient().upload_part(
-            path,
-            body,
-            access=access,
-            token=token,
+    resolved_token = _validate_multipart_context(path, access, token)
+    _validate_part_upload_inputs(part_number, body)
+    headers = _build_put_headers(content_type=content_type)
+    response = iter_coroutine(
+        _SyncMultipartClient().upload_part(
             upload_id=upload_id,
             key=key,
+            path=path,
+            headers=headers,
             part_number=part_number,
-            content_type=content_type,
+            body=body,
             on_upload_progress=on_upload_progress,
-        )
+            token=resolved_token,
+        ),
     )
+    return _build_multipart_part_result(part_number, response)
 
 
 async def upload_part_async(
@@ -394,17 +168,20 @@ async def upload_part_async(
         | None
     ) = None,
 ) -> MultipartPart:
-    return await _AsyncMultipartApiClient().upload_part(
-        path,
-        body,
-        access=access,
-        token=token,
+    resolved_token = _validate_multipart_context(path, access, token)
+    _validate_part_upload_inputs(part_number, body)
+    headers = _build_put_headers(content_type=content_type)
+    response = await _AsyncMultipartClient().upload_part(
         upload_id=upload_id,
         key=key,
+        path=path,
+        headers=headers,
         part_number=part_number,
-        content_type=content_type,
+        body=body,
         on_upload_progress=on_upload_progress,
+        token=resolved_token,
     )
+    return _build_multipart_part_result(part_number, response)
 
 
 def complete_multipart_upload(
@@ -417,17 +194,19 @@ def complete_multipart_upload(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
-    return iter_coroutine(
-        _SyncMultipartApiClient().complete_multipart_upload(
-            path,
-            parts,
-            access=access,
-            content_type=content_type,
-            token=token,
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(content_type=content_type)
+    response = iter_coroutine(
+        _SyncMultipartClient().complete_multipart_upload(
             upload_id=upload_id,
             key=key,
-        )
+            path=path,
+            headers=headers,
+            parts=_normalize_complete_parts(parts),
+            token=resolved_token,
+        ),
     )
+    return _build_put_blob_result(response)
 
 
 async def complete_multipart_upload_async(
@@ -440,15 +219,17 @@ async def complete_multipart_upload_async(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
-    return await _AsyncMultipartApiClient().complete_multipart_upload(
-        path,
-        parts,
-        access=access,
-        content_type=content_type,
-        token=token,
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(content_type=content_type)
+    response = await _AsyncMultipartClient().complete_multipart_upload(
         upload_id=upload_id,
         key=key,
+        path=path,
+        headers=headers,
+        parts=_normalize_complete_parts(parts),
+        token=resolved_token,
     )
+    return _build_put_blob_result(response)
 
 
 class _BaseMultipartUploader:
@@ -494,26 +275,30 @@ class MultipartUploader(_BaseMultipartUploader):
             def effective(evt: UploadProgressEvent) -> None:
                 per_part_progress(part_number, evt)
 
-        result = call_upload_part(
-            upload_id=self._upload_id,
-            key=self._key,
-            path=self._path,
-            headers=self._headers,
-            part_number=part_number,
-            body=body,
-            on_upload_progress=effective,
-            token=self._token,
+        result = iter_coroutine(
+            _SyncMultipartClient().upload_part(
+                upload_id=self._upload_id,
+                key=self._key,
+                path=self._path,
+                headers=self._headers,
+                part_number=part_number,
+                body=body,
+                on_upload_progress=effective,
+                token=self._token,
+            )
         )
         return _build_multipart_part_result(part_number, result)
 
     def complete(self, parts: list[MultipartPart]) -> PutBlobResult:
-        response = call_complete_multipart_upload(
-            upload_id=self._upload_id,
-            key=self._key,
-            path=self._path,
-            headers=self._headers,
-            parts=_normalize_complete_parts(parts),
-            token=self._token,
+        response = iter_coroutine(
+            _SyncMultipartClient().complete_multipart_upload(
+                upload_id=self._upload_id,
+                key=self._key,
+                path=self._path,
+                headers=self._headers,
+                parts=_normalize_complete_parts(parts),
+                token=self._token,
+            )
         )
         return _build_put_blob_result(response)
 
@@ -545,7 +330,7 @@ class AsyncMultipartUploader(_BaseMultipartUploader):
                 if inspect.isawaitable(result):
                     await result
 
-        response = await call_upload_part_async(
+        response = await _AsyncMultipartClient().upload_part(
             upload_id=self._upload_id,
             key=self._key,
             path=self._path,
@@ -558,7 +343,7 @@ class AsyncMultipartUploader(_BaseMultipartUploader):
         return _build_multipart_part_result(part_number, response)
 
     async def complete(self, parts: list[MultipartPart]) -> PutBlobResult:
-        response = await call_complete_multipart_upload_async(
+        response = await _AsyncMultipartClient().complete_multipart_upload(
             upload_id=self._upload_id,
             key=self._key,
             path=self._path,
@@ -586,7 +371,9 @@ def create_multipart_uploader(
         overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
     )
-    create_response = call_create_multipart_upload(path, headers, token=resolved_token)
+    create_response = iter_coroutine(
+        _SyncMultipartClient().create_multipart_upload(path, headers, token=resolved_token)
+    )
 
     return MultipartUploader(
         path=path,
@@ -614,7 +401,9 @@ async def create_multipart_uploader_async(
         overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
     )
-    create_response = await call_create_multipart_upload_async(path, headers, token=resolved_token)
+    create_response = await _AsyncMultipartClient().create_multipart_upload(
+        path, headers, token=resolved_token
+    )
 
     return AsyncMultipartUploader(
         path=path,

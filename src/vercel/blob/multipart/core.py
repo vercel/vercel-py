@@ -38,7 +38,7 @@ def _build_headers(
     return request_headers
 
 
-class _BaseMultipartRequestClient:
+class _BaseMultipartClient:
     async def _request_api(self, **kwargs: Any) -> Any:
         raise NotImplementedError
 
@@ -114,12 +114,12 @@ class _BaseMultipartRequestClient:
         return cast(dict[str, Any], response)
 
 
-class _SyncMultipartRequestClient(_BaseMultipartRequestClient):
+class _SyncMultipartClient(_BaseMultipartClient):
     async def _request_api(self, **kwargs: Any) -> Any:
         return request_api(**kwargs)
 
 
-class _AsyncMultipartRequestClient(_BaseMultipartRequestClient):
+class _AsyncMultipartClient(_BaseMultipartClient):
     async def _request_api(self, **kwargs: Any) -> Any:
         return await request_api_async(**kwargs)
 
@@ -128,14 +128,14 @@ def call_create_multipart_upload(
     path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
     return iter_coroutine(
-        _SyncMultipartRequestClient().create_multipart_upload(path, headers, token=token)
+        _SyncMultipartClient().create_multipart_upload(path, headers, token=token)
     )
 
 
 async def call_create_multipart_upload_async(
     path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
-    return await _AsyncMultipartRequestClient().create_multipart_upload(path, headers, token=token)
+    return await _AsyncMultipartClient().create_multipart_upload(path, headers, token=token)
 
 
 def call_upload_part(
@@ -150,7 +150,7 @@ def call_upload_part(
     token: str | None = None,
 ) -> dict[str, Any]:
     return iter_coroutine(
-        _SyncMultipartRequestClient().upload_part(
+        _SyncMultipartClient().upload_part(
             upload_id=upload_id,
             key=key,
             path=path,
@@ -174,7 +174,7 @@ async def call_upload_part_async(
     on_upload_progress: AsyncProgressCallback | None = None,
     token: str | None = None,
 ) -> dict[str, Any]:
-    return await _AsyncMultipartRequestClient().upload_part(
+    return await _AsyncMultipartClient().upload_part(
         upload_id=upload_id,
         key=key,
         path=path,
@@ -196,7 +196,7 @@ def call_complete_multipart_upload(
     token: str | None = None,
 ) -> dict[str, Any]:
     return iter_coroutine(
-        _SyncMultipartRequestClient().complete_multipart_upload(
+        _SyncMultipartClient().complete_multipart_upload(
             upload_id=upload_id,
             key=key,
             path=path,
@@ -216,7 +216,7 @@ async def call_complete_multipart_upload_async(
     parts: list[dict[str, Any]],
     token: str | None = None,
 ) -> dict[str, Any]:
-    return await _AsyncMultipartRequestClient().complete_multipart_upload(
+    return await _AsyncMultipartClient().complete_multipart_upload(
         upload_id=upload_id,
         key=key,
         path=path,
