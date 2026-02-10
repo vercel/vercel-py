@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import abc
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from typing import Any, TypeVar, cast
 
 import httpx
 
@@ -22,11 +23,19 @@ from .errors import (
     BlobStoreSuspendedError,
     BlobUnknownError,
 )
+from .types import (
+    CreateFolderResult as CreateFolderResultType,
+    HeadBlobResult as HeadBlobResultType,
+    ListBlobItem,
+    ListBlobResult as ListBlobResultType,
+    PutBlobResult as PutBlobResultType,
+)
 from .utils import (
     PutHeaders,
     StreamingBodyWithProgress,
     UploadProgressEvent,
     compute_body_length,
+    create_put_headers,
     debug,
     ensure_token,
     extract_store_id_from_token,
@@ -34,15 +43,196 @@ from .utils import (
     get_api_version,
     get_proxy_through_alternative_api_header_from_env,
     get_retries,
+    is_url,
     make_request_id,
+    parse_datetime,
     parse_rfc7231_retry_after,
+    require_public_access,
     should_use_x_content_length,
+    validate_path,
 )
 
 BlobProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
 )
 SleepFn = Callable[[float], Awaitable[None] | None]
+_T = TypeVar("_T")
+PUT_BODY_OBJECT_ERROR = (
+    "Body must be a string, buffer or stream. "
+    "You sent a plain object, double check what you're trying to upload."
+)
+_SyncRequestFunc = Callable[..., dict[str, Any]]
+_AsyncRequestFunc = Callable[..., Awaitable[dict[str, Any]]]
+_SyncMultipartUploadFunc = Callable[..., dict[str, Any]]
+_AsyncMultipartUploadFunc = Callable[..., Awaitable[dict[str, Any]]]
+
+
+class _BlobOpsRuntime(abc.ABC):
+    @abc.abstractmethod
+    async def request(
+        self,
+        pathname: str,
+        method: str,
+        *,
+        token: str | None = None,
+        headers: PutHeaders | dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        body: Any = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def multipart_upload(
+        self,
+        path: str,
+        body: Any,
+        *,
+        access: str,
+        content_type: str | None = None,
+        add_random_suffix: bool = False,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+        token: str | None = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class _BlockingBlobOpsRuntime(_BlobOpsRuntime):
+    def __init__(
+        self,
+        request_func: _SyncRequestFunc,
+        multipart_upload_func: _SyncMultipartUploadFunc,
+    ) -> None:
+        self._request_func = request_func
+        self._multipart_upload_func = multipart_upload_func
+
+    async def request(
+        self,
+        pathname: str,
+        method: str,
+        *,
+        token: str | None = None,
+        headers: PutHeaders | dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        body: Any = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        return self._request_func(
+            pathname,
+            method,
+            token=token,
+            headers=headers,
+            params=params,
+            body=body,
+            on_upload_progress=cast(
+                Callable[[UploadProgressEvent], None] | None, on_upload_progress
+            ),
+        )
+
+    async def multipart_upload(
+        self,
+        path: str,
+        body: Any,
+        *,
+        access: str,
+        content_type: str | None = None,
+        add_random_suffix: bool = False,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+        token: str | None = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        return self._multipart_upload_func(
+            path,
+            body,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+            on_upload_progress=cast(
+                Callable[[UploadProgressEvent], None] | None, on_upload_progress
+            ),
+        )
+
+
+class _AsyncBlobOpsRuntime(_BlobOpsRuntime):
+    def __init__(
+        self,
+        request_func: _AsyncRequestFunc,
+        multipart_upload_func: _AsyncMultipartUploadFunc,
+    ) -> None:
+        self._request_func = request_func
+        self._multipart_upload_func = multipart_upload_func
+
+    async def request(
+        self,
+        pathname: str,
+        method: str,
+        *,
+        token: str | None = None,
+        headers: PutHeaders | dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        body: Any = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        return await self._request_func(
+            pathname,
+            method,
+            token=token,
+            headers=headers,
+            params=params,
+            body=body,
+            on_upload_progress=on_upload_progress,
+        )
+
+    async def multipart_upload(
+        self,
+        path: str,
+        body: Any,
+        *,
+        access: str,
+        content_type: str | None = None,
+        add_random_suffix: bool = False,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+        token: str | None = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        return await self._multipart_upload_func(
+            path,
+            body,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+            on_upload_progress=on_upload_progress,
+        )
+
+
+def create_blocking_blob_ops_runtime(
+    request_func: _SyncRequestFunc,
+    multipart_upload_func: _SyncMultipartUploadFunc,
+) -> _BlobOpsRuntime:
+    return _BlockingBlobOpsRuntime(
+        request_func=request_func,
+        multipart_upload_func=multipart_upload_func,
+    )
+
+
+def create_async_blob_ops_runtime(
+    request_func: _AsyncRequestFunc,
+    multipart_upload_func: _AsyncMultipartUploadFunc,
+) -> _BlobOpsRuntime:
+    return _AsyncBlobOpsRuntime(
+        request_func=request_func,
+        multipart_upload_func=multipart_upload_func,
+    )
 
 
 def map_blob_error(response: httpx.Response) -> tuple[str, BlobError]:
@@ -111,9 +301,10 @@ def decode_blob_response(response: httpx.Response) -> Any:
         return response.text
 
 
-async def _maybe_await(value: Any) -> None:
+async def _maybe_await(value: _T | Awaitable[_T]) -> _T:
     if inspect.isawaitable(value):
-        await value
+        return await cast(Awaitable[_T], value)
+    return cast(_T, value)
 
 
 async def _emit_progress(
@@ -181,6 +372,317 @@ def _build_request_body(
         return RawBody(content)
 
     return JSONBody(body)
+
+
+def get_telemetry_size_bytes(body: Any) -> int | None:
+    if isinstance(body, (bytes, bytearray)):
+        return len(body)
+    if isinstance(body, str):
+        return len(body.encode())
+    return None
+
+
+def _validate_put_inputs(path: str, body: Any, access: str) -> None:
+    validate_path(path)
+    require_public_access(access)
+    if body is None:
+        raise BlobError("body is required")
+    if isinstance(body, dict):
+        raise BlobError(PUT_BODY_OBJECT_ERROR)
+
+
+def normalize_delete_urls(url_or_path: str | Iterable[str]) -> list[str]:
+    if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
+        return [str(url) for url in url_or_path]
+    return [str(url_or_path)]
+
+
+def build_put_blob_result(raw: dict[str, Any]) -> PutBlobResultType:
+    return PutBlobResultType(
+        url=raw["url"],
+        download_url=raw["downloadUrl"],
+        pathname=raw["pathname"],
+        content_type=raw["contentType"],
+        content_disposition=raw["contentDisposition"],
+    )
+
+
+def build_head_blob_result(resp: dict[str, Any]) -> HeadBlobResultType:
+    uploaded_at = (
+        parse_datetime(resp["uploadedAt"])
+        if isinstance(resp.get("uploadedAt"), str)
+        else resp["uploadedAt"]
+    )
+    return HeadBlobResultType(
+        size=resp["size"],
+        uploaded_at=uploaded_at,
+        pathname=resp["pathname"],
+        content_type=resp["contentType"],
+        content_disposition=resp["contentDisposition"],
+        url=resp["url"],
+        download_url=resp["downloadUrl"],
+        cache_control=resp["cacheControl"],
+    )
+
+
+def build_list_blob_result(resp: dict[str, Any]) -> ListBlobResultType:
+    blobs_list: list[ListBlobItem] = []
+    for blob in resp.get("blobs", []):
+        uploaded_at = (
+            parse_datetime(blob["uploadedAt"])
+            if isinstance(blob.get("uploadedAt"), str)
+            else blob["uploadedAt"]
+        )
+        blobs_list.append(
+            ListBlobItem(
+                url=blob["url"],
+                download_url=blob["downloadUrl"],
+                pathname=blob["pathname"],
+                size=blob["size"],
+                uploaded_at=uploaded_at,
+            )
+        )
+    return ListBlobResultType(
+        blobs=blobs_list,
+        cursor=resp.get("cursor"),
+        has_more=resp.get("hasMore", False),
+        folders=resp.get("folders"),
+    )
+
+
+def build_create_folder_result(raw: dict[str, Any]) -> CreateFolderResultType:
+    return CreateFolderResultType(pathname=raw["pathname"], url=raw["url"])
+
+
+def build_list_params(
+    *,
+    limit: int | None = None,
+    prefix: str | None = None,
+    cursor: str | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if limit is not None:
+        params["limit"] = int(limit)
+    if prefix is not None:
+        params["prefix"] = prefix
+    if cursor is not None:
+        params["cursor"] = cursor
+    if mode is not None:
+        params["mode"] = mode
+    return params
+
+
+async def put_blob_core(
+    path: str,
+    body: Any,
+    *,
+    access: str,
+    content_type: str | None,
+    add_random_suffix: bool,
+    overwrite: bool,
+    cache_control_max_age: int | None,
+    token: str | None,
+    multipart: bool,
+    on_upload_progress: BlobProgressCallback | None,
+    runtime: _BlobOpsRuntime,
+) -> tuple[PutBlobResultType, bool]:
+    token = ensure_token(token)
+    _validate_put_inputs(path, body, access)
+
+    headers = create_put_headers(
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
+    )
+
+    if multipart:
+        raw = await runtime.multipart_upload(
+            path,
+            body,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+            on_upload_progress=on_upload_progress,
+        )
+        return build_put_blob_result(raw), True
+
+    raw = await runtime.request(
+        "",
+        "PUT",
+        token=token,
+        headers=headers,
+        params={"pathname": path},
+        body=body,
+        on_upload_progress=on_upload_progress,
+    )
+    return build_put_blob_result(raw), False
+
+
+async def delete_blob_core(
+    url_or_path: str | Iterable[str],
+    *,
+    token: str | None,
+    runtime: _BlobOpsRuntime,
+) -> int:
+    token = ensure_token(token)
+    urls = normalize_delete_urls(url_or_path)
+    await runtime.request(
+        "/delete",
+        "POST",
+        token=token,
+        headers={"content-type": "application/json"},
+        body={"urls": urls},
+    )
+    return len(urls)
+
+
+async def head_blob_core(
+    url_or_path: str,
+    *,
+    token: str | None,
+    runtime: _BlobOpsRuntime,
+) -> HeadBlobResultType:
+    token = ensure_token(token)
+    resp = await runtime.request(
+        "",
+        "GET",
+        token=token,
+        params={"url": url_or_path},
+    )
+    return build_head_blob_result(resp)
+
+
+async def list_objects_core(
+    *,
+    limit: int | None,
+    prefix: str | None,
+    cursor: str | None,
+    mode: str | None,
+    token: str | None,
+    runtime: _BlobOpsRuntime,
+) -> ListBlobResultType:
+    token = ensure_token(token)
+    resp = await runtime.request(
+        "",
+        "GET",
+        token=token,
+        params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
+    )
+    return build_list_blob_result(resp)
+
+
+async def iter_objects_core(
+    *,
+    prefix: str | None,
+    mode: str | None,
+    token: str | None,
+    batch_size: int | None,
+    limit: int | None,
+    cursor: str | None,
+    runtime: _BlobOpsRuntime,
+) -> AsyncIterator[ListBlobItem]:
+    token = ensure_token(token)
+    next_cursor = cursor
+    yielded_count = 0
+
+    while True:
+        effective_limit: int | None = batch_size
+        if limit is not None:
+            remaining = limit - yielded_count
+            if remaining <= 0:
+                break
+            if effective_limit is None or effective_limit > remaining:
+                effective_limit = remaining
+
+        page = await list_objects_core(
+            limit=effective_limit,
+            prefix=prefix,
+            cursor=next_cursor,
+            mode=mode,
+            token=token,
+            runtime=runtime,
+        )
+
+        for item in page.blobs:
+            yield item
+            if limit is not None:
+                yielded_count += 1
+                if yielded_count >= limit:
+                    return
+
+        if not page.has_more or not page.cursor:
+            break
+        next_cursor = page.cursor
+
+
+async def copy_blob_core(
+    src_path: str,
+    dst_path: str,
+    *,
+    access: str,
+    content_type: str | None,
+    add_random_suffix: bool,
+    overwrite: bool,
+    cache_control_max_age: int | None,
+    token: str | None,
+    runtime: _BlobOpsRuntime,
+) -> PutBlobResultType:
+    token = ensure_token(token)
+    validate_path(dst_path)
+    require_public_access(access)
+
+    src_url = src_path
+    if not is_url(src_url):
+        src_url = (
+            await head_blob_core(
+                src_url,
+                token=token,
+                runtime=runtime,
+            )
+        ).url
+
+    headers = create_put_headers(
+        content_type=content_type,
+        add_random_suffix=add_random_suffix,
+        allow_overwrite=overwrite,
+        cache_control_max_age=cache_control_max_age,
+    )
+    raw = await runtime.request(
+        "",
+        "PUT",
+        token=token,
+        headers=headers,
+        params={"pathname": str(dst_path), "fromUrl": src_url},
+    )
+    return build_put_blob_result(raw)
+
+
+async def create_folder_core(
+    path: str,
+    *,
+    token: str | None,
+    overwrite: bool,
+    runtime: _BlobOpsRuntime,
+) -> CreateFolderResultType:
+    token = ensure_token(token)
+    folder_path = path if path.endswith("/") else f"{path}/"
+    headers = create_put_headers(
+        add_random_suffix=False,
+        allow_overwrite=overwrite,
+    )
+    raw = await runtime.request(
+        "",
+        "PUT",
+        token=token,
+        headers=headers,
+        params={"pathname": folder_path},
+    )
+    return build_create_folder_result(raw)
 
 
 async def request_api_core(
@@ -280,9 +782,25 @@ async def request_api_core(
 
 
 __all__ = [
+    "build_create_folder_result",
+    "build_head_blob_result",
+    "build_list_blob_result",
+    "build_list_params",
+    "build_put_blob_result",
+    "copy_blob_core",
+    "create_async_blob_ops_runtime",
+    "create_blocking_blob_ops_runtime",
+    "create_folder_core",
+    "delete_blob_core",
     "decode_blob_response",
+    "get_telemetry_size_bytes",
+    "head_blob_core",
     "is_network_error",
+    "iter_objects_core",
+    "list_objects_core",
     "map_blob_error",
+    "normalize_delete_urls",
+    "put_blob_core",
     "request_api_core",
     "should_retry",
 ]

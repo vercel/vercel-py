@@ -9,7 +9,21 @@ from typing import Any
 
 import httpx
 
+from .._iter_coroutine import iter_coroutine
 from .._telemetry.tracker import telemetry, track
+from ._core import (
+    copy_blob_core,
+    create_async_blob_ops_runtime,
+    create_blocking_blob_ops_runtime,
+    create_folder_core,
+    delete_blob_core,
+    get_telemetry_size_bytes,
+    head_blob_core,
+    iter_objects_core,
+    list_objects_core,
+    normalize_delete_urls,
+    put_blob_core,
+)
 from .api import request_api, request_api_async
 from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
@@ -21,20 +35,24 @@ from .types import (
     PutBlobResult as PutBlobResultType,
 )
 from .utils import (
-    PutHeaders,
     UploadProgressEvent,
-    create_put_headers,
     ensure_token,
     is_url,
-    parse_datetime,
-    require_public_access,
-    validate_path,
 )
 
 # Context variable to store the delete count for telemetry
 # This allows the derive function to access the count after the iterable is consumed
 _delete_count_context: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "_delete_count", default=None
+)
+
+_BLOCKING_BLOB_RUNTIME = create_blocking_blob_ops_runtime(
+    request_func=request_api,
+    multipart_upload_func=auto_multipart_upload,
+)
+_ASYNC_BLOB_RUNTIME = create_async_blob_ops_runtime(
+    request_func=request_api_async,
+    multipart_upload_func=auto_multipart_upload_async,
 )
 
 
@@ -52,26 +70,8 @@ def put(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    validate_path(path)
-    require_public_access(access)
-
-    if body is None:
-        raise BlobError("body is required")
-    if isinstance(body, dict):
-        raise BlobError(
-            "Body must be a string, buffer or stream. "
-            "You sent a plain object, double check what you're trying to upload."
-        )
-
-    headers = create_put_headers(
-        content_type=content_type,
-        add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
-        cache_control_max_age=cache_control_max_age,
-    )
-
-    if multipart is True:
-        raw = auto_multipart_upload(
+    result, used_multipart = iter_coroutine(
+        put_blob_core(
             path,
             body,
             access=access,
@@ -80,61 +80,20 @@ def put(
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
             token=token,
+            multipart=multipart,
             on_upload_progress=on_upload_progress,
+            runtime=_BLOCKING_BLOB_RUNTIME,
         )
-        # Track telemetry (best-effort)
-        size_bytes = None
-        if isinstance(body, (bytes, bytearray)):
-            size_bytes = len(body)
-        elif isinstance(body, str):
-            size_bytes = len(body.encode())
-        track(
-            "blob_put",
-            token=token,
-            access=access,
-            content_type=content_type,
-            multipart=True,
-            size_bytes=size_bytes,
-        )
-        return PutBlobResultType(
-            url=raw["url"],
-            download_url=raw["downloadUrl"],
-            pathname=raw["pathname"],
-            content_type=raw["contentType"],
-            content_disposition=raw["contentDisposition"],
-        )
-
-    params = {"pathname": path}
-    raw = request_api(
-        "",
-        "PUT",
-        token=token,
-        headers=headers,
-        params=params,
-        body=body,
-        on_upload_progress=on_upload_progress,
     )
-    # Track telemetry (best-effort)
-    size_bytes = None
-    if isinstance(body, (bytes, bytearray)):
-        size_bytes = len(body)
-    elif isinstance(body, str):
-        size_bytes = len(body.encode())
     track(
         "blob_put",
         token=token,
         access=access,
         content_type=content_type,
-        multipart=False,
-        size_bytes=size_bytes,
+        multipart=used_multipart,
+        size_bytes=get_telemetry_size_bytes(body),
     )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
-    )
+    return result
 
 
 async def put_async(
@@ -155,91 +114,28 @@ async def put_async(
     ) = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    validate_path(path)
-    require_public_access(access)
-
-    if body is None:
-        raise BlobError("body is required")
-    # Reject plain dict (JS plain object equivalent) to match TS error semantics
-    if isinstance(body, dict):
-        raise BlobError(
-            "Body must be a string, buffer or stream. "
-            "You sent a plain object, double check what you're trying to upload."
-        )
-
-    headers: PutHeaders = create_put_headers(
+    result, used_multipart = await put_blob_core(
+        path,
+        body,
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-    )
-
-    # Multipart auto support
-    if multipart is True:
-        raw = await auto_multipart_upload_async(
-            path,
-            body,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-            on_upload_progress=on_upload_progress,
-        )
-        # Track telemetry
-        size_bytes = None
-        if isinstance(body, (bytes, bytearray)):
-            size_bytes = len(body)
-        elif isinstance(body, str):
-            size_bytes = len(body.encode())
-        track(
-            "blob_put",
-            token=token,
-            access=access,
-            content_type=content_type,
-            multipart=True,
-            size_bytes=size_bytes,
-        )
-        return PutBlobResultType(
-            url=raw["url"],
-            download_url=raw["downloadUrl"],
-            pathname=raw["pathname"],
-            content_type=raw["contentType"],
-            content_disposition=raw["contentDisposition"],
-        )
-
-    params = {"pathname": path}
-    raw = await request_api_async(
-        "",
-        "PUT",
         token=token,
-        headers=headers,
-        params=params,
-        body=body,
+        multipart=multipart,
         on_upload_progress=on_upload_progress,
+        runtime=_ASYNC_BLOB_RUNTIME,
     )
-    # Track telemetry
-    size_bytes = None
-    if isinstance(body, (bytes, bytearray)):
-        size_bytes = len(body)
-    elif isinstance(body, str):
-        size_bytes = len(body.encode())
     track(
         "blob_put",
         token=token,
         access=access,
         content_type=content_type,
-        multipart=False,
-        size_bytes=size_bytes,
+        multipart=used_multipart,
+        size_bytes=get_telemetry_size_bytes(body),
     )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
-    )
+    return result
 
 
 class _CountedIterable:
@@ -300,20 +196,14 @@ def delete(
     token: str | None = None,
 ) -> None:
     token = ensure_token(token)
-    # Convert iterables to a list and store the count for telemetry
-    if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
-        urls = [str(u) for u in url_or_path]
-        _delete_count_context.set(len(urls))
-    else:
-        urls = [str(url_or_path)]
-        _delete_count_context.set(1)
-
-    request_api(
-        "/delete",
-        "POST",
-        token=token,
-        headers={"content-type": "application/json"},
-        body={"urls": urls},
+    normalized_urls = normalize_delete_urls(url_or_path)
+    _delete_count_context.set(len(normalized_urls))
+    iter_coroutine(
+        delete_blob_core(
+            normalized_urls,
+            token=token,
+            runtime=_BLOCKING_BLOB_RUNTIME,
+        )
     )
 
 
@@ -329,72 +219,32 @@ async def delete_async(
     token: str | None = None,
 ) -> None:
     token = ensure_token(token)
-    # Convert iterables to a list and store the count for telemetry
-    if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
-        urls = [str(u) for u in url_or_path]
-        _delete_count_context.set(len(urls))
-    else:
-        urls = [str(url_or_path)]
-        _delete_count_context.set(1)
-
-    await request_api_async(
-        "/delete",
-        "POST",
+    normalized_urls = normalize_delete_urls(url_or_path)
+    _delete_count_context.set(len(normalized_urls))
+    await delete_blob_core(
+        normalized_urls,
         token=token,
-        headers={"content-type": "application/json"},
-        body={"urls": urls},
+        runtime=_ASYNC_BLOB_RUNTIME,
     )
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
     token = ensure_token(token)
-    params = {"url": url_or_path}
-    resp = request_api(
-        "",
-        "GET",
-        token=token,
-        params=params,
-    )
-    uploaded_at = (
-        parse_datetime(resp["uploadedAt"])
-        if isinstance(resp.get("uploadedAt"), str)
-        else resp["uploadedAt"]
-    )
-    return HeadBlobResultType(
-        size=resp["size"],
-        uploaded_at=uploaded_at,
-        pathname=resp["pathname"],
-        content_type=resp["contentType"],
-        content_disposition=resp["contentDisposition"],
-        url=resp["url"],
-        download_url=resp["downloadUrl"],
-        cache_control=resp["cacheControl"],
+    return iter_coroutine(
+        head_blob_core(
+            url_or_path,
+            token=token,
+            runtime=_BLOCKING_BLOB_RUNTIME,
+        )
     )
 
 
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
     token = ensure_token(token)
-    params = {"url": url_or_path}
-    resp = await request_api_async(
-        "",
-        "GET",
+    return await head_blob_core(
+        url_or_path,
         token=token,
-        params=params,
-    )
-    uploaded_at = (
-        parse_datetime(resp["uploadedAt"])
-        if isinstance(resp.get("uploadedAt"), str)
-        else resp["uploadedAt"]
-    )
-    return HeadBlobResultType(
-        size=resp["size"],
-        uploaded_at=uploaded_at,
-        pathname=resp["pathname"],
-        content_type=resp["contentType"],
-        content_disposition=resp["contentDisposition"],
-        url=resp["url"],
-        download_url=resp["downloadUrl"],
-        cache_control=resp["cacheControl"],
+        runtime=_ASYNC_BLOB_RUNTIME,
     )
 
 
@@ -467,43 +317,15 @@ def list_objects(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    params: dict[str, Any] = {}
-    if limit is not None:
-        params["limit"] = int(limit)
-    if prefix is not None:
-        params["prefix"] = prefix
-    if cursor is not None:
-        params["cursor"] = cursor
-    if mode is not None:
-        params["mode"] = mode
-
-    resp = request_api(
-        "",
-        "GET",
-        token=token,
-        params=params,
-    )
-    blobs_list: list[ListBlobItem] = []
-    for b in resp.get("blobs", []):
-        uploaded_at = (
-            parse_datetime(b["uploadedAt"])
-            if isinstance(b.get("uploadedAt"), str)
-            else b["uploadedAt"]
+    return iter_coroutine(
+        list_objects_core(
+            limit=limit,
+            prefix=prefix,
+            cursor=cursor,
+            mode=mode,
+            token=token,
+            runtime=_BLOCKING_BLOB_RUNTIME,
         )
-        blobs_list.append(
-            ListBlobItem(
-                url=b["url"],
-                download_url=b["downloadUrl"],
-                pathname=b["pathname"],
-                size=b["size"],
-                uploaded_at=uploaded_at,
-            )
-        )
-    return ListBlobResultType(
-        blobs=blobs_list,
-        cursor=resp.get("cursor"),
-        has_more=resp.get("hasMore", False),
-        folders=resp.get("folders"),
     )
 
 
@@ -516,44 +338,23 @@ async def list_objects_async(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    params: dict[str, Any] = {}
-    if limit is not None:
-        params["limit"] = int(limit)
-    if prefix is not None:
-        params["prefix"] = prefix
-    if cursor is not None:
-        params["cursor"] = cursor
-    if mode is not None:
-        params["mode"] = mode
-
-    resp = await request_api_async(
-        "",
-        "GET",
+    return await list_objects_core(
+        limit=limit,
+        prefix=prefix,
+        cursor=cursor,
+        mode=mode,
         token=token,
-        params=params,
+        runtime=_ASYNC_BLOB_RUNTIME,
     )
-    blobs_list: list[ListBlobItem] = []
-    for b in resp.get("blobs", []):
-        uploaded_at = (
-            parse_datetime(b["uploadedAt"])
-            if isinstance(b.get("uploadedAt"), str)
-            else b["uploadedAt"]
-        )
-        blobs_list.append(
-            ListBlobItem(
-                url=b["url"],
-                download_url=b["downloadUrl"],
-                pathname=b["pathname"],
-                size=b["size"],
-                uploaded_at=uploaded_at,
-            )
-        )
-    return ListBlobResultType(
-        blobs=blobs_list,
-        cursor=resp.get("cursor"),
-        has_more=resp.get("hasMore", False),
-        folders=resp.get("folders"),
-    )
+
+
+async def _next_async_item(
+    iterator: AsyncIterator[ListBlobItem],
+) -> tuple[bool, ListBlobItem | None]:
+    try:
+        return False, await iterator.__anext__()
+    except StopAsyncIteration:
+        return True, None
 
 
 def iter_objects(
@@ -566,32 +367,22 @@ def iter_objects(
     cursor: str | None = None,
 ) -> Iterator[ListBlobItem]:
     token = ensure_token(token)
-    next_cursor = cursor
-    yielded_count = 0
+    core_iterator = iter_objects_core(
+        prefix=prefix,
+        mode=mode,
+        token=token,
+        batch_size=batch_size,
+        limit=limit,
+        cursor=cursor,
+        runtime=_BLOCKING_BLOB_RUNTIME,
+    )
+
     while True:
-        effective_limit: int | None = batch_size
-        if limit is not None:
-            remaining = limit - yielded_count
-            if remaining <= 0:
-                break
-            if effective_limit is None or effective_limit > remaining:
-                effective_limit = remaining
-        page = list_objects(
-            limit=effective_limit,
-            prefix=prefix,
-            cursor=next_cursor,
-            mode=mode,
-            token=token,
-        )
-        for item in page.blobs:
-            yield item
-            if limit is not None:
-                yielded_count += 1
-                if yielded_count >= limit:
-                    return
-        if not page.has_more or not page.cursor:
+        done, item = iter_coroutine(_next_async_item(core_iterator))
+        if done:
             break
-        next_cursor = page.cursor
+        if item is not None:
+            yield item
 
 
 async def iter_objects_async(
@@ -604,32 +395,16 @@ async def iter_objects_async(
     cursor: str | None = None,
 ) -> AsyncIterator[ListBlobItem]:
     token = ensure_token(token)
-    next_cursor = cursor
-    yielded_count = 0
-    while True:
-        effective_limit: int | None = batch_size
-        if limit is not None:
-            remaining = limit - yielded_count
-            if remaining <= 0:
-                break
-            if effective_limit is None or effective_limit > remaining:
-                effective_limit = remaining
-        page = await list_objects_async(
-            limit=effective_limit,
-            prefix=prefix,
-            cursor=next_cursor,
-            mode=mode,
-            token=token,
-        )
-        for item in page.blobs:
-            yield item
-            if limit is not None:
-                yielded_count += 1
-                if yielded_count >= limit:
-                    return
-        if not page.has_more or not page.cursor:
-            break
-        next_cursor = page.cursor
+    async for item in iter_objects_core(
+        prefix=prefix,
+        mode=mode,
+        token=token,
+        batch_size=batch_size,
+        limit=limit,
+        cursor=cursor,
+        runtime=_ASYNC_BLOB_RUNTIME,
+    ):
+        yield item
 
 
 def copy(
@@ -644,32 +419,18 @@ def copy(
     token: str | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    validate_path(dst_path)
-    require_public_access(access)
-    if not is_url(src_path):
-        meta = head(src_path, token=token)
-        src_path = meta.url
-
-    headers: PutHeaders = create_put_headers(
-        content_type=content_type,
-        add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
-        cache_control_max_age=cache_control_max_age,
-    )
-    params = {"pathname": dst_path, "fromUrl": src_path}
-    raw = request_api(
-        "",
-        "PUT",
-        token=token,
-        headers=headers,
-        params=params,
-    )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
+    return iter_coroutine(
+        copy_blob_core(
+            src_path,
+            dst_path,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+            runtime=_BLOCKING_BLOB_RUNTIME,
+        )
     )
 
 
@@ -685,34 +446,16 @@ async def copy_async(
     token: str | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    validate_path(dst_path)
-    require_public_access(access)
-
-    if not is_url(src_path):
-        meta = head(src_path, token=token)
-        src_path = meta.url
-    dst_path = str(dst_path)
-
-    headers: PutHeaders = create_put_headers(
+    return await copy_blob_core(
+        src_path,
+        dst_path,
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-    )
-    params = {"pathname": dst_path, "fromUrl": src_path}
-    raw = await request_api_async(
-        "",
-        "PUT",
         token=token,
-        headers=headers,
-        params=params,
-    )
-    return PutBlobResultType(
-        url=raw["url"],
-        download_url=raw["downloadUrl"],
-        pathname=raw["pathname"],
-        content_type=raw["contentType"],
-        content_disposition=raw["contentDisposition"],
+        runtime=_ASYNC_BLOB_RUNTIME,
     )
 
 
@@ -723,20 +466,14 @@ def create_folder(
     overwrite: bool = False,
 ) -> CreateFolderResultType:
     token = ensure_token(token)
-    folder_path = path if path.endswith("/") else path + "/"
-    headers = create_put_headers(
-        add_random_suffix=False,
-        allow_overwrite=overwrite,
+    return iter_coroutine(
+        create_folder_core(
+            path,
+            token=token,
+            overwrite=overwrite,
+            runtime=_BLOCKING_BLOB_RUNTIME,
+        )
     )
-    params = {"pathname": folder_path}
-    raw = request_api(
-        "",
-        "PUT",
-        token=token,
-        headers=headers,
-        params=params,
-    )
-    return CreateFolderResultType(pathname=raw["pathname"], url=raw["url"])
 
 
 async def create_folder_async(
@@ -746,20 +483,12 @@ async def create_folder_async(
     overwrite: bool = False,
 ) -> CreateFolderResultType:
     token = ensure_token(token)
-    folder_path = path if path.endswith("/") else path + "/"
-    headers = create_put_headers(
-        add_random_suffix=False,
-        allow_overwrite=overwrite,
-    )
-    params = {"pathname": folder_path}
-    raw = await request_api_async(
-        "",
-        "PUT",
+    return await create_folder_core(
+        path,
         token=token,
-        headers=headers,
-        params=params,
+        overwrite=overwrite,
+        runtime=_ASYNC_BLOB_RUNTIME,
     )
-    return CreateFolderResultType(pathname=raw["pathname"], url=raw["url"])
 
 
 def upload_file(
