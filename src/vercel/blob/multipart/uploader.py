@@ -289,8 +289,10 @@ class _AsyncMultipartUploadRuntime:
                 results.append(completed.result())
 
         if on_upload_progress:
+            loaded = sum(loaded_per_part.values())
+            percentage = round((loaded / total) * 100, 2) if total else 100.0
             callback_result = on_upload_progress(
-                UploadProgressEvent(loaded=total, total=total, percentage=100.0)
+                UploadProgressEvent(loaded=loaded, total=total, percentage=percentage)
             )
             if inspect.isawaitable(callback_result):
                 await cast(Awaitable[None], callback_result)

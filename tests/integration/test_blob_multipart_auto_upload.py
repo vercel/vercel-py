@@ -208,6 +208,61 @@ async def test_auto_multipart_upload_async_uses_blob_api_flow(mock_env_clear) ->
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_auto_multipart_upload_async_unknown_total_reports_loaded_bytes(
+    mock_env_clear,
+) -> None:
+    upload_part_numbers: list[int] = []
+    progress_events: list[UploadProgressEvent] = []
+
+    def mpu_handler(request: httpx.Request) -> httpx.Response:
+        action = request.headers["x-mpu-action"]
+
+        if action == "create":
+            assert request.url.params["pathname"] == "folder/unknown-total.bin"
+            return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+
+        if action == "upload":
+            part_number = int(request.headers["x-mpu-part-number"])
+            upload_part_numbers.append(part_number)
+            return httpx.Response(200, json={"etag": f"etag-{part_number}"})
+
+        if action == "complete":
+            return httpx.Response(200, json=_build_complete_response("folder/unknown-total.bin"))
+
+        raise AssertionError(f"unexpected multipart action: {action}")
+
+    route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
+
+    chunk_one = b"a" * (MIN_PART_SIZE // 2)
+    chunk_two = b"b"
+
+    async def async_chunks():
+        yield chunk_one
+        yield chunk_two
+
+    async def on_progress(event: UploadProgressEvent) -> None:
+        progress_events.append(event)
+
+    result = await auto_multipart_upload_async(
+        "folder/unknown-total.bin",
+        async_chunks(),
+        token="test_token",
+        part_size=MIN_PART_SIZE,
+        on_upload_progress=on_progress,
+    )
+
+    assert route.call_count == 3
+    assert upload_part_numbers == [1]
+    assert result["pathname"] == "folder/unknown-total.bin"
+    assert progress_events[-1] == UploadProgressEvent(
+        loaded=len(chunk_one) + len(chunk_two),
+        total=0,
+        percentage=100.0,
+    )
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_manual_multipart_async_uses_blob_api_flow(mock_env_clear) -> None:
     handler, state = _manual_mpu_handler("folder/manual-async.bin")
     route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=handler)
