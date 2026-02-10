@@ -74,6 +74,12 @@ def _blocking_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+async def _await_if_necessary(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await cast(Awaitable[Any], value)
+    return value
+
+
 def map_blob_error(response: httpx.Response) -> tuple[str, BlobError]:
     try:
         data = response.json()
@@ -418,6 +424,27 @@ class _BlobRequestClient:
 
 
 class _BaseBlobOpsClient(_BlobRequestClient):
+    def __init__(
+        self,
+        *,
+        transport: BaseTransport,
+        sleep_fn: SleepFn = asyncio.sleep,
+        await_progress_callback: bool = True,
+        async_content: bool = True,
+        multipart_runtime: Any,
+        create_multipart_upload: Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]],
+        complete_multipart_upload: Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]],
+    ) -> None:
+        super().__init__(
+            transport=transport,
+            sleep_fn=sleep_fn,
+            await_progress_callback=await_progress_callback,
+            async_content=async_content,
+        )
+        self._multipart_runtime = multipart_runtime
+        self._create_multipart_upload = create_multipart_upload
+        self._complete_multipart_upload = complete_multipart_upload
+
     async def _multipart_upload(
         self,
         path: str,
@@ -431,7 +458,65 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         token: str | None = None,
         on_upload_progress: BlobProgressCallback | None = None,
     ) -> dict[str, Any]:
-        raise NotImplementedError
+        from .multipart.uploader import (
+            DEFAULT_PART_SIZE,
+            _MultipartUploadSession,
+            _order_uploaded_parts,
+            _prepare_upload_headers,
+            _shape_complete_upload_result,
+            _validate_part_size,
+        )
+
+        headers = _prepare_upload_headers(
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+        )
+        part_size = _validate_part_size(DEFAULT_PART_SIZE)
+
+        create_response = cast(
+            dict[str, str],
+            await _await_if_necessary(self._create_multipart_upload(path, headers, token=token)),
+        )
+        session = _MultipartUploadSession(
+            upload_id=create_response["uploadId"],
+            key=create_response["key"],
+            path=path,
+            headers=headers,
+            token=token,
+        )
+
+        total = compute_body_length(body)
+        parts = cast(
+            list[dict[str, Any]],
+            await _await_if_necessary(
+                self._multipart_runtime.upload(
+                    session=session,
+                    body=body,
+                    part_size=part_size,
+                    total=total,
+                    on_upload_progress=on_upload_progress,
+                )
+            ),
+        )
+        ordered_parts = _order_uploaded_parts(parts)
+
+        complete_response = cast(
+            dict[str, Any],
+            await _await_if_necessary(
+                self._complete_multipart_upload(
+                    upload_id=session.upload_id,
+                    key=session.key,
+                    path=session.path,
+                    headers=session.headers,
+                    token=session.token,
+                    parts=ordered_parts,
+                )
+            ),
+        )
+        return _shape_complete_upload_result(complete_response)
 
     async def _put_blob(
         self,
@@ -649,42 +734,21 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
 class _SyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
+        from .multipart.core import (
+            call_complete_multipart_upload,
+            call_create_multipart_upload,
+        )
+        from .multipart.uploader import create_blocking_multipart_upload_runtime
+
         transport = BlockingTransport(create_base_client(timeout=timeout))
         super().__init__(
             transport=transport,
             sleep_fn=_blocking_sleep,
             await_progress_callback=False,
             async_content=False,
-        )
-
-    async def _multipart_upload(
-        self,
-        path: str,
-        body: Any,
-        *,
-        access: str,
-        content_type: str | None = None,
-        add_random_suffix: bool = False,
-        overwrite: bool = False,
-        cache_control_max_age: int | None = None,
-        token: str | None = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        from .multipart import auto_multipart_upload
-
-        return auto_multipart_upload(
-            path,
-            body,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-            on_upload_progress=cast(
-                Callable[[UploadProgressEvent], None] | None,
-                on_upload_progress,
-            ),
+            multipart_runtime=create_blocking_multipart_upload_runtime(),
+            create_multipart_upload=call_create_multipart_upload,
+            complete_multipart_upload=call_complete_multipart_upload,
         )
 
     def close(self) -> None:
@@ -699,34 +763,18 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
 
 class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
+        from .multipart.core import (
+            call_complete_multipart_upload_async,
+            call_create_multipart_upload_async,
+        )
+        from .multipart.uploader import create_async_multipart_upload_runtime
+
         transport = AsyncTransport(create_base_async_client(timeout=timeout))
-        super().__init__(transport=transport)
-
-    async def _multipart_upload(
-        self,
-        path: str,
-        body: Any,
-        *,
-        access: str,
-        content_type: str | None = None,
-        add_random_suffix: bool = False,
-        overwrite: bool = False,
-        cache_control_max_age: int | None = None,
-        token: str | None = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        from .multipart import auto_multipart_upload_async
-
-        return await auto_multipart_upload_async(
-            path,
-            body,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-            on_upload_progress=on_upload_progress,
+        super().__init__(
+            transport=transport,
+            multipart_runtime=create_async_multipart_upload_runtime(),
+            create_multipart_upload=call_create_multipart_upload_async,
+            complete_multipart_upload=call_complete_multipart_upload_async,
         )
 
     async def aclose(self) -> None:

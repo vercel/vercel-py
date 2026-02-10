@@ -67,6 +67,110 @@ class TestBlobPut:
         assert result.pathname == "test.txt"
 
     @respx.mock
+    def test_put_sync_multipart_uses_runtime_upload(self, mock_env_clear):
+        """Test sync multipart put uses create/upload/complete flow."""
+        import json
+
+        actions: list[str] = []
+        completed_parts: list[dict[str, str | int]] = []
+
+        def mpu_handler(request: httpx.Request) -> httpx.Response:
+            action = request.headers["x-mpu-action"]
+            actions.append(action)
+
+            if action == "create":
+                assert request.url.params["pathname"] == "folder/put-sync.bin"
+                return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+
+            if action == "upload":
+                assert request.headers["x-mpu-upload-id"] == "upload-id"
+                assert request.headers["x-mpu-key"] == "blob-key"
+                assert request.headers["x-mpu-part-number"] == "1"
+                return httpx.Response(200, json={"etag": "etag-1"})
+
+            if action == "complete":
+                completed_parts.extend(json.loads(request.content.decode()))
+                return httpx.Response(
+                    200,
+                    json={
+                        "url": "https://blob.vercel-storage.com/test-abc123/folder/put-sync.bin",
+                        "downloadUrl": (
+                            "https://blob.vercel-storage.com/"
+                            "test-abc123/folder/put-sync.bin?download=1"
+                        ),
+                        "pathname": "folder/put-sync.bin",
+                        "contentType": "application/octet-stream",
+                        "contentDisposition": 'inline; filename="put-sync.bin"',
+                    },
+                )
+
+            raise AssertionError(f"unexpected multipart action: {action}")
+
+        route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
+
+        result = put("folder/put-sync.bin", b"hello", token="test_token", multipart=True)
+
+        assert route.call_count == 3
+        assert actions == ["create", "upload", "complete"]
+        assert [part["partNumber"] for part in completed_parts] == [1]
+        assert result.pathname == "folder/put-sync.bin"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_put_async_multipart_uses_runtime_upload(self, mock_env_clear):
+        """Test async multipart put uses create/upload/complete flow."""
+        import json
+
+        actions: list[str] = []
+        completed_parts: list[dict[str, str | int]] = []
+
+        def mpu_handler(request: httpx.Request) -> httpx.Response:
+            action = request.headers["x-mpu-action"]
+            actions.append(action)
+
+            if action == "create":
+                assert request.url.params["pathname"] == "folder/put-async.bin"
+                return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+
+            if action == "upload":
+                assert request.headers["x-mpu-upload-id"] == "upload-id"
+                assert request.headers["x-mpu-key"] == "blob-key"
+                assert request.headers["x-mpu-part-number"] == "1"
+                return httpx.Response(200, json={"etag": "etag-1"})
+
+            if action == "complete":
+                completed_parts.extend(json.loads(request.content.decode()))
+                return httpx.Response(
+                    200,
+                    json={
+                        "url": "https://blob.vercel-storage.com/test-abc123/folder/put-async.bin",
+                        "downloadUrl": (
+                            "https://blob.vercel-storage.com/"
+                            "test-abc123/folder/put-async.bin?download=1"
+                        ),
+                        "pathname": "folder/put-async.bin",
+                        "contentType": "application/octet-stream",
+                        "contentDisposition": 'inline; filename="put-async.bin"',
+                    },
+                )
+
+            raise AssertionError(f"unexpected multipart action: {action}")
+
+        route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
+
+        result = await put_async(
+            "folder/put-async.bin",
+            b"hello",
+            token="test_token",
+            multipart=True,
+        )
+
+        assert route.call_count == 3
+        assert actions == ["create", "upload", "complete"]
+        assert [part["partNumber"] for part in completed_parts] == [1]
+        assert result.pathname == "folder/put-async.bin"
+
+    @respx.mock
     def test_put_with_content_type(self, mock_env_clear, mock_blob_put_response):
         """Test put with explicit content type."""
         route = respx.put(BLOB_API_BASE).mock(
