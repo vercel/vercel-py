@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
 import respx
 
-from vercel.blob.multipart import auto_multipart_upload, auto_multipart_upload_async
+from vercel.blob.multipart import (
+    auto_multipart_upload,
+    auto_multipart_upload_async,
+    complete_multipart_upload,
+    complete_multipart_upload_async,
+    create_multipart_upload,
+    create_multipart_upload_async,
+    upload_part,
+    upload_part_async,
+)
 from vercel.blob.multipart.uploader import MIN_PART_SIZE
 from vercel.blob.utils import UploadProgressEvent
 
@@ -23,6 +34,39 @@ def _build_complete_response(pathname: str) -> dict[str, str]:
         "contentType": "application/octet-stream",
         "contentDisposition": 'inline; filename="file.bin"',
     }
+
+
+def _manual_mpu_handler(
+    pathname: str,
+) -> tuple[Callable[[httpx.Request], httpx.Response], dict[str, Any]]:
+    upload_part_numbers: list[int] = []
+    completed_parts: list[dict[str, str | int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        action = request.headers["x-mpu-action"]
+
+        if action == "create":
+            assert request.url.params["pathname"] == pathname
+            return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+
+        if action == "upload":
+            part_number = int(request.headers["x-mpu-part-number"])
+            upload_part_numbers.append(part_number)
+            assert request.headers["x-mpu-upload-id"] == "upload-id"
+            assert request.headers["x-mpu-key"] == "blob-key"
+            return httpx.Response(200, json={"etag": f"etag-{part_number}"})
+
+        if action == "complete":
+            completed_parts.extend(json.loads(request.content.decode()))
+            return httpx.Response(200, json=_build_complete_response(pathname))
+
+        raise AssertionError(f"unexpected multipart action: {action}")
+
+    state = {
+        "upload_part_numbers": upload_part_numbers,
+        "completed_parts": completed_parts,
+    }
+    return handler, state
 
 
 @respx.mock
@@ -75,6 +119,34 @@ def test_auto_multipart_upload_sync_uses_blob_api_flow(mock_env_clear) -> None:
         total=len(body),
         percentage=100.0,
     )
+
+
+@respx.mock
+def test_manual_multipart_sync_uses_blob_api_flow(mock_env_clear) -> None:
+    handler, state = _manual_mpu_handler("folder/manual.bin")
+    route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=handler)
+
+    created = create_multipart_upload("folder/manual.bin", token="test_token")
+    part = upload_part(
+        "folder/manual.bin",
+        b"chunk",
+        token="test_token",
+        upload_id=created.upload_id,
+        key=created.key,
+        part_number=1,
+    )
+    result = complete_multipart_upload(
+        "folder/manual.bin",
+        [part],
+        token="test_token",
+        upload_id=created.upload_id,
+        key=created.key,
+    )
+
+    assert route.call_count == 3
+    assert state["upload_part_numbers"] == [1]
+    assert [part["partNumber"] for part in state["completed_parts"]] == [1]
+    assert result.pathname == "folder/manual.bin"
 
 
 @respx.mock
@@ -132,3 +204,32 @@ async def test_auto_multipart_upload_async_uses_blob_api_flow(mock_env_clear) ->
         total=len(body),
         percentage=100.0,
     )
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_manual_multipart_async_uses_blob_api_flow(mock_env_clear) -> None:
+    handler, state = _manual_mpu_handler("folder/manual-async.bin")
+    route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=handler)
+
+    created = await create_multipart_upload_async("folder/manual-async.bin", token="test_token")
+    part = await upload_part_async(
+        "folder/manual-async.bin",
+        b"chunk",
+        token="test_token",
+        upload_id=created.upload_id,
+        key=created.key,
+        part_number=1,
+    )
+    result = await complete_multipart_upload_async(
+        "folder/manual-async.bin",
+        [part],
+        token="test_token",
+        upload_id=created.upload_id,
+        key=created.key,
+    )
+
+    assert route.call_count == 3
+    assert state["upload_part_numbers"] == [1]
+    assert [part["partNumber"] for part in state["completed_parts"]] == [1]
+    assert result.pathname == "folder/manual-async.bin"

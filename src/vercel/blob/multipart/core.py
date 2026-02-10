@@ -4,38 +4,138 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from urllib.parse import quote
 
+from ..._iter_coroutine import iter_coroutine
 from ..api import request_api, request_api_async
 from ..utils import PutHeaders, UploadProgressEvent
+
+SyncProgressCallback = Callable[[UploadProgressEvent], None]
+AsyncProgressCallback = (
+    Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
+)
+
+
+def _build_headers(
+    headers: PutHeaders | dict[str, str],
+    *,
+    action: str,
+    key: str | None = None,
+    upload_id: str | None = None,
+    part_number: int | None = None,
+    set_json_content_type: bool = False,
+) -> dict[str, str]:
+    request_headers = cast(dict[str, str], headers).copy()
+    if set_json_content_type:
+        request_headers["content-type"] = "application/json"
+
+    request_headers["x-mpu-action"] = action
+    if key is not None:
+        request_headers["x-mpu-key"] = quote(key, safe="")
+    if upload_id is not None:
+        request_headers["x-mpu-upload-id"] = upload_id
+    if part_number is not None:
+        request_headers["x-mpu-part-number"] = str(part_number)
+
+    return request_headers
+
+
+class _BaseMultipartRequestClient:
+    async def _request_api(self, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def create_multipart_upload(
+        self,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        *,
+        token: str | None = None,
+    ) -> dict[str, str]:
+        response = await self._request_api(
+            pathname="/mpu",
+            method="POST",
+            token=token,
+            headers=_build_headers(headers, action="create"),
+            params={"pathname": path},
+        )
+        return cast(dict[str, str], response)
+
+    async def upload_part(
+        self,
+        *,
+        upload_id: str,
+        key: str,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        part_number: int,
+        body: Any,
+        on_upload_progress: AsyncProgressCallback | None = None,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        response = await self._request_api(
+            pathname="/mpu",
+            method="POST",
+            token=token,
+            headers=_build_headers(
+                headers,
+                action="upload",
+                key=key,
+                upload_id=upload_id,
+                part_number=part_number,
+            ),
+            params={"pathname": path},
+            body=body,
+            on_upload_progress=on_upload_progress,
+        )
+        return cast(dict[str, Any], response)
+
+    async def complete_multipart_upload(
+        self,
+        *,
+        upload_id: str,
+        key: str,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        parts: list[dict[str, Any]],
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        response = await self._request_api(
+            pathname="/mpu",
+            method="POST",
+            token=token,
+            headers=_build_headers(
+                headers,
+                action="complete",
+                key=key,
+                upload_id=upload_id,
+                set_json_content_type=True,
+            ),
+            params={"pathname": path},
+            body=parts,
+        )
+        return cast(dict[str, Any], response)
+
+
+class _SyncMultipartRequestClient(_BaseMultipartRequestClient):
+    async def _request_api(self, **kwargs: Any) -> Any:
+        return request_api(**kwargs)
+
+
+class _AsyncMultipartRequestClient(_BaseMultipartRequestClient):
+    async def _request_api(self, **kwargs: Any) -> Any:
+        return await request_api_async(**kwargs)
 
 
 def call_create_multipart_upload(
     path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
-    params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers).copy()
-    request_headers["x-mpu-action"] = "create"
-    return request_api(
-        "/mpu",
-        "POST",
-        token=token,
-        headers=request_headers,
-        params=params,
+    return iter_coroutine(
+        _SyncMultipartRequestClient().create_multipart_upload(path, headers, token=token)
     )
 
 
 async def call_create_multipart_upload_async(
     path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
 ) -> dict[str, str]:
-    params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers).copy()
-    request_headers["x-mpu-action"] = "create"
-    return await request_api_async(
-        "/mpu",
-        "POST",
-        token=token,
-        headers=request_headers,
-        params=params,
-    )
+    return await _AsyncMultipartRequestClient().create_multipart_upload(path, headers, token=token)
 
 
 def call_upload_part(
@@ -46,23 +146,20 @@ def call_upload_part(
     headers: PutHeaders | dict[str, str],
     part_number: int,
     body: Any,
-    on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
+    on_upload_progress: SyncProgressCallback | None = None,
     token: str | None = None,
-):
-    params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers).copy()
-    request_headers["x-mpu-action"] = "upload"
-    request_headers["x-mpu-key"] = quote(key, safe="")
-    request_headers["x-mpu-upload-id"] = upload_id
-    request_headers["x-mpu-part-number"] = str(part_number)
-    return request_api(
-        "/mpu",
-        "POST",
-        token=token,
-        headers=request_headers,
-        params=params,
-        body=body,
-        on_upload_progress=on_upload_progress,
+) -> dict[str, Any]:
+    return iter_coroutine(
+        _SyncMultipartRequestClient().upload_part(
+            upload_id=upload_id,
+            key=key,
+            path=path,
+            headers=headers,
+            part_number=part_number,
+            body=body,
+            on_upload_progress=on_upload_progress,
+            token=token,
+        )
     )
 
 
@@ -74,27 +171,18 @@ async def call_upload_part_async(
     headers: PutHeaders | dict[str, str],
     part_number: int,
     body: Any,
-    on_upload_progress: (
-        Callable[[UploadProgressEvent], None]
-        | Callable[[UploadProgressEvent], Awaitable[None]]
-        | None
-    ) = None,
+    on_upload_progress: AsyncProgressCallback | None = None,
     token: str | None = None,
-):
-    params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers).copy()
-    request_headers["x-mpu-action"] = "upload"
-    request_headers["x-mpu-key"] = quote(key, safe="")
-    request_headers["x-mpu-upload-id"] = upload_id
-    request_headers["x-mpu-part-number"] = str(part_number)
-    return await request_api_async(
-        "/mpu",
-        "POST",
-        token=token,
-        headers=request_headers,
-        params=params,
+) -> dict[str, Any]:
+    return await _AsyncMultipartRequestClient().upload_part(
+        upload_id=upload_id,
+        key=key,
+        path=path,
+        headers=headers,
+        part_number=part_number,
         body=body,
         on_upload_progress=on_upload_progress,
+        token=token,
     )
 
 
@@ -107,19 +195,15 @@ def call_complete_multipart_upload(
     parts: list[dict[str, Any]],
     token: str | None = None,
 ) -> dict[str, Any]:
-    params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers).copy()
-    request_headers["content-type"] = "application/json"
-    request_headers["x-mpu-action"] = "complete"
-    request_headers["x-mpu-upload-id"] = upload_id
-    request_headers["x-mpu-key"] = quote(key, safe="")
-    return request_api(
-        "/mpu",
-        "POST",
-        token=token,
-        headers=request_headers,
-        params=params,
-        body=parts,
+    return iter_coroutine(
+        _SyncMultipartRequestClient().complete_multipart_upload(
+            upload_id=upload_id,
+            key=key,
+            path=path,
+            headers=headers,
+            parts=parts,
+            token=token,
+        )
     )
 
 
@@ -132,17 +216,11 @@ async def call_complete_multipart_upload_async(
     parts: list[dict[str, Any]],
     token: str | None = None,
 ) -> dict[str, Any]:
-    params = {"pathname": path}
-    request_headers = cast(dict[str, str], headers).copy()
-    request_headers["content-type"] = "application/json"
-    request_headers["x-mpu-action"] = "complete"
-    request_headers["x-mpu-upload-id"] = upload_id
-    request_headers["x-mpu-key"] = quote(key, safe="")
-    return await request_api_async(
-        "/mpu",
-        "POST",
+    return await _AsyncMultipartRequestClient().complete_multipart_upload(
+        upload_id=upload_id,
+        key=key,
+        path=path,
+        headers=headers,
+        parts=parts,
         token=token,
-        headers=request_headers,
-        params=params,
-        body=parts,
     )

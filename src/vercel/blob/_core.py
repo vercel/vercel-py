@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import httpx
 
@@ -64,7 +64,6 @@ BlobProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
 )
 SleepFn = Callable[[float], Awaitable[None] | None]
-_T = TypeVar("_T")
 PUT_BODY_OBJECT_ERROR = (
     "Body must be a string, buffer or stream. "
     "You sent a plain object, double check what you're trying to upload."
@@ -141,12 +140,6 @@ def decode_blob_response(response: httpx.Response) -> Any:
         return response.text
 
 
-async def _maybe_await(value: _T | Awaitable[_T]) -> _T:
-    if inspect.isawaitable(value):
-        return await cast(Awaitable[_T], value)
-    return cast(_T, value)
-
-
 async def _emit_progress(
     callback: BlobProgressCallback | None,
     event: UploadProgressEvent,
@@ -157,8 +150,8 @@ async def _emit_progress(
         return
 
     result = callback(event)
-    if await_callback:
-        await _maybe_await(result)
+    if await_callback and inspect.isawaitable(result):
+        await cast(Awaitable[None], result)
 
 
 async def _sleep_with_backoff(
@@ -166,7 +159,9 @@ async def _sleep_with_backoff(
     attempt: int,
 ) -> None:
     delay = min(2**attempt * 0.1, 2.0)
-    await _maybe_await(sleep_fn(delay))
+    result = sleep_fn(delay)
+    if inspect.isawaitable(result):
+        await cast(Awaitable[None], result)
 
 
 def _build_headers(
