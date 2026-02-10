@@ -9,6 +9,9 @@ LOCAL_QUEUE_MAX_VISIBILITY = int(
 
 
 class LocalWorld(world.World):
+    async def get_deployment_id(self) -> str:
+        return ""
+
     async def queue(
         self,
         queue_name: str,
@@ -74,3 +77,17 @@ class LocalWorld(world.World):
                 return world.HTTPResponse.json({"error": str(error)}, status=500)
 
         return http_handler
+
+    async def runs_get(self, run_id: str) -> world.WorkflowRun:
+        raise NotImplementedError()
+
+    async def events_create(self, run_id: str | None, data: world.Event) -> world.EventResult:
+        raise NotImplementedError()
+
+    async def events_list(
+        self,
+        run_id: str,
+        *,
+        pagination: world.PaginationOptions | None = None,
+    ) -> world.PaginatedResult[world.Event]:
+        raise NotImplementedError()

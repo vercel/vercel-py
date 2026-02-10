@@ -10,7 +10,7 @@ class FastAPIRequestAdapter(world.HTTPRequest):
     def get_header(self, name: str) -> str | None:
         return self._request.headers.get(name)
 
-    async def get_body(self) -> bytes | None:
+    async def get_body(self) -> bytes:
         return await self._request.body()
 
 
@@ -32,14 +32,14 @@ def with_workflow(app: fastapi.FastAPI) -> fastapi.FastAPI:
 
     router = fastapi.APIRouter(prefix="/.well-known/workflow/v1", tags=["Workflow"])
 
-    workflow_entrypoint = runtime.workflow_entrypoint()
+    workflow_entrypoint = ctx.workflow_entrypoint()
 
     @router.post("/flow")
     async def flow(request: fastapi.Request):
         response = await workflow_entrypoint(FastAPIRequestAdapter(request))
         return make_fastapi_response(response)
 
-    step_entrypoint = runtime.step_entrypoint()
+    step_entrypoint = ctx.step_entrypoint()
 
     @router.post("/step")
     async def step(request: fastapi.Request):

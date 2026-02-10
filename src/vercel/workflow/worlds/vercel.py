@@ -1,7 +1,17 @@
+import asyncio
+import concurrent.futures
+import contextvars
+import datetime
 import os
 import platform
+import urllib.parse
+from typing import Any, TypeVar
 
+import cbor2
 import httpx
+import pydantic
+
+from vercel.workers import client as vqs_client
 
 from .. import world
 
@@ -10,8 +20,14 @@ from .. import world
 # Leave empty string for production (uses default vercel-workflow.com).
 #
 # Example: 'https://workflow-server-git-branch-name.vercel.sh'
-
+#
 WORKFLOW_SERVER_URL_OVERRIDE = ""
+
+MAX_DELAY_SECONDS = float(
+    os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
+)  # 23 hours - leave 1h buffer before 24h retention limit
+
+T = TypeVar("T", bound=world.BaseModel)
 
 
 class VercelWorld(world.World):
@@ -23,24 +39,19 @@ class VercelWorld(world.World):
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> None:
-        self._provided_token = token
+        self._token = token
 
-        # utils.ts, getHttpUrl and @vercel/queue client initialization
+        # utils.ts, getHttpUrl
         # Use proxy when we have project config (for authentication via Vercel API)
-        using_proxy = bool(project_id and team_id)
+        self._using_proxy = bool(project_id and team_id)
         # When using proxy, requests go through api.vercel.com (with x-vercel-workflow-api-url
         # header if override is set)
         # When not using proxy, use the default workflow-server URL (with /api path appended)
-        if using_proxy:
-            base_url = "https://api.vercel.com/v1/workflow"
-            # The proxy will strip `/queues` from the path, and add `/api` in front,
-            # so this ends up being `/api/v3/topic` when arriving at the queue server,
-            # which is the same as the default basePath in VQS client.
-            base_path = "/queues/v3/topic"
+        if self._using_proxy:
+            self._base_url = "https://api.vercel.com/v1/workflow"
         else:
-            base_url = os.getenv("VERCEL_QUEUE_BASE_URL", "https://vercel-workflow.com")
-            base_path = os.getenv("VERCEL_QUEUE_BASE_PATH", "/api/v3/topic")
-        self._base_url = f"{base_url.rstrip('/')}{base_path}"
+            default_host = WORKFLOW_SERVER_URL_OVERRIDE or "https://vercel-workflow.com"
+            self._base_url = f"{default_host}/api"
 
         # utils.ts, getUserAgent
         self._headers = {}
@@ -60,29 +71,73 @@ class VercelWorld(world.World):
         # Only set workflow-api-url header when using the proxy, since the proxy
         # forwards it to the workflow-server. When not using proxy, requests go
         # directly to the workflow-server so this header has no effect.
-        if WORKFLOW_SERVER_URL_OVERRIDE and using_proxy:
+        if WORKFLOW_SERVER_URL_OVERRIDE and self._using_proxy:
             self._headers["x-vercel-workflow-api-url"] = WORKFLOW_SERVER_URL_OVERRIDE
 
-    async def _get_token(self) -> str:
-        if self._provided_token:
-            return self._provided_token
+    async def _cbor_request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        schema: type[T] | pydantic.TypeAdapter[T],
+        data: Any = None,
+    ) -> T:
+        # utils.ts, getHttpConfig, makeRequest
+        if self._token is None:
+            from vercel.oidc.aio import get_vercel_oidc_token
 
-        env_token = os.environ.get("VERCEL_QUEUE_TOKEN")
-        if env_token:
-            return env_token
-
-        # Fall back to Vercel OIDC token when running inside a Vercel environment.
-        from vercel.oidc.aio import get_vercel_oidc_token as get_vercel_oidc_token_async
-
-        token = await get_vercel_oidc_token_async()
+            token = await get_vercel_oidc_token()
+        else:
+            token = self._token
+        headers = self._headers.copy()
         if token:
-            return token
+            headers["Authorization"] = f"Bearer {token}"
 
-        raise ValueError(
-            "Failed to resolve queue token. "
-            "Set the WORKFLOW_VERCEL_AUTH_TOKEN or VERCEL_QUEUE_TOKEN environment variable, "
-            "or ensure a Vercel OIDC token is available in this environment.",
-        )
+        headers["Accept"] = "application/cbor"
+        # NOTE: Add a unique header to bypass RSC request memoization.
+        # See: https://github.com/vercel/workflow/issues/618
+        headers["X-Request-Time"] = datetime.datetime.now(datetime.UTC).isoformat() + "Z"
+
+        # Encode body as CBOR if data is provided
+        body: bytes | None = None
+        if data is not None:
+            headers["Content-Type"] = "application/cbor"
+            body = cbor2.dumps(data)
+
+        async with httpx.AsyncClient(base_url=self._base_url, headers=headers) as client:
+            resp = await client.request(
+                method,
+                endpoint,
+                content=body,
+            )
+
+        # utils.ts, parseResponseBody
+        if "application/cbor" in resp.headers.get("Content-Type", ""):
+            result = cbor2.loads(resp.content)
+        else:
+            result = resp.json()
+
+        if resp.is_success:
+            if isinstance(schema, pydantic.TypeAdapter):
+                return schema.validate_python(result)
+            else:
+                return schema.model_validate(result)
+        else:
+            raise RuntimeError(
+                result.get("message")
+                or f"{method} {endpoint} -> HTTP {resp.status_code}: {resp.reason_phrase}",
+                {
+                    "url": f"{self._base_url}{endpoint}",
+                    "status": resp.status_code,
+                    "code": result.get("code"),
+                },
+            )
+
+    async def get_deployment_id(self) -> str:
+        deployment_id = os.getenv("VERCEL_DEPLOYMENT_ID")
+        if not deployment_id:
+            raise ValueError("VERCEL_DEPLOYMENT_ID environment variable is not set.")
+        return deployment_id
 
     async def queue(
         self,
@@ -105,51 +160,151 @@ class VercelWorld(world.World):
                 )
 
         payload = {
-            "payload": message,
+            "payload": message.model_dump(),
             "queueName": queue_name,
             # Store deploymentId in the message so it can be preserved when re-enqueueing
             "deploymentId": deployment_id,
         }
-        sanitized_queue_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in queue_name)
-        headers = {
-            "Authorization": f"Bearer {await self._get_token()}",
-            "Vqs-Deployment-Id": deployment_id,
-        }
-        if idempotency_key:
-            headers["Vqs-Idempotency-Key"] = idempotency_key
+        headers = {}
         if delay_seconds is not None:
             headers["Vqs-Delay-Seconds"] = str(delay_seconds)
-
-        async with httpx.AsyncClient(
-            base_url=self._base_url, headers=self._headers
-        ) as send_message_client:
-            response = await send_message_client.post(
-                f"/{sanitized_queue_name}",
-                json=payload,
-                headers=headers,
+        try:
+            response = await vqs_client.send_async(
+                queue_name,
+                payload,
+                idempotency_key=idempotency_key,
+                deployment_id=deployment_id,
+                token=self._token if self._using_proxy else None,
+                base_url=self._base_url if self._using_proxy else None,
+                # The proxy will strip `/queues` from the path, and add `/api` in front,
+                # so this ends up being `/api/v2/messages` when arriving at the queue server,
+                # which is the same as the default basePath in VQS client.
+                base_path="/queues/v2/messages" if self._using_proxy else None,
+                custom_headers=self._headers | headers,
             )
-
-        # Silently handle idempotency key conflicts - the message was already queued
-        # This matches the behavior of world-local and world-postgres
-        if response.status_code == 409:
+            return response["messageId"]
+        except vqs_client.DuplicateIdempotencyKeyError:
+            # Silently handle idempotency key conflicts - the message was already queued
+            # This matches the behavior of world-local and world-postgres
             # Return a placeholder messageId since the original is not available from the error.
             # Callers using idempotency keys shouldn't depend on the returned messageId.
-            # TODO: VQS should return the message ID of the existing message, or we should
-            # stop expecting any world to include this
             return f"msg_duplicate_{idempotency_key or 'unknown'}"
-
-        response.raise_for_status()
-
-        data = response.json()
-        if not isinstance(data, dict) or "messageId" not in data:
-            raise RuntimeError("Queue API returned an unexpected response: missing 'messageId'")
-
-        return str(data["messageId"])
 
     def create_queue_handler(
         self, queue_name_prefix: world.QueuePrefix, handler: world.QueueHandler
     ) -> world.HTTPHandler:
+        async def async_handler(
+            fut: concurrent.futures.Future[None], body: Any, meta: vqs_client.MessageMetadata
+        ) -> None:
+            try:
+                if not isinstance(body, dict):
+                    raise ValueError("Invalid message body: expected a JSON object")
+                if "payload" not in body:
+                    raise ValueError("Invalid message body: missing 'payload' field")
+                if "queueName" not in body:
+                    raise ValueError("Invalid message body: missing 'queueName' field")
+                queue_name = body["queueName"]
+                payload = body["payload"]
+                result = await handler(
+                    payload,
+                    queue_name=queue_name,
+                    attempt=meta["deliveryCount"],
+                    message_id=meta["messageId"],
+                )
+                if result is not None:
+                    # Use delaySeconds approach: send new message with delay, then delete current
+                    # Clamp to max delay (23h) - for longer sleeps, the workflow will chain
+                    # multiple delayed messages until the full sleep duration has elapsed
+                    delay_seconds = min(result, MAX_DELAY_SECONDS)
+
+                    # Send new message with delay BEFORE acknowledging current message
+                    # This ensures crash safety: if process dies after send but before ack,
+                    # we may get a duplicate invocation but won't lose the scheduled wakeup
+                    await self.queue(
+                        queue_name,
+                        payload,
+                        deployment_id=body.get("deploymentId"),
+                        delay_seconds=delay_seconds,
+                    )
+            except Exception as e:
+                fut.set_exception(e)
+            except BaseException:
+                fut.cancel()
+                raise
+            else:
+                fut.set_result(None)
+
+        loop_ctx: contextvars.ContextVar[asyncio.AbstractEventLoop] = contextvars.ContextVar(
+            "loop_ctx"
+        )
+
+        @vqs_client.subscribe(
+            topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
+        )
+        def queue_handler(message: Any, metadata: vqs_client.MessageMetadata) -> None:
+            fut: concurrent.futures.Future[None] = concurrent.futures.Future()
+            loop = loop_ctx.get()
+            loop.call_soon_threadsafe(loop.create_task, async_handler(fut, message, metadata))
+            fut.result()
+
         async def http_handler(request: world.HTTPRequest) -> world.HTTPResponse:
-            raise NotImplementedError()
+            content_type = request.get_header("content-type")
+            if not content_type or "application/cloudevents+json" not in content_type:
+                return world.HTTPResponse.json(
+                    {"error": 'Invalid content type: expected "application/cloudevents+json"'},
+                    status=400,
+                )
+            raw_body = await request.get_body()
+            token = loop_ctx.set(asyncio.get_running_loop())
+            try:
+                status_code, headers, body = await asyncio.to_thread(
+                    vqs_client.handle_queue_callback, raw_body
+                )
+            finally:
+                loop_ctx.reset(token)
+            return world.HTTPResponse(status_code, body, dict(headers))
 
         return http_handler
+
+    async def runs_get(self, run_id: str) -> world.WorkflowRun:
+        return await self._cbor_request(
+            "GET", f"/v2/runs/{run_id}?remoteRefBehavior=resolve", schema=world.WorkflowRunAdaptor
+        )
+
+    async def events_create(self, run_id: str | None, data: world.Event) -> world.EventResult:
+        if data.event_type == "run_created":
+            return world.EventResult(
+                run=await self._cbor_request(
+                    "POST",
+                    "/v1/runs/create",
+                    data=data.event_data.model_dump(),
+                    schema=world.WorkflowRunAdaptor,
+                )
+            )
+
+        return world.EventResult(
+            event=await self._cbor_request(
+                "POST",
+                f"/v1/runs/{run_id}/events",
+                data=data.model_dump(),
+                schema=world.EventAdaptor,
+            )
+        )
+
+    async def events_list(
+        self,
+        run_id: str,
+        *,
+        pagination: world.PaginationOptions | None = None,
+    ) -> world.PaginatedResult[world.Event]:
+        search_params = {}
+        if pagination is not None:
+            search_params.update(pagination.model_dump())
+        search_params["remoteRefBehavior"] = "resolve"
+        query_string = urllib.parse.urlencode(search_params)
+        query = f"?{query_string}" if query_string else ""
+        return await self._cbor_request(
+            "GET",
+            f"/v2/runs/{run_id}/events{query}",
+            schema=world.PaginatedResult[world.Event],
+        )

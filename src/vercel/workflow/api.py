@@ -3,7 +3,7 @@ import contextvars
 import dataclasses
 import json
 from collections.abc import Coroutine
-from typing import Any, Generic, Literal, ParamSpec, TypeVar
+from typing import Any, Literal, ParamSpec, TypeVar
 
 from . import core
 
@@ -25,7 +25,7 @@ class WorkflowContext:
         self.event_log: list[WorkflowEvent] = []
         self.replay_index = 0
 
-    async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    async def run_step[**P, T](self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         args_json = json.dumps((args, kwargs), sort_keys=True)
         sus = Suspension(ulid=str(self.ulid_counter), step=step, args_json=args_json)
         self.suspensions[sus.ulid] = sus
@@ -62,7 +62,7 @@ class WorkflowEvent:
 
 
 @dataclasses.dataclass(frozen=True)
-class Suspension(Generic[T]):
+class Suspension[T]:
     ulid: str
     step: core.Step[Any, T]
     args_json: str
@@ -88,10 +88,13 @@ class Suspension(Generic[T]):
             )
 
 
-class Run(Generic[T]):
+class Run[T]:
     def __init__(self, workflow: core.Workflow[Any, T], coroutine: Coroutine[Any, Any, T]):
-        with CTX.set(WorkflowContext(workflow)):
+        token = CTX.set(WorkflowContext(workflow))
+        try:
             self.fut = asyncio.ensure_future(coroutine)
+        finally:
+            CTX.reset(token)
 
     async def get_status(self) -> Literal["completed", "failed", "running"]:
         if self.fut.done():
@@ -106,5 +109,5 @@ class Run(Generic[T]):
         return await self.fut
 
 
-async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
+async def start[**P, T](wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
     return Run(wf, wf.func(*args, **kwargs))
