@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-import abc
 import asyncio
 import inspect
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Any, TypeVar, cast
 
 import httpx
 
-from .._http import BaseTransport, JSONBody, RawBody
+from .._http import (
+    AsyncTransport,
+    BaseTransport,
+    BlockingTransport,
+    JSONBody,
+    RawBody,
+    create_base_async_client,
+    create_base_client,
+)
 from .errors import (
     BlobAccessError,
     BlobClientTokenExpiredError,
@@ -61,178 +69,10 @@ PUT_BODY_OBJECT_ERROR = (
     "Body must be a string, buffer or stream. "
     "You sent a plain object, double check what you're trying to upload."
 )
-_SyncRequestFunc = Callable[..., dict[str, Any]]
-_AsyncRequestFunc = Callable[..., Awaitable[dict[str, Any]]]
-_SyncMultipartUploadFunc = Callable[..., dict[str, Any]]
-_AsyncMultipartUploadFunc = Callable[..., Awaitable[dict[str, Any]]]
 
 
-class _BlobOpsRuntime(abc.ABC):
-    @abc.abstractmethod
-    async def request(
-        self,
-        pathname: str,
-        method: str,
-        *,
-        token: str | None = None,
-        headers: PutHeaders | dict[str, str] | None = None,
-        params: dict[str, Any] | None = None,
-        body: Any = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    async def multipart_upload(
-        self,
-        path: str,
-        body: Any,
-        *,
-        access: str,
-        content_type: str | None = None,
-        add_random_suffix: bool = False,
-        overwrite: bool = False,
-        cache_control_max_age: int | None = None,
-        token: str | None = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-
-class _BlockingBlobOpsRuntime(_BlobOpsRuntime):
-    def __init__(
-        self,
-        request_func: _SyncRequestFunc,
-        multipart_upload_func: _SyncMultipartUploadFunc,
-    ) -> None:
-        self._request_func = request_func
-        self._multipart_upload_func = multipart_upload_func
-
-    async def request(
-        self,
-        pathname: str,
-        method: str,
-        *,
-        token: str | None = None,
-        headers: PutHeaders | dict[str, str] | None = None,
-        params: dict[str, Any] | None = None,
-        body: Any = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        return self._request_func(
-            pathname,
-            method,
-            token=token,
-            headers=headers,
-            params=params,
-            body=body,
-            on_upload_progress=cast(
-                Callable[[UploadProgressEvent], None] | None, on_upload_progress
-            ),
-        )
-
-    async def multipart_upload(
-        self,
-        path: str,
-        body: Any,
-        *,
-        access: str,
-        content_type: str | None = None,
-        add_random_suffix: bool = False,
-        overwrite: bool = False,
-        cache_control_max_age: int | None = None,
-        token: str | None = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        return self._multipart_upload_func(
-            path,
-            body,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-            on_upload_progress=cast(
-                Callable[[UploadProgressEvent], None] | None, on_upload_progress
-            ),
-        )
-
-
-class _AsyncBlobOpsRuntime(_BlobOpsRuntime):
-    def __init__(
-        self,
-        request_func: _AsyncRequestFunc,
-        multipart_upload_func: _AsyncMultipartUploadFunc,
-    ) -> None:
-        self._request_func = request_func
-        self._multipart_upload_func = multipart_upload_func
-
-    async def request(
-        self,
-        pathname: str,
-        method: str,
-        *,
-        token: str | None = None,
-        headers: PutHeaders | dict[str, str] | None = None,
-        params: dict[str, Any] | None = None,
-        body: Any = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        return await self._request_func(
-            pathname,
-            method,
-            token=token,
-            headers=headers,
-            params=params,
-            body=body,
-            on_upload_progress=on_upload_progress,
-        )
-
-    async def multipart_upload(
-        self,
-        path: str,
-        body: Any,
-        *,
-        access: str,
-        content_type: str | None = None,
-        add_random_suffix: bool = False,
-        overwrite: bool = False,
-        cache_control_max_age: int | None = None,
-        token: str | None = None,
-        on_upload_progress: BlobProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        return await self._multipart_upload_func(
-            path,
-            body,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-            on_upload_progress=on_upload_progress,
-        )
-
-
-def create_blocking_blob_ops_runtime(
-    request_func: _SyncRequestFunc,
-    multipart_upload_func: _SyncMultipartUploadFunc,
-) -> _BlobOpsRuntime:
-    return _BlockingBlobOpsRuntime(
-        request_func=request_func,
-        multipart_upload_func=multipart_upload_func,
-    )
-
-
-def create_async_blob_ops_runtime(
-    request_func: _AsyncRequestFunc,
-    multipart_upload_func: _AsyncMultipartUploadFunc,
-) -> _BlobOpsRuntime:
-    return _AsyncBlobOpsRuntime(
-        request_func=request_func,
-        multipart_upload_func=multipart_upload_func,
-    )
+def _blocking_sleep(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 def map_blob_error(response: httpx.Response) -> tuple[str, BlobError]:
@@ -473,32 +313,416 @@ def build_list_params(
     return params
 
 
-async def put_blob_core(
-    path: str,
-    body: Any,
-    *,
-    access: str,
-    content_type: str | None,
-    add_random_suffix: bool,
-    overwrite: bool,
-    cache_control_max_age: int | None,
-    token: str | None,
-    multipart: bool,
-    on_upload_progress: BlobProgressCallback | None,
-    runtime: _BlobOpsRuntime,
-) -> tuple[PutBlobResultType, bool]:
-    token = ensure_token(token)
-    _validate_put_inputs(path, body, access)
+class _BlobRequestClient:
+    _transport: BaseTransport
+    _sleep_fn: SleepFn
+    _await_progress_callback: bool
+    _async_content: bool
 
-    headers = create_put_headers(
-        content_type=content_type,
-        add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
-        cache_control_max_age=cache_control_max_age,
-    )
+    def __init__(
+        self,
+        *,
+        transport: BaseTransport,
+        sleep_fn: SleepFn = asyncio.sleep,
+        await_progress_callback: bool = True,
+        async_content: bool = True,
+    ) -> None:
+        self._transport = transport
+        self._sleep_fn = sleep_fn
+        self._await_progress_callback = await_progress_callback
+        self._async_content = async_content
 
-    if multipart:
-        raw = await runtime.multipart_upload(
+    async def _request_api(
+        self,
+        pathname: str,
+        method: str,
+        *,
+        token: str | None = None,
+        headers: PutHeaders | dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        body: Any = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        token = ensure_token(token)
+        store_id = extract_store_id_from_token(token)
+        request_id = make_request_id(store_id)
+        retries = get_retries()
+        api_version = get_api_version()
+        extra_headers = get_proxy_through_alternative_api_header_from_env()
+        request_headers = cast(dict[str, str], headers or {})
+
+        send_body_length = bool(on_upload_progress) or should_use_x_content_length()
+        total_length = compute_body_length(body) if send_body_length else 0
+
+        if on_upload_progress:
+            await _emit_progress(
+                on_upload_progress,
+                UploadProgressEvent(loaded=0, total=total_length, percentage=0.0),
+                await_callback=self._await_progress_callback,
+            )
+
+        url = get_api_url(pathname)
+        effective_timeout = timeout if timeout is not None else 30.0
+
+        for attempt in range(retries + 1):
+            try:
+                final_headers = _build_headers(
+                    token=token,
+                    request_id=request_id,
+                    attempt=attempt,
+                    extra_headers=extra_headers,
+                    request_headers=request_headers,
+                    send_body_length=send_body_length,
+                    total_length=total_length,
+                    api_version=api_version,
+                )
+                request_body = _build_request_body(
+                    body,
+                    on_upload_progress=on_upload_progress,
+                    async_content=self._async_content,
+                )
+                resp = await self._transport.send(
+                    method=method,
+                    path=url,
+                    headers=final_headers,
+                    params=params,
+                    body=request_body,
+                    timeout=effective_timeout,
+                )
+
+                if 200 <= resp.status_code < 300:
+                    if on_upload_progress:
+                        await _emit_progress(
+                            on_upload_progress,
+                            UploadProgressEvent(
+                                loaded=total_length or 0,
+                                total=total_length or 0,
+                                percentage=100.0,
+                            ),
+                            await_callback=self._await_progress_callback,
+                        )
+                    return decode_blob_response(resp)
+
+                code, mapped = map_blob_error(resp)
+                if should_retry(code) and attempt < retries:
+                    debug(f"retrying API request to {pathname}", code)
+                    await _sleep_with_backoff(self._sleep_fn, attempt)
+                    continue
+                raise mapped
+            except Exception as exc:
+                if is_network_error(exc) and attempt < retries:
+                    debug(f"retrying API request to {pathname}", str(exc))
+                    await _sleep_with_backoff(self._sleep_fn, attempt)
+                    continue
+                if isinstance(exc, httpx.HTTPError):
+                    raise BlobUnknownError() from exc
+                raise
+
+        raise BlobUnknownError()
+
+
+class _BaseBlobOpsClient(_BlobRequestClient):
+    async def _multipart_upload(
+        self,
+        path: str,
+        body: Any,
+        *,
+        access: str,
+        content_type: str | None = None,
+        add_random_suffix: bool = False,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+        token: str | None = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def _put_blob(
+        self,
+        path: str,
+        body: Any,
+        *,
+        access: str,
+        content_type: str | None,
+        add_random_suffix: bool,
+        overwrite: bool,
+        cache_control_max_age: int | None,
+        token: str | None,
+        multipart: bool,
+        on_upload_progress: BlobProgressCallback | None,
+    ) -> tuple[PutBlobResultType, bool]:
+        token = ensure_token(token)
+        _validate_put_inputs(path, body, access)
+
+        headers = create_put_headers(
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            allow_overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+        )
+
+        if multipart:
+            raw = await self._multipart_upload(
+                path,
+                body,
+                access=access,
+                content_type=content_type,
+                add_random_suffix=add_random_suffix,
+                overwrite=overwrite,
+                cache_control_max_age=cache_control_max_age,
+                token=token,
+                on_upload_progress=on_upload_progress,
+            )
+            return build_put_blob_result(raw), True
+
+        raw = cast(
+            dict[str, Any],
+            await self._request_api(
+                "",
+                "PUT",
+                token=token,
+                headers=headers,
+                params={"pathname": path},
+                body=body,
+                on_upload_progress=on_upload_progress,
+            ),
+        )
+        return build_put_blob_result(raw), False
+
+    async def _delete_blob(
+        self,
+        url_or_path: str | Iterable[str],
+        *,
+        token: str | None,
+    ) -> int:
+        token = ensure_token(token)
+        urls = normalize_delete_urls(url_or_path)
+        await self._request_api(
+            "/delete",
+            "POST",
+            token=token,
+            headers={"content-type": "application/json"},
+            body={"urls": urls},
+        )
+        return len(urls)
+
+    async def _head_blob(
+        self,
+        url_or_path: str,
+        *,
+        token: str | None,
+    ) -> HeadBlobResultType:
+        token = ensure_token(token)
+        resp = cast(
+            dict[str, Any],
+            await self._request_api(
+                "",
+                "GET",
+                token=token,
+                params={"url": url_or_path},
+            ),
+        )
+        return build_head_blob_result(resp)
+
+    async def _list_objects(
+        self,
+        *,
+        limit: int | None,
+        prefix: str | None,
+        cursor: str | None,
+        mode: str | None,
+        token: str | None,
+    ) -> ListBlobResultType:
+        token = ensure_token(token)
+        resp = cast(
+            dict[str, Any],
+            await self._request_api(
+                "",
+                "GET",
+                token=token,
+                params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
+            ),
+        )
+        return build_list_blob_result(resp)
+
+    async def _iter_objects(
+        self,
+        *,
+        prefix: str | None,
+        mode: str | None,
+        token: str | None,
+        batch_size: int | None,
+        limit: int | None,
+        cursor: str | None,
+    ) -> AsyncIterator[ListBlobItem]:
+        token = ensure_token(token)
+        next_cursor = cursor
+        yielded_count = 0
+
+        while True:
+            effective_limit: int | None = batch_size
+            if limit is not None:
+                remaining = limit - yielded_count
+                if remaining <= 0:
+                    break
+                if effective_limit is None or effective_limit > remaining:
+                    effective_limit = remaining
+
+            page = await self._list_objects(
+                limit=effective_limit,
+                prefix=prefix,
+                cursor=next_cursor,
+                mode=mode,
+                token=token,
+            )
+
+            for item in page.blobs:
+                yield item
+                if limit is not None:
+                    yielded_count += 1
+                    if yielded_count >= limit:
+                        return
+
+            if not page.has_more or not page.cursor:
+                break
+            next_cursor = page.cursor
+
+    async def _copy_blob(
+        self,
+        src_path: str,
+        dst_path: str,
+        *,
+        access: str,
+        content_type: str | None,
+        add_random_suffix: bool,
+        overwrite: bool,
+        cache_control_max_age: int | None,
+        token: str | None,
+    ) -> PutBlobResultType:
+        token = ensure_token(token)
+        validate_path(dst_path)
+        require_public_access(access)
+
+        src_url = src_path
+        if not is_url(src_url):
+            src_url = (await self._head_blob(src_url, token=token)).url
+
+        headers = create_put_headers(
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            allow_overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+        )
+        raw = cast(
+            dict[str, Any],
+            await self._request_api(
+                "",
+                "PUT",
+                token=token,
+                headers=headers,
+                params={"pathname": str(dst_path), "fromUrl": src_url},
+            ),
+        )
+        return build_put_blob_result(raw)
+
+    async def _create_folder(
+        self,
+        path: str,
+        *,
+        token: str | None,
+        overwrite: bool,
+    ) -> CreateFolderResultType:
+        token = ensure_token(token)
+        folder_path = path if path.endswith("/") else f"{path}/"
+        headers = create_put_headers(
+            add_random_suffix=False,
+            allow_overwrite=overwrite,
+        )
+        raw = cast(
+            dict[str, Any],
+            await self._request_api(
+                "",
+                "PUT",
+                token=token,
+                headers=headers,
+                params={"pathname": folder_path},
+            ),
+        )
+        return build_create_folder_result(raw)
+
+
+class _SyncBlobOpsClient(_BaseBlobOpsClient):
+    def __init__(self, *, timeout: float = 30.0) -> None:
+        transport = BlockingTransport(create_base_client(timeout=timeout))
+        super().__init__(
+            transport=transport,
+            sleep_fn=_blocking_sleep,
+            await_progress_callback=False,
+            async_content=False,
+        )
+
+    async def _multipart_upload(
+        self,
+        path: str,
+        body: Any,
+        *,
+        access: str,
+        content_type: str | None = None,
+        add_random_suffix: bool = False,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+        token: str | None = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        from .multipart import auto_multipart_upload
+
+        return auto_multipart_upload(
+            path,
+            body,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+            on_upload_progress=cast(
+                Callable[[UploadProgressEvent], None] | None,
+                on_upload_progress,
+            ),
+        )
+
+    def close(self) -> None:
+        self._transport.close()
+
+    def __enter__(self) -> _SyncBlobOpsClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+class _AsyncBlobOpsClient(_BaseBlobOpsClient):
+    def __init__(self, *, timeout: float = 30.0) -> None:
+        transport = AsyncTransport(create_base_async_client(timeout=timeout))
+        super().__init__(transport=transport)
+
+    async def _multipart_upload(
+        self,
+        path: str,
+        body: Any,
+        *,
+        access: str,
+        content_type: str | None = None,
+        add_random_suffix: bool = False,
+        overwrite: bool = False,
+        cache_control_max_age: int | None = None,
+        token: str | None = None,
+        on_upload_progress: BlobProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        from .multipart import auto_multipart_upload_async
+
+        return await auto_multipart_upload_async(
             path,
             body,
             access=access,
@@ -509,180 +733,15 @@ async def put_blob_core(
             token=token,
             on_upload_progress=on_upload_progress,
         )
-        return build_put_blob_result(raw), True
 
-    raw = await runtime.request(
-        "",
-        "PUT",
-        token=token,
-        headers=headers,
-        params={"pathname": path},
-        body=body,
-        on_upload_progress=on_upload_progress,
-    )
-    return build_put_blob_result(raw), False
+    async def aclose(self) -> None:
+        await self._transport.aclose()
 
+    async def __aenter__(self) -> _AsyncBlobOpsClient:
+        return self
 
-async def delete_blob_core(
-    url_or_path: str | Iterable[str],
-    *,
-    token: str | None,
-    runtime: _BlobOpsRuntime,
-) -> int:
-    token = ensure_token(token)
-    urls = normalize_delete_urls(url_or_path)
-    await runtime.request(
-        "/delete",
-        "POST",
-        token=token,
-        headers={"content-type": "application/json"},
-        body={"urls": urls},
-    )
-    return len(urls)
-
-
-async def head_blob_core(
-    url_or_path: str,
-    *,
-    token: str | None,
-    runtime: _BlobOpsRuntime,
-) -> HeadBlobResultType:
-    token = ensure_token(token)
-    resp = await runtime.request(
-        "",
-        "GET",
-        token=token,
-        params={"url": url_or_path},
-    )
-    return build_head_blob_result(resp)
-
-
-async def list_objects_core(
-    *,
-    limit: int | None,
-    prefix: str | None,
-    cursor: str | None,
-    mode: str | None,
-    token: str | None,
-    runtime: _BlobOpsRuntime,
-) -> ListBlobResultType:
-    token = ensure_token(token)
-    resp = await runtime.request(
-        "",
-        "GET",
-        token=token,
-        params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
-    )
-    return build_list_blob_result(resp)
-
-
-async def iter_objects_core(
-    *,
-    prefix: str | None,
-    mode: str | None,
-    token: str | None,
-    batch_size: int | None,
-    limit: int | None,
-    cursor: str | None,
-    runtime: _BlobOpsRuntime,
-) -> AsyncIterator[ListBlobItem]:
-    token = ensure_token(token)
-    next_cursor = cursor
-    yielded_count = 0
-
-    while True:
-        effective_limit: int | None = batch_size
-        if limit is not None:
-            remaining = limit - yielded_count
-            if remaining <= 0:
-                break
-            if effective_limit is None or effective_limit > remaining:
-                effective_limit = remaining
-
-        page = await list_objects_core(
-            limit=effective_limit,
-            prefix=prefix,
-            cursor=next_cursor,
-            mode=mode,
-            token=token,
-            runtime=runtime,
-        )
-
-        for item in page.blobs:
-            yield item
-            if limit is not None:
-                yielded_count += 1
-                if yielded_count >= limit:
-                    return
-
-        if not page.has_more or not page.cursor:
-            break
-        next_cursor = page.cursor
-
-
-async def copy_blob_core(
-    src_path: str,
-    dst_path: str,
-    *,
-    access: str,
-    content_type: str | None,
-    add_random_suffix: bool,
-    overwrite: bool,
-    cache_control_max_age: int | None,
-    token: str | None,
-    runtime: _BlobOpsRuntime,
-) -> PutBlobResultType:
-    token = ensure_token(token)
-    validate_path(dst_path)
-    require_public_access(access)
-
-    src_url = src_path
-    if not is_url(src_url):
-        src_url = (
-            await head_blob_core(
-                src_url,
-                token=token,
-                runtime=runtime,
-            )
-        ).url
-
-    headers = create_put_headers(
-        content_type=content_type,
-        add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
-        cache_control_max_age=cache_control_max_age,
-    )
-    raw = await runtime.request(
-        "",
-        "PUT",
-        token=token,
-        headers=headers,
-        params={"pathname": str(dst_path), "fromUrl": src_url},
-    )
-    return build_put_blob_result(raw)
-
-
-async def create_folder_core(
-    path: str,
-    *,
-    token: str | None,
-    overwrite: bool,
-    runtime: _BlobOpsRuntime,
-) -> CreateFolderResultType:
-    token = ensure_token(token)
-    folder_path = path if path.endswith("/") else f"{path}/"
-    headers = create_put_headers(
-        add_random_suffix=False,
-        allow_overwrite=overwrite,
-    )
-    raw = await runtime.request(
-        "",
-        "PUT",
-        token=token,
-        headers=headers,
-        params={"pathname": folder_path},
-    )
-    return build_create_folder_result(raw)
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
 
 async def request_api_core(
@@ -700,107 +759,37 @@ async def request_api_core(
     await_progress_callback: bool = True,
     async_content: bool = True,
 ) -> Any:
-    token = ensure_token(token)
-    store_id = extract_store_id_from_token(token)
-    request_id = make_request_id(store_id)
-    retries = get_retries()
-    api_version = get_api_version()
-    extra_headers = get_proxy_through_alternative_api_header_from_env()
-    request_headers = cast(dict[str, str], headers or {})
-
-    send_body_length = bool(on_upload_progress) or should_use_x_content_length()
-    total_length = compute_body_length(body) if send_body_length else 0
-
-    if on_upload_progress:
-        await _emit_progress(
-            on_upload_progress,
-            UploadProgressEvent(loaded=0, total=total_length, percentage=0.0),
-            await_callback=await_progress_callback,
-        )
-
-    url = get_api_url(pathname)
-    effective_timeout = timeout if timeout is not None else 30.0
-
-    for attempt in range(retries + 1):
-        try:
-            final_headers = _build_headers(
-                token=token,
-                request_id=request_id,
-                attempt=attempt,
-                extra_headers=extra_headers,
-                request_headers=request_headers,
-                send_body_length=send_body_length,
-                total_length=total_length,
-                api_version=api_version,
-            )
-
-            request_body = _build_request_body(
-                body,
-                on_upload_progress=on_upload_progress,
-                async_content=async_content,
-            )
-
-            resp = await transport.send(
-                method=method,
-                path=url,
-                headers=final_headers,
-                params=params,
-                body=request_body,
-                timeout=effective_timeout,
-            )
-
-            if 200 <= resp.status_code < 300:
-                if on_upload_progress:
-                    await _emit_progress(
-                        on_upload_progress,
-                        UploadProgressEvent(
-                            loaded=total_length or 0,
-                            total=total_length or 0,
-                            percentage=100.0,
-                        ),
-                        await_callback=await_progress_callback,
-                    )
-                return decode_blob_response(resp)
-
-            code, mapped = map_blob_error(resp)
-            if should_retry(code) and attempt < retries:
-                debug(f"retrying API request to {pathname}", code)
-                await _sleep_with_backoff(sleep_fn, attempt)
-                continue
-            raise mapped
-
-        except Exception as exc:
-            if is_network_error(exc) and attempt < retries:
-                debug(f"retrying API request to {pathname}", str(exc))
-                await _sleep_with_backoff(sleep_fn, attempt)
-                continue
-            if isinstance(exc, httpx.HTTPError):
-                raise BlobUnknownError() from exc
-            raise
-
-    raise BlobUnknownError()
+    request_client = _BlobRequestClient(
+        transport=transport,
+        sleep_fn=sleep_fn,
+        await_progress_callback=await_progress_callback,
+        async_content=async_content,
+    )
+    return await request_client._request_api(
+        pathname,
+        method,
+        token=token,
+        headers=headers,
+        params=params,
+        body=body,
+        on_upload_progress=on_upload_progress,
+        timeout=timeout,
+    )
 
 
 __all__ = [
+    "_AsyncBlobOpsClient",
+    "_SyncBlobOpsClient",
     "build_create_folder_result",
     "build_head_blob_result",
     "build_list_blob_result",
     "build_list_params",
     "build_put_blob_result",
-    "copy_blob_core",
-    "create_async_blob_ops_runtime",
-    "create_blocking_blob_ops_runtime",
-    "create_folder_core",
-    "delete_blob_core",
     "decode_blob_response",
     "get_telemetry_size_bytes",
-    "head_blob_core",
     "is_network_error",
-    "iter_objects_core",
-    "list_objects_core",
     "map_blob_error",
     "normalize_delete_urls",
-    "put_blob_core",
     "request_api_core",
     "should_retry",
 ]

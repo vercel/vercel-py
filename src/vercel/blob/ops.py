@@ -12,21 +12,12 @@ import httpx
 from .._iter_coroutine import iter_coroutine
 from .._telemetry.tracker import telemetry, track
 from ._core import (
-    copy_blob_core,
-    create_async_blob_ops_runtime,
-    create_blocking_blob_ops_runtime,
-    create_folder_core,
-    delete_blob_core,
+    _AsyncBlobOpsClient,
+    _SyncBlobOpsClient,
     get_telemetry_size_bytes,
-    head_blob_core,
-    iter_objects_core,
-    list_objects_core,
     normalize_delete_urls,
-    put_blob_core,
 )
-from .api import request_api, request_api_async
 from .errors import BlobError, BlobNotFoundError
-from .multipart import auto_multipart_upload, auto_multipart_upload_async
 from .types import (
     CreateFolderResult as CreateFolderResultType,
     HeadBlobResult as HeadBlobResultType,
@@ -46,15 +37,6 @@ _delete_count_context: contextvars.ContextVar[int | None] = contextvars.ContextV
     "_delete_count", default=None
 )
 
-_BLOCKING_BLOB_RUNTIME = create_blocking_blob_ops_runtime(
-    request_func=request_api,
-    multipart_upload_func=auto_multipart_upload,
-)
-_ASYNC_BLOB_RUNTIME = create_async_blob_ops_runtime(
-    request_func=request_api_async,
-    multipart_upload_func=auto_multipart_upload_async,
-)
-
 
 def put(
     path: str,
@@ -70,21 +52,21 @@ def put(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    result, used_multipart = iter_coroutine(
-        put_blob_core(
-            path,
-            body,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-            multipart=multipart,
-            on_upload_progress=on_upload_progress,
-            runtime=_BLOCKING_BLOB_RUNTIME,
+    with _SyncBlobOpsClient() as client:
+        result, used_multipart = iter_coroutine(
+            client._put_blob(
+                path,
+                body,
+                access=access,
+                content_type=content_type,
+                add_random_suffix=add_random_suffix,
+                overwrite=overwrite,
+                cache_control_max_age=cache_control_max_age,
+                token=token,
+                multipart=multipart,
+                on_upload_progress=on_upload_progress,
+            )
         )
-    )
     track(
         "blob_put",
         token=token,
@@ -114,19 +96,19 @@ async def put_async(
     ) = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    result, used_multipart = await put_blob_core(
-        path,
-        body,
-        access=access,
-        content_type=content_type,
-        add_random_suffix=add_random_suffix,
-        overwrite=overwrite,
-        cache_control_max_age=cache_control_max_age,
-        token=token,
-        multipart=multipart,
-        on_upload_progress=on_upload_progress,
-        runtime=_ASYNC_BLOB_RUNTIME,
-    )
+    async with _AsyncBlobOpsClient() as client:
+        result, used_multipart = await client._put_blob(
+            path,
+            body,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+            multipart=multipart,
+            on_upload_progress=on_upload_progress,
+        )
     track(
         "blob_put",
         token=token,
@@ -198,13 +180,13 @@ def delete(
     token = ensure_token(token)
     normalized_urls = normalize_delete_urls(url_or_path)
     _delete_count_context.set(len(normalized_urls))
-    iter_coroutine(
-        delete_blob_core(
-            normalized_urls,
-            token=token,
-            runtime=_BLOCKING_BLOB_RUNTIME,
+    with _SyncBlobOpsClient() as client:
+        iter_coroutine(
+            client._delete_blob(
+                normalized_urls,
+                token=token,
+            )
         )
-    )
 
 
 @telemetry(
@@ -221,31 +203,31 @@ async def delete_async(
     token = ensure_token(token)
     normalized_urls = normalize_delete_urls(url_or_path)
     _delete_count_context.set(len(normalized_urls))
-    await delete_blob_core(
-        normalized_urls,
-        token=token,
-        runtime=_ASYNC_BLOB_RUNTIME,
-    )
+    async with _AsyncBlobOpsClient() as client:
+        await client._delete_blob(
+            normalized_urls,
+            token=token,
+        )
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
     token = ensure_token(token)
-    return iter_coroutine(
-        head_blob_core(
-            url_or_path,
-            token=token,
-            runtime=_BLOCKING_BLOB_RUNTIME,
+    with _SyncBlobOpsClient() as client:
+        return iter_coroutine(
+            client._head_blob(
+                url_or_path,
+                token=token,
+            )
         )
-    )
 
 
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
     token = ensure_token(token)
-    return await head_blob_core(
-        url_or_path,
-        token=token,
-        runtime=_ASYNC_BLOB_RUNTIME,
-    )
+    async with _AsyncBlobOpsClient() as client:
+        return await client._head_blob(
+            url_or_path,
+            token=token,
+        )
 
 
 def get(
@@ -317,16 +299,16 @@ def list_objects(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    return iter_coroutine(
-        list_objects_core(
-            limit=limit,
-            prefix=prefix,
-            cursor=cursor,
-            mode=mode,
-            token=token,
-            runtime=_BLOCKING_BLOB_RUNTIME,
+    with _SyncBlobOpsClient() as client:
+        return iter_coroutine(
+            client._list_objects(
+                limit=limit,
+                prefix=prefix,
+                cursor=cursor,
+                mode=mode,
+                token=token,
+            )
         )
-    )
 
 
 async def list_objects_async(
@@ -338,14 +320,14 @@ async def list_objects_async(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    return await list_objects_core(
-        limit=limit,
-        prefix=prefix,
-        cursor=cursor,
-        mode=mode,
-        token=token,
-        runtime=_ASYNC_BLOB_RUNTIME,
-    )
+    async with _AsyncBlobOpsClient() as client:
+        return await client._list_objects(
+            limit=limit,
+            prefix=prefix,
+            cursor=cursor,
+            mode=mode,
+            token=token,
+        )
 
 
 async def _next_async_item(
@@ -367,22 +349,22 @@ def iter_objects(
     cursor: str | None = None,
 ) -> Iterator[ListBlobItem]:
     token = ensure_token(token)
-    core_iterator = iter_objects_core(
-        prefix=prefix,
-        mode=mode,
-        token=token,
-        batch_size=batch_size,
-        limit=limit,
-        cursor=cursor,
-        runtime=_BLOCKING_BLOB_RUNTIME,
-    )
+    with _SyncBlobOpsClient() as client:
+        core_iterator = client._iter_objects(
+            prefix=prefix,
+            mode=mode,
+            token=token,
+            batch_size=batch_size,
+            limit=limit,
+            cursor=cursor,
+        )
 
-    while True:
-        done, item = iter_coroutine(_next_async_item(core_iterator))
-        if done:
-            break
-        if item is not None:
-            yield item
+        while True:
+            done, item = iter_coroutine(_next_async_item(core_iterator))
+            if done:
+                break
+            if item is not None:
+                yield item
 
 
 async def iter_objects_async(
@@ -395,16 +377,16 @@ async def iter_objects_async(
     cursor: str | None = None,
 ) -> AsyncIterator[ListBlobItem]:
     token = ensure_token(token)
-    async for item in iter_objects_core(
-        prefix=prefix,
-        mode=mode,
-        token=token,
-        batch_size=batch_size,
-        limit=limit,
-        cursor=cursor,
-        runtime=_ASYNC_BLOB_RUNTIME,
-    ):
-        yield item
+    async with _AsyncBlobOpsClient() as client:
+        async for item in client._iter_objects(
+            prefix=prefix,
+            mode=mode,
+            token=token,
+            batch_size=batch_size,
+            limit=limit,
+            cursor=cursor,
+        ):
+            yield item
 
 
 def copy(
@@ -419,19 +401,19 @@ def copy(
     token: str | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    return iter_coroutine(
-        copy_blob_core(
-            src_path,
-            dst_path,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=add_random_suffix,
-            overwrite=overwrite,
-            cache_control_max_age=cache_control_max_age,
-            token=token,
-            runtime=_BLOCKING_BLOB_RUNTIME,
+    with _SyncBlobOpsClient() as client:
+        return iter_coroutine(
+            client._copy_blob(
+                src_path,
+                dst_path,
+                access=access,
+                content_type=content_type,
+                add_random_suffix=add_random_suffix,
+                overwrite=overwrite,
+                cache_control_max_age=cache_control_max_age,
+                token=token,
+            )
         )
-    )
 
 
 async def copy_async(
@@ -446,17 +428,17 @@ async def copy_async(
     token: str | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    return await copy_blob_core(
-        src_path,
-        dst_path,
-        access=access,
-        content_type=content_type,
-        add_random_suffix=add_random_suffix,
-        overwrite=overwrite,
-        cache_control_max_age=cache_control_max_age,
-        token=token,
-        runtime=_ASYNC_BLOB_RUNTIME,
-    )
+    async with _AsyncBlobOpsClient() as client:
+        return await client._copy_blob(
+            src_path,
+            dst_path,
+            access=access,
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            token=token,
+        )
 
 
 def create_folder(
@@ -466,14 +448,14 @@ def create_folder(
     overwrite: bool = False,
 ) -> CreateFolderResultType:
     token = ensure_token(token)
-    return iter_coroutine(
-        create_folder_core(
-            path,
-            token=token,
-            overwrite=overwrite,
-            runtime=_BLOCKING_BLOB_RUNTIME,
+    with _SyncBlobOpsClient() as client:
+        return iter_coroutine(
+            client._create_folder(
+                path,
+                token=token,
+                overwrite=overwrite,
+            )
         )
-    )
 
 
 async def create_folder_async(
@@ -483,12 +465,12 @@ async def create_folder_async(
     overwrite: bool = False,
 ) -> CreateFolderResultType:
     token = ensure_token(token)
-    return await create_folder_core(
-        path,
-        token=token,
-        overwrite=overwrite,
-        runtime=_ASYNC_BLOB_RUNTIME,
-    )
+    async with _AsyncBlobOpsClient() as client:
+        return await client._create_folder(
+            path,
+            token=token,
+            overwrite=overwrite,
+        )
 
 
 def upload_file(
