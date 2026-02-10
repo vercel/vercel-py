@@ -313,3 +313,17 @@ class TestResultTypeParity:
         # Async should return Coroutine[..., ListBlobResult] - verify inner type matches
         async_str = str(async_annotation)
         assert "ListBlobResult" in async_str, f"Async should return ListBlobResult, got {async_str}"
+
+    def test_blob_iter_returns_iterator_types(self):
+        """Test iter_objects and iter_objects_async expose iterator return types."""
+        from vercel.blob import iter_objects, iter_objects_async
+
+        sync_annotation = inspect.signature(iter_objects).return_annotation
+        async_annotation = inspect.signature(iter_objects_async).return_annotation
+
+        assert "Iterator" in str(sync_annotation), (
+            f"Sync should return Iterator, got {sync_annotation}"
+        )
+        assert "AsyncIterator" in str(async_annotation), (
+            f"Async should return AsyncIterator, got {async_annotation}"
+        )

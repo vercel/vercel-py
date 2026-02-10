@@ -575,6 +575,111 @@ class TestBlobIterObjects:
         # Should have items from both pages (1 + 2 = 3)
         assert len(items) == 3
 
+    @respx.mock
+    def test_iter_objects_sync_batch_size_limit_pagination(self, mock_env_clear):
+        """Test sync iteration uses paginated list requests with limit-aware batching."""
+        first_page = {
+            "blobs": [
+                {
+                    "url": "https://blob.vercel-storage.com/test-abc123/page1.txt",
+                    "downloadUrl": "https://blob.vercel-storage.com/test-abc123/page1.txt?download=1",
+                    "pathname": "page1.txt",
+                    "contentType": "text/plain",
+                    "contentDisposition": 'inline; filename="page1.txt"',
+                    "size": 50,
+                    "uploadedAt": "2024-01-15T10:30:00.000Z",
+                }
+            ],
+            "cursor": "cursor-1",
+            "hasMore": True,
+            "folders": [],
+        }
+        second_page = {
+            "blobs": [
+                {
+                    "url": "https://blob.vercel-storage.com/test-abc123/page2.txt",
+                    "downloadUrl": "https://blob.vercel-storage.com/test-abc123/page2.txt?download=1",
+                    "pathname": "page2.txt",
+                    "contentType": "text/plain",
+                    "contentDisposition": 'inline; filename="page2.txt"',
+                    "size": 60,
+                    "uploadedAt": "2024-01-15T10:31:00.000Z",
+                }
+            ],
+            "cursor": "cursor-2",
+            "hasMore": True,
+            "folders": [],
+        }
+        route = respx.get(BLOB_API_BASE).mock(
+            side_effect=[
+                httpx.Response(200, json=first_page),
+                httpx.Response(200, json=second_page),
+            ]
+        )
+
+        items = list(iter_objects(batch_size=1, limit=2, token="test_token"))
+
+        assert [item.pathname for item in items] == ["page1.txt", "page2.txt"]
+        assert route.call_count == 2
+        assert route.calls[0].request.url.params.get("limit") == "1"
+        assert route.calls[0].request.url.params.get("cursor") is None
+        assert route.calls[1].request.url.params.get("limit") == "1"
+        assert route.calls[1].request.url.params.get("cursor") == "cursor-1"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_iter_objects_async_batch_size_limit_pagination(self, mock_env_clear):
+        """Test async iteration uses paginated list requests with limit-aware batching."""
+        first_page = {
+            "blobs": [
+                {
+                    "url": "https://blob.vercel-storage.com/test-abc123/page1.txt",
+                    "downloadUrl": "https://blob.vercel-storage.com/test-abc123/page1.txt?download=1",
+                    "pathname": "page1.txt",
+                    "contentType": "text/plain",
+                    "contentDisposition": 'inline; filename="page1.txt"',
+                    "size": 50,
+                    "uploadedAt": "2024-01-15T10:30:00.000Z",
+                }
+            ],
+            "cursor": "cursor-1",
+            "hasMore": True,
+            "folders": [],
+        }
+        second_page = {
+            "blobs": [
+                {
+                    "url": "https://blob.vercel-storage.com/test-abc123/page2.txt",
+                    "downloadUrl": "https://blob.vercel-storage.com/test-abc123/page2.txt?download=1",
+                    "pathname": "page2.txt",
+                    "contentType": "text/plain",
+                    "contentDisposition": 'inline; filename="page2.txt"',
+                    "size": 60,
+                    "uploadedAt": "2024-01-15T10:31:00.000Z",
+                }
+            ],
+            "cursor": "cursor-2",
+            "hasMore": True,
+            "folders": [],
+        }
+        route = respx.get(BLOB_API_BASE).mock(
+            side_effect=[
+                httpx.Response(200, json=first_page),
+                httpx.Response(200, json=second_page),
+            ]
+        )
+
+        items = []
+        async for item in iter_objects_async(batch_size=1, limit=2, token="test_token"):
+            items.append(item)
+
+        assert [item.pathname for item in items] == ["page1.txt", "page2.txt"]
+        assert route.call_count == 2
+        assert route.calls[0].request.url.params.get("limit") == "1"
+        assert route.calls[0].request.url.params.get("cursor") is None
+        assert route.calls[1].request.url.params.get("limit") == "1"
+        assert route.calls[1].request.url.params.get("cursor") == "cursor-1"
+
 
 class TestBlobCopy:
     """Test blob copy operations."""

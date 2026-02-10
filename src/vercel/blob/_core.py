@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from typing import Any, cast
 
 import httpx
@@ -17,6 +17,7 @@ from .._http import (
     create_base_async_client,
     create_base_client,
 )
+from .._iter_coroutine import iter_coroutine
 from .errors import (
     BlobAccessError,
     BlobClientTokenExpiredError,
@@ -312,6 +313,30 @@ def build_list_params(
     if mode is not None:
         params["mode"] = mode
     return params
+
+
+def _resolve_page_limit(
+    *,
+    batch_size: int | None,
+    limit: int | None,
+    yielded_count: int,
+) -> tuple[bool, int | None]:
+    page_limit = batch_size
+    if limit is None:
+        return False, page_limit
+
+    remaining = limit - yielded_count
+    if remaining <= 0:
+        return True, None
+    if page_limit is None or page_limit > remaining:
+        page_limit = remaining
+    return False, page_limit
+
+
+def _get_next_cursor(page: ListBlobResultType) -> str | None:
+    if not page.has_more or not page.cursor:
+        return None
+    return page.cursor
 
 
 class _BlobRequestClient:
@@ -641,13 +666,13 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         yielded_count = 0
 
         while True:
-            effective_limit: int | None = batch_size
-            if limit is not None:
-                remaining = limit - yielded_count
-                if remaining <= 0:
-                    break
-                if effective_limit is None or effective_limit > remaining:
-                    effective_limit = remaining
+            done, effective_limit = _resolve_page_limit(
+                batch_size=batch_size,
+                limit=limit,
+                yielded_count=yielded_count,
+            )
+            if done:
+                break
 
             page = await self._list_objects(
                 limit=effective_limit,
@@ -664,9 +689,9 @@ class _BaseBlobOpsClient(_BlobRequestClient):
                     if yielded_count >= limit:
                         return
 
-            if not page.has_more or not page.cursor:
+            next_cursor = _get_next_cursor(page)
+            if next_cursor is None:
                 break
-            next_cursor = page.cursor
 
     async def _copy_blob(
         self,
@@ -753,6 +778,68 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
 
     def close(self) -> None:
         self._transport.close()
+
+    def _list_objects_sync(
+        self,
+        *,
+        limit: int | None,
+        prefix: str | None,
+        cursor: str | None,
+        mode: str | None,
+        token: str | None,
+    ) -> ListBlobResultType:
+        # This coroutine must stay non-suspending for iter_coroutine().
+        return iter_coroutine(
+            self._list_objects(
+                limit=limit,
+                prefix=prefix,
+                cursor=cursor,
+                mode=mode,
+                token=token,
+            )
+        )
+
+    def _iter_objects_sync(
+        self,
+        *,
+        prefix: str | None,
+        mode: str | None,
+        token: str | None,
+        batch_size: int | None,
+        limit: int | None,
+        cursor: str | None,
+    ) -> Iterator[ListBlobItem]:
+        token = ensure_token(token)
+        next_cursor = cursor
+        yielded_count = 0
+
+        while True:
+            done, effective_limit = _resolve_page_limit(
+                batch_size=batch_size,
+                limit=limit,
+                yielded_count=yielded_count,
+            )
+            if done:
+                break
+
+            page = self._list_objects_sync(
+                limit=effective_limit,
+                prefix=prefix,
+                cursor=next_cursor,
+                mode=mode,
+                token=token,
+            )
+
+            for item in page.blobs:
+                yield item
+                if limit is not None:
+                    yielded_count += 1
+                    if yielded_count >= limit:
+                        return
+
+            next_cursor = _get_next_cursor(page)
+            if next_cursor is None:
+                break
 
     def __enter__(self) -> _SyncBlobOpsClient:
         return self
