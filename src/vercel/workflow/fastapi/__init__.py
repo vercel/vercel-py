@@ -1,9 +1,9 @@
 import fastapi
 
-from .. import runtime, world
+from .. import runtime, world as w
 
 
-class FastAPIRequestAdapter(world.HTTPRequest):
+class FastAPIRequestAdapter(w.HTTPRequest):
     def __init__(self, request: fastapi.Request):
         self._request = request
 
@@ -14,7 +14,7 @@ class FastAPIRequestAdapter(world.HTTPRequest):
         return await self._request.body()
 
 
-def make_fastapi_response(response: world.HTTPResponse) -> fastapi.Response:
+def make_fastapi_response(response: w.HTTPResponse) -> fastapi.Response:
     return fastapi.Response(
         content=response.body,
         status_code=response.status,
@@ -23,23 +23,16 @@ def make_fastapi_response(response: world.HTTPResponse) -> fastapi.Response:
 
 
 def with_workflow(app: fastapi.FastAPI) -> fastapi.FastAPI:
-    ctx = runtime.WorkflowContext()
-
-    @app.middleware("http")
-    async def ensure_workflow_context(request: fastapi.Request, call_next):
-        with ctx:
-            return call_next(request)
-
     router = fastapi.APIRouter(prefix="/.well-known/workflow/v1", tags=["Workflow"])
 
-    workflow_entrypoint = ctx.workflow_entrypoint()
+    workflow_entrypoint = runtime.workflow_entrypoint()
 
     @router.post("/flow")
     async def flow(request: fastapi.Request):
         response = await workflow_entrypoint(FastAPIRequestAdapter(request))
         return make_fastapi_response(response)
 
-    step_entrypoint = ctx.step_entrypoint()
+    step_entrypoint = runtime.step_entrypoint()
 
     @router.post("/step")
     async def step(request: fastapi.Request):

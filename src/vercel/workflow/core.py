@@ -3,6 +3,7 @@ from typing import Any, ParamSpec, TypeVar
 
 P = ParamSpec("P")
 T = TypeVar("T")
+_workflows: dict[str, Workflow[Any, Any]] = {}
 
 
 class Workflow[**P, T]:
@@ -10,10 +11,16 @@ class Workflow[**P, T]:
         self.func = func
         module = getattr(func, "__module__", "<unknown module>")
         self.workflow_id = f"workflow//{module}//{func.__qualname__}"
+        assert self.workflow_id not in _workflows, f"Duplicate workflow ID: {self.workflow_id}"
+        _workflows[self.workflow_id] = self
 
 
 def workflow[**P, T](func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
     return Workflow(func)
+
+
+def get_workflow(workflow_id: str) -> Workflow[Any, Any]:
+    return _workflows[workflow_id]
 
 
 class Step[**P, T]:
@@ -26,10 +33,10 @@ class Step[**P, T]:
             self.name = f"{module}.{func.__qualname__}"
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
-        from . import api
+        from . import runtime
 
         try:
-            ctx = api.get_workflow_context()
+            ctx = runtime.WorkflowContext.current()
         except LookupError:
             pass
         else:

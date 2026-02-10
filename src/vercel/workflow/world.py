@@ -227,15 +227,37 @@ class RunStartedEvent(BaseEvent):
     """
 
     event_type: Literal["run_started"] = pydantic.Field(
-        default="run_started", alias="eventType", serialization_alias="eventType"
+        default="run_started",
+        alias="eventType",
     )
 
 
+class WaitCreatedEventData(BaseModel):
+    resume_at: datetime = pydantic.Field(alias="resumeAt")
+
+
+class WaitCreatedEvent(BaseEvent):
+    event_type: Literal["wait_created"] = pydantic.Field(
+        default="wait_created",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: WaitCreatedEventData = pydantic.Field(alias="eventData")
+
+
+class WaitCompletedEvent(BaseEvent):
+    event_type: Literal["wait_completed"] = pydantic.Field(
+        default="wait_completed",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+
+
+type CreateEventRequest = RunStartedEvent | WaitCompletedEvent
 type Event = Annotated[
-    RunCreatedEvent | RunStartedEvent, pydantic.Field(discriminator="event_type")
+    RunCreatedEvent | CreateEventRequest, pydantic.Field(discriminator="event_type")
 ]
 EventAdaptor: pydantic.TypeAdapter[Event] = pydantic.TypeAdapter(Event)
-type CreateEventRequest = RunStartedEvent
 
 
 class PaginationOptions(BaseModel):

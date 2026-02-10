@@ -13,7 +13,7 @@ import pydantic
 
 from vercel.workers import client as vqs_client
 
-from .. import world
+from .. import world as w
 
 # Hard-coded workflow-server URL override for testing.
 # Set this to test against a different workflow-server version.
@@ -27,10 +27,10 @@ MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
 )  # 23 hours - leave 1h buffer before 24h retention limit
 
-T = TypeVar("T", bound=world.BaseModel)
+T = TypeVar("T", bound=w.BaseModel)
 
 
-class VercelWorld(world.World):
+class VercelWorld(w.World):
     def __init__(
         self,
         *,
@@ -142,7 +142,7 @@ class VercelWorld(world.World):
     async def queue(
         self,
         queue_name: str,
-        message: world.QueuePayload,
+        message: w.QueuePayload,
         *,
         deployment_id: str | None = None,
         idempotency_key: str | None = None,
@@ -191,8 +191,8 @@ class VercelWorld(world.World):
             return f"msg_duplicate_{idempotency_key or 'unknown'}"
 
     def create_queue_handler(
-        self, queue_name_prefix: world.QueuePrefix, handler: world.QueueHandler
-    ) -> world.HTTPHandler:
+        self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
+    ) -> w.HTTPHandler:
         async def async_handler(
             fut: concurrent.futures.Future[None], body: Any, meta: vqs_client.MessageMetadata
         ) -> None:
@@ -247,10 +247,10 @@ class VercelWorld(world.World):
             loop.call_soon_threadsafe(loop.create_task, async_handler(fut, message, metadata))
             fut.result()
 
-        async def http_handler(request: world.HTTPRequest) -> world.HTTPResponse:
+        async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
             content_type = request.get_header("content-type")
             if not content_type or "application/cloudevents+json" not in content_type:
-                return world.HTTPResponse.json(
+                return w.HTTPResponse.json(
                     {"error": 'Invalid content type: expected "application/cloudevents+json"'},
                     status=400,
                 )
@@ -262,32 +262,32 @@ class VercelWorld(world.World):
                 )
             finally:
                 loop_ctx.reset(token)
-            return world.HTTPResponse(status_code, body, dict(headers))
+            return w.HTTPResponse(status_code, body, dict(headers))
 
         return http_handler
 
-    async def runs_get(self, run_id: str) -> world.WorkflowRun:
+    async def runs_get(self, run_id: str) -> w.WorkflowRun:
         return await self._cbor_request(
-            "GET", f"/v2/runs/{run_id}?remoteRefBehavior=resolve", schema=world.WorkflowRunAdaptor
+            "GET", f"/v2/runs/{run_id}?remoteRefBehavior=resolve", schema=w.WorkflowRunAdaptor
         )
 
-    async def events_create(self, run_id: str | None, data: world.Event) -> world.EventResult:
+    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         if data.event_type == "run_created":
-            return world.EventResult(
+            return w.EventResult(
                 run=await self._cbor_request(
                     "POST",
                     "/v1/runs/create",
                     data=data.event_data.model_dump(),
-                    schema=world.WorkflowRunAdaptor,
+                    schema=w.WorkflowRunAdaptor,
                 )
             )
 
-        return world.EventResult(
+        return w.EventResult(
             event=await self._cbor_request(
                 "POST",
                 f"/v1/runs/{run_id}/events",
                 data=data.model_dump(),
-                schema=world.EventAdaptor,
+                schema=w.EventAdaptor,
             )
         )
 
@@ -295,8 +295,8 @@ class VercelWorld(world.World):
         self,
         run_id: str,
         *,
-        pagination: world.PaginationOptions | None = None,
-    ) -> world.PaginatedResult[world.Event]:
+        pagination: w.PaginationOptions | None = None,
+    ) -> w.PaginatedResult[w.Event]:
         search_params = {}
         if pagination is not None:
             search_params.update(pagination.model_dump())
@@ -306,5 +306,5 @@ class VercelWorld(world.World):
         return await self._cbor_request(
             "GET",
             f"/v2/runs/{run_id}/events{query}",
-            schema=world.PaginatedResult[world.Event],
+            schema=w.PaginatedResult[w.Event],
         )
