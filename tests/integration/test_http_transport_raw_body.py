@@ -6,8 +6,8 @@ from httpx import Response
 
 from vercel._http import (
     AsyncTransport,
-    BlockingTransport,
     RawBody,
+    SyncTransport,
     create_base_async_client,
     create_base_client,
 )
@@ -20,7 +20,7 @@ class TestRawBodySupport:
     @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
     @respx.mock
     def test_sync_raw_body_iterable(self, stream: bool):
-        """BlockingTransport should forward iterable bodies without JSON encoding."""
+        """SyncTransport should forward iterable bodies without JSON encoding."""
         base_url = "https://upload.example.com"
         expected = b"chunk-1chunk-2"
 
@@ -32,7 +32,7 @@ class TestRawBodySupport:
         route = respx.post(f"{base_url}/upload").mock(side_effect=handler)
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
         try:
             body = RawBody(iter([b"chunk-1", b"chunk-2"]))
             response = iter_coroutine(transport.send("POST", "/upload", body=body, stream=stream))

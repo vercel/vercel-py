@@ -4,7 +4,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .._http import AsyncTransport, BlockingTransport, create_base_async_client, create_base_client
+from .._http import AsyncTransport, SyncTransport, create_base_async_client, create_base_client
 from .._iter_coroutine import iter_coroutine
 from ._core import request_api_core
 from .utils import PutHeaders, UploadProgressEvent
@@ -27,7 +27,7 @@ def request_api(
 ) -> Any:
     """Synchronous HTTP caller that delegates to the async blob request core."""
     effective_timeout = timeout if timeout is not None else 30.0
-    transport = BlockingTransport(create_base_client(timeout=effective_timeout))
+    transport = SyncTransport(create_base_client(timeout=effective_timeout))
     try:
         return iter_coroutine(
             request_api_core(

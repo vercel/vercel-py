@@ -51,7 +51,7 @@ duplication.
   - Example shape: `_Base<Domain>Client` with async methods for shared ops.
   - Keep parsing/validation/result-shaping helpers in this layer.
 - Add private sync/async concrete classes:
-  - Sync uses `BlockingTransport(...)` and sync callbacks.
+  - Sync uses `SyncTransport(...)` and sync callbacks.
   - Async uses `AsyncTransport(...)` and awaitable callbacks.
 - Keep public sync functions as wrappers that call
   `iter_coroutine(base_client.async_method(...))`.

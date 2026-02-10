@@ -11,9 +11,9 @@ import httpx
 from .._http import (
     AsyncTransport,
     BaseTransport,
-    BlockingTransport,
     JSONBody,
     RawBody,
+    SyncTransport,
     create_base_async_client,
     create_base_client,
 )
@@ -765,7 +765,7 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
         )
         from .multipart.uploader import create_sync_multipart_upload_runtime
 
-        transport = BlockingTransport(create_base_client(timeout=timeout))
+        transport = SyncTransport(create_base_client(timeout=timeout))
         super().__init__(
             transport=transport,
             sleep_fn=_sync_sleep,

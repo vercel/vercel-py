@@ -15,8 +15,8 @@ from httpx import Response
 
 from vercel._http import (
     AsyncTransport,
-    BlockingTransport,
     JSONBody,
+    SyncTransport,
     create_base_async_client,
     create_base_client,
 )
@@ -58,11 +58,11 @@ class TestUrlNormalization:
     )
     @respx.mock
     def test_sync_normalization_consistency(self, base_url: str, path: str, expected_url: str):
-        """Test that BlockingTransport normalizes URLs consistently."""
+        """Test that SyncTransport normalizes URLs consistently."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
 
         try:
             response = iter_coroutine(transport.send("GET", path))
@@ -139,7 +139,7 @@ class TestEdgeCases:
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
 
         try:
             response = iter_coroutine(transport.send("GET", path))
@@ -167,7 +167,7 @@ class TestCacheUrlPatterns:
         route = respx.get(expected).mock(return_value=Response(200, json={"data": "cached"}))
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
 
         try:
             response = iter_coroutine(transport.send("GET", key))
@@ -186,7 +186,7 @@ class TestCacheUrlPatterns:
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
 
         try:
             response = iter_coroutine(transport.send("POST", key, body=JSONBody({"value": "test"})))
@@ -204,7 +204,7 @@ class TestCacheUrlPatterns:
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
 
         try:
             response = iter_coroutine(transport.send("POST", "revalidate", params={"tags": "foo"}))
@@ -230,7 +230,7 @@ class TestApiUrlPatterns:
         route = respx.get(expected).mock(return_value=Response(200, json={"projects": []}))
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
 
         try:
             response = iter_coroutine(transport.send("GET", path))
@@ -250,7 +250,7 @@ class TestApiUrlPatterns:
         route = respx.get(expected).mock(return_value=Response(200, json={"id": project_id}))
 
         client = create_base_client(timeout=30.0, base_url=base_url)
-        transport = BlockingTransport(client)
+        transport = SyncTransport(client)
 
         try:
             response = iter_coroutine(transport.send("GET", path))

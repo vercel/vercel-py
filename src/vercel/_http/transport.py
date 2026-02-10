@@ -80,7 +80,7 @@ class BaseTransport(abc.ABC):
         raise NotImplementedError
 
 
-class BlockingTransport(BaseTransport):
+class SyncTransport(BaseTransport):
     """Sync transport with async interface for use with iter_coroutine()."""
 
     def __init__(self, client: httpx.Client) -> None:
@@ -154,7 +154,7 @@ class AsyncTransport(BaseTransport):
 
 __all__ = [
     "BaseTransport",
-    "BlockingTransport",
+    "SyncTransport",
     "AsyncTransport",
     "JSONBody",
     "BytesBody",

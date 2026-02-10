@@ -9,7 +9,7 @@ from typing import Any, TypeVar
 
 import httpx
 
-from .._http import AsyncTransport, BlockingTransport, create_base_async_client, create_base_client
+from .._http import AsyncTransport, SyncTransport, create_base_async_client, create_base_client
 from .._iter_coroutine import iter_coroutine
 from .._telemetry.tracker import telemetry, track
 from ._core import (
@@ -253,7 +253,7 @@ def get(
         target_url = metadata.url
 
     effective_timeout = timeout or 30.0
-    transport = BlockingTransport(create_base_client(timeout=effective_timeout))
+    transport = SyncTransport(create_base_client(timeout=effective_timeout))
     response: httpx.Response | None = None
     try:
         response = iter_coroutine(
@@ -600,7 +600,7 @@ def download_file(
     tmp = dst + ".part"
     bytes_read = 0
     effective_timeout = timeout or 120.0
-    transport = BlockingTransport(create_base_client(timeout=effective_timeout))
+    transport = SyncTransport(create_base_client(timeout=effective_timeout))
     response: httpx.Response | None = None
 
     try:

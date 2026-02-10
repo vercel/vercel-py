@@ -12,18 +12,18 @@ from .config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
 from .transport import (
     AsyncTransport,
     BaseTransport,
-    BlockingTransport,
     BytesBody,
     JSONBody,
     RawBody,
     RequestBody,
+    SyncTransport,
 )
 
 __all__ = [
     "DEFAULT_API_BASE_URL",
     "DEFAULT_TIMEOUT",
     "BaseTransport",
-    "BlockingTransport",
+    "SyncTransport",
     "AsyncTransport",
     "JSONBody",
     "BytesBody",
