@@ -15,6 +15,7 @@ from .transport import (
     BlockingTransport,
     BytesBody,
     JSONBody,
+    RawBody,
     RequestBody,
 )
 
@@ -26,6 +27,7 @@ __all__ = [
     "AsyncTransport",
     "JSONBody",
     "BytesBody",
+    "RawBody",
     "RequestBody",
     "create_vercel_client",
     "create_vercel_async_client",

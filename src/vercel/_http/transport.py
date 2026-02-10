@@ -1,5 +1,7 @@
 """HTTP transport implementations for sync and async clients."""
 
+from __future__ import annotations
+
 import abc
 from dataclasses import dataclass
 from typing import Any
@@ -22,7 +24,14 @@ class BytesBody:
     content_type: str = "application/octet-stream"
 
 
-RequestBody = JSONBody | BytesBody | None
+@dataclass(frozen=True, slots=True)
+class RawBody:
+    """Unmodified request content (bytes, iterables, async iterables, file-like, etc.)."""
+
+    data: Any
+
+
+RequestBody = JSONBody | BytesBody | RawBody | None
 
 
 def _build_request_kwargs(
@@ -30,7 +39,6 @@ def _build_request_kwargs(
     params: dict[str, Any] | None,
     body: RequestBody,
     headers: dict[str, str] | None,
-    timeout: float | None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
 
@@ -46,12 +54,11 @@ def _build_request_kwargs(
     elif isinstance(body, BytesBody):
         kwargs["content"] = body.data
         request_headers["Content-Type"] = body.content_type
+    elif isinstance(body, RawBody):
+        kwargs["content"] = body.data
 
     if request_headers:
         kwargs["headers"] = request_headers
-
-    if timeout is not None:
-        kwargs["timeout"] = httpx.Timeout(timeout)
 
     return kwargs
 
@@ -67,6 +74,8 @@ class BaseTransport(abc.ABC):
         body: RequestBody = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        follow_redirects: bool | None = None,
+        stream: bool = False,
     ) -> httpx.Response:
         raise NotImplementedError
 
@@ -86,13 +95,30 @@ class BlockingTransport(BaseTransport):
         body: RequestBody = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        follow_redirects: bool | None = None,
+        stream: bool = False,
     ) -> httpx.Response:
         kwargs = _build_request_kwargs(
             params=params,
             body=body,
             headers=headers,
-            timeout=timeout,
         )
+
+        timeout_config = httpx.Timeout(timeout) if timeout is not None else None
+
+        if stream:
+            request = self._client.build_request(method, _normalize_path(path), **kwargs)
+            send_kwargs: dict[str, Any] = {"stream": True}
+            if timeout_config is not None:
+                send_kwargs["timeout"] = timeout_config
+            if follow_redirects is not None:
+                send_kwargs["follow_redirects"] = follow_redirects
+            return self._client.send(request, **send_kwargs)
+
+        if timeout_config is not None:
+            kwargs["timeout"] = timeout_config
+        if follow_redirects is not None:
+            kwargs["follow_redirects"] = follow_redirects
 
         return self._client.request(method, _normalize_path(path), **kwargs)
 
@@ -113,13 +139,30 @@ class AsyncTransport(BaseTransport):
         body: RequestBody = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        follow_redirects: bool | None = None,
+        stream: bool = False,
     ) -> httpx.Response:
         kwargs = _build_request_kwargs(
             params=params,
             body=body,
             headers=headers,
-            timeout=timeout,
         )
+
+        timeout_config = httpx.Timeout(timeout) if timeout is not None else None
+
+        if stream:
+            request = self._client.build_request(method, _normalize_path(path), **kwargs)
+            send_kwargs: dict[str, Any] = {"stream": True}
+            if timeout_config is not None:
+                send_kwargs["timeout"] = timeout_config
+            if follow_redirects is not None:
+                send_kwargs["follow_redirects"] = follow_redirects
+            return await self._client.send(request, **send_kwargs)
+
+        if timeout_config is not None:
+            kwargs["timeout"] = timeout_config
+        if follow_redirects is not None:
+            kwargs["follow_redirects"] = follow_redirects
 
         return await self._client.request(method, _normalize_path(path), **kwargs)
 
@@ -133,5 +176,6 @@ __all__ = [
     "AsyncTransport",
     "JSONBody",
     "BytesBody",
+    "RawBody",
     "RequestBody",
 ]
