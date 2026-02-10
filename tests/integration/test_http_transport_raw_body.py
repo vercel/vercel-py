@@ -17,8 +17,9 @@ from vercel._iter_coroutine import iter_coroutine
 class TestRawBodySupport:
     """Test that RawBody content is passed through transport unchanged."""
 
+    @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
     @respx.mock
-    def test_sync_raw_body_iterable(self):
+    def test_sync_raw_body_iterable(self, stream: bool):
         """BlockingTransport should forward iterable bodies without JSON encoding."""
         base_url = "https://upload.example.com"
         expected = b"chunk-1chunk-2"
@@ -34,15 +35,17 @@ class TestRawBodySupport:
         transport = BlockingTransport(client)
         try:
             body = RawBody(iter([b"chunk-1", b"chunk-2"]))
-            response = iter_coroutine(transport.send("POST", "/upload", body=body))
+            response = iter_coroutine(transport.send("POST", "/upload", body=body, stream=stream))
             assert response.status_code == 200
+            assert response.read() == b'{"ok":true}'
             assert route.called
         finally:
             transport.close()
 
+    @pytest.mark.parametrize("stream", [False, True], ids=["non_stream", "stream"])
     @respx.mock
     @pytest.mark.asyncio
-    async def test_async_raw_body_async_iterable(self):
+    async def test_async_raw_body_async_iterable(self, stream: bool):
         """AsyncTransport should forward async iterable bodies without JSON encoding."""
         base_url = "https://upload.example.com"
         expected = b"part-apart-b"
@@ -63,8 +66,9 @@ class TestRawBodySupport:
         client = create_base_async_client(timeout=30.0, base_url=base_url)
         transport = AsyncTransport(client)
         try:
-            response = await transport.send("POST", "upload", body=RawBody(chunks()))
+            response = await transport.send("POST", "upload", body=RawBody(chunks()), stream=stream)
             assert response.status_code == 200
+            assert await response.aread() == b'{"ok":true}'
             assert route.called
         finally:
             await transport.aclose()

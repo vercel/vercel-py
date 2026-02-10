@@ -104,23 +104,14 @@ class BlockingTransport(BaseTransport):
             headers=headers,
         )
 
-        timeout_config = httpx.Timeout(timeout) if timeout is not None else None
+        if timeout is not None:
+            kwargs["timeout"] = httpx.Timeout(timeout)
 
-        if stream:
-            request = self._client.build_request(method, _normalize_path(path), **kwargs)
-            send_kwargs: dict[str, Any] = {"stream": True}
-            if timeout_config is not None:
-                send_kwargs["timeout"] = timeout_config
-            if follow_redirects is not None:
-                send_kwargs["follow_redirects"] = follow_redirects
-            return self._client.send(request, **send_kwargs)
-
-        if timeout_config is not None:
-            kwargs["timeout"] = timeout_config
+        request = self._client.build_request(method, _normalize_path(path), **kwargs)
+        send_kwargs: dict[str, Any] = {"stream": stream}
         if follow_redirects is not None:
-            kwargs["follow_redirects"] = follow_redirects
-
-        return self._client.request(method, _normalize_path(path), **kwargs)
+            send_kwargs["follow_redirects"] = follow_redirects
+        return self._client.send(request, **send_kwargs)
 
     def close(self) -> None:
         self._client.close()
@@ -148,23 +139,14 @@ class AsyncTransport(BaseTransport):
             headers=headers,
         )
 
-        timeout_config = httpx.Timeout(timeout) if timeout is not None else None
+        if timeout is not None:
+            kwargs["timeout"] = httpx.Timeout(timeout)
 
-        if stream:
-            request = self._client.build_request(method, _normalize_path(path), **kwargs)
-            send_kwargs: dict[str, Any] = {"stream": True}
-            if timeout_config is not None:
-                send_kwargs["timeout"] = timeout_config
-            if follow_redirects is not None:
-                send_kwargs["follow_redirects"] = follow_redirects
-            return await self._client.send(request, **send_kwargs)
-
-        if timeout_config is not None:
-            kwargs["timeout"] = timeout_config
+        request = self._client.build_request(method, _normalize_path(path), **kwargs)
+        send_kwargs: dict[str, Any] = {"stream": stream}
         if follow_redirects is not None:
-            kwargs["follow_redirects"] = follow_redirects
-
-        return await self._client.request(method, _normalize_path(path), **kwargs)
+            send_kwargs["follow_redirects"] = follow_redirects
+        return await self._client.send(request, **send_kwargs)
 
     async def aclose(self) -> None:
         await self._client.aclose()
