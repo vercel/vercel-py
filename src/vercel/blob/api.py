@@ -10,7 +10,7 @@ from ._core import request_api_core
 from .utils import PutHeaders, UploadProgressEvent
 
 
-def _blocking_sleep(seconds: float) -> None:
+def _sync_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
@@ -40,7 +40,7 @@ def request_api(
                 on_upload_progress=on_upload_progress,
                 timeout=timeout,
                 transport=transport,
-                sleep_fn=_blocking_sleep,
+                sleep_fn=_sync_sleep,
                 await_progress_callback=False,
                 async_content=False,
             )

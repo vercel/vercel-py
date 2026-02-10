@@ -171,7 +171,7 @@ async def _aiter_part_bytes(body: Any, part_size: int) -> AsyncIterator[bytes]:
         yield chunk
 
 
-class _BlockingMultipartUploadRuntime:
+class _SyncMultipartUploadRuntime:
     def upload(
         self,
         *,
@@ -300,9 +300,8 @@ class _AsyncMultipartUploadRuntime:
         return results
 
 
-def create_blocking_multipart_upload_runtime() -> _BlockingMultipartUploadRuntime:
-    return _BlockingMultipartUploadRuntime()
-
+def create_sync_multipart_upload_runtime() -> _SyncMultipartUploadRuntime:
+    return _SyncMultipartUploadRuntime()
 
 def create_async_multipart_upload_runtime() -> _AsyncMultipartUploadRuntime:
     return _AsyncMultipartUploadRuntime()
@@ -339,7 +338,7 @@ def auto_multipart_upload(
         token=token,
     )
 
-    runtime = create_blocking_multipart_upload_runtime()
+    runtime = create_sync_multipart_upload_runtime()
     total = compute_body_length(body)
     parts = runtime.upload(
         session=session,

@@ -71,7 +71,7 @@ PUT_BODY_OBJECT_ERROR = (
 )
 
 
-def _blocking_sleep(seconds: float) -> None:
+def _sync_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
@@ -763,15 +763,15 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
             call_complete_multipart_upload,
             call_create_multipart_upload,
         )
-        from .multipart.uploader import create_blocking_multipart_upload_runtime
+        from .multipart.uploader import create_sync_multipart_upload_runtime
 
         transport = BlockingTransport(create_base_client(timeout=timeout))
         super().__init__(
             transport=transport,
-            sleep_fn=_blocking_sleep,
+            sleep_fn=_sync_sleep,
             await_progress_callback=False,
             async_content=False,
-            multipart_runtime=create_blocking_multipart_upload_runtime(),
+            multipart_runtime=create_sync_multipart_upload_runtime(),
             create_multipart_upload=call_create_multipart_upload,
             complete_multipart_upload=call_complete_multipart_upload,
         )
