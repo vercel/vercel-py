@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from .._http import AsyncTransport, BlockingTransport, create_base_async_client, create_base_client
 from .._iter_coroutine import iter_coroutine
 from .._telemetry.tracker import telemetry, track
 from ._core import (
@@ -244,19 +245,32 @@ def get(
         metadata = head(url_or_path, token=token)
         target_url = metadata.url
 
+    effective_timeout = timeout or 30.0
+    transport = BlockingTransport(create_base_client(timeout=effective_timeout))
+    response: httpx.Response | None = None
     try:
-        with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(timeout or 30.0)) as client:
-            resp = client.get(target_url)
-            if resp.status_code == 404:
-                raise BlobNotFoundError()
-            resp.raise_for_status()
-            return resp.content
+        response = iter_coroutine(
+            transport.send(
+                "GET",
+                target_url,
+                timeout=effective_timeout,
+                follow_redirects=True,
+            )
+        )
+        if response.status_code == 404:
+            raise BlobNotFoundError()
+        response.raise_for_status()
+        return response.content
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code == 404:
             raise BlobNotFoundError() from exc
         raise
     except httpx.HTTPError:
         raise
+    finally:
+        if response is not None:
+            response.close()
+        transport.close()
 
 
 async def get_async(
@@ -273,21 +287,30 @@ async def get_async(
         metadata = await head_async(url_or_path, token=token)
         target_url = metadata.url
 
+    effective_timeout = timeout or 120.0
+    transport = AsyncTransport(create_base_async_client(timeout=effective_timeout))
+    response: httpx.Response | None = None
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=httpx.Timeout(timeout or 120.0)
-        ) as client:
-            resp = await client.get(target_url)
-            if resp.status_code == 404:
-                raise BlobNotFoundError()
-            resp.raise_for_status()
-            return resp.content
+        response = await transport.send(
+            "GET",
+            target_url,
+            timeout=effective_timeout,
+            follow_redirects=True,
+        )
+        if response.status_code == 404:
+            raise BlobNotFoundError()
+        response.raise_for_status()
+        return response.content
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code == 404:
             raise BlobNotFoundError() from exc
         raise
     except httpx.HTTPError:
         raise
+    finally:
+        if response is not None:
+            await response.aclose()
+        await transport.aclose()
 
 
 def list_objects(
@@ -588,21 +611,31 @@ def download_file(
 
     tmp = dst + ".part"
     bytes_read = 0
+    effective_timeout = timeout or 120.0
+    transport = BlockingTransport(create_base_client(timeout=effective_timeout))
+    response: httpx.Response | None = None
 
     try:
-        with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(timeout or 120.0)) as client:
-            with client.stream("GET", target_url) as resp:
-                if resp.status_code == 404:
-                    raise BlobNotFoundError()
-                resp.raise_for_status()
-                total = int(resp.headers.get("Content-Length", "0")) or None
-                with open(tmp, "wb") as f:
-                    for chunk in resp.iter_bytes():
-                        if chunk:
-                            f.write(chunk)
-                            bytes_read += len(chunk)
-                            if progress:
-                                progress(bytes_read, total)
+        response = iter_coroutine(
+            transport.send(
+                "GET",
+                target_url,
+                timeout=effective_timeout,
+                follow_redirects=True,
+                stream=True,
+            )
+        )
+        if response.status_code == 404:
+            raise BlobNotFoundError()
+        response.raise_for_status()
+        total = int(response.headers.get("Content-Length", "0")) or None
+        with open(tmp, "wb") as f:
+            for chunk in response.iter_bytes():
+                if chunk:
+                    f.write(chunk)
+                    bytes_read += len(chunk)
+                    if progress:
+                        progress(bytes_read, total)
 
         os.replace(tmp, dst)  # atomic finalize
     except Exception:
@@ -610,7 +643,14 @@ def download_file(
             if os.path.exists(tmp):
                 os.remove(tmp)
         finally:
+            if response is not None:
+                response.close()
+            transport.close()
             raise
+    else:
+        if response is not None:
+            response.close()
+        transport.close()
     return dst
 
 
@@ -643,28 +683,31 @@ async def download_file_async(
 
     tmp = dst + ".part"
     bytes_read = 0
+    effective_timeout = timeout or 120.0
+    transport = AsyncTransport(create_base_async_client(timeout=effective_timeout))
+    response: httpx.Response | None = None
 
     try:
-        async with (
-            httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=httpx.Timeout(timeout or 120.0),
-            ) as client,
-            client.stream("GET", target_url) as resp,
-        ):
-            if resp.status_code == 404:
-                raise BlobNotFoundError()
-            resp.raise_for_status()
-            total = int(resp.headers.get("Content-Length", "0")) or None
-            with open(tmp, "wb") as f:
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        f.write(chunk)
-                        bytes_read += len(chunk)
-                        if progress:
-                            maybe = progress(bytes_read, total)
-                            if inspect.isawaitable(maybe):
-                                await maybe
+        response = await transport.send(
+            "GET",
+            target_url,
+            timeout=effective_timeout,
+            follow_redirects=True,
+            stream=True,
+        )
+        if response.status_code == 404:
+            raise BlobNotFoundError()
+        response.raise_for_status()
+        total = int(response.headers.get("Content-Length", "0")) or None
+        with open(tmp, "wb") as f:
+            async for chunk in response.aiter_bytes():
+                if chunk:
+                    f.write(chunk)
+                    bytes_read += len(chunk)
+                    if progress:
+                        maybe = progress(bytes_read, total)
+                        if inspect.isawaitable(maybe):
+                            await maybe
 
         os.replace(tmp, dst)  # atomic finalize
     except Exception:
@@ -672,5 +715,12 @@ async def download_file_async(
             if os.path.exists(tmp):
                 os.remove(tmp)
         finally:
+            if response is not None:
+                await response.aclose()
+            await transport.aclose()
             raise
+    else:
+        if response is not None:
+            await response.aclose()
+        await transport.aclose()
     return dst

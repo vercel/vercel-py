@@ -17,6 +17,8 @@ from vercel.blob import (
     create_folder_async,
     delete,
     delete_async,
+    download_file,
+    download_file_async,
     head,
     head_async,
     iter_objects,
@@ -26,6 +28,7 @@ from vercel.blob import (
     put,
     put_async,
 )
+from vercel.blob.ops import get, get_async
 
 # Base URL for Vercel Blob API
 BLOB_API_BASE = "https://vercel.com/api/blob"
@@ -343,6 +346,103 @@ class TestBlobHead:
 
         with pytest.raises(BlobNotFoundError):
             await head_async("https://blob.vercel-storage.com/nonexistent.txt", token="test_token")
+
+
+class TestBlobReadAndDownload:
+    """Test blob read and download operations."""
+
+    @respx.mock
+    def test_get_sync_with_url(self, mock_env_clear, mock_blob_head_response):
+        """Test synchronous read from a direct blob URL."""
+        payload = b"hello sync"
+        route = respx.get(mock_blob_head_response["url"]).mock(
+            return_value=httpx.Response(200, content=payload)
+        )
+
+        result = get(mock_blob_head_response["url"], token="test_token")
+
+        assert route.called
+        assert result == payload
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_get_async_with_path(self, mock_env_clear, mock_blob_head_response):
+        """Test async read resolves path metadata before fetching bytes."""
+        payload = b"hello async"
+        head_route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+        blob_route = respx.get(mock_blob_head_response["url"]).mock(
+            return_value=httpx.Response(200, content=payload)
+        )
+
+        result = await get_async("test.txt", token="test_token")
+
+        assert head_route.called
+        assert blob_route.called
+        assert result == payload
+
+    @respx.mock
+    def test_download_file_sync_progress(self, mock_env_clear, mock_blob_head_response, tmp_path):
+        """Test sync file download writes bytes and emits progress."""
+        payload = b"download-sync-payload"
+        route = respx.get(mock_blob_head_response["downloadUrl"]).mock(
+            return_value=httpx.Response(
+                200,
+                content=payload,
+                headers={"Content-Length": str(len(payload))},
+            )
+        )
+        destination = tmp_path / "sync-download.bin"
+        progress_updates: list[tuple[int, int | None]] = []
+
+        result = download_file(
+            mock_blob_head_response["downloadUrl"],
+            destination,
+            token="test_token",
+            progress=lambda loaded, total: progress_updates.append((loaded, total)),
+        )
+
+        assert route.called
+        assert result == str(destination)
+        assert destination.read_bytes() == payload
+        assert progress_updates[-1] == (len(payload), len(payload))
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_progress(
+        self, mock_env_clear, mock_blob_head_response, tmp_path
+    ):
+        """Test async file download supports awaitable progress callbacks."""
+        payload = b"download-async-payload"
+        head_route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+        download_route = respx.get(mock_blob_head_response["downloadUrl"]).mock(
+            return_value=httpx.Response(
+                200,
+                content=payload,
+                headers={"Content-Length": str(len(payload))},
+            )
+        )
+        destination = tmp_path / "async-download.bin"
+        progress_updates: list[tuple[int, int | None]] = []
+
+        async def progress_callback(loaded: int, total: int | None) -> None:
+            progress_updates.append((loaded, total))
+
+        result = await download_file_async(
+            "test.txt",
+            destination,
+            token="test_token",
+            progress=progress_callback,
+        )
+
+        assert head_route.called
+        assert download_route.called
+        assert result == str(destination)
+        assert destination.read_bytes() == payload
+        assert progress_updates[-1] == (len(payload), len(payload))
 
 
 class TestBlobList:
