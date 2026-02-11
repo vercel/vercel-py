@@ -81,6 +81,9 @@ class LocalWorld(world.World):
     async def runs_get(self, run_id: str) -> world.WorkflowRun:
         raise NotImplementedError()
 
+    async def steps_get(self, run_id: str, step_id: str) -> world.WorkflowStep:
+        raise NotImplementedError()
+
     async def events_create(self, run_id: str | None, data: world.Event) -> world.EventResult:
         raise NotImplementedError()
 

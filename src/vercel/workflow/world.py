@@ -72,6 +72,7 @@ class StructuredError(BaseModel):
 
 
 type WorkflowRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
+type StepStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 
 
 class _ContextWrapper[T]:
@@ -168,6 +169,64 @@ type WorkflowRun = Annotated[
 WorkflowRunAdaptor: pydantic.TypeAdapter[WorkflowRun] = pydantic.TypeAdapter(WorkflowRun)
 
 
+class BaseWorkflowStep(BaseModel):
+    run_id: str = pydantic.Field(alias="runId")
+    step_id: str = pydantic.Field(alias="stepId")
+    step_name: str = pydantic.Field(alias="stepName")
+    status: StepStatus
+    input: bytes
+    output: bytes | None = None
+    """
+    The error from a step_retrying or step_failed event.
+    This tracks the most recent error the step encountered, which may
+    be from a retry attempt (step_retrying) or the final failure (step_failed).
+    """
+    error: StructuredError | None = None
+    attempt: int
+    """
+    When the step first started executing. Set by the first step_started event
+    and not updated on subsequent retries.
+    """
+    started_at: datetime | None = pydantic.Field(default=None, alias="startedAt")
+    completed_at: datetime | None = pydantic.Field(default=None, alias="completedAt")
+    created_at: datetime = pydantic.Field(alias="createdAt")
+    updated_at: datetime = pydantic.Field(alias="updatedAt")
+    retry_after: datetime | None = pydantic.Field(default=None, alias="retryAfter")
+    spec_version: int | None = pydantic.Field(default=None, alias="specVersion")
+
+
+class NonFinalWorkflowStep(BaseWorkflowStep):
+    status: Literal["pending", "running"]
+    output: None = None
+    completed_at: None = pydantic.Field(default=None, alias="completedAt")
+
+
+class CancelledWorkflowStep(BaseWorkflowStep):
+    status: Literal["cancelled"]
+    output: None = None
+    completed_at: datetime = pydantic.Field(alias="completedAt")
+
+
+class CompletedWorkflowStep(BaseWorkflowStep):
+    status: Literal["completed"]
+    output: bytes
+    completed_at: datetime = pydantic.Field(alias="completedAt")
+
+
+class FailedWorkflowStep(BaseWorkflowStep):
+    status: Literal["failed"]
+    output: None = None
+    error: StructuredError
+    completed_at: datetime = pydantic.Field(alias="completedAt")
+
+
+type WorkflowStep = Annotated[
+    NonFinalWorkflowStep | CancelledWorkflowStep | CompletedWorkflowStep | FailedWorkflowStep,
+    pydantic.Field(discriminator="status"),
+]
+WorkflowStepAdaptor: pydantic.TypeAdapter[WorkflowStep] = pydantic.TypeAdapter(WorkflowStep)
+
+
 class ServerProps(BaseModel):
     run_id: str = pydantic.Field(alias="runId")
     event_id: str = pydantic.Field(alias="eventId")
@@ -232,6 +291,146 @@ class RunStartedEvent(BaseEvent):
     )
 
 
+class RunCompletedEventData(BaseModel):
+    result: bytes
+
+    def into_event(self) -> "RunCompletedEvent":
+        return RunCompletedEvent(eventData=self)
+
+
+class RunCompletedEvent(BaseEvent):
+    """
+    Event created when a workflow run completes successfully.
+    Updates the run entity to status 'completed' with output.
+    """
+
+    event_type: Literal["run_completed"] = pydantic.Field(
+        default="run_completed",
+        alias="eventType",
+    )
+    event_data: RunCompletedEventData = pydantic.Field(alias="eventData")
+
+
+class RunFailedEventData(BaseModel):
+    error: Any
+    code: str | None = None
+
+    def into_event(self) -> "RunFailedEvent":
+        return RunFailedEvent(eventData=self)
+
+
+class RunFailedEvent(BaseEvent):
+    """
+    Event created when a workflow run fails.
+    Updates the run entity to status 'failed' with error.
+    """
+
+    event_type: Literal["run_failed"] = pydantic.Field(
+        default="run_failed",
+        alias="eventType",
+    )
+    event_data: RunFailedEventData = pydantic.Field(alias="eventData")
+
+
+class StepCreatedEventData(BaseModel):
+    step_name: str = pydantic.Field(alias="stepName")
+    input: bytes
+
+    def into_event(self, correlation_id: str) -> "StepCreatedEvent":
+        return StepCreatedEvent(correlationId=correlation_id, eventData=self)
+
+
+class StepCreatedEvent(BaseEvent):
+    """
+    Event created when a step is first invoked. The World implementation
+    atomically creates both the event and the step entity.
+    """
+
+    event_type: Literal["step_created"] = pydantic.Field(
+        default="step_created",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: StepCreatedEventData = pydantic.Field(alias="eventData")
+
+
+class StepStartedEventData(BaseModel):
+    attempt: int | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+
+    def into_event(self, correlation_id: str) -> "StepStartedEvent":
+        return StepStartedEvent(correlationId=correlation_id, eventData=self)
+
+
+class StepStartedEvent(BaseEvent):
+    event_type: Literal["step_started"] = pydantic.Field(
+        default="step_started",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: StepStartedEventData | None = pydantic.Field(
+        default=None, alias="eventData", exclude_if=lambda e: e is None
+    )
+
+
+class StepRetryingEventData(BaseModel):
+    error: Any
+    stack: str | None = None
+    retry_after: datetime | None = pydantic.Field(
+        default=None, alias="retryAfter", exclude_if=lambda e: e is None
+    )
+
+    def into_event(self, correlation_id: str) -> "StepRetryingEvent":
+        return StepRetryingEvent(correlationId=correlation_id, eventData=self)
+
+
+class StepRetryingEvent(BaseEvent):
+    """
+    Event created when a step fails and will be retried.
+    Sets the step status back to 'pending' and records the error.
+    The error is stored in step.error for debugging.
+    """
+
+    event_type: Literal["step_retrying"] = pydantic.Field(
+        default="step_retrying",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: StepRetryingEventData = pydantic.Field(alias="eventData")
+
+
+class StepCompletedEventData(BaseModel):
+    result: bytes
+
+    def into_event(self, correlation_id: str) -> "StepCompletedEvent":
+        return StepCompletedEvent(correlationId=correlation_id, eventData=self)
+
+
+class StepCompletedEvent(BaseEvent):
+    event_type: Literal["step_completed"] = pydantic.Field(
+        default="step_completed",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: StepCompletedEventData = pydantic.Field(alias="eventData")
+
+
+class StepFailedEventData(BaseModel):
+    error: Any
+    stack: str | None = None
+
+    def into_event(self, correlation_id: str) -> "StepFailedEvent":
+        return StepFailedEvent(correlationId=correlation_id, eventData=self)
+
+
+class StepFailedEvent(BaseEvent):
+    event_type: Literal["step_failed"] = pydantic.Field(
+        default="step_failed",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: StepFailedEventData = pydantic.Field(alias="eventData")
+
+
 class WaitCreatedEventData(BaseModel):
     resume_at: datetime = pydantic.Field(alias="resumeAt")
 
@@ -253,7 +452,18 @@ class WaitCompletedEvent(BaseEvent):
     correlation_id: str = pydantic.Field(alias="correlationId")
 
 
-type CreateEventRequest = RunStartedEvent | WaitCompletedEvent
+type CreateEventRequest = (
+    RunStartedEvent
+    | RunCompletedEvent
+    | RunFailedEvent
+    | StepCreatedEvent
+    | StepStartedEvent
+    | StepRetryingEvent
+    | StepCompletedEvent
+    | StepFailedEvent
+    | WaitCreatedEvent
+    | WaitCompletedEvent
+)
 type Event = Annotated[
     RunCreatedEvent | CreateEventRequest, pydantic.Field(discriminator="event_type")
 ]
@@ -277,6 +487,7 @@ class PaginatedResult[T](BaseModel):
 class EventResult(BaseModel):
     event: Event | None = None
     run: WorkflowRun | None = None
+    step: WorkflowStep | None = None
 
 
 class HTTPRequest(metaclass=abc.ABCMeta):
@@ -363,6 +574,9 @@ class World(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     async def runs_get(self, run_id: str) -> WorkflowRun: ...
+
+    @abc.abstractmethod
+    async def steps_get(self, run_id: str, step_id: str) -> WorkflowStep: ...
 
     @overload
     async def events_create(self, run_id: None, data: RunCreatedEvent) -> EventResult:

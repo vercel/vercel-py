@@ -3,7 +3,8 @@ from typing import Any, ParamSpec, TypeVar
 
 P = ParamSpec("P")
 T = TypeVar("T")
-_workflows: dict[str, Workflow[Any, Any]] = {}
+_workflows: dict[str, "Workflow[Any, Any]"] = {}
+_steps: dict[str, "Step[Any, Any]"] = {}
 
 
 class Workflow[**P, T]:
@@ -24,19 +25,20 @@ def get_workflow(workflow_id: str) -> Workflow[Any, Any]:
 
 
 class Step[**P, T]:
+    max_retries: int = 3
+
     def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
         self.func = func
-        module = getattr(func, "__module__", None)
-        if module is None:
-            self.name = func.__qualname__
-        else:
-            self.name = f"{module}.{func.__qualname__}"
+        module = getattr(func, "__module__", "<unknown module>")
+        self.name = f"step//{module}//{func.__qualname__}"
+        assert self.name not in _steps, f"Duplicate step name: {self.name}"
+        _steps[self.name] = self
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         from . import runtime
 
         try:
-            ctx = runtime.WorkflowContext.current()
+            ctx = runtime.WorkflowOrchestratorContext.current()
         except LookupError:
             pass
         else:
@@ -48,3 +50,7 @@ class Step[**P, T]:
 
 def step[**P, T](func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
     return Step(func)
+
+
+def get_step(step_name: str) -> Step[Any, Any]:
+    return _steps[step_name]

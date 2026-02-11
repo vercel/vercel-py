@@ -271,6 +271,13 @@ class VercelWorld(w.World):
             "GET", f"/v2/runs/{run_id}?remoteRefBehavior=resolve", schema=w.WorkflowRunAdaptor
         )
 
+    async def steps_get(self, run_id: str, step_id: str) -> w.WorkflowStep:
+        return await self._cbor_request(
+            "GET",
+            f"/v2/runs/{run_id}/steps/{step_id}?remoteRefBehavior=resolve",
+            schema=w.WorkflowStepAdaptor,
+        )
+
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         if data.event_type == "run_created":
             return w.EventResult(
