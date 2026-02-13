@@ -5,9 +5,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterat
 from os import PathLike
 from typing import Any, TypeVar
 
-import httpx
-
-from .._http import AsyncTransport, SyncTransport, create_base_async_client, create_base_client
 from .._iter_coroutine import iter_coroutine
 from .._telemetry.tracker import telemetry, track
 from ._core import (
@@ -16,7 +13,6 @@ from ._core import (
     get_telemetry_size_bytes,
     normalize_delete_urls,
 )
-from .errors import BlobNotFoundError
 from .types import (
     CreateFolderResult as CreateFolderResultType,
     HeadBlobResult as HeadBlobResultType,
@@ -27,7 +23,6 @@ from .types import (
 from .utils import (
     UploadProgressEvent,
     ensure_token,
-    is_url,
 )
 
 # Context variable to store the delete count for telemetry
@@ -243,39 +238,14 @@ def get(
     timeout: float | None = None,
 ) -> bytes:
     token = ensure_token(token)
-    target_url: str
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        metadata = head(url_or_path, token=token)
-        target_url = metadata.url
-
-    effective_timeout = timeout or 30.0
-    transport = SyncTransport(create_base_client(timeout=effective_timeout))
-    response: httpx.Response | None = None
-    try:
-        response = iter_coroutine(
-            transport.send(
-                "GET",
-                target_url,
-                timeout=effective_timeout,
-                follow_redirects=True,
-            )
+    return _run_sync_blob_operation(
+        lambda client: client._get_blob(
+            url_or_path,
+            token=token,
+            timeout=timeout,
+            default_timeout=30.0,
         )
-        if response.status_code == 404:
-            raise BlobNotFoundError()
-        response.raise_for_status()
-        return response.content
-    except httpx.HTTPStatusError as exc:
-        if exc.response is not None and exc.response.status_code == 404:
-            raise BlobNotFoundError() from exc
-        raise
-    except httpx.HTTPError:
-        raise
-    finally:
-        if response is not None:
-            response.close()
-        transport.close()
+    )
 
 
 async def get_async(
@@ -285,37 +255,13 @@ async def get_async(
     timeout: float | None = None,
 ) -> bytes:
     token = ensure_token(token)
-    target_url: str
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        metadata = await head_async(url_or_path, token=token)
-        target_url = metadata.url
-
-    effective_timeout = timeout or 120.0
-    transport = AsyncTransport(create_base_async_client(timeout=effective_timeout))
-    response: httpx.Response | None = None
-    try:
-        response = await transport.send(
-            "GET",
-            target_url,
-            timeout=effective_timeout,
-            follow_redirects=True,
+    async with _AsyncBlobOpsClient() as client:
+        return await client._get_blob(
+            url_or_path,
+            token=token,
+            timeout=timeout,
+            default_timeout=120.0,
         )
-        if response.status_code == 404:
-            raise BlobNotFoundError()
-        response.raise_for_status()
-        return response.content
-    except httpx.HTTPStatusError as exc:
-        if exc.response is not None and exc.response.status_code == 404:
-            raise BlobNotFoundError() from exc
-        raise
-    except httpx.HTTPError:
-        raise
-    finally:
-        if response is not None:
-            await response.aclose()
-        await transport.aclose()
 
 
 def list_objects(

@@ -492,8 +492,11 @@ class _BaseBlobOpsClient(_BlobRequestClient):
     def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
         raise NotImplementedError
 
-    async def _close_download_response(self, response: httpx.Response) -> None:
+    async def _close_response(self, response: httpx.Response) -> None:
         raise NotImplementedError
+
+    async def _close_download_response(self, response: httpx.Response) -> None:
+        await self._close_response(response)
 
     async def _multipart_upload(
         self,
@@ -654,6 +657,41 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             ),
         )
         return build_head_blob_result(resp)
+
+    async def _get_blob(
+        self,
+        url_or_path: str,
+        *,
+        token: str | None,
+        timeout: float | None,
+        default_timeout: float,
+    ) -> bytes:
+        token = ensure_token(token)
+        target_url = url_or_path
+        if not is_url(target_url):
+            target_url = (await self._head_blob(target_url, token=token)).url
+
+        effective_timeout = timeout or default_timeout
+        response: httpx.Response | None = None
+
+        try:
+            response = await self._transport.send(
+                "GET",
+                target_url,
+                timeout=effective_timeout,
+                follow_redirects=True,
+            )
+            if response.status_code == 404:
+                raise BlobNotFoundError()
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                raise BlobNotFoundError() from exc
+            raise
+        finally:
+            if response is not None:
+                await self._close_response(response)
 
     async def _list_objects(
         self,
@@ -985,6 +1023,9 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
         return _iterate()
 
     async def _close_download_response(self, response: httpx.Response) -> None:
+        await self._close_response(response)
+
+    async def _close_response(self, response: httpx.Response) -> None:
         response.close()
 
     def __enter__(self) -> _SyncBlobOpsClient:
@@ -1027,6 +1068,9 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
         return _iterate()
 
     async def _close_download_response(self, response: httpx.Response) -> None:
+        await self._close_response(response)
+
+    async def _close_response(self, response: httpx.Response) -> None:
         await response.aclose()
 
 
