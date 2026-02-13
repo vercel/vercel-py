@@ -123,50 +123,11 @@ async def put_async(
     return result
 
 
-class _CountedIterable:
-    """Wrapper for iterables that preserves count even after consumption.
-
-    This is used to handle generators and other single-use iterables
-    passed to delete/delete_async. The wrapper converts the iterable
-    to a list once, so that the count is preserved even after the
-    iterable is fully consumed by the function.
-    """
-
-    def __init__(self, iterable: Iterable[str]) -> None:
-        """Convert the iterable to a list to preserve it for later counting."""
-        self.items = [str(item) for item in iterable]
-
-    def __iter__(self) -> Iterator[str]:
-        """Allow iteration over the preserved items."""
-        return iter(self.items)
-
-    def __len__(self) -> int:
-        """Return the count of items."""
-        return len(self.items)
-
-
 def _derive_delete_count(args: tuple, kwargs: dict, result: Any) -> int:
-    """Derive the count of URLs being deleted."""
-    # First, check if the count was stored in the context variable
+    del args, kwargs, result
     count = _delete_count_context.get()
-    if count is not None:
-        _delete_count_context.set(None)  # Clear it for the next call
-        return count
-
-    # Fallback: try to derive from the argument
-    url_or_path = kwargs.get("url_or_path", args[0] if args else None)
-    if url_or_path is None:
-        return 1
-    # Check if it's a _CountedIterable (which preserves count after consumption)
-    if isinstance(url_or_path, _CountedIterable):
-        return len(url_or_path)
-    # For other iterables, try to count them (though they may be exhausted)
-    if isinstance(url_or_path, Iterable) and not isinstance(url_or_path, (str, bytes)):
-        try:
-            return len(list(url_or_path))
-        except Exception:
-            return 1
-    return 1
+    _delete_count_context.set(None)
+    return count or 1
 
 
 @telemetry(
