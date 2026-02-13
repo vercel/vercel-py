@@ -341,6 +341,22 @@ class TestBlobDelete:
         assert len(body["urls"]) == 3
 
     @respx.mock
+    def test_delete_batch_sync_generator(self, mock_env_clear):
+        """Test synchronous delete with generator input preserves all URLs."""
+        route = respx.post(f"{BLOB_API_BASE}/delete").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        urls = (f"https://blob.vercel-storage.com/file{i}.txt" for i in range(1, 4))
+        delete(urls, token="test_token")
+
+        assert route.called
+        import json
+
+        body = json.loads(route.calls.last.request.content)
+        assert len(body["urls"]) == 3
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_delete_batch_async(self, mock_env_clear):
         """Test asynchronous batch blob delete."""
@@ -355,6 +371,23 @@ class TestBlobDelete:
         await delete_async(urls, token="test_token")
 
         assert route.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_delete_batch_async_generator(self, mock_env_clear):
+        """Test asynchronous delete with generator input preserves all URLs."""
+        route = respx.post(f"{BLOB_API_BASE}/delete").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        urls = (f"https://blob.vercel-storage.com/file{i}.txt" for i in range(1, 3))
+        await delete_async(urls, token="test_token")
+
+        assert route.called
+        import json
+
+        body = json.loads(route.calls.last.request.content)
+        assert len(body["urls"]) == 2
 
 
 class TestBlobHead:
@@ -421,6 +454,8 @@ class TestBlobReadAndDownload:
 
         assert route.called
         assert result == payload
+        timeout = route.calls.last.request.extensions["timeout"]
+        assert timeout["connect"] == 30.0
 
     @respx.mock
     @pytest.mark.asyncio
@@ -439,6 +474,8 @@ class TestBlobReadAndDownload:
         assert head_route.called
         assert blob_route.called
         assert result == payload
+        timeout = blob_route.calls.last.request.extensions["timeout"]
+        assert timeout["connect"] == 120.0
 
     @respx.mock
     def test_download_file_sync_progress(self, mock_env_clear, mock_blob_head_response, tmp_path):
