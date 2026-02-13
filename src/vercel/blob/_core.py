@@ -625,12 +625,10 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
     async def _delete_blob(
         self,
-        url_or_path: str | Iterable[str],
+        urls: list[str],
         *,
-        token: str | None,
+        token: str,
     ) -> int:
-        token = ensure_token(token)
-        urls = normalize_delete_urls(url_or_path)
         await self._request_api(
             "/delete",
             "POST",
