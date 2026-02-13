@@ -29,6 +29,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio",
     "pytest-xdist",
+    "respx>=0.21.0",
     "mypy",
     "build",
     "twine",
@@ -53,6 +54,9 @@ vercel = ["py.typed"]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+    "live: requires live API credentials (VERCEL_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",
+]
 
 [tool.mypy]
 ignore_missing_imports = true
