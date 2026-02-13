@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import contextvars
-import inspect
-import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from os import PathLike
 from typing import Any, TypeVar
@@ -18,7 +16,7 @@ from ._core import (
     get_telemetry_size_bytes,
     normalize_delete_urls,
 )
-from .errors import BlobError, BlobNotFoundError
+from .errors import BlobNotFoundError
 from .types import (
     CreateFolderResult as CreateFolderResultType,
     HeadBlobResult as HeadBlobResultType,
@@ -497,33 +495,21 @@ def upload_file(
     multipart: bool = False,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
-    token = ensure_token(token)
-    if not local_path:
-        raise BlobError("src_path is required")
-    if not path:
-        raise BlobError("path is required")
-    if not os.path.exists(os.fspath(local_path)):
-        raise BlobError("local_path does not exist")
-    if not os.path.isfile(os.fspath(local_path)):
-        raise BlobError("local_path is not a file")
-
-    # Auto-enable multipart if file size exceeds 5 MiB
-    size_bytes = os.path.getsize(os.fspath(local_path))
-    use_multipart = multipart or (size_bytes > 5 * 1024 * 1024)
-
-    with open(os.fspath(local_path), "rb") as f:
-        return put(
+    return _run_sync_blob_operation(
+        lambda client: client._upload_file(
+            local_path,
             path,
-            f,
             access=access,
             content_type=content_type,
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
             token=token,
-            multipart=use_multipart,
+            multipart=multipart,
             on_upload_progress=on_upload_progress,
+            missing_local_path_error="src_path is required",
         )
+    )
 
 
 async def upload_file_async(
@@ -543,32 +529,19 @@ async def upload_file_async(
         | None
     ) = None,
 ) -> PutBlobResultType:
-    token = ensure_token(token)
-    if not local_path:
-        raise BlobError("local_path is required")
-    if not path:
-        raise BlobError("path is required")
-    if not os.path.exists(os.fspath(local_path)):
-        raise BlobError("local_path does not exist")
-    if not os.path.isfile(os.fspath(local_path)):
-        raise BlobError("local_path is not a file")
-
-    # Auto-enable multipart if file size exceeds 5 MiB
-    size_bytes = os.path.getsize(os.fspath(local_path))
-    use_multipart = multipart or (size_bytes > 5 * 1024 * 1024)
-
-    with open(os.fspath(local_path), "rb") as f:
-        return await put_async(
+    async with _AsyncBlobOpsClient() as client:
+        return await client._upload_file(
+            local_path,
             path,
-            f,
             access=access,
             content_type=content_type,
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
             token=token,
-            multipart=use_multipart,
+            multipart=multipart,
             on_upload_progress=on_upload_progress,
+            missing_local_path_error="local_path is required",
         )
 
 
@@ -582,59 +555,17 @@ def download_file(
     create_parents: bool = True,
     progress: Callable[[int, int | None], None] | None = None,
 ) -> str:
-    token = ensure_token(token)
-    # Resolve remote URL from url_or_path
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        meta = head(url_or_path, token=token)
-        target_url = meta.download_url or meta.url
-
-    # Prepare destination
-    dst = os.fspath(local_path)
-    if not overwrite and os.path.exists(dst):
-        raise BlobError("destination exists; pass overwrite=True to replace it")
-    if create_parents:
-        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-
-    tmp = dst + ".part"
-    bytes_read = 0
-    effective_timeout = timeout or 120.0
-    transport = SyncTransport(create_base_client(timeout=effective_timeout))
-    response: httpx.Response | None = None
-
-    try:
-        response = iter_coroutine(
-            transport.send(
-                "GET",
-                target_url,
-                timeout=effective_timeout,
-                follow_redirects=True,
-                stream=True,
-            )
+    return _run_sync_blob_operation(
+        lambda client: client._download_file(
+            url_or_path,
+            local_path,
+            token=token,
+            timeout=timeout,
+            overwrite=overwrite,
+            create_parents=create_parents,
+            progress=progress,
         )
-        if response.status_code == 404:
-            raise BlobNotFoundError()
-        response.raise_for_status()
-        total = int(response.headers.get("Content-Length", "0")) or None
-        with open(tmp, "wb") as f:
-            for chunk in response.iter_bytes():
-                if chunk:
-                    f.write(chunk)
-                    bytes_read += len(chunk)
-                    if progress:
-                        progress(bytes_read, total)
-
-        os.replace(tmp, dst)  # atomic finalize
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
-    finally:
-        if response is not None:
-            response.close()
-        transport.close()
-    return dst
+    )
 
 
 async def download_file_async(
@@ -649,56 +580,13 @@ async def download_file_async(
         Callable[[int, int | None], None] | Callable[[int, int | None], Awaitable[None]] | None
     ) = None,
 ) -> str:
-    token = ensure_token(token)
-    # Resolve remote URL from url_or_path
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        meta = await head_async(url_or_path, token=token)
-        target_url = meta.download_url or meta.url
-
-    # Prepare destination
-    dst = os.fspath(local_path)
-    if not overwrite and os.path.exists(dst):
-        raise BlobError("destination exists; pass overwrite=True to replace it")
-    if create_parents:
-        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-
-    tmp = dst + ".part"
-    bytes_read = 0
-    effective_timeout = timeout or 120.0
-    transport = AsyncTransport(create_base_async_client(timeout=effective_timeout))
-    response: httpx.Response | None = None
-
-    try:
-        response = await transport.send(
-            "GET",
-            target_url,
-            timeout=effective_timeout,
-            follow_redirects=True,
-            stream=True,
+    async with _AsyncBlobOpsClient() as client:
+        return await client._download_file(
+            url_or_path,
+            local_path,
+            token=token,
+            timeout=timeout,
+            overwrite=overwrite,
+            create_parents=create_parents,
+            progress=progress,
         )
-        if response.status_code == 404:
-            raise BlobNotFoundError()
-        response.raise_for_status()
-        total = int(response.headers.get("Content-Length", "0")) or None
-        with open(tmp, "wb") as f:
-            async for chunk in response.aiter_bytes():
-                if chunk:
-                    f.write(chunk)
-                    bytes_read += len(chunk)
-                    if progress:
-                        maybe = progress(bytes_read, total)
-                        if inspect.isawaitable(maybe):
-                            await maybe
-
-        os.replace(tmp, dst)  # atomic finalize
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
-    finally:
-        if response is not None:
-            await response.aclose()
-        await transport.aclose()
-    return dst

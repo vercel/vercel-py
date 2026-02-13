@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from typing import Any, cast
@@ -63,6 +64,9 @@ from .utils import (
 
 BlobProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
+)
+DownloadProgressCallback = (
+    Callable[[int, int | None], None] | Callable[[int, int | None], Awaitable[None]]
 )
 SleepFn = Callable[[float], Awaitable[None] | None]
 PUT_BODY_OBJECT_ERROR = (
@@ -157,6 +161,21 @@ async def _emit_progress(
         return
 
     result = callback(event)
+    if await_callback and inspect.isawaitable(result):
+        await cast(Awaitable[None], result)
+
+
+async def _emit_download_progress(
+    callback: DownloadProgressCallback | None,
+    loaded: int,
+    total: int | None,
+    *,
+    await_callback: bool,
+) -> None:
+    if callback is None:
+        return
+
+    result = callback(loaded, total)
     if await_callback and inspect.isawaitable(result):
         await cast(Awaitable[None], result)
 
@@ -470,6 +489,12 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         self._create_multipart_upload = create_multipart_upload
         self._complete_multipart_upload = complete_multipart_upload
 
+    def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
+        raise NotImplementedError
+
+    async def _close_download_response(self, response: httpx.Response) -> None:
+        raise NotImplementedError
+
     async def _multipart_upload(
         self,
         path: str,
@@ -756,6 +781,117 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         return build_create_folder_result(raw)
 
+    async def _upload_file(
+        self,
+        local_path: str | os.PathLike,
+        path: str,
+        *,
+        access: str,
+        content_type: str | None,
+        add_random_suffix: bool,
+        overwrite: bool,
+        cache_control_max_age: int | None,
+        token: str | None,
+        multipart: bool,
+        on_upload_progress: BlobProgressCallback | None,
+        missing_local_path_error: str,
+    ) -> PutBlobResultType:
+        token = ensure_token(token)
+        if not local_path:
+            raise BlobError(missing_local_path_error)
+        if not path:
+            raise BlobError("path is required")
+
+        source_path = os.fspath(local_path)
+        if not os.path.exists(source_path):
+            raise BlobError("local_path does not exist")
+        if not os.path.isfile(source_path):
+            raise BlobError("local_path is not a file")
+
+        size_bytes = os.path.getsize(source_path)
+        use_multipart = multipart or (size_bytes > 5 * 1024 * 1024)
+
+        with open(source_path, "rb") as f:
+            result, _ = await self._put_blob(
+                path,
+                f,
+                access=access,
+                content_type=content_type,
+                add_random_suffix=add_random_suffix,
+                overwrite=overwrite,
+                cache_control_max_age=cache_control_max_age,
+                token=token,
+                multipart=use_multipart,
+                on_upload_progress=on_upload_progress,
+            )
+        return result
+
+    async def _download_file(
+        self,
+        url_or_path: str,
+        local_path: str | os.PathLike,
+        *,
+        token: str | None,
+        timeout: float | None,
+        overwrite: bool,
+        create_parents: bool,
+        progress: DownloadProgressCallback | None,
+    ) -> str:
+        token = ensure_token(token)
+        if is_url(url_or_path):
+            target_url = url_or_path
+        else:
+            meta = await self._head_blob(url_or_path, token=token)
+            target_url = meta.download_url or meta.url
+
+        dst = os.fspath(local_path)
+        if not overwrite and os.path.exists(dst):
+            raise BlobError("destination exists; pass overwrite=True to replace it")
+        if create_parents:
+            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+
+        tmp = dst + ".part"
+        bytes_read = 0
+        effective_timeout = timeout or 120.0
+        response: httpx.Response | None = None
+
+        try:
+            response = await self._transport.send(
+                "GET",
+                target_url,
+                timeout=effective_timeout,
+                follow_redirects=True,
+                stream=True,
+            )
+            if response.status_code == 404:
+                raise BlobNotFoundError()
+            response.raise_for_status()
+            total = int(response.headers.get("Content-Length", "0")) or None
+
+            with open(tmp, "wb") as f:
+                async for chunk in self._stream_download_chunks(response):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    bytes_read += len(chunk)
+                    await _emit_download_progress(
+                        progress,
+                        bytes_read,
+                        total,
+                        await_callback=self._await_progress_callback,
+                    )
+
+            os.replace(tmp, dst)
+        except Exception:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+        finally:
+            if response is not None:
+                await self._close_download_response(response)
+
+        return dst
+
 
 class _SyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
@@ -841,6 +977,16 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
             if next_cursor is None:
                 break
 
+    def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            for chunk in response.iter_bytes():
+                yield chunk
+
+        return _iterate()
+
+    async def _close_download_response(self, response: httpx.Response) -> None:
+        response.close()
+
     def __enter__(self) -> _SyncBlobOpsClient:
         return self
 
@@ -872,6 +1018,16 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
 
     async def __aexit__(self, *args: object) -> None:
         await self.aclose()
+
+    def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+
+        return _iterate()
+
+    async def _close_download_response(self, response: httpx.Response) -> None:
+        await response.aclose()
 
 
 async def request_api_core(

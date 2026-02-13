@@ -3,6 +3,8 @@
 Tests both sync and async variants to ensure API parity.
 """
 
+import io
+
 import httpx
 import pytest
 import respx
@@ -68,6 +70,62 @@ class TestBlobPut:
         assert route.called
         assert result.url == mock_blob_put_response["url"]
         assert result.pathname == "test.txt"
+
+    @respx.mock
+    def test_put_sync_progress_per_chunk(self, mock_env_clear, mock_blob_put_response):
+        """Test sync put emits multiple progress callbacks for streamed file-like input."""
+        payload = b"a" * (64 * 1024) + b"b" * 32
+        progress_percentages: list[float] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = b"".join(request.stream)
+            assert body == payload
+            return httpx.Response(200, json=mock_blob_put_response)
+
+        route = respx.put(BLOB_API_BASE).mock(side_effect=handler)
+
+        put(
+            "test.txt",
+            io.BytesIO(payload),
+            token="test_token",
+            on_upload_progress=lambda event: progress_percentages.append(event.percentage),
+        )
+
+        assert route.called
+        assert len(progress_percentages) >= 2
+        assert progress_percentages[-1] == 100.0
+        assert any(percentage < 100.0 for percentage in progress_percentages)
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_put_async_progress_per_chunk(self, mock_env_clear, mock_blob_put_response):
+        """Test async put emits multiple progress callbacks for streamed file-like input."""
+        payload = b"a" * (64 * 1024) + b"b" * 32
+        progress_percentages: list[float] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            body = b""
+            async for chunk in request.stream:
+                body += chunk
+            assert body == payload
+            return httpx.Response(200, json=mock_blob_put_response)
+
+        route = respx.put(BLOB_API_BASE).mock(side_effect=handler)
+
+        async def on_progress(event) -> None:
+            progress_percentages.append(event.percentage)
+
+        await put_async(
+            "test.txt",
+            io.BytesIO(payload),
+            token="test_token",
+            on_upload_progress=on_progress,
+        )
+
+        assert route.called
+        assert len(progress_percentages) >= 2
+        assert progress_percentages[-1] == 100.0
+        assert any(percentage < 100.0 for percentage in progress_percentages)
 
     @respx.mock
     def test_put_sync_multipart_uses_runtime_upload(self, mock_env_clear):
@@ -409,6 +467,42 @@ class TestBlobReadAndDownload:
         assert progress_updates[-1] == (len(payload), len(payload))
 
     @respx.mock
+    def test_download_file_sync_progress_per_chunk(
+        self, mock_env_clear, mock_blob_head_response, tmp_path
+    ):
+        """Test sync file download emits progress for each streamed chunk."""
+        chunks = [b"chunk-1", b"chunk-2"]
+        payload = b"".join(chunks)
+
+        class ChunkedSyncStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield from chunks
+
+        route = respx.get(mock_blob_head_response["downloadUrl"]).mock(
+            return_value=httpx.Response(
+                200,
+                stream=ChunkedSyncStream(),
+                headers={"Content-Length": str(len(payload))},
+            )
+        )
+        destination = tmp_path / "sync-download-chunked.bin"
+        progress_updates: list[tuple[int, int | None]] = []
+
+        result = download_file(
+            mock_blob_head_response["downloadUrl"],
+            destination,
+            token="test_token",
+            progress=lambda loaded, total: progress_updates.append((loaded, total)),
+        )
+
+        assert route.called
+        assert result == str(destination)
+        assert destination.read_bytes() == payload
+        assert len(progress_updates) >= 2
+        assert progress_updates[-1] == (len(payload), len(payload))
+        assert any(update[0] < len(payload) for update in progress_updates)
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_download_file_async_progress(
         self, mock_env_clear, mock_blob_head_response, tmp_path
@@ -443,6 +537,51 @@ class TestBlobReadAndDownload:
         assert result == str(destination)
         assert destination.read_bytes() == payload
         assert progress_updates[-1] == (len(payload), len(payload))
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_progress_per_chunk(
+        self, mock_env_clear, mock_blob_head_response, tmp_path
+    ):
+        """Test async file download emits progress for each streamed chunk."""
+        chunks = [b"chunk-a", b"chunk-b"]
+        payload = b"".join(chunks)
+
+        class ChunkedAsyncStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for chunk in chunks:
+                    yield chunk
+
+        head_route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+        download_route = respx.get(mock_blob_head_response["downloadUrl"]).mock(
+            return_value=httpx.Response(
+                200,
+                stream=ChunkedAsyncStream(),
+                headers={"Content-Length": str(len(payload))},
+            )
+        )
+        destination = tmp_path / "async-download-chunked.bin"
+        progress_updates: list[tuple[int, int | None]] = []
+
+        async def progress_callback(loaded: int, total: int | None) -> None:
+            progress_updates.append((loaded, total))
+
+        result = await download_file_async(
+            "test.txt",
+            destination,
+            token="test_token",
+            progress=progress_callback,
+        )
+
+        assert head_route.called
+        assert download_route.called
+        assert result == str(destination)
+        assert destination.read_bytes() == payload
+        assert len(progress_updates) >= 2
+        assert progress_updates[-1] == (len(payload), len(payload))
+        assert any(update[0] < len(payload) for update in progress_updates)
 
 
 class TestBlobList:
