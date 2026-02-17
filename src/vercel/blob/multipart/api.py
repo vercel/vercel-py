@@ -7,6 +7,7 @@ from typing import Any, cast
 from ..errors import BlobError
 from ..types import MultipartCreateResult, MultipartPart, PutBlobResult
 from ..utils import (
+    Access,
     PutHeaders,
     UploadProgressEvent,
     create_put_headers,
@@ -27,7 +28,7 @@ from .core import (
 def create_multipart_upload(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -53,7 +54,7 @@ def create_multipart_upload(
 async def create_multipart_upload_async(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -78,7 +79,7 @@ def upload_part(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     upload_id: str,
     key: str,
@@ -108,7 +109,7 @@ async def upload_part_async(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     upload_id: str,
     key: str,
@@ -142,7 +143,7 @@ def complete_multipart_upload(
     path: str,
     parts: list[MultipartPart],
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     token: str | None = None,
     upload_id: str,
@@ -174,7 +175,7 @@ async def complete_multipart_upload_async(
     path: str,
     parts: list[MultipartPart],
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     token: str | None = None,
     upload_id: str,
@@ -451,7 +452,7 @@ class AsyncMultipartUploader:
 def create_multipart_uploader(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = True,
     overwrite: bool = False,
@@ -511,7 +512,7 @@ def create_multipart_uploader(
 async def create_multipart_uploader_async(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = True,
     overwrite: bool = False,

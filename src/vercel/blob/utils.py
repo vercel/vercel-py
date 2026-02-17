@@ -7,9 +7,11 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 from .errors import BlobError, BlobNoTokenProvidedError
+
+Access = Literal["public", "private"]
 
 DEFAULT_VERCEL_BLOB_API_URL = "https://vercel.com/api/blob"
 MAXIMUM_PATHNAME_LENGTH = 950
@@ -107,13 +109,13 @@ def validate_path(path: str) -> None:
             raise BlobError(f'path cannot contain "{invalid}", please encode it if needed')
 
 
-def validate_access(access: str) -> str:
+def validate_access(access: Access) -> Access:
     if access not in ("public", "private"):
         raise BlobError('access must be "public" or "private"')
     return access
 
 
-def construct_blob_url(store_id: str, pathname: str, access: str) -> str:
+def construct_blob_url(store_id: str, pathname: str, access: Access) -> str:
     """Construct a blob storage URL based on access type.
 
     Public:  https://{storeId}.public.blob.vercel-storage.com/{pathname}
@@ -354,7 +356,7 @@ def create_put_headers(
     add_random_suffix: bool | None = None,
     allow_overwrite: bool | None = None,
     cache_control_max_age: int | None = None,
-    access: str | None = None,
+    access: Access | None = None,
 ) -> PutHeaders:
     headers: PutHeaders = {}
     if content_type:

@@ -8,6 +8,7 @@ from typing import Any
 
 from ..errors import BlobError
 from ..utils import (
+    Access,
     UploadProgressEvent,
     compute_body_length,
     create_put_headers,
@@ -110,7 +111,7 @@ def auto_multipart_upload(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -199,7 +200,7 @@ async def auto_multipart_upload_async(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,

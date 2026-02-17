@@ -25,6 +25,7 @@ from .types import (
     PutBlobResult as PutBlobResultType,
 )
 from .utils import (
+    Access,
     PutHeaders,
     UploadProgressEvent,
     construct_blob_url,
@@ -49,7 +50,7 @@ def put(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -149,7 +150,7 @@ async def put_async(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -407,7 +408,7 @@ async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobR
     )
 
 
-def _resolve_blob_url(url_or_path: str, token: str, access: str) -> tuple[str, str]:
+def _resolve_blob_url(url_or_path: str, token: str, access: Access) -> tuple[str, str]:
     """Resolve a URL or pathname to a blob URL and extract the pathname.
 
     Returns (blob_url, pathname).
@@ -419,6 +420,12 @@ def _resolve_blob_url(url_or_path: str, token: str, access: str) -> tuple[str, s
 
     # It's a pathname - construct the URL from token store ID
     store_id = extract_store_id_from_token(token)
+    if not store_id:
+        raise BlobError(
+            "Unable to extract store ID from token. "
+            "When using a pathname instead of a full URL, "
+            "a valid token with an embedded store ID is required."
+        )
     pathname = url_or_path.lstrip("/")
     blob_url = construct_blob_url(store_id, pathname, access)
     return blob_url, pathname
@@ -430,11 +437,11 @@ def _parse_last_modified(value: str | None) -> datetime:
         return datetime.now(tz=timezone.utc)
     try:
         return parsedate_to_datetime(value)
-    except Exception:
+    except (ValueError, TypeError):
         pass
     try:
         return parse_datetime(value)
-    except Exception:
+    except (ValueError, TypeError):
         return datetime.now(tz=timezone.utc)
 
 
@@ -469,7 +476,7 @@ def _build_get_result(
         uploaded_at=_parse_last_modified(resp.headers.get("last-modified")),
         etag=resp.headers.get("etag", ""),
         content=resp.content,
-        status_code=200,
+        status_code=resp.status_code,
     )
 
 
@@ -487,7 +494,7 @@ def _build_cache_bypass_url(blob_url: str) -> str:
 def get(
     url_or_path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     timeout: float | None = None,
     use_cache: bool = True,
@@ -523,7 +530,7 @@ def get(
 async def get_async(
     url_or_path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     timeout: float | None = None,
     use_cache: bool = True,
@@ -736,7 +743,7 @@ def copy(
     src_path: str,
     dst_path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -778,7 +785,7 @@ async def copy_async(
     src_path: str,
     dst_path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -868,7 +875,7 @@ def upload_file(
     local_path: str | PathLike,
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -910,7 +917,7 @@ async def upload_file_async(
     local_path: str | PathLike,
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -956,7 +963,7 @@ def download_file(
     url_or_path: str,
     local_path: str | PathLike,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     timeout: float | None = None,
     overwrite: bool = True,
@@ -967,11 +974,8 @@ def download_file(
     validate_access(access)
 
     # Resolve remote URL from url_or_path
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        meta = head(url_or_path, token=token)
-        target_url = meta.download_url or meta.url
+    blob_url, _ = _resolve_blob_url(url_or_path, token, access)
+    target_url = blob_url
 
     # Prepare destination
     dst = os.fspath(local_path)
@@ -1016,7 +1020,7 @@ async def download_file_async(
     url_or_path: str,
     local_path: str | PathLike,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     timeout: float | None = None,
     overwrite: bool = True,
@@ -1029,11 +1033,8 @@ async def download_file_async(
     validate_access(access)
 
     # Resolve remote URL from url_or_path
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        meta = await head_async(url_or_path, token=token)
-        target_url = meta.download_url or meta.url
+    blob_url, _ = _resolve_blob_url(url_or_path, token, access)
+    target_url = blob_url
 
     # Prepare destination
     dst = os.fspath(local_path)
