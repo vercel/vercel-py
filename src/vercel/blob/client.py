@@ -31,6 +31,7 @@ from .ops import (
 )
 from .types import (
     CreateFolderResult as CreateFolderResultType,
+    GetBlobResult as GetBlobResultType,
     HeadBlobResult as HeadBlobResultType,
     ListBlobItem,
     ListBlobResult as ListBlobResultType,
@@ -73,8 +74,23 @@ class BlobClient:
             on_upload_progress=on_upload_progress,
         )
 
-    def get(self, url_or_path: str, *, timeout: float | None = None) -> bytes:
-        return get(url_or_path, token=self.token, timeout=timeout)
+    def get(
+        self,
+        url_or_path: str,
+        *,
+        access: str = "public",
+        timeout: float | None = None,
+        use_cache: bool = True,
+        if_none_match: str | None = None,
+    ) -> GetBlobResultType:
+        return get(
+            url_or_path,
+            access=access,
+            token=self.token,
+            timeout=timeout,
+            use_cache=use_cache,
+            if_none_match=if_none_match,
+        )
 
     def head(self, url_or_path: str) -> HeadBlobResultType:
         return head(url_or_path, token=self.token)
@@ -140,6 +156,7 @@ class BlobClient:
         url_or_path: str,
         local_path: str | PathLike,
         *,
+        access: str = "public",
         timeout: float | None = None,
         overwrite: bool = True,
         create_parents: bool = True,
@@ -148,6 +165,7 @@ class BlobClient:
         return download_file(
             url_or_path,
             local_path,
+            access=access,
             token=self.token,
             timeout=timeout,
             overwrite=overwrite,
@@ -241,8 +259,23 @@ class AsyncBlobClient:
             on_upload_progress=on_upload_progress,
         )
 
-    async def get(self, url_or_path: str, *, timeout: float | None = None) -> bytes:
-        return await get_async(url_or_path, token=self.token, timeout=timeout)
+    async def get(
+        self,
+        url_or_path: str,
+        *,
+        access: str = "public",
+        timeout: float | None = None,
+        use_cache: bool = True,
+        if_none_match: str | None = None,
+    ) -> GetBlobResultType:
+        return await get_async(
+            url_or_path,
+            access=access,
+            token=self.token,
+            timeout=timeout,
+            use_cache=use_cache,
+            if_none_match=if_none_match,
+        )
 
     async def head(self, url_or_path: str) -> HeadBlobResultType:
         return await head_async(url_or_path, token=self.token)
@@ -310,6 +343,7 @@ class AsyncBlobClient:
         url_or_path: str,
         local_path: str | PathLike,
         *,
+        access: str = "public",
         timeout: float | None = None,
         overwrite: bool = True,
         create_parents: bool = True,
@@ -320,6 +354,7 @@ class AsyncBlobClient:
         return await download_file_async(
             url_or_path,
             local_path,
+            access=access,
             token=self.token,
             timeout=timeout,
             overwrite=overwrite,

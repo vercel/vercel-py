@@ -11,7 +11,7 @@ from ..utils import (
     UploadProgressEvent,
     compute_body_length,
     create_put_headers,
-    require_public_access,
+    validate_access,
 )
 from .core import (
     call_complete_multipart_upload,
@@ -119,12 +119,13 @@ def auto_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    require_public_access(access)
+    validate_access(access)
     headers = create_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
 
     part_size = _validate_part_size(part_size)
@@ -211,12 +212,13 @@ async def auto_multipart_upload_async(
     ) = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    require_public_access(access)
+    validate_access(access)
     headers = create_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
 
     part_size = _validate_part_size(part_size)

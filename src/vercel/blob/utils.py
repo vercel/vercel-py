@@ -107,9 +107,22 @@ def validate_path(path: str) -> None:
             raise BlobError(f'path cannot contain "{invalid}", please encode it if needed')
 
 
-def require_public_access(access: str) -> None:
-    if access != "public":
-        raise BlobError('access must be "public"')
+def validate_access(access: str) -> str:
+    if access not in ("public", "private"):
+        raise BlobError('access must be "public" or "private"')
+    return access
+
+
+def construct_blob_url(store_id: str, pathname: str, access: str) -> str:
+    """Construct a blob storage URL based on access type.
+
+    Public:  https://{storeId}.public.blob.vercel-storage.com/{pathname}
+    Private: https://{storeId}.private.blob.vercel-storage.com/{pathname}
+    """
+    # Strip leading slash from pathname
+    if pathname.startswith("/"):
+        pathname = pathname[1:]
+    return f"https://{store_id}.{access}.blob.vercel-storage.com/{pathname}"
 
 
 def compute_body_length(body: Any) -> int:
@@ -330,6 +343,7 @@ PutHeaders = TypedDict(
         "x-add-random-suffix": str,
         "x-allow-overwrite": str,
         "x-content-type": str,
+        "x-vercel-blob-access": str,
     },
     total=False,
 )
@@ -340,6 +354,7 @@ def create_put_headers(
     add_random_suffix: bool | None = None,
     allow_overwrite: bool | None = None,
     cache_control_max_age: int | None = None,
+    access: str | None = None,
 ) -> PutHeaders:
     headers: PutHeaders = {}
     if content_type:
@@ -350,6 +365,8 @@ def create_put_headers(
         headers["x-allow-overwrite"] = "1" if allow_overwrite else "0"
     if cache_control_max_age is not None:
         headers["x-cache-control-max-age"] = str(cache_control_max_age)
+    if access is not None:
+        headers["x-vercel-blob-access"] = access
     return headers
 
 

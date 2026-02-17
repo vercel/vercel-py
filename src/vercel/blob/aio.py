@@ -36,6 +36,7 @@ from .ops import (
 )
 from .types import (
     CreateFolderResult,
+    GetBlobResult,
     HeadBlobResult,
     ListBlobItem,
     ListBlobResult,
@@ -82,6 +83,7 @@ __all__ = [
     "OnUploadProgressCallback",
     # types
     "PutBlobResult",
+    "GetBlobResult",
     "HeadBlobResult",
     "ListBlobResult",
     "ListBlobItem",

@@ -4,8 +4,10 @@ import contextvars
 import inspect
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from datetime import datetime, timezone
 from os import PathLike
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -15,6 +17,7 @@ from .errors import BlobError, BlobNotFoundError
 from .multipart import auto_multipart_upload, auto_multipart_upload_async
 from .types import (
     CreateFolderResult as CreateFolderResultType,
+    GetBlobResult as GetBlobResultType,
     HeadBlobResult as HeadBlobResultType,
     ListBlobItem,
     ListBlobResult as ListBlobResultType,
@@ -23,11 +26,14 @@ from .types import (
 from .utils import (
     PutHeaders,
     UploadProgressEvent,
+    construct_blob_url,
     create_put_headers,
     ensure_token,
+    extract_store_id_from_token,
+    get_download_url,
     is_url,
     parse_datetime,
-    require_public_access,
+    validate_access,
     validate_path,
 )
 
@@ -53,7 +59,7 @@ def put(
 ) -> PutBlobResultType:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
 
     if body is None:
         raise BlobError("body is required")
@@ -68,6 +74,7 @@ def put(
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
 
     if multipart is True:
@@ -156,7 +163,7 @@ async def put_async(
 ) -> PutBlobResultType:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
 
     if body is None:
         raise BlobError("body is required")
@@ -172,6 +179,7 @@ async def put_async(
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
 
     # Multipart auto support
@@ -398,63 +406,144 @@ async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobR
     )
 
 
+def _resolve_blob_url(url_or_path: str, token: str, access: str) -> tuple[str, str]:
+    """Resolve a URL or pathname to a blob URL and extract the pathname.
+
+    Returns (blob_url, pathname).
+    """
+    if is_url(url_or_path):
+        parsed = urlparse(url_or_path)
+        pathname = parsed.path.lstrip("/")
+        return url_or_path, pathname
+
+    # It's a pathname - construct the URL from token store ID
+    store_id = extract_store_id_from_token(token)
+    pathname = url_or_path.lstrip("/")
+    blob_url = construct_blob_url(store_id, pathname, access)
+    return blob_url, pathname
+
+
+def _build_get_result(
+    resp: httpx.Response, blob_url: str, pathname: str
+) -> GetBlobResultType:
+    """Build a GetBlobResult from an httpx response."""
+    if resp.status_code == 304:
+        last_modified = resp.headers.get("last-modified")
+        return GetBlobResultType(
+            url=blob_url,
+            download_url=get_download_url(blob_url),
+            pathname=pathname,
+            content_type=None,
+            size=None,
+            content_disposition=resp.headers.get("content-disposition", ""),
+            cache_control=resp.headers.get("cache-control", ""),
+            uploaded_at=(
+                parse_datetime(last_modified) if last_modified else datetime.now(tz=timezone.utc)
+            ),
+            etag=resp.headers.get("etag", ""),
+            content=b"",
+            status_code=304,
+        )
+
+    content_length = resp.headers.get("content-length")
+    last_modified = resp.headers.get("last-modified")
+    return GetBlobResultType(
+        url=blob_url,
+        download_url=get_download_url(blob_url),
+        pathname=pathname,
+        content_type=resp.headers.get("content-type", "application/octet-stream"),
+        size=int(content_length) if content_length else len(resp.content),
+        content_disposition=resp.headers.get("content-disposition", ""),
+        cache_control=resp.headers.get("cache-control", ""),
+        uploaded_at=(
+            parse_datetime(last_modified) if last_modified else datetime.now(tz=timezone.utc)
+        ),
+        etag=resp.headers.get("etag", ""),
+        content=resp.content,
+        status_code=200,
+    )
+
+
+def _build_cache_bypass_url(blob_url: str) -> str:
+    parsed = urlparse(blob_url)
+    params = parse_qs(parsed.query)
+    params["cache"] = ["0"]
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(params, doseq=True), parsed.fragment)
+    )
+
+
 def get(
     url_or_path: str,
     *,
+    access: str = "public",
     token: str | None = None,
     timeout: float | None = None,
-) -> bytes:
+    use_cache: bool = True,
+    if_none_match: str | None = None,
+) -> GetBlobResultType:
     token = ensure_token(token)
-    target_url: str
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        metadata = head(url_or_path, token=token)
-        target_url = metadata.url
+    validate_access(access)
+    blob_url, pathname = _resolve_blob_url(url_or_path, token, access)
+
+    headers: dict[str, str] = {}
+    if access == "private":
+        headers["authorization"] = f"Bearer {token}"
+    if if_none_match:
+        headers["if-none-match"] = if_none_match
+
+    fetch_url = _build_cache_bypass_url(blob_url) if not use_cache else blob_url
 
     try:
         with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(timeout or 30.0)) as client:
-            resp = client.get(target_url)
+            resp = client.get(fetch_url, headers=headers)
             if resp.status_code == 404:
                 raise BlobNotFoundError()
+            if resp.status_code == 304:
+                return _build_get_result(resp, blob_url, pathname)
             resp.raise_for_status()
-            return resp.content
+            return _build_get_result(resp, blob_url, pathname)
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code == 404:
             raise BlobNotFoundError() from exc
-        raise
-    except httpx.HTTPError:
         raise
 
 
 async def get_async(
     url_or_path: str,
     *,
+    access: str = "public",
     token: str | None = None,
     timeout: float | None = None,
-) -> bytes:
+    use_cache: bool = True,
+    if_none_match: str | None = None,
+) -> GetBlobResultType:
     token = ensure_token(token)
-    target_url: str
-    if is_url(url_or_path):
-        target_url = url_or_path
-    else:
-        metadata = await head_async(url_or_path, token=token)
-        target_url = metadata.url
+    validate_access(access)
+    blob_url, pathname = _resolve_blob_url(url_or_path, token, access)
+
+    headers: dict[str, str] = {}
+    if access == "private":
+        headers["authorization"] = f"Bearer {token}"
+    if if_none_match:
+        headers["if-none-match"] = if_none_match
+
+    fetch_url = _build_cache_bypass_url(blob_url) if not use_cache else blob_url
 
     try:
         async with httpx.AsyncClient(
             follow_redirects=True, timeout=httpx.Timeout(timeout or 120.0)
         ) as client:
-            resp = await client.get(target_url)
+            resp = await client.get(fetch_url, headers=headers)
             if resp.status_code == 404:
                 raise BlobNotFoundError()
+            if resp.status_code == 304:
+                return _build_get_result(resp, blob_url, pathname)
             resp.raise_for_status()
-            return resp.content
+            return _build_get_result(resp, blob_url, pathname)
     except httpx.HTTPStatusError as exc:
         if exc.response is not None and exc.response.status_code == 404:
             raise BlobNotFoundError() from exc
-        raise
-    except httpx.HTTPError:
         raise
 
 
@@ -645,7 +734,7 @@ def copy(
 ) -> PutBlobResultType:
     token = ensure_token(token)
     validate_path(dst_path)
-    require_public_access(access)
+    validate_access(access)
     if not is_url(src_path):
         meta = head(src_path, token=token)
         src_path = meta.url
@@ -655,6 +744,7 @@ def copy(
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
     params = {"pathname": dst_path, "fromUrl": src_path}
     raw = request_api(
@@ -686,7 +776,7 @@ async def copy_async(
 ) -> PutBlobResultType:
     token = ensure_token(token)
     validate_path(dst_path)
-    require_public_access(access)
+    validate_access(access)
 
     if not is_url(src_path):
         meta = head(src_path, token=token)
@@ -698,6 +788,7 @@ async def copy_async(
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
     params = {"pathname": dst_path, "fromUrl": src_path}
     raw = await request_api_async(
@@ -854,6 +945,7 @@ def download_file(
     url_or_path: str,
     local_path: str | PathLike,
     *,
+    access: str = "public",
     token: str | None = None,
     timeout: float | None = None,
     overwrite: bool = True,
@@ -861,6 +953,8 @@ def download_file(
     progress: Callable[[int, int | None], None] | None = None,
 ) -> str:
     token = ensure_token(token)
+    validate_access(access)
+
     # Resolve remote URL from url_or_path
     if is_url(url_or_path):
         target_url = url_or_path
@@ -878,9 +972,13 @@ def download_file(
     tmp = dst + ".part"
     bytes_read = 0
 
+    req_headers: dict[str, str] = {}
+    if access == "private":
+        req_headers["authorization"] = f"Bearer {token}"
+
     try:
         with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(timeout or 120.0)) as client:
-            with client.stream("GET", target_url) as resp:
+            with client.stream("GET", target_url, headers=req_headers) as resp:
                 if resp.status_code == 404:
                     raise BlobNotFoundError()
                 resp.raise_for_status()
@@ -907,6 +1005,7 @@ async def download_file_async(
     url_or_path: str,
     local_path: str | PathLike,
     *,
+    access: str = "public",
     token: str | None = None,
     timeout: float | None = None,
     overwrite: bool = True,
@@ -916,6 +1015,8 @@ async def download_file_async(
     ) = None,
 ) -> str:
     token = ensure_token(token)
+    validate_access(access)
+
     # Resolve remote URL from url_or_path
     if is_url(url_or_path):
         target_url = url_or_path
@@ -933,13 +1034,17 @@ async def download_file_async(
     tmp = dst + ".part"
     bytes_read = 0
 
+    req_headers: dict[str, str] = {}
+    if access == "private":
+        req_headers["authorization"] = f"Bearer {token}"
+
     try:
         async with (
             httpx.AsyncClient(
                 follow_redirects=True,
                 timeout=httpx.Timeout(timeout or 120.0),
             ) as client,
-            client.stream("GET", target_url) as resp,
+            client.stream("GET", target_url, headers=req_headers) as resp,
         ):
             if resp.status_code == 404:
                 raise BlobNotFoundError()

@@ -41,6 +41,8 @@ from .ops import (
     delete_async,
     download_file,
     download_file_async,
+    get,
+    get_async,
     head,
     head_async,
     iter_objects,
@@ -54,6 +56,7 @@ from .ops import (
 )
 from .types import (
     CreateFolderResult,
+    GetBlobResult,
     HeadBlobResult,
     ListBlobItem,
     ListBlobResult,
@@ -85,6 +88,8 @@ __all__ = [
     "delete_async",
     "head",
     "head_async",
+    "get",
+    "get_async",
     "list_objects",
     "list_objects_async",
     "iter_objects",
@@ -119,6 +124,7 @@ __all__ = [
     "UploadProgressEvent",
     "OnUploadProgressCallback",
     "PutBlobResult",
+    "GetBlobResult",
     "HeadBlobResult",
     "ListBlobResult",
     "ListBlobItem",
