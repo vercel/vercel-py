@@ -5,6 +5,7 @@ import inspect
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from os import PathLike
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -423,12 +424,25 @@ def _resolve_blob_url(url_or_path: str, token: str, access: str) -> tuple[str, s
     return blob_url, pathname
 
 
+def _parse_last_modified(value: str | None) -> datetime:
+    """Parse a Last-Modified header (RFC 7231 or ISO 8601)."""
+    if not value:
+        return datetime.now(tz=timezone.utc)
+    try:
+        return parsedate_to_datetime(value)
+    except Exception:
+        pass
+    try:
+        return parse_datetime(value)
+    except Exception:
+        return datetime.now(tz=timezone.utc)
+
+
 def _build_get_result(
     resp: httpx.Response, blob_url: str, pathname: str
 ) -> GetBlobResultType:
     """Build a GetBlobResult from an httpx response."""
     if resp.status_code == 304:
-        last_modified = resp.headers.get("last-modified")
         return GetBlobResultType(
             url=blob_url,
             download_url=get_download_url(blob_url),
@@ -437,16 +451,13 @@ def _build_get_result(
             size=None,
             content_disposition=resp.headers.get("content-disposition", ""),
             cache_control=resp.headers.get("cache-control", ""),
-            uploaded_at=(
-                parse_datetime(last_modified) if last_modified else datetime.now(tz=timezone.utc)
-            ),
+            uploaded_at=_parse_last_modified(resp.headers.get("last-modified")),
             etag=resp.headers.get("etag", ""),
             content=b"",
             status_code=304,
         )
 
     content_length = resp.headers.get("content-length")
-    last_modified = resp.headers.get("last-modified")
     return GetBlobResultType(
         url=blob_url,
         download_url=get_download_url(blob_url),
@@ -455,9 +466,7 @@ def _build_get_result(
         size=int(content_length) if content_length else len(resp.content),
         content_disposition=resp.headers.get("content-disposition", ""),
         cache_control=resp.headers.get("cache-control", ""),
-        uploaded_at=(
-            parse_datetime(last_modified) if last_modified else datetime.now(tz=timezone.utc)
-        ),
+        uploaded_at=_parse_last_modified(resp.headers.get("last-modified")),
         etag=resp.headers.get("etag", ""),
         content=resp.content,
         status_code=200,
