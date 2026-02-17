@@ -468,9 +468,11 @@ def _build_cache_bypass_url(blob_url: str) -> str:
     parsed = urlparse(blob_url)
     params = parse_qs(parsed.query)
     params["cache"] = ["0"]
-    return urlunparse(
-        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(params, doseq=True), parsed.fragment)
-    )
+    query = urlencode(params, doseq=True)
+    return urlunparse((
+        parsed.scheme, parsed.netloc, parsed.path,
+        parsed.params, query, parsed.fragment,
+    ))
 
 
 def get(
