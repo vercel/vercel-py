@@ -7,11 +7,12 @@ from typing import Any, cast
 from ..errors import BlobError
 from ..types import MultipartCreateResult, MultipartPart, PutBlobResult
 from ..utils import (
+    Access,
     PutHeaders,
     UploadProgressEvent,
     create_put_headers,
     ensure_token,
-    require_public_access,
+    validate_access,
     validate_path,
 )
 from .core import (
@@ -27,7 +28,7 @@ from .core import (
 def create_multipart_upload(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -36,13 +37,14 @@ def create_multipart_upload(
 ) -> MultipartCreateResult:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
 
     headers = create_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
 
     resp = call_create_multipart_upload(path, headers, token=token)
@@ -52,7 +54,7 @@ def create_multipart_upload(
 async def create_multipart_upload_async(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -61,12 +63,13 @@ async def create_multipart_upload_async(
 ) -> MultipartCreateResult:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
     headers = create_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
     resp = await call_create_multipart_upload_async(path, headers, token=token)
     return MultipartCreateResult(upload_id=resp["uploadId"], key=resp["key"])
@@ -76,7 +79,7 @@ def upload_part(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     upload_id: str,
     key: str,
@@ -86,9 +89,9 @@ def upload_part(
 ) -> MultipartPart:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
 
-    headers = create_put_headers(content_type=content_type)
+    headers = create_put_headers(content_type=content_type, access=access)
     resp = call_upload_part(
         upload_id=upload_id,
         key=key,
@@ -106,7 +109,7 @@ async def upload_part_async(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     upload_id: str,
     key: str,
@@ -120,9 +123,9 @@ async def upload_part_async(
 ) -> MultipartPart:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
 
-    headers = create_put_headers(content_type=content_type)
+    headers = create_put_headers(content_type=content_type, access=access)
     resp = await call_upload_part_async(
         upload_id=upload_id,
         key=key,
@@ -140,7 +143,7 @@ def complete_multipart_upload(
     path: str,
     parts: list[MultipartPart],
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     token: str | None = None,
     upload_id: str,
@@ -148,8 +151,8 @@ def complete_multipart_upload(
 ) -> PutBlobResult:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
-    headers = create_put_headers(content_type=content_type)
+    validate_access(access)
+    headers = create_put_headers(content_type=content_type, access=access)
 
     resp = call_complete_multipart_upload(
         upload_id=upload_id,
@@ -172,7 +175,7 @@ async def complete_multipart_upload_async(
     path: str,
     parts: list[MultipartPart],
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     token: str | None = None,
     upload_id: str,
@@ -180,9 +183,9 @@ async def complete_multipart_upload_async(
 ) -> PutBlobResult:
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
 
-    headers = create_put_headers(content_type=content_type)
+    headers = create_put_headers(content_type=content_type, access=access)
     resp = await call_complete_multipart_upload_async(
         upload_id=upload_id,
         key=key,
@@ -449,7 +452,7 @@ class AsyncMultipartUploader:
 def create_multipart_uploader(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = True,
     overwrite: bool = False,
@@ -486,13 +489,14 @@ def create_multipart_uploader(
     """
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
 
     headers = create_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
     create_resp = call_create_multipart_upload(path, headers, token=token)
 
@@ -508,7 +512,7 @@ def create_multipart_uploader(
 async def create_multipart_uploader_async(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = True,
     overwrite: bool = False,
@@ -545,12 +549,13 @@ async def create_multipart_uploader_async(
     """
     token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
     headers = create_put_headers(
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         allow_overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
+        access=access,
     )
 
     create_resp = await call_create_multipart_upload_async(path, headers, token=token)

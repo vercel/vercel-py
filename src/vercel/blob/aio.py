@@ -36,12 +36,13 @@ from .ops import (
 )
 from .types import (
     CreateFolderResult,
+    GetBlobResult,
     HeadBlobResult,
     ListBlobItem,
     ListBlobResult,
     PutBlobResult,
 )
-from .utils import OnUploadProgressCallback, UploadProgressEvent, get_download_url
+from .utils import Access, OnUploadProgressCallback, UploadProgressEvent, get_download_url
 
 __all__ = [
     # errors
@@ -78,10 +79,13 @@ __all__ = [
     "AsyncBlobClient",
     # helpers
     "get_download_url",
+    # types
+    "Access",
     "UploadProgressEvent",
     "OnUploadProgressCallback",
     # types
     "PutBlobResult",
+    "GetBlobResult",
     "HeadBlobResult",
     "ListBlobResult",
     "ListBlobItem",

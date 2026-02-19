@@ -41,6 +41,8 @@ from .ops import (
     delete_async,
     download_file,
     download_file_async,
+    get,
+    get_async,
     head,
     head_async,
     iter_objects,
@@ -54,6 +56,7 @@ from .ops import (
 )
 from .types import (
     CreateFolderResult,
+    GetBlobResult,
     HeadBlobResult,
     ListBlobItem,
     ListBlobResult,
@@ -61,7 +64,7 @@ from .types import (
     MultipartPart,
     PutBlobResult,
 )
-from .utils import OnUploadProgressCallback, UploadProgressEvent, get_download_url
+from .utils import Access, OnUploadProgressCallback, UploadProgressEvent, get_download_url
 
 __all__ = [
     # errors
@@ -85,6 +88,8 @@ __all__ = [
     "delete_async",
     "head",
     "head_async",
+    "get",
+    "get_async",
     "list_objects",
     "list_objects_async",
     "iter_objects",
@@ -116,9 +121,11 @@ __all__ = [
     # helpers
     "get_download_url",
     # types
+    "Access",
     "UploadProgressEvent",
     "OnUploadProgressCallback",
     "PutBlobResult",
+    "GetBlobResult",
     "HeadBlobResult",
     "ListBlobResult",
     "ListBlobItem",
