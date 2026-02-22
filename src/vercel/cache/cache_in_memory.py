@@ -96,3 +96,6 @@ class AsyncInMemoryCache(AsyncCache):
 
     async def contains(self, key: str) -> bool:
         return key in self.cache
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.cache
