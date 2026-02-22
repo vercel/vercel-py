@@ -37,6 +37,8 @@ class AsyncCache(Protocol):
 
     async def contains(self, key: str) -> bool: ...
 
+    def __contains__(self, key: str) -> bool: ...
+
 
 class PurgeAPI(Protocol):
     """Protocol for the purge API object."""
