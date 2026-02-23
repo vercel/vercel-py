@@ -114,9 +114,7 @@ class TestBuildGetResult:
             },
             content=b"Hello, world!",
         )
-        result = _build_get_result(
-            resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt"
-        )
+        result = _build_get_result(resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt")
         assert result.status_code == resp.status_code
         assert result.content == b"Hello, world!"
         assert result.size == 13
@@ -131,9 +129,7 @@ class TestBuildGetResult:
                 "etag": '"abc"',
             },
         )
-        result = _build_get_result(
-            resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt"
-        )
+        result = _build_get_result(resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt")
         assert result.status_code == 304
         assert result.content == b""
         assert result.size is None
@@ -162,18 +158,16 @@ class TestDownloadFile:
     def test_pathname_delegates_to_core_client(self, tmp_path):
         dest = tmp_path / "downloaded.txt"
         mock_core_client = MagicMock()
-        mock_core_client._download_file = AsyncMock(return_value=str(dest))
+        mock_core_client.download_file = AsyncMock(return_value=str(dest))
 
         def _run(operation):
             return iter_coroutine(operation(mock_core_client))
 
         with patch("vercel.blob.ops._run_sync_blob_operation", side_effect=_run):
-            result = download_file(
-                "my/file.txt", str(dest), token=TOKEN, access="public"
-            )
+            result = download_file("my/file.txt", str(dest), token=TOKEN, access="public")
 
         assert result == str(dest)
-        mock_core_client._download_file.assert_awaited_once_with(
+        mock_core_client.download_file.assert_awaited_once_with(
             "my/file.txt",
             str(dest),
             access="public",
@@ -187,17 +181,15 @@ class TestDownloadFile:
     def test_private_access_passes_access_to_core_client(self, tmp_path):
         dest = tmp_path / "private.txt"
         mock_core_client = MagicMock()
-        mock_core_client._download_file = AsyncMock(return_value=str(dest))
+        mock_core_client.download_file = AsyncMock(return_value=str(dest))
 
         def _run(operation):
             return iter_coroutine(operation(mock_core_client))
 
         with patch("vercel.blob.ops._run_sync_blob_operation", side_effect=_run):
-            download_file(
-                "my/secret.txt", str(dest), token=TOKEN, access="private"
-            )
+            download_file("my/secret.txt", str(dest), token=TOKEN, access="private")
 
-        kwargs = mock_core_client._download_file.await_args.kwargs
+        kwargs = mock_core_client.download_file.await_args.kwargs
         assert kwargs["access"] == "private"
         assert kwargs["token"] == TOKEN
 
@@ -209,7 +201,7 @@ class TestDownloadFileAsync:
     async def test_pathname_delegates_to_core_client(self, tmp_path):
         dest = tmp_path / "downloaded_async.txt"
         mock_core_client = MagicMock()
-        mock_core_client._download_file = AsyncMock(return_value=str(dest))
+        mock_core_client.download_file = AsyncMock(return_value=str(dest))
         mock_core_client.__aenter__ = AsyncMock(return_value=mock_core_client)
         mock_core_client.__aexit__ = AsyncMock(return_value=False)
 
@@ -219,7 +211,7 @@ class TestDownloadFileAsync:
             )
 
         assert result == str(dest)
-        mock_core_client._download_file.assert_awaited_once_with(
+        mock_core_client.download_file.assert_awaited_once_with(
             "my/file.txt",
             str(dest),
             access="public",
@@ -233,16 +225,14 @@ class TestDownloadFileAsync:
     async def test_private_access_passes_access_to_core_client(self, tmp_path):
         dest = tmp_path / "private_async.txt"
         mock_core_client = MagicMock()
-        mock_core_client._download_file = AsyncMock(return_value=str(dest))
+        mock_core_client.download_file = AsyncMock(return_value=str(dest))
         mock_core_client.__aenter__ = AsyncMock(return_value=mock_core_client)
         mock_core_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch("vercel.blob.ops._AsyncBlobOpsClient", return_value=mock_core_client):
-            await download_file_async(
-                "my/secret.txt", str(dest), token=TOKEN, access="private"
-            )
+            await download_file_async("my/secret.txt", str(dest), token=TOKEN, access="private")
 
-        kwargs = mock_core_client._download_file.await_args.kwargs
+        kwargs = mock_core_client.download_file.await_args.kwargs
         assert kwargs["access"] == "private"
         assert kwargs["token"] == TOKEN
 

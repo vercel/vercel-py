@@ -22,6 +22,7 @@ from .._http import (
     create_base_client,
 )
 from .._iter_coroutine import iter_coroutine
+from .._telemetry.tracker import track
 from .errors import (
     BlobAccessError,
     BlobClientTokenExpiredError,
@@ -426,7 +427,7 @@ class _BlobRequestClient:
         self._await_progress_callback = await_progress_callback
         self._async_content = async_content
 
-    async def _request_api(
+    async def request_api(
         self,
         pathname: str,
         method: str,
@@ -641,7 +642,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
     ) -> dict[str, str]:
         from .multipart.core import _build_headers as _build_multipart_headers
 
-        response = await self._request_api(
+        response = await self.request_api(
             pathname="/mpu",
             method="POST",
             token=token,
@@ -662,7 +663,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
     ) -> dict[str, Any]:
         from .multipart.core import _build_headers as _build_multipart_headers
 
-        response = await self._request_api(
+        response = await self.request_api(
             pathname="/mpu",
             method="POST",
             token=token,
@@ -678,7 +679,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         return cast(dict[str, Any], response)
 
-    async def _put_blob(
+    async def put_blob(
         self,
         path: str,
         body: Any,
@@ -715,11 +716,20 @@ class _BaseBlobOpsClient(_BlobRequestClient):
                 token=token,
                 on_upload_progress=on_upload_progress,
             )
-            return build_put_blob_result(raw), True
+            result = build_put_blob_result(raw)
+            track(
+                "blob_put",
+                token=token,
+                access=access,
+                content_type=content_type,
+                multipart=True,
+                size_bytes=get_telemetry_size_bytes(body),
+            )
+            return result, True
 
         raw = cast(
             dict[str, Any],
-            await self._request_api(
+            await self.request_api(
                 "",
                 "PUT",
                 token=token,
@@ -729,15 +739,24 @@ class _BaseBlobOpsClient(_BlobRequestClient):
                 on_upload_progress=on_upload_progress,
             ),
         )
-        return build_put_blob_result(raw), False
+        result = build_put_blob_result(raw)
+        track(
+            "blob_put",
+            token=token,
+            access=access,
+            content_type=content_type,
+            multipart=False,
+            size_bytes=get_telemetry_size_bytes(body),
+        )
+        return result, False
 
-    async def _delete_blob(
+    async def delete_blob(
         self,
         urls: list[str],
         *,
         token: str,
     ) -> int:
-        await self._request_api(
+        await self.request_api(
             "/delete",
             "POST",
             token=token,
@@ -745,9 +764,10 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             body={"urls": urls},
             decode_mode="none",
         )
+        track("blob_delete", token=token, count=len(urls))
         return len(urls)
 
-    async def _head_blob(
+    async def head_blob(
         self,
         url_or_path: str,
         *,
@@ -756,7 +776,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         token = ensure_token(token)
         resp = cast(
             dict[str, Any],
-            await self._request_api(
+            await self.request_api(
                 "",
                 "GET",
                 token=token,
@@ -765,7 +785,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         return build_head_blob_result(resp)
 
-    async def _get_blob(
+    async def get_blob(
         self,
         url_or_path: str,
         *,
@@ -787,7 +807,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             if store_id:
                 target_url = construct_blob_url(store_id, pathname, access)
             else:
-                head_result = await self._head_blob(target_url, token=token)
+                head_result = await self.head_blob(target_url, token=token)
                 target_url = head_result.url
                 pathname = head_result.pathname
                 download_url = head_result.download_url
@@ -865,7 +885,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         token = ensure_token(token)
         resp = cast(
             dict[str, Any],
-            await self._request_api(
+            await self.request_api(
                 "",
                 "GET",
                 token=token,
@@ -916,7 +936,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             if next_cursor is None:
                 break
 
-    async def _copy_blob(
+    async def copy_blob(
         self,
         src_path: str,
         dst_path: str,
@@ -934,7 +954,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
         src_url = src_path
         if not is_url(src_url):
-            src_url = (await self._head_blob(src_url, token=token)).url
+            src_url = (await self.head_blob(src_url, token=token)).url
 
         headers = create_put_headers(
             content_type=content_type,
@@ -945,7 +965,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         raw = cast(
             dict[str, Any],
-            await self._request_api(
+            await self.request_api(
                 "",
                 "PUT",
                 token=token,
@@ -955,7 +975,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         return build_put_blob_result(raw)
 
-    async def _create_folder(
+    async def create_folder(
         self,
         path: str,
         *,
@@ -970,7 +990,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         raw = cast(
             dict[str, Any],
-            await self._request_api(
+            await self.request_api(
                 "",
                 "PUT",
                 token=token,
@@ -980,7 +1000,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         return build_create_folder_result(raw)
 
-    async def _upload_file(
+    async def upload_file(
         self,
         local_path: str | os.PathLike,
         path: str,
@@ -1011,7 +1031,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         use_multipart = multipart or (size_bytes > 5 * 1024 * 1024)
 
         with open(source_path, "rb") as f:
-            result, _ = await self._put_blob(
+            result, _ = await self.put_blob(
                 path,
                 f,
                 access=access,
@@ -1025,7 +1045,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             )
         return result
 
-    async def _download_file(
+    async def download_file(
         self,
         url_or_path: str,
         local_path: str | os.PathLike,
@@ -1045,7 +1065,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             blob_url = construct_blob_url(store_id, url_or_path.lstrip("/"), access)
             target_url = get_download_url(blob_url)
         else:
-            meta = await self._head_blob(url_or_path, token=token)
+            meta = await self.head_blob(url_or_path, token=token)
             target_url = meta.download_url or meta.url
 
         dst = os.fspath(local_path)
@@ -1134,7 +1154,7 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
         return cast(
             dict[str, Any],
             iter_coroutine(
-                self._request_api(
+                self.request_api(
                     pathname="/mpu",
                     method="POST",
                     token=token,
@@ -1170,6 +1190,23 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
                 mode=mode,
                 token=token,
             )
+        )
+
+    def list_objects(
+        self,
+        *,
+        limit: int | None,
+        prefix: str | None,
+        cursor: str | None,
+        mode: str | None,
+        token: str | None,
+    ) -> ListBlobResultType:
+        return self._list_objects_sync(
+            limit=limit,
+            prefix=prefix,
+            cursor=cursor,
+            mode=mode,
+            token=token,
         )
 
     def _iter_objects_sync(
@@ -1213,6 +1250,25 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
             next_cursor = _get_next_cursor(page)
             if next_cursor is None:
                 break
+
+    def iter_objects(
+        self,
+        *,
+        prefix: str | None,
+        mode: str | None,
+        token: str | None,
+        batch_size: int | None,
+        limit: int | None,
+        cursor: str | None,
+    ) -> Iterator[ListBlobItem]:
+        return self._iter_objects_sync(
+            prefix=prefix,
+            mode=mode,
+            token=token,
+            batch_size=batch_size,
+            limit=limit,
+            cursor=cursor,
+        )
 
     def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
         async def _iterate() -> AsyncIterator[bytes]:
@@ -1267,7 +1323,7 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     ) -> dict[str, Any]:
         from .multipart.core import _build_headers as _build_multipart_headers
 
-        response = await self._request_api(
+        response = await self.request_api(
             pathname="/mpu",
             method="POST",
             token=token,
@@ -1297,6 +1353,42 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     async def _close_response(self, response: httpx.Response) -> None:
         await response.aclose()
 
+    async def list_objects(
+        self,
+        *,
+        limit: int | None,
+        prefix: str | None,
+        cursor: str | None,
+        mode: str | None,
+        token: str | None,
+    ) -> ListBlobResultType:
+        return await self._list_objects(
+            limit=limit,
+            prefix=prefix,
+            cursor=cursor,
+            mode=mode,
+            token=token,
+        )
+
+    def iter_objects(
+        self,
+        *,
+        prefix: str | None,
+        mode: str | None,
+        token: str | None,
+        batch_size: int | None,
+        limit: int | None,
+        cursor: str | None,
+    ) -> AsyncIterator[ListBlobItem]:
+        return self._iter_objects(
+            prefix=prefix,
+            mode=mode,
+            token=token,
+            batch_size=batch_size,
+            limit=limit,
+            cursor=cursor,
+        )
+
 
 async def request_api_core(
     pathname: str,
@@ -1319,7 +1411,7 @@ async def request_api_core(
         await_progress_callback=await_progress_callback,
         async_content=async_content,
     )
-    return await request_client._request_api(
+    return await request_client.request_api(
         pathname,
         method,
         token=token,

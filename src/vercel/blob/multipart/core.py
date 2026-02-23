@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from urllib.parse import quote
@@ -37,8 +38,17 @@ def _build_headers(
 
 
 class _BaseMultipartClient:
+    def __init__(
+        self,
+        request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]],
+    ) -> None:
+        self._request_api_fn = request_api_fn
+
     async def _request_api(self, **kwargs: Any) -> Any:
-        raise NotImplementedError
+        result = self._request_api_fn(**kwargs)
+        if inspect.isawaitable(result):
+            return await cast(Awaitable[Any], result)
+        return result
 
     async def create_multipart_upload(
         self,
@@ -113,10 +123,16 @@ class _BaseMultipartClient:
 
 
 class _SyncMultipartClient(_BaseMultipartClient):
-    async def _request_api(self, **kwargs: Any) -> Any:
-        return request_api(**kwargs)
+    def __init__(
+        self,
+        request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]] | None = None,
+    ) -> None:
+        super().__init__(request_api_fn or request_api)
 
 
 class _AsyncMultipartClient(_BaseMultipartClient):
-    async def _request_api(self, **kwargs: Any) -> Any:
-        return await request_api_async(**kwargs)
+    def __init__(
+        self,
+        request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]] | None = None,
+    ) -> None:
+        super().__init__(request_api_fn or request_api_async)

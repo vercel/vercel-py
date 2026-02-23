@@ -171,7 +171,12 @@ class TestBlobClientClassParity:
             if not m.startswith("_") and callable(getattr(AsyncBlobClient, m))
         }
 
-        # Methods should be the same (async client may have additional async-specific methods)
+        # Lifecycle naming intentionally differs by runtime.
+        assert "close" in sync_methods
+        assert "aclose" in async_methods
+        sync_methods.discard("close")
+        async_methods.discard("aclose")
+
         assert sync_methods == async_methods, (
             f"Method mismatch: sync_only={sync_methods - async_methods}, "
             f"async_only={async_methods - sync_methods}"

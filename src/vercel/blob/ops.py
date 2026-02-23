@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextvars
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -11,11 +10,9 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import httpx
 
 from .._iter_coroutine import iter_coroutine
-from .._telemetry.tracker import telemetry, track
 from ._core import (
     _AsyncBlobOpsClient,
     _SyncBlobOpsClient,
-    get_telemetry_size_bytes,
     normalize_delete_urls,
 )
 from .errors import BlobError
@@ -37,12 +34,6 @@ from .utils import (
     is_url,
     parse_datetime,
     validate_access,
-)
-
-# Context variable to store the delete count for telemetry
-# This allows the derive function to access the count after the iterable is consumed
-_delete_count_context: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "_delete_count", default=None
 )
 
 _T = TypeVar("_T")
@@ -87,9 +78,7 @@ def _parse_last_modified(value: str | None) -> datetime:
         return datetime.now(tz=timezone.utc)
 
 
-def _build_get_result(
-    resp: httpx.Response, blob_url: str, pathname: str
-) -> GetBlobResultType:
+def _build_get_result(resp: httpx.Response, blob_url: str, pathname: str) -> GetBlobResultType:
     if resp.status_code == 304:
         return GetBlobResultType(
             url=blob_url,
@@ -152,8 +141,8 @@ def put(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    result, used_multipart = _run_sync_blob_operation(
-        lambda client: client._put_blob(
+    result, _ = _run_sync_blob_operation(
+        lambda client: client.put_blob(
             path,
             body,
             access=access,
@@ -165,14 +154,6 @@ def put(
             multipart=multipart,
             on_upload_progress=on_upload_progress,
         )
-    )
-    track(
-        "blob_put",
-        token=token,
-        access=access,
-        content_type=content_type,
-        multipart=used_multipart,
-        size_bytes=get_telemetry_size_bytes(body),
     )
     return result
 
@@ -196,7 +177,7 @@ async def put_async(
 ) -> PutBlobResultType:
     token = ensure_token(token)
     async with _AsyncBlobOpsClient() as client:
-        result, used_multipart = await client._put_blob(
+        result, _ = await client.put_blob(
             path,
             body,
             access=access,
@@ -208,30 +189,9 @@ async def put_async(
             multipart=multipart,
             on_upload_progress=on_upload_progress,
         )
-    track(
-        "blob_put",
-        token=token,
-        access=access,
-        content_type=content_type,
-        multipart=used_multipart,
-        size_bytes=get_telemetry_size_bytes(body),
-    )
     return result
 
 
-def _derive_delete_count(args: tuple, kwargs: dict, result: Any) -> int:
-    del args, kwargs, result
-    count = _delete_count_context.get()
-    _delete_count_context.set(None)
-    return count or 1
-
-
-@telemetry(
-    event="blob_delete",
-    capture=["token"],
-    derive={"count": _derive_delete_count},
-    when="after",
-)
 def delete(
     url_or_path: str | Iterable[str],
     *,
@@ -239,21 +199,14 @@ def delete(
 ) -> None:
     token = ensure_token(token)
     normalized_urls = normalize_delete_urls(url_or_path)
-    _delete_count_context.set(len(normalized_urls))
     _run_sync_blob_operation(
-        lambda client: client._delete_blob(
+        lambda client: client.delete_blob(
             normalized_urls,
             token=token,
         )
     )
 
 
-@telemetry(
-    event="blob_delete",
-    capture=["token"],
-    derive={"count": _derive_delete_count},
-    when="after",
-)
 async def delete_async(
     url_or_path: str | Iterable[str],
     *,
@@ -261,9 +214,8 @@ async def delete_async(
 ) -> None:
     token = ensure_token(token)
     normalized_urls = normalize_delete_urls(url_or_path)
-    _delete_count_context.set(len(normalized_urls))
     async with _AsyncBlobOpsClient() as client:
-        await client._delete_blob(
+        await client.delete_blob(
             normalized_urls,
             token=token,
         )
@@ -272,7 +224,7 @@ async def delete_async(
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
     token = ensure_token(token)
     return _run_sync_blob_operation(
-        lambda client: client._head_blob(
+        lambda client: client.head_blob(
             url_or_path,
             token=token,
         )
@@ -282,7 +234,7 @@ def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
     token = ensure_token(token)
     async with _AsyncBlobOpsClient() as client:
-        return await client._head_blob(
+        return await client.head_blob(
             url_or_path,
             token=token,
         )
@@ -300,7 +252,7 @@ def get(
     token = ensure_token(token)
     validate_access(access)
     return _run_sync_blob_operation(
-        lambda client: client._get_blob(
+        lambda client: client.get_blob(
             url_or_path,
             access=access,
             token=token,
@@ -324,7 +276,7 @@ async def get_async(
     token = ensure_token(token)
     validate_access(access)
     async with _AsyncBlobOpsClient() as client:
-        return await client._get_blob(
+        return await client.get_blob(
             url_or_path,
             access=access,
             token=token,
@@ -344,15 +296,14 @@ def list_objects(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    return _run_sync_blob_operation(
-        lambda client: client._list_objects(
+    with _SyncBlobOpsClient() as client:
+        return client.list_objects(
             limit=limit,
             prefix=prefix,
             cursor=cursor,
             mode=mode,
             token=token,
         )
-    )
 
 
 async def list_objects_async(
@@ -365,7 +316,7 @@ async def list_objects_async(
 ) -> ListBlobResultType:
     token = ensure_token(token)
     async with _AsyncBlobOpsClient() as client:
-        return await client._list_objects(
+        return await client.list_objects(
             limit=limit,
             prefix=prefix,
             cursor=cursor,
@@ -385,7 +336,7 @@ def iter_objects(
 ) -> Iterator[ListBlobItem]:
     token = ensure_token(token)
     with _SyncBlobOpsClient() as client:
-        yield from client._iter_objects_sync(
+        yield from client.iter_objects(
             prefix=prefix,
             mode=mode,
             token=token,
@@ -406,7 +357,7 @@ async def iter_objects_async(
 ) -> AsyncIterator[ListBlobItem]:
     token = ensure_token(token)
     async with _AsyncBlobOpsClient() as client:
-        async for item in client._iter_objects(
+        async for item in client.iter_objects(
             prefix=prefix,
             mode=mode,
             token=token,
@@ -430,7 +381,7 @@ def copy(
 ) -> PutBlobResultType:
     token = ensure_token(token)
     return _run_sync_blob_operation(
-        lambda client: client._copy_blob(
+        lambda client: client.copy_blob(
             src_path,
             dst_path,
             access=access,
@@ -456,7 +407,7 @@ async def copy_async(
 ) -> PutBlobResultType:
     token = ensure_token(token)
     async with _AsyncBlobOpsClient() as client:
-        return await client._copy_blob(
+        return await client.copy_blob(
             src_path,
             dst_path,
             access=access,
@@ -476,7 +427,7 @@ def create_folder(
 ) -> CreateFolderResultType:
     token = ensure_token(token)
     return _run_sync_blob_operation(
-        lambda client: client._create_folder(
+        lambda client: client.create_folder(
             path,
             token=token,
             overwrite=overwrite,
@@ -492,7 +443,7 @@ async def create_folder_async(
 ) -> CreateFolderResultType:
     token = ensure_token(token)
     async with _AsyncBlobOpsClient() as client:
-        return await client._create_folder(
+        return await client.create_folder(
             path,
             token=token,
             overwrite=overwrite,
@@ -513,7 +464,7 @@ def upload_file(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
     return _run_sync_blob_operation(
-        lambda client: client._upload_file(
+        lambda client: client.upload_file(
             local_path,
             path,
             access=access,
@@ -547,7 +498,7 @@ async def upload_file_async(
     ) = None,
 ) -> PutBlobResultType:
     async with _AsyncBlobOpsClient() as client:
-        return await client._upload_file(
+        return await client.upload_file(
             local_path,
             path,
             access=access,
@@ -576,7 +527,7 @@ def download_file(
     token = ensure_token(token)
     validate_access(access)
     return _run_sync_blob_operation(
-        lambda client: client._download_file(
+        lambda client: client.download_file(
             url_or_path,
             local_path,
             access=access,
@@ -605,7 +556,7 @@ async def download_file_async(
     token = ensure_token(token)
     validate_access(access)
     async with _AsyncBlobOpsClient() as client:
-        return await client._download_file(
+        return await client.download_file(
             url_or_path,
             local_path,
             access=access,
