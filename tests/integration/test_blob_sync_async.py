@@ -575,7 +575,7 @@ class TestBlobReadAndDownload:
         result = get(mock_blob_head_response["url"], token="test_token")
 
         assert route.called
-        assert result == payload
+        assert result.content == payload
         timeout = route.calls.last.request.extensions["timeout"]
         assert timeout["connect"] == 30.0
 
@@ -595,7 +595,7 @@ class TestBlobReadAndDownload:
 
         assert head_route.called
         assert blob_route.called
-        assert result == payload
+        assert result.content == payload
         timeout = blob_route.calls.last.request.extensions["timeout"]
         assert timeout["connect"] == 120.0
 
@@ -1153,7 +1153,7 @@ class TestBlobClient:
         result = client.get("https://blob.vercel-storage.com/test.txt")
 
         assert route.called
-        assert result == b"blob data"
+        assert result.content == b"blob data"
 
     @respx.mock
     def test_blob_client_iter_objects(self, mock_env_clear, mock_blob_list_response):
@@ -1305,7 +1305,7 @@ class TestBlobClient:
         result = await client.get("https://blob.vercel-storage.com/test.txt")
 
         assert route.called
-        assert result == b"blob data"
+        assert result.content == b"blob data"
 
     @respx.mock
     @pytest.mark.asyncio

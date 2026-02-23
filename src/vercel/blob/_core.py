@@ -5,6 +5,8 @@ import inspect
 import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -38,6 +40,7 @@ from .errors import (
 )
 from .types import (
     CreateFolderResult as CreateFolderResultType,
+    GetBlobResult as GetBlobResultType,
     HeadBlobResult as HeadBlobResultType,
     ListBlobItem,
     ListBlobResult as ListBlobResultType,
@@ -391,6 +394,19 @@ def _build_cache_bypass_url(blob_url: str) -> str:
     )
 
 
+def _parse_last_modified(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(tz=timezone.utc)
+    try:
+        return parsedate_to_datetime(value)
+    except (ValueError, TypeError):
+        pass
+    try:
+        return parse_datetime(value)
+    except (ValueError, TypeError):
+        return datetime.now(tz=timezone.utc)
+
+
 class _BlobRequestClient:
     _transport: BaseTransport
     _sleep_fn: SleepFn
@@ -551,7 +567,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         path: str,
         body: Any,
         *,
-        access: str,
+        access: Access,
         content_type: str | None = None,
         add_random_suffix: bool = False,
         overwrite: bool = False,
@@ -667,7 +683,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         path: str,
         body: Any,
         *,
-        access: str,
+        access: Access,
         content_type: str | None,
         add_random_suffix: bool,
         overwrite: bool,
@@ -684,7 +700,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             add_random_suffix=add_random_suffix,
             allow_overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            access=cast(Access, access),
+            access=access,
         )
 
         if multipart:
@@ -759,17 +775,26 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         use_cache: bool,
         if_none_match: str | None,
         default_timeout: float,
-    ) -> bytes:
+    ) -> GetBlobResultType:
         token = ensure_token(token)
         validate_access(access)
         target_url = url_or_path
+        pathname: str
+        download_url: str | None = None
         if not is_url(target_url):
             pathname = target_url.lstrip("/")
             store_id = extract_store_id_from_token(token)
             if store_id:
                 target_url = construct_blob_url(store_id, pathname, access)
             else:
-                target_url = (await self._head_blob(target_url, token=token)).url
+                head_result = await self._head_blob(target_url, token=token)
+                target_url = head_result.url
+                pathname = head_result.pathname
+                download_url = head_result.download_url
+        else:
+            pathname = urlparse(target_url).path.lstrip("/")
+        if download_url is None:
+            download_url = get_download_url(target_url)
         if not use_cache:
             target_url = _build_cache_bypass_url(target_url)
 
@@ -792,9 +817,34 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             if response.status_code == 404:
                 raise BlobNotFoundError()
             if response.status_code == 304:
-                return b""
+                return GetBlobResultType(
+                    url=target_url,
+                    download_url=download_url,
+                    pathname=pathname,
+                    content_type=None,
+                    size=None,
+                    content_disposition=response.headers.get("content-disposition", ""),
+                    cache_control=response.headers.get("cache-control", ""),
+                    uploaded_at=_parse_last_modified(response.headers.get("last-modified")),
+                    etag=response.headers.get("etag", ""),
+                    content=b"",
+                    status_code=304,
+                )
             response.raise_for_status()
-            return response.content
+            content_length = response.headers.get("content-length")
+            return GetBlobResultType(
+                url=target_url,
+                download_url=download_url,
+                pathname=pathname,
+                content_type=response.headers.get("content-type", "application/octet-stream"),
+                size=int(content_length) if content_length else len(response.content),
+                content_disposition=response.headers.get("content-disposition", ""),
+                cache_control=response.headers.get("cache-control", ""),
+                uploaded_at=_parse_last_modified(response.headers.get("last-modified")),
+                etag=response.headers.get("etag", ""),
+                content=response.content,
+                status_code=response.status_code,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 raise BlobNotFoundError() from exc
@@ -935,7 +985,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         local_path: str | os.PathLike,
         path: str,
         *,
-        access: str,
+        access: Access,
         content_type: str | None,
         add_random_suffix: bool,
         overwrite: bool,

@@ -296,7 +296,7 @@ def get(
     timeout: float | None = None,
     use_cache: bool = True,
     if_none_match: str | None = None,
-) -> bytes:
+) -> GetBlobResultType:
     token = ensure_token(token)
     validate_access(access)
     return _run_sync_blob_operation(
@@ -320,7 +320,7 @@ async def get_async(
     timeout: float | None = None,
     use_cache: bool = True,
     if_none_match: str | None = None,
-) -> bytes:
+) -> GetBlobResultType:
     token = ensure_token(token)
     validate_access(access)
     async with _AsyncBlobOpsClient() as client:
