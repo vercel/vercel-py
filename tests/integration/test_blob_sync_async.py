@@ -597,7 +597,7 @@ class TestBlobReadAndDownload:
         assert blob_route.called
         assert result.content == payload
         timeout = blob_route.calls.last.request.extensions["timeout"]
-        assert timeout["connect"] == 120.0
+        assert timeout["connect"] == 30.0
 
     @respx.mock
     def test_download_file_sync_progress(self, mock_env_clear, mock_blob_head_response, tmp_path):

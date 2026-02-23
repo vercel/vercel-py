@@ -192,7 +192,7 @@ async def get_async(
             timeout=timeout,
             use_cache=use_cache,
             if_none_match=if_none_match,
-            default_timeout=120.0,
+            default_timeout=30.0,
         )
 
 
