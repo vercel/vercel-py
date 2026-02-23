@@ -873,69 +873,6 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             if response is not None:
                 await self._close_response(response)
 
-    async def _list_objects(
-        self,
-        *,
-        limit: int | None,
-        prefix: str | None,
-        cursor: str | None,
-        mode: str | None,
-        token: str | None,
-    ) -> ListBlobResultType:
-        token = ensure_token(token)
-        resp = cast(
-            dict[str, Any],
-            await self.request_api(
-                "",
-                "GET",
-                token=token,
-                params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
-            ),
-        )
-        return build_list_blob_result(resp)
-
-    async def _iter_objects(
-        self,
-        *,
-        prefix: str | None,
-        mode: str | None,
-        token: str | None,
-        batch_size: int | None,
-        limit: int | None,
-        cursor: str | None,
-    ) -> AsyncIterator[ListBlobItem]:
-        token = ensure_token(token)
-        next_cursor = cursor
-        yielded_count = 0
-
-        while True:
-            done, effective_limit = _resolve_page_limit(
-                batch_size=batch_size,
-                limit=limit,
-                yielded_count=yielded_count,
-            )
-            if done:
-                break
-
-            page = await self._list_objects(
-                limit=effective_limit,
-                prefix=prefix,
-                cursor=next_cursor,
-                mode=mode,
-                token=token,
-            )
-
-            for item in page.blobs:
-                yield item
-                if limit is not None:
-                    yielded_count += 1
-                    if yielded_count >= limit:
-                        return
-
-            next_cursor = _get_next_cursor(page)
-            if next_cursor is None:
-                break
-
     async def copy_blob(
         self,
         src_path: str,
@@ -1172,26 +1109,6 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
             ),
         )
 
-    def _list_objects_sync(
-        self,
-        *,
-        limit: int | None,
-        prefix: str | None,
-        cursor: str | None,
-        mode: str | None,
-        token: str | None,
-    ) -> ListBlobResultType:
-        # This coroutine must stay non-suspending for iter_coroutine().
-        return iter_coroutine(
-            self._list_objects(
-                limit=limit,
-                prefix=prefix,
-                cursor=cursor,
-                mode=mode,
-                token=token,
-            )
-        )
-
     def list_objects(
         self,
         *,
@@ -1201,15 +1118,21 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
         mode: str | None,
         token: str | None,
     ) -> ListBlobResultType:
-        return self._list_objects_sync(
-            limit=limit,
-            prefix=prefix,
-            cursor=cursor,
-            mode=mode,
-            token=token,
+        token = ensure_token(token)
+        resp = cast(
+            dict[str, Any],
+            iter_coroutine(
+                self.request_api(
+                    "",
+                    "GET",
+                    token=token,
+                    params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
+                )
+            ),
         )
+        return build_list_blob_result(resp)
 
-    def _iter_objects_sync(
+    def iter_objects(
         self,
         *,
         prefix: str | None,
@@ -1219,7 +1142,6 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
         limit: int | None,
         cursor: str | None,
     ) -> Iterator[ListBlobItem]:
-        token = ensure_token(token)
         next_cursor = cursor
         yielded_count = 0
 
@@ -1232,7 +1154,7 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
             if done:
                 break
 
-            page = self._list_objects_sync(
+            page = self.list_objects(
                 limit=effective_limit,
                 prefix=prefix,
                 cursor=next_cursor,
@@ -1250,25 +1172,6 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
             next_cursor = _get_next_cursor(page)
             if next_cursor is None:
                 break
-
-    def iter_objects(
-        self,
-        *,
-        prefix: str | None,
-        mode: str | None,
-        token: str | None,
-        batch_size: int | None,
-        limit: int | None,
-        cursor: str | None,
-    ) -> Iterator[ListBlobItem]:
-        return self._iter_objects_sync(
-            prefix=prefix,
-            mode=mode,
-            token=token,
-            batch_size=batch_size,
-            limit=limit,
-            cursor=cursor,
-        )
 
     def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
         async def _iterate() -> AsyncIterator[bytes]:
@@ -1362,15 +1265,19 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
         mode: str | None,
         token: str | None,
     ) -> ListBlobResultType:
-        return await self._list_objects(
-            limit=limit,
-            prefix=prefix,
-            cursor=cursor,
-            mode=mode,
-            token=token,
+        token = ensure_token(token)
+        resp = cast(
+            dict[str, Any],
+            await self.request_api(
+                "",
+                "GET",
+                token=token,
+                params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
+            ),
         )
+        return build_list_blob_result(resp)
 
-    def iter_objects(
+    async def iter_objects(
         self,
         *,
         prefix: str | None,
@@ -1380,14 +1287,36 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
         limit: int | None,
         cursor: str | None,
     ) -> AsyncIterator[ListBlobItem]:
-        return self._iter_objects(
-            prefix=prefix,
-            mode=mode,
-            token=token,
-            batch_size=batch_size,
-            limit=limit,
-            cursor=cursor,
-        )
+        next_cursor = cursor
+        yielded_count = 0
+
+        while True:
+            done, effective_limit = _resolve_page_limit(
+                batch_size=batch_size,
+                limit=limit,
+                yielded_count=yielded_count,
+            )
+            if done:
+                break
+
+            page = await self.list_objects(
+                limit=effective_limit,
+                prefix=prefix,
+                cursor=next_cursor,
+                mode=mode,
+                token=token,
+            )
+
+            for item in page.blobs:
+                yield item
+                if limit is not None:
+                    yielded_count += 1
+                    if yielded_count >= limit:
+                        return
+
+            next_cursor = _get_next_cursor(page)
+            if next_cursor is None:
+                break
 
 
 async def request_api_core(
