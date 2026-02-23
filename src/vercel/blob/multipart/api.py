@@ -8,25 +8,27 @@ from ..._iter_coroutine import iter_coroutine
 from ..errors import BlobError
 from ..types import MultipartCreateResult, MultipartPart, PutBlobResult
 from ..utils import (
+    Access,
     PutHeaders,
     UploadProgressEvent,
     create_put_headers,
     ensure_token,
-    require_public_access,
+    validate_access,
     validate_path,
 )
 from .core import _AsyncMultipartClient, _SyncMultipartClient
 
 
-def _validate_multipart_context(path: str, access: str, token: str | None) -> str:
+def _validate_multipart_context(path: str, access: Access, token: str | None) -> str:
     resolved_token = ensure_token(token)
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
     return resolved_token
 
 
 def _build_put_headers(
     *,
+    access: Access,
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -39,6 +41,7 @@ def _build_put_headers(
             add_random_suffix=add_random_suffix,
             allow_overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
+            access=access,
         ),
     )
 
@@ -79,7 +82,7 @@ def _validate_part_upload_inputs(part_number: int, body: Any) -> None:
 def create_multipart_upload(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -88,6 +91,7 @@ def create_multipart_upload(
 ) -> MultipartCreateResult:
     resolved_token = _validate_multipart_context(path, access, token)
     headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         overwrite=overwrite,
@@ -102,7 +106,7 @@ def create_multipart_upload(
 async def create_multipart_upload_async(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = False,
     overwrite: bool = False,
@@ -111,6 +115,7 @@ async def create_multipart_upload_async(
 ) -> MultipartCreateResult:
     resolved_token = _validate_multipart_context(path, access, token)
     headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         overwrite=overwrite,
@@ -126,7 +131,7 @@ def upload_part(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     upload_id: str,
     key: str,
@@ -136,7 +141,7 @@ def upload_part(
 ) -> MultipartPart:
     resolved_token = _validate_multipart_context(path, access, token)
     _validate_part_upload_inputs(part_number, body)
-    headers = _build_put_headers(content_type=content_type)
+    headers = _build_put_headers(access=access, content_type=content_type)
     response = iter_coroutine(
         _SyncMultipartClient().upload_part(
             upload_id=upload_id,
@@ -156,7 +161,7 @@ async def upload_part_async(
     path: str,
     body: Any,
     *,
-    access: str = "public",
+    access: Access = "public",
     token: str | None = None,
     upload_id: str,
     key: str,
@@ -170,7 +175,7 @@ async def upload_part_async(
 ) -> MultipartPart:
     resolved_token = _validate_multipart_context(path, access, token)
     _validate_part_upload_inputs(part_number, body)
-    headers = _build_put_headers(content_type=content_type)
+    headers = _build_put_headers(access=access, content_type=content_type)
     response = await _AsyncMultipartClient().upload_part(
         upload_id=upload_id,
         key=key,
@@ -188,14 +193,14 @@ def complete_multipart_upload(
     path: str,
     parts: list[MultipartPart],
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     token: str | None = None,
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
     resolved_token = _validate_multipart_context(path, access, token)
-    headers = _build_put_headers(content_type=content_type)
+    headers = _build_put_headers(access=access, content_type=content_type)
     response = iter_coroutine(
         _SyncMultipartClient().complete_multipart_upload(
             upload_id=upload_id,
@@ -213,14 +218,14 @@ async def complete_multipart_upload_async(
     path: str,
     parts: list[MultipartPart],
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     token: str | None = None,
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
     resolved_token = _validate_multipart_context(path, access, token)
-    headers = _build_put_headers(content_type=content_type)
+    headers = _build_put_headers(access=access, content_type=content_type)
     response = await _AsyncMultipartClient().complete_multipart_upload(
         upload_id=upload_id,
         key=key,
@@ -357,7 +362,7 @@ class AsyncMultipartUploader(_BaseMultipartUploader):
 def create_multipart_uploader(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = True,
     overwrite: bool = False,
@@ -366,6 +371,7 @@ def create_multipart_uploader(
 ) -> MultipartUploader:
     resolved_token = _validate_multipart_context(path, access, token)
     headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         overwrite=overwrite,
@@ -387,7 +393,7 @@ def create_multipart_uploader(
 async def create_multipart_uploader_async(
     path: str,
     *,
-    access: str = "public",
+    access: Access = "public",
     content_type: str | None = None,
     add_random_suffix: bool = True,
     overwrite: bool = False,
@@ -396,6 +402,7 @@ async def create_multipart_uploader_async(
 ) -> AsyncMultipartUploader:
     resolved_token = _validate_multipart_context(path, access, token)
     headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         overwrite=overwrite,

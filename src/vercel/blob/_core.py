@@ -43,6 +43,7 @@ from .types import (
     PutBlobResult as PutBlobResultType,
 )
 from .utils import (
+    Access,
     PutHeaders,
     StreamingBodyWithProgress,
     UploadProgressEvent,
@@ -59,8 +60,8 @@ from .utils import (
     make_request_id,
     parse_datetime,
     parse_rfc7231_retry_after,
-    require_public_access,
     should_use_x_content_length,
+    validate_access,
     validate_path,
 )
 
@@ -255,9 +256,9 @@ def get_telemetry_size_bytes(body: Any) -> int | None:
     return None
 
 
-def _validate_put_inputs(path: str, body: Any, access: str) -> None:
+def _validate_put_inputs(path: str, body: Any, access: Access) -> None:
     validate_path(path)
-    require_public_access(access)
+    validate_access(access)
     if body is None:
         raise BlobError("body is required")
     if isinstance(body, dict):
@@ -663,6 +664,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             add_random_suffix=add_random_suffix,
             allow_overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
+            access=cast(Access, access),
         )
 
         if multipart:
@@ -839,7 +841,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
     ) -> PutBlobResultType:
         token = ensure_token(token)
         validate_path(dst_path)
-        require_public_access(access)
+        validate_access(cast(Access, access))
 
         src_url = src_path
         if not is_url(src_url):
@@ -850,6 +852,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             add_random_suffix=add_random_suffix,
             allow_overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
+            access=cast(Access, access),
         )
         raw = cast(
             dict[str, Any],

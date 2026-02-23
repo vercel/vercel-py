@@ -55,6 +55,21 @@ class MultipartCreateResult:
 
 
 @dataclass(slots=True)
+class GetBlobResult:
+    url: str
+    download_url: str
+    pathname: str
+    content_type: str | None
+    size: int | None
+    content_disposition: str
+    cache_control: str
+    uploaded_at: datetime
+    etag: str
+    content: bytes
+    status_code: int
+
+
+@dataclass(slots=True)
 class MultipartPart:
     part_number: int
     etag: str

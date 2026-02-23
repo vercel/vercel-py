@@ -52,9 +52,9 @@ async def main() -> None:
         meta = await client.head(b.url)
         print(" -", b.pathname, b.size, meta.content_type)
 
-    # 3b) Get object bytes via get() (async client)
-    content = await client.get(uploaded.url)
-    print("get():", len(content), "bytes")
+    # 3b) Get object via get() (async client)
+    result = await client.get(uploaded.url, access="public")
+    print("get():", len(result.content), "bytes, etag:", result.etag)
 
     # 4) Copy (async client)
     copied = await client.copy(
