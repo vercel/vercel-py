@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from os import PathLike
 from typing import Any, TypeVar
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-
-import httpx
 
 from .._iter_coroutine import iter_coroutine
 from ._core import (
@@ -15,7 +10,6 @@ from ._core import (
     _SyncBlobOpsClient,
     normalize_delete_urls,
 )
-from .errors import BlobError
 from .types import (
     CreateFolderResult as CreateFolderResultType,
     GetBlobResult as GetBlobResultType,
@@ -27,12 +21,7 @@ from .types import (
 from .utils import (
     Access,
     UploadProgressEvent,
-    construct_blob_url,
     ensure_token,
-    extract_store_id_from_token,
-    get_download_url,
-    is_url,
-    parse_datetime,
     validate_access,
 )
 
@@ -45,86 +34,6 @@ def _run_sync_blob_operation(
     with _SyncBlobOpsClient() as client:
         # Keep exactly one sync bridge at the wrapper boundary.
         return iter_coroutine(operation(client))
-
-
-def _resolve_blob_url(url_or_path: str, token: str, access: Access) -> tuple[str, str]:
-    if is_url(url_or_path):
-        parsed = urlparse(url_or_path)
-        pathname = parsed.path.lstrip("/")
-        return url_or_path, pathname
-
-    store_id = extract_store_id_from_token(token)
-    if not store_id:
-        raise BlobError(
-            "Unable to extract store ID from token. "
-            "When using a pathname instead of a full URL, "
-            "a valid token with an embedded store ID is required."
-        )
-    pathname = url_or_path.lstrip("/")
-    blob_url = construct_blob_url(store_id, pathname, access)
-    return blob_url, pathname
-
-
-def _parse_last_modified(value: str | None) -> datetime:
-    if not value:
-        return datetime.now(tz=timezone.utc)
-    try:
-        return parsedate_to_datetime(value)
-    except (ValueError, TypeError):
-        pass
-    try:
-        return parse_datetime(value)
-    except (ValueError, TypeError):
-        return datetime.now(tz=timezone.utc)
-
-
-def _build_get_result(resp: httpx.Response, blob_url: str, pathname: str) -> GetBlobResultType:
-    if resp.status_code == 304:
-        return GetBlobResultType(
-            url=blob_url,
-            download_url=get_download_url(blob_url),
-            pathname=pathname,
-            content_type=None,
-            size=None,
-            content_disposition=resp.headers.get("content-disposition", ""),
-            cache_control=resp.headers.get("cache-control", ""),
-            uploaded_at=_parse_last_modified(resp.headers.get("last-modified")),
-            etag=resp.headers.get("etag", ""),
-            content=b"",
-            status_code=304,
-        )
-
-    content_length = resp.headers.get("content-length")
-    return GetBlobResultType(
-        url=blob_url,
-        download_url=get_download_url(blob_url),
-        pathname=pathname,
-        content_type=resp.headers.get("content-type", "application/octet-stream"),
-        size=int(content_length) if content_length else len(resp.content),
-        content_disposition=resp.headers.get("content-disposition", ""),
-        cache_control=resp.headers.get("cache-control", ""),
-        uploaded_at=_parse_last_modified(resp.headers.get("last-modified")),
-        etag=resp.headers.get("etag", ""),
-        content=resp.content,
-        status_code=resp.status_code,
-    )
-
-
-def _build_cache_bypass_url(blob_url: str) -> str:
-    parsed = urlparse(blob_url)
-    params = parse_qs(parsed.query)
-    params["cache"] = ["0"]
-    query = urlencode(params, doseq=True)
-    return urlunparse(
-        (
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            parsed.params,
-            query,
-            parsed.fragment,
-        )
-    )
 
 
 def put(

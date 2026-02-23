@@ -6,15 +6,12 @@ from datetime import datetime, timezone
 from typing import get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from vercel._iter_coroutine import iter_coroutine
+from vercel.blob._core import _parse_last_modified
 from vercel.blob.errors import BlobError
 from vercel.blob.ops import (
-    _build_get_result,
-    _parse_last_modified,
-    _resolve_blob_url,
     download_file,
     download_file_async,
 )
@@ -24,40 +21,6 @@ from vercel.blob.utils import validate_access
 # extract_store_id_from_token splits on "_" and returns index 3
 TOKEN = "vercel_blob_rw_storeid123_token123"
 STORE_ID = "storeid123"
-
-
-# ---------------------------------------------------------------------------
-# _resolve_blob_url — pure logic, no mocking
-# ---------------------------------------------------------------------------
-class TestResolveBlobUrl:
-    def test_url_input_returns_same_url_and_pathname(self):
-        url = "https://example.com/foo/bar.txt"
-        result_url, pathname = _resolve_blob_url(url, TOKEN, "public")
-        assert result_url == url
-        assert pathname == "foo/bar.txt"
-
-    def test_pathname_public_access(self):
-        blob_url, pathname = _resolve_blob_url("my/file.txt", TOKEN, "public")
-        expected = f"https://{STORE_ID}.public.blob.vercel-storage.com/my/file.txt"
-        assert blob_url == expected
-        assert pathname == "my/file.txt"
-
-    def test_pathname_private_access(self):
-        blob_url, pathname = _resolve_blob_url("my/file.txt", TOKEN, "private")
-        expected = f"https://{STORE_ID}.private.blob.vercel-storage.com/my/file.txt"
-        assert blob_url == expected
-        assert pathname == "my/file.txt"
-
-    def test_bad_token_raises_blob_error(self):
-        with pytest.raises(BlobError):
-            _resolve_blob_url("my/file.txt", "short_token", "public")
-
-    def test_leading_slash_stripped(self):
-        blob_url, pathname = _resolve_blob_url("/leading/slash.txt", TOKEN, "public")
-        assert pathname == "leading/slash.txt"
-        # No double-slash in the path portion (ignore the scheme "https://")
-        path_part = blob_url.split("://", 1)[1]
-        assert "//" not in path_part
 
 
 # ---------------------------------------------------------------------------
@@ -87,53 +50,6 @@ class TestParseLastModified:
         dt = _parse_last_modified("not-a-date")
         after = datetime.now(tz=timezone.utc)
         assert before <= dt <= after
-
-
-# ---------------------------------------------------------------------------
-# _build_get_result — mock httpx.Response
-# ---------------------------------------------------------------------------
-class TestBuildGetResult:
-    @staticmethod
-    def _make_response(status_code: int, headers: dict, content: bytes = b""):
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = status_code
-        resp.headers = httpx.Headers(headers)
-        resp.content = content
-        return resp
-
-    def test_200_response(self):
-        resp = self._make_response(
-            200,
-            {
-                "content-type": "text/plain",
-                "content-length": "13",
-                "content-disposition": "inline",
-                "cache-control": "max-age=300",
-                "last-modified": "2024-01-15T10:30:00+00:00",
-                "etag": '"abc"',
-            },
-            content=b"Hello, world!",
-        )
-        result = _build_get_result(resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt")
-        assert result.status_code == resp.status_code
-        assert result.content == b"Hello, world!"
-        assert result.size == 13
-        assert result.content_type == "text/plain"
-
-    def test_304_response(self):
-        resp = self._make_response(
-            304,
-            {
-                "content-disposition": "inline",
-                "cache-control": "max-age=300",
-                "etag": '"abc"',
-            },
-        )
-        result = _build_get_result(resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt")
-        assert result.status_code == 304
-        assert result.content == b""
-        assert result.size is None
-        assert result.content_type is None
 
 
 # ---------------------------------------------------------------------------
