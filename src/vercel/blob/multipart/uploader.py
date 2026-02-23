@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, cast
+
+import anyio
 
 from ..errors import BlobError
 from ..utils import (
@@ -272,21 +273,24 @@ class _AsyncMultipartUploadRuntime:
             )
             return _normalize_part_upload_result(part_number, response)
 
-        inflight: set[asyncio.Task[dict[str, Any]]] = set()
-        part_number = 1
-        async for chunk in _aiter_part_bytes(body, part_size):
-            task = asyncio.create_task(upload_one(part_number, chunk))
-            inflight.add(task)
-            part_number += 1
-            if len(inflight) >= MAX_CONCURRENCY:
-                done, inflight = await asyncio.wait(inflight, return_when=asyncio.FIRST_COMPLETED)
-                for completed in done:
-                    results.append(completed.result())
+        semaphore = anyio.Semaphore(MAX_CONCURRENCY)
+        results_by_part: dict[int, dict[str, Any]] = {}
 
-        if inflight:
-            done, _ = await asyncio.wait(inflight, return_when=asyncio.ALL_COMPLETED)
-            for completed in done:
-                results.append(completed.result())
+        async def run_limited_upload(part_number: int, content: bytes) -> None:
+            await semaphore.acquire()
+            try:
+                results_by_part[part_number] = await upload_one(part_number, content)
+            finally:
+                semaphore.release()
+
+        part_number = 1
+        async with anyio.create_task_group() as task_group:
+            async for chunk in _aiter_part_bytes(body, part_size):
+                task_group.start_soon(run_limited_upload, part_number, chunk)
+                part_number += 1
+
+        for ordered_part_number in sorted(results_by_part):
+            results.append(results_by_part[ordered_part_number])
 
         if on_upload_progress:
             loaded = sum(loaded_per_part.values())
@@ -302,6 +306,7 @@ class _AsyncMultipartUploadRuntime:
 
 def create_sync_multipart_upload_runtime() -> _SyncMultipartUploadRuntime:
     return _SyncMultipartUploadRuntime()
+
 
 def create_async_multipart_upload_runtime() -> _AsyncMultipartUploadRuntime:
     return _AsyncMultipartUploadRuntime()
