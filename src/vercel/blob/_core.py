@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from typing import Any, Literal, cast
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -48,12 +49,14 @@ from .utils import (
     StreamingBodyWithProgress,
     UploadProgressEvent,
     compute_body_length,
+    construct_blob_url,
     create_put_headers,
     debug,
     ensure_token,
     extract_store_id_from_token,
     get_api_url,
     get_api_version,
+    get_download_url,
     get_proxy_through_alternative_api_header_from_env,
     get_retries,
     is_url,
@@ -369,6 +372,23 @@ def _get_next_cursor(page: ListBlobResultType) -> str | None:
     if not page.has_more or not page.cursor:
         return None
     return page.cursor
+
+
+def _build_cache_bypass_url(blob_url: str) -> str:
+    parsed = urlparse(blob_url)
+    params = parse_qs(parsed.query)
+    params["cache"] = ["0"]
+    query = urlencode(params, doseq=True)
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            query,
+            parsed.fragment,
+        )
+    )
 
 
 class _BlobRequestClient:
@@ -733,27 +753,46 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         self,
         url_or_path: str,
         *,
+        access: Access,
         token: str | None,
         timeout: float | None,
+        use_cache: bool,
+        if_none_match: str | None,
         default_timeout: float,
     ) -> bytes:
         token = ensure_token(token)
+        validate_access(access)
         target_url = url_or_path
         if not is_url(target_url):
-            target_url = (await self._head_blob(target_url, token=token)).url
+            pathname = target_url.lstrip("/")
+            store_id = extract_store_id_from_token(token)
+            if store_id:
+                target_url = construct_blob_url(store_id, pathname, access)
+            else:
+                target_url = (await self._head_blob(target_url, token=token)).url
+        if not use_cache:
+            target_url = _build_cache_bypass_url(target_url)
 
         effective_timeout = timeout or default_timeout
+        headers: dict[str, str] = {}
+        if access == "private":
+            headers["authorization"] = f"Bearer {token}"
+        if if_none_match:
+            headers["if-none-match"] = if_none_match
         response: httpx.Response | None = None
 
         try:
             response = await self._transport.send(
                 "GET",
                 target_url,
+                headers=headers,
                 timeout=effective_timeout,
                 follow_redirects=True,
             )
             if response.status_code == 404:
                 raise BlobNotFoundError()
+            if response.status_code == 304:
+                return b""
             response.raise_for_status()
             return response.content
         except httpx.HTTPStatusError as exc:
@@ -941,6 +980,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         url_or_path: str,
         local_path: str | os.PathLike,
         *,
+        access: Access,
         token: str | None,
         timeout: float | None,
         overwrite: bool,
@@ -948,8 +988,12 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         progress: DownloadProgressCallback | None,
     ) -> str:
         token = ensure_token(token)
+        validate_access(access)
         if is_url(url_or_path):
-            target_url = url_or_path
+            target_url = get_download_url(url_or_path)
+        elif store_id := extract_store_id_from_token(token):
+            blob_url = construct_blob_url(store_id, url_or_path.lstrip("/"), access)
+            target_url = get_download_url(blob_url)
         else:
             meta = await self._head_blob(url_or_path, token=token)
             target_url = meta.download_url or meta.url
@@ -963,12 +1007,16 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         tmp = dst + ".part"
         bytes_read = 0
         effective_timeout = timeout or 120.0
+        headers: dict[str, str] = {}
+        if access == "private":
+            headers["authorization"] = f"Bearer {token}"
         response: httpx.Response | None = None
 
         try:
             response = await self._transport.send(
                 "GET",
                 target_url,
+                headers=headers,
                 timeout=effective_timeout,
                 follow_redirects=True,
                 stream=True,

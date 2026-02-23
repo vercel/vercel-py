@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from vercel._iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobError
 from vercel.blob.ops import (
     _build_get_result,
@@ -155,113 +156,95 @@ class TestValidateAccess:
 
 
 # ---------------------------------------------------------------------------
-# download_file (sync) — mock httpx.Client
+# download_file (sync) — wrapper delegation
 # ---------------------------------------------------------------------------
 class TestDownloadFile:
-    @staticmethod
-    def _mock_sync_download(chunk_data: bytes):
-        """Return a mock httpx.Client whose stream() yields *chunk_data*."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.headers = httpx.Headers(
-            {"Content-Length": str(len(chunk_data))}
-        )
-        mock_resp.iter_bytes.return_value = iter([chunk_data])
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        mock_client = MagicMock()
-        mock_client.stream.return_value = mock_resp
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        return mock_client
-
-    def test_pathname_constructs_url_and_writes_file(self, tmp_path):
+    def test_pathname_delegates_to_core_client(self, tmp_path):
         dest = tmp_path / "downloaded.txt"
-        chunk_data = b"file content here"
-        mock_client = self._mock_sync_download(chunk_data)
+        mock_core_client = MagicMock()
+        mock_core_client._download_file = AsyncMock(return_value=str(dest))
 
-        with patch("vercel.blob.ops.httpx.Client", return_value=mock_client):
+        def _run(operation):
+            return iter_coroutine(operation(mock_core_client))
+
+        with patch("vercel.blob.ops._run_sync_blob_operation", side_effect=_run):
             result = download_file(
                 "my/file.txt", str(dest), token=TOKEN, access="public"
             )
 
         assert result == str(dest)
-        assert dest.read_bytes() == chunk_data
-        # URL was constructed from pathname — no head() call needed
-        mock_client.stream.assert_called_once()
-        url_arg = mock_client.stream.call_args[0][1]
-        assert STORE_ID in url_arg
+        mock_core_client._download_file.assert_awaited_once_with(
+            "my/file.txt",
+            str(dest),
+            access="public",
+            token=TOKEN,
+            timeout=None,
+            overwrite=True,
+            create_parents=True,
+            progress=None,
+        )
 
-    def test_private_access_sends_auth_header(self, tmp_path):
+    def test_private_access_passes_access_to_core_client(self, tmp_path):
         dest = tmp_path / "private.txt"
-        mock_client = self._mock_sync_download(b"secret")
+        mock_core_client = MagicMock()
+        mock_core_client._download_file = AsyncMock(return_value=str(dest))
 
-        with patch("vercel.blob.ops.httpx.Client", return_value=mock_client):
+        def _run(operation):
+            return iter_coroutine(operation(mock_core_client))
+
+        with patch("vercel.blob.ops._run_sync_blob_operation", side_effect=_run):
             download_file(
                 "my/secret.txt", str(dest), token=TOKEN, access="private"
             )
 
-        headers = mock_client.stream.call_args[1]["headers"]
-        assert headers["authorization"] == f"Bearer {TOKEN}"
+        kwargs = mock_core_client._download_file.await_args.kwargs
+        assert kwargs["access"] == "private"
+        assert kwargs["token"] == TOKEN
 
 
 # ---------------------------------------------------------------------------
-# download_file_async — mock httpx.AsyncClient
+# download_file_async — wrapper delegation
 # ---------------------------------------------------------------------------
 class TestDownloadFileAsync:
-    @staticmethod
-    def _mock_async_download(chunk_data: bytes):
-        """Return a mock httpx.AsyncClient whose stream() yields *chunk_data*."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.headers = httpx.Headers(
-            {"Content-Length": str(len(chunk_data))}
-        )
-        mock_resp.raise_for_status = MagicMock()
-
-        async def aiter_bytes():
-            yield chunk_data
-
-        mock_resp.aiter_bytes = aiter_bytes
-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-        mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-        mock_client = MagicMock()
-        mock_client.stream.return_value = mock_resp
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        return mock_client
-
-    async def test_pathname_constructs_url_and_writes_file(self, tmp_path):
+    async def test_pathname_delegates_to_core_client(self, tmp_path):
         dest = tmp_path / "downloaded_async.txt"
-        chunk_data = b"async file content"
-        mock_client = self._mock_async_download(chunk_data)
+        mock_core_client = MagicMock()
+        mock_core_client._download_file = AsyncMock(return_value=str(dest))
+        mock_core_client.__aenter__ = AsyncMock(return_value=mock_core_client)
+        mock_core_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch(
-            "vercel.blob.ops.httpx.AsyncClient", return_value=mock_client
-        ):
+        with patch("vercel.blob.ops._AsyncBlobOpsClient", return_value=mock_core_client):
             result = await download_file_async(
                 "my/file.txt", str(dest), token=TOKEN, access="public"
             )
 
         assert result == str(dest)
-        assert dest.read_bytes() == chunk_data
+        mock_core_client._download_file.assert_awaited_once_with(
+            "my/file.txt",
+            str(dest),
+            access="public",
+            token=TOKEN,
+            timeout=None,
+            overwrite=True,
+            create_parents=True,
+            progress=None,
+        )
 
-    async def test_private_access_sends_auth_header(self, tmp_path):
+    async def test_private_access_passes_access_to_core_client(self, tmp_path):
         dest = tmp_path / "private_async.txt"
-        mock_client = self._mock_async_download(b"async secret")
+        mock_core_client = MagicMock()
+        mock_core_client._download_file = AsyncMock(return_value=str(dest))
+        mock_core_client.__aenter__ = AsyncMock(return_value=mock_core_client)
+        mock_core_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch(
-            "vercel.blob.ops.httpx.AsyncClient", return_value=mock_client
-        ):
+        with patch("vercel.blob.ops._AsyncBlobOpsClient", return_value=mock_core_client):
             await download_file_async(
                 "my/secret.txt", str(dest), token=TOKEN, access="private"
             )
 
-        headers = mock_client.stream.call_args[1]["headers"]
-        assert headers["authorization"] == f"Bearer {TOKEN}"
+        kwargs = mock_core_client._download_file.await_args.kwargs
+        assert kwargs["access"] == "private"
+        assert kwargs["token"] == TOKEN
 
 
 # ---------------------------------------------------------------------------
