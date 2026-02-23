@@ -178,6 +178,62 @@ class TestBlobPut:
         assert result.pathname == "folder/put-sync.bin"
 
     @respx.mock
+    def test_put_sync_multipart_aggregates_progress(self, mock_env_clear):
+        """Test sync multipart put aggregates part progress into total progress."""
+        import json
+
+        from vercel.blob.multipart.uploader import DEFAULT_PART_SIZE
+
+        completed_parts: list[dict[str, str | int]] = []
+        progress_events = []
+
+        def mpu_handler(request: httpx.Request) -> httpx.Response:
+            action = request.headers["x-mpu-action"]
+
+            if action == "create":
+                return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+
+            if action == "upload":
+                part_number = int(request.headers["x-mpu-part-number"])
+                return httpx.Response(200, json={"etag": f"etag-{part_number}"})
+
+            if action == "complete":
+                completed_parts.extend(json.loads(request.content.decode()))
+                return httpx.Response(
+                    200,
+                    json={
+                        "url": "https://blob.vercel-storage.com/test-abc123/folder/progress-sync.bin",
+                        "downloadUrl": (
+                            "https://blob.vercel-storage.com/"
+                            "test-abc123/folder/progress-sync.bin?download=1"
+                        ),
+                        "pathname": "folder/progress-sync.bin",
+                        "contentType": "application/octet-stream",
+                        "contentDisposition": 'inline; filename="progress-sync.bin"',
+                    },
+                )
+
+            raise AssertionError(f"unexpected multipart action: {action}")
+
+        route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
+        body = (b"a" * DEFAULT_PART_SIZE) + b"b"
+        result = put(
+            "folder/progress-sync.bin",
+            body,
+            token="test_token",
+            multipart=True,
+            on_upload_progress=progress_events.append,
+        )
+
+        assert route.call_count == 4
+        assert [part["partNumber"] for part in completed_parts] == [1, 2]
+        assert result.pathname == "folder/progress-sync.bin"
+        assert progress_events[-1].loaded == len(body)
+        assert progress_events[-1].total == len(body)
+        assert progress_events[-1].percentage == 100.0
+        assert any(event.loaded < len(body) for event in progress_events)
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_put_async_multipart_uses_runtime_upload(self, mock_env_clear):
         """Test async multipart put uses create/upload/complete flow."""
@@ -231,6 +287,67 @@ class TestBlobPut:
         assert actions == ["create", "upload", "complete"]
         assert [part["partNumber"] for part in completed_parts] == [1]
         assert result.pathname == "folder/put-async.bin"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_put_async_multipart_aggregates_progress(self, mock_env_clear):
+        """Test async multipart put aggregates part progress into total progress."""
+        import json
+
+        from vercel.blob.multipart.uploader import DEFAULT_PART_SIZE
+
+        completed_parts: list[dict[str, str | int]] = []
+        progress_events = []
+
+        def mpu_handler(request: httpx.Request) -> httpx.Response:
+            action = request.headers["x-mpu-action"]
+
+            if action == "create":
+                return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+
+            if action == "upload":
+                part_number = int(request.headers["x-mpu-part-number"])
+                return httpx.Response(200, json={"etag": f"etag-{part_number}"})
+
+            if action == "complete":
+                completed_parts.extend(json.loads(request.content.decode()))
+                return httpx.Response(
+                    200,
+                    json={
+                        "url": "https://blob.vercel-storage.com/test-abc123/folder/progress-async.bin",
+                        "downloadUrl": (
+                            "https://blob.vercel-storage.com/"
+                            "test-abc123/folder/progress-async.bin?download=1"
+                        ),
+                        "pathname": "folder/progress-async.bin",
+                        "contentType": "application/octet-stream",
+                        "contentDisposition": 'inline; filename="progress-async.bin"',
+                    },
+                )
+
+            raise AssertionError(f"unexpected multipart action: {action}")
+
+        route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
+        body = (b"a" * DEFAULT_PART_SIZE) + b"b"
+
+        async def on_progress(event) -> None:
+            progress_events.append(event)
+
+        result = await put_async(
+            "folder/progress-async.bin",
+            body,
+            token="test_token",
+            multipart=True,
+            on_upload_progress=on_progress,
+        )
+
+        assert route.call_count == 4
+        assert [part["partNumber"] for part in completed_parts] == [1, 2]
+        assert result.pathname == "folder/progress-async.bin"
+        assert progress_events[-1].loaded == len(body)
+        assert progress_events[-1].total == len(body)
+        assert progress_events[-1].percentage == 100.0
+        assert any(event.loaded < len(body) for event in progress_events)
 
     @respx.mock
     def test_put_with_content_type(self, mock_env_clear, mock_blob_put_response):

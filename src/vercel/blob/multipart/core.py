@@ -4,11 +4,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from urllib.parse import quote
 
-from ..._iter_coroutine import iter_coroutine
 from ..api import request_api, request_api_async
 from ..utils import PutHeaders, UploadProgressEvent
 
-SyncProgressCallback = Callable[[UploadProgressEvent], None]
 AsyncProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
 )
@@ -122,105 +120,3 @@ class _SyncMultipartClient(_BaseMultipartClient):
 class _AsyncMultipartClient(_BaseMultipartClient):
     async def _request_api(self, **kwargs: Any) -> Any:
         return await request_api_async(**kwargs)
-
-
-def call_create_multipart_upload(
-    path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
-) -> dict[str, str]:
-    return iter_coroutine(
-        _SyncMultipartClient().create_multipart_upload(path, headers, token=token)
-    )
-
-
-async def call_create_multipart_upload_async(
-    path: str, headers: PutHeaders | dict[str, str], *, token: str | None = None
-) -> dict[str, str]:
-    return await _AsyncMultipartClient().create_multipart_upload(path, headers, token=token)
-
-
-def call_upload_part(
-    *,
-    upload_id: str,
-    key: str,
-    path: str,
-    headers: PutHeaders | dict[str, str],
-    part_number: int,
-    body: Any,
-    on_upload_progress: SyncProgressCallback | None = None,
-    token: str | None = None,
-) -> dict[str, Any]:
-    return iter_coroutine(
-        _SyncMultipartClient().upload_part(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            part_number=part_number,
-            body=body,
-            on_upload_progress=on_upload_progress,
-            token=token,
-        )
-    )
-
-
-async def call_upload_part_async(
-    *,
-    upload_id: str,
-    key: str,
-    path: str,
-    headers: PutHeaders | dict[str, str],
-    part_number: int,
-    body: Any,
-    on_upload_progress: AsyncProgressCallback | None = None,
-    token: str | None = None,
-) -> dict[str, Any]:
-    return await _AsyncMultipartClient().upload_part(
-        upload_id=upload_id,
-        key=key,
-        path=path,
-        headers=headers,
-        part_number=part_number,
-        body=body,
-        on_upload_progress=on_upload_progress,
-        token=token,
-    )
-
-
-def call_complete_multipart_upload(
-    *,
-    upload_id: str,
-    key: str,
-    path: str,
-    headers: PutHeaders | dict[str, str],
-    parts: list[dict[str, Any]],
-    token: str | None = None,
-) -> dict[str, Any]:
-    return iter_coroutine(
-        _SyncMultipartClient().complete_multipart_upload(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            parts=parts,
-            token=token,
-        )
-    )
-
-
-async def call_complete_multipart_upload_async(
-    *,
-    upload_id: str,
-    key: str,
-    path: str,
-    headers: PutHeaders | dict[str, str],
-    parts: list[dict[str, Any]],
-    token: str | None = None,
-) -> dict[str, Any]:
-    return await _AsyncMultipartClient().complete_multipart_upload(
-        upload_id=upload_id,
-        key=key,
-        path=path,
-        headers=headers,
-        parts=parts,
-        token=token,
-    )

@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import anyio
 
+from ..._iter_coroutine import iter_coroutine
 from ..errors import BlobError
 from ..utils import (
     UploadProgressEvent,
@@ -16,14 +17,7 @@ from ..utils import (
     create_put_headers,
     require_public_access,
 )
-from .core import (
-    call_complete_multipart_upload,
-    call_complete_multipart_upload_async,
-    call_create_multipart_upload,
-    call_create_multipart_upload_async,
-    call_upload_part,
-    call_upload_part_async,
-)
+from .core import _AsyncMultipartClient, _SyncMultipartClient
 
 DEFAULT_PART_SIZE = 8 * 1024 * 1024  # 8MB
 MIN_PART_SIZE = 5 * 1024 * 1024  # 5 MiB minimum for most backends; last part may be smaller
@@ -33,6 +27,8 @@ SyncProgressCallback = Callable[[UploadProgressEvent], None]
 AsyncProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
 )
+SyncPartUploadFn = Callable[..., dict[str, Any]]
+AsyncPartUploadFn = Callable[..., Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -181,6 +177,7 @@ class _SyncMultipartUploadRuntime:
         part_size: int,
         total: int,
         on_upload_progress: SyncProgressCallback | None,
+        upload_part_fn: SyncPartUploadFn,
     ) -> list[dict[str, Any]]:
         loaded_per_part: dict[int, int] = {}
         loaded_lock = threading.Lock()
@@ -194,7 +191,7 @@ class _SyncMultipartUploadRuntime:
                         loaded = sum(loaded_per_part.values())
                         on_upload_progress(_aggregate_progress_event(loaded=loaded, total=total))
 
-            response = call_upload_part(
+            response = upload_part_fn(
                 upload_id=session.upload_id,
                 key=session.key,
                 path=session.path,
@@ -238,6 +235,7 @@ class _AsyncMultipartUploadRuntime:
         part_size: int,
         total: int,
         on_upload_progress: AsyncProgressCallback | None,
+        upload_part_fn: AsyncPartUploadFn,
     ) -> list[dict[str, Any]]:
         loaded_per_part: dict[int, int] = {}
         results: list[dict[str, Any]] = []
@@ -261,7 +259,7 @@ class _AsyncMultipartUploadRuntime:
             return callback
 
         async def upload_one(part_number: int, content: bytes) -> dict[str, Any]:
-            response = await call_upload_part_async(
+            response = await upload_part_fn(
                 upload_id=session.upload_id,
                 key=session.key,
                 path=session.path,
@@ -325,6 +323,7 @@ def auto_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
+    client = _SyncMultipartClient()
     headers = _prepare_upload_headers(
         access=access,
         content_type=content_type,
@@ -334,7 +333,7 @@ def auto_multipart_upload(
     )
     part_size = _validate_part_size(part_size)
 
-    create_response = call_create_multipart_upload(path, headers, token=token)
+    create_response = iter_coroutine(client.create_multipart_upload(path, headers, token=token))
     session = _MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
@@ -351,16 +350,19 @@ def auto_multipart_upload(
         part_size=part_size,
         total=total,
         on_upload_progress=on_upload_progress,
+        upload_part_fn=lambda **kwargs: iter_coroutine(client.upload_part(**kwargs)),
     )
     ordered_parts = _order_uploaded_parts(parts)
 
-    complete_response = call_complete_multipart_upload(
-        upload_id=session.upload_id,
-        key=session.key,
-        path=session.path,
-        headers=session.headers,
-        token=session.token,
-        parts=ordered_parts,
+    complete_response = iter_coroutine(
+        client.complete_multipart_upload(
+            upload_id=session.upload_id,
+            key=session.key,
+            path=session.path,
+            headers=session.headers,
+            token=session.token,
+            parts=ordered_parts,
+        )
     )
     return _shape_complete_upload_result(complete_response)
 
@@ -382,6 +384,7 @@ async def auto_multipart_upload_async(
     ) = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
+    client = _AsyncMultipartClient()
     headers = _prepare_upload_headers(
         access=access,
         content_type=content_type,
@@ -391,7 +394,7 @@ async def auto_multipart_upload_async(
     )
     part_size = _validate_part_size(part_size)
 
-    create_response = await call_create_multipart_upload_async(path, headers, token=token)
+    create_response = await client.create_multipart_upload(path, headers, token=token)
     session = _MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
@@ -408,10 +411,11 @@ async def auto_multipart_upload_async(
         part_size=part_size,
         total=total,
         on_upload_progress=on_upload_progress,
+        upload_part_fn=client.upload_part,
     )
     ordered_parts = _order_uploaded_parts(parts)
 
-    complete_response = await call_complete_multipart_upload_async(
+    complete_response = await client.complete_multipart_upload(
         upload_id=session.upload_id,
         key=session.key,
         path=session.path,

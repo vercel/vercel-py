@@ -493,8 +493,6 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         await_progress_callback: bool = True,
         async_content: bool = True,
         multipart_runtime: Any,
-        create_multipart_upload: Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]],
-        complete_multipart_upload: Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]],
     ) -> None:
         super().__init__(
             transport=transport,
@@ -503,8 +501,6 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             async_content=async_content,
         )
         self._multipart_runtime = multipart_runtime
-        self._create_multipart_upload = create_multipart_upload
-        self._complete_multipart_upload = complete_multipart_upload
 
     def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
         raise NotImplementedError
@@ -514,6 +510,20 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
     async def _close_download_response(self, response: httpx.Response) -> None:
         await self._close_response(response)
+
+    def _multipart_upload_part_request(
+        self,
+        *,
+        upload_id: str,
+        key: str,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        part_number: int,
+        body: Any,
+        on_upload_progress: BlobProgressCallback | None = None,
+        token: str | None = None,
+    ) -> Any:
+        raise NotImplementedError
 
     async def _multipart_upload(
         self,
@@ -546,9 +556,10 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         part_size = _validate_part_size(DEFAULT_PART_SIZE)
 
-        create_response = cast(
-            dict[str, str],
-            await _await_if_necessary(self._create_multipart_upload(path, headers, token=token)),
+        create_response = await self._multipart_create_request(
+            path,
+            headers,
+            token=token,
         )
         session = _MultipartUploadSession(
             upload_id=create_response["uploadId"],
@@ -568,25 +579,67 @@ class _BaseBlobOpsClient(_BlobRequestClient):
                     part_size=part_size,
                     total=total,
                     on_upload_progress=on_upload_progress,
+                    upload_part_fn=self._multipart_upload_part_request,
                 )
             ),
         )
         ordered_parts = _order_uploaded_parts(parts)
 
-        complete_response = cast(
-            dict[str, Any],
-            await _await_if_necessary(
-                self._complete_multipart_upload(
-                    upload_id=session.upload_id,
-                    key=session.key,
-                    path=session.path,
-                    headers=session.headers,
-                    token=session.token,
-                    parts=ordered_parts,
-                )
-            ),
+        complete_response = await self._multipart_complete_request(
+            upload_id=session.upload_id,
+            key=session.key,
+            path=session.path,
+            headers=session.headers,
+            token=session.token,
+            parts=ordered_parts,
         )
         return _shape_complete_upload_result(complete_response)
+
+    async def _multipart_create_request(
+        self,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        *,
+        token: str | None,
+    ) -> dict[str, str]:
+        from .multipart.core import _build_headers as _build_multipart_headers
+
+        response = await self._request_api(
+            pathname="/mpu",
+            method="POST",
+            token=token,
+            headers=_build_multipart_headers(headers, action="create"),
+            params={"pathname": path},
+        )
+        return cast(dict[str, str], response)
+
+    async def _multipart_complete_request(
+        self,
+        *,
+        upload_id: str,
+        key: str,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        token: str | None,
+        parts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        from .multipart.core import _build_headers as _build_multipart_headers
+
+        response = await self._request_api(
+            pathname="/mpu",
+            method="POST",
+            token=token,
+            headers=_build_multipart_headers(
+                headers,
+                action="complete",
+                key=key,
+                upload_id=upload_id,
+                set_json_content_type=True,
+            ),
+            params={"pathname": path},
+            body=parts,
+        )
+        return cast(dict[str, Any], response)
 
     async def _put_blob(
         self,
@@ -949,10 +1002,6 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
 class _SyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        from .multipart.core import (
-            call_complete_multipart_upload,
-            call_create_multipart_upload,
-        )
         from .multipart.uploader import create_sync_multipart_upload_runtime
 
         transport = SyncTransport(create_base_client(timeout=timeout))
@@ -962,12 +1011,45 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
             await_progress_callback=False,
             async_content=False,
             multipart_runtime=create_sync_multipart_upload_runtime(),
-            create_multipart_upload=call_create_multipart_upload,
-            complete_multipart_upload=call_complete_multipart_upload,
         )
 
     def close(self) -> None:
         self._transport.close()
+
+    def _multipart_upload_part_request(
+        self,
+        *,
+        upload_id: str,
+        key: str,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        part_number: int,
+        body: Any,
+        on_upload_progress: BlobProgressCallback | None = None,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        from .multipart.core import _build_headers as _build_multipart_headers
+
+        return cast(
+            dict[str, Any],
+            iter_coroutine(
+                self._request_api(
+                    pathname="/mpu",
+                    method="POST",
+                    token=token,
+                    headers=_build_multipart_headers(
+                        headers,
+                        action="upload",
+                        key=key,
+                        upload_id=upload_id,
+                        part_number=part_number,
+                    ),
+                    params={"pathname": path},
+                    body=body,
+                    on_upload_progress=on_upload_progress,
+                )
+            ),
+        )
 
     def _list_objects_sync(
         self,
@@ -1053,18 +1135,12 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
 
 class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        from .multipart.core import (
-            call_complete_multipart_upload_async,
-            call_create_multipart_upload_async,
-        )
         from .multipart.uploader import create_async_multipart_upload_runtime
 
         transport = AsyncTransport(create_base_async_client(timeout=timeout))
         super().__init__(
             transport=transport,
             multipart_runtime=create_async_multipart_upload_runtime(),
-            create_multipart_upload=call_create_multipart_upload_async,
-            complete_multipart_upload=call_complete_multipart_upload_async,
         )
 
     async def aclose(self) -> None:
@@ -1075,6 +1151,37 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
 
     async def __aexit__(self, *args: object) -> None:
         await self.aclose()
+
+    async def _multipart_upload_part_request(
+        self,
+        *,
+        upload_id: str,
+        key: str,
+        path: str,
+        headers: PutHeaders | dict[str, str],
+        part_number: int,
+        body: Any,
+        on_upload_progress: BlobProgressCallback | None = None,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        from .multipart.core import _build_headers as _build_multipart_headers
+
+        response = await self._request_api(
+            pathname="/mpu",
+            method="POST",
+            token=token,
+            headers=_build_multipart_headers(
+                headers,
+                action="upload",
+                key=key,
+                upload_id=upload_id,
+                part_number=part_number,
+            ),
+            params={"pathname": path},
+            body=body,
+            on_upload_progress=on_upload_progress,
+        )
+        return cast(dict[str, Any], response)
 
     def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
         async def _iterate() -> AsyncIterator[bytes]:
