@@ -30,6 +30,7 @@ from vercel.blob import (
     put,
     put_async,
 )
+from vercel.blob._core import decode_blob_response_json
 from vercel.blob.ops import get, get_async
 
 # Base URL for Vercel Blob API
@@ -1054,3 +1055,47 @@ class TestBlobErrorHandling:
 
         with pytest.raises(BlobNotFoundError):
             await head_async("https://blob.vercel-storage.com/missing.txt", token="test_token")
+
+    @respx.mock
+    def test_put_invalid_json_raises_blob_error(self, mock_env_clear):
+        """Test malformed 2xx JSON response raises a dedicated parse error."""
+        from vercel.blob.errors import BlobInvalidResponseJSONError
+
+        respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b'{"url":',
+            )
+        )
+
+        with pytest.raises(BlobInvalidResponseJSONError, match=r"parse JSON response body"):
+            put("test.txt", b"data", token="test_token")
+
+    @respx.mock
+    def test_put_unexpected_content_type_raises_blob_error(self, mock_env_clear):
+        """Test non-JSON content type on 2xx response raises content-type error."""
+        from vercel.blob.errors import BlobUnexpectedResponseContentTypeError
+
+        respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "text/plain"},
+                content=b'{"url":"https://blob.vercel-storage.com/test.txt"}',
+            )
+        )
+
+        with pytest.raises(
+            BlobUnexpectedResponseContentTypeError,
+            match=r"Unexpected response content type: text/plain",
+        ):
+            put("test.txt", b"data", token="test_token")
+
+    def test_decode_blob_response_json_accepts_non_object_json(self):
+        """Test strict JSON decode mode accepts valid non-object JSON values."""
+        response = httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b"[1, 2, 3]",
+        )
+        assert decode_blob_response_json(response) == [1, 2, 3]

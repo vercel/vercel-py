@@ -5,7 +5,7 @@ import inspect
 import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 
@@ -25,12 +25,14 @@ from .errors import (
     BlobContentTypeNotAllowedError,
     BlobError,
     BlobFileTooLargeError,
+    BlobInvalidResponseJSONError,
     BlobNotFoundError,
     BlobPathnameMismatchError,
     BlobServiceNotAvailable,
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
     BlobStoreSuspendedError,
+    BlobUnexpectedResponseContentTypeError,
     BlobUnknownError,
 )
 from .types import (
@@ -139,16 +141,26 @@ def is_network_error(exc: Exception) -> bool:
 
 
 def decode_blob_response(response: httpx.Response) -> Any:
-    content_type = response.headers.get("content-type", "")
-    if "application/json" in content_type or (response.text or "").startswith("{"):
-        try:
-            return response.json()
-        except Exception:
-            return response.text
     try:
         return response.json()
     except Exception:
         return response.text
+
+
+def _is_json_content_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def decode_blob_response_json(response: httpx.Response) -> Any:
+    content_type = response.headers.get("content-type", "")
+    if not _is_json_content_type(content_type):
+        raise BlobUnexpectedResponseContentTypeError(content_type or None)
+
+    try:
+        return response.json()
+    except Exception as exc:
+        raise BlobInvalidResponseJSONError() from exc
 
 
 async def _emit_progress(
@@ -388,6 +400,7 @@ class _BlobRequestClient:
         body: Any = None,
         on_upload_progress: BlobProgressCallback | None = None,
         timeout: float | None = None,
+        decode_mode: Literal["json", "any", "none"] = "json",
     ) -> Any:
         token = ensure_token(token)
         store_id = extract_store_id_from_token(token)
@@ -447,6 +460,10 @@ class _BlobRequestClient:
                             ),
                             await_callback=self._await_progress_callback,
                         )
+                    if decode_mode == "none":
+                        return None
+                    if decode_mode == "json":
+                        return decode_blob_response_json(resp)
                     return decode_blob_response(resp)
 
                 code, mapped = map_blob_error(resp)
@@ -635,6 +652,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             token=token,
             headers={"content-type": "application/json"},
             body={"urls": urls},
+            decode_mode="none",
         )
         return len(urls)
 

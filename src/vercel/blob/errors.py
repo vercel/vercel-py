@@ -80,3 +80,14 @@ class BlobServiceRateLimited(BlobError):
 class BlobRequestAbortedError(BlobError):
     def __init__(self) -> None:
         super().__init__("The request was aborted.")
+
+
+class BlobUnexpectedResponseContentTypeError(BlobError):
+    def __init__(self, content_type: str | None) -> None:
+        value = content_type or "<missing>"
+        super().__init__(f"Unexpected response content type: {value}.")
+
+
+class BlobInvalidResponseJSONError(BlobError):
+    def __init__(self) -> None:
+        super().__init__("Failed to parse JSON response body.")

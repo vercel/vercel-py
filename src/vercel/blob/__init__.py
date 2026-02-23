@@ -9,6 +9,7 @@ from .errors import (
     BlobContentTypeNotAllowedError,
     BlobError,
     BlobFileTooLargeError,
+    BlobInvalidResponseJSONError,
     BlobNotFoundError,
     BlobPathnameMismatchError,
     BlobRequestAbortedError,
@@ -16,6 +17,7 @@ from .errors import (
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
     BlobStoreSuspendedError,
+    BlobUnexpectedResponseContentTypeError,
     BlobUnknownError,
 )
 from .multipart import (
@@ -75,6 +77,8 @@ __all__ = [
     "BlobStoreSuspendedError",
     "BlobUnknownError",
     "BlobNotFoundError",
+    "BlobUnexpectedResponseContentTypeError",
+    "BlobInvalidResponseJSONError",
     "BlobServiceNotAvailable",
     "BlobServiceRateLimited",
     "BlobRequestAbortedError",
