@@ -11,12 +11,16 @@ import pytest
 import respx
 
 from vercel.blob.multipart import (
+    AsyncMultipartUploader,
+    MultipartUploader,
     auto_multipart_upload,
     auto_multipart_upload_async,
     complete_multipart_upload,
     complete_multipart_upload_async,
     create_multipart_upload,
     create_multipart_upload_async,
+    create_multipart_uploader,
+    create_multipart_uploader_async,
     upload_part,
     upload_part_async,
 )
@@ -288,3 +292,44 @@ async def test_manual_multipart_async_uses_blob_api_flow(mock_env_clear) -> None
     assert state["upload_part_numbers"] == [1]
     assert [part["partNumber"] for part in state["completed_parts"]] == [1]
     assert result.pathname == "folder/manual-async.bin"
+
+
+@respx.mock
+def test_create_multipart_uploader_sync_uses_blob_api_flow(mock_env_clear) -> None:
+    handler, state = _manual_mpu_handler("folder/uploader-sync.bin")
+    route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=handler)
+
+    uploader = create_multipart_uploader("folder/uploader-sync.bin", token="test_token")
+    assert isinstance(uploader, MultipartUploader)
+    assert uploader.upload_id == "upload-id"
+    assert uploader.key == "blob-key"
+
+    part = uploader.upload_part(1, b"chunk")
+    result = uploader.complete([part])
+
+    assert route.call_count == 3
+    assert state["upload_part_numbers"] == [1]
+    assert [part["partNumber"] for part in state["completed_parts"]] == [1]
+    assert result.pathname == "folder/uploader-sync.bin"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_create_multipart_uploader_async_uses_blob_api_flow(mock_env_clear) -> None:
+    handler, state = _manual_mpu_handler("folder/uploader-async.bin")
+    route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=handler)
+
+    uploader = await create_multipart_uploader_async(
+        "folder/uploader-async.bin", token="test_token"
+    )
+    assert isinstance(uploader, AsyncMultipartUploader)
+    assert uploader.upload_id == "upload-id"
+    assert uploader.key == "blob-key"
+
+    part = await uploader.upload_part(1, b"chunk")
+    result = await uploader.complete([part])
+
+    assert route.call_count == 3
+    assert state["upload_part_numbers"] == [1]
+    assert [part["partNumber"] for part in state["completed_parts"]] == [1]
+    assert result.pathname == "folder/uploader-async.bin"

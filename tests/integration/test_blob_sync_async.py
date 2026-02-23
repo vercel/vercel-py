@@ -13,6 +13,7 @@ from vercel.blob import (
     AsyncBlobClient,
     BlobClient,
     BlobNotFoundError,
+    aioblob,
     copy,
     copy_async,
     create_folder,
@@ -21,6 +22,7 @@ from vercel.blob import (
     delete_async,
     download_file,
     download_file_async,
+    get_download_url,
     head,
     head_async,
     iter_objects,
@@ -29,6 +31,8 @@ from vercel.blob import (
     list_objects_async,
     put,
     put_async,
+    upload_file,
+    upload_file_async,
 )
 from vercel.blob._core import decode_blob_response_json
 from vercel.blob.ops import get, get_async
@@ -1016,6 +1020,39 @@ class TestBlobCopy:
         assert result.pathname == "copied.txt"
 
 
+class TestBlobUploadFile:
+    """Test upload_file helpers."""
+
+    @respx.mock
+    def test_upload_file_sync(self, mock_env_clear, mock_blob_put_response, tmp_path):
+        """Test synchronous upload_file helper."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_put_response)
+        )
+        local_file = tmp_path / "upload-sync.txt"
+        local_file.write_bytes(b"sync file upload")
+
+        result = upload_file(local_file, "test.txt", token="test_token")
+
+        assert route.called
+        assert result.url == mock_blob_put_response["url"]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_upload_file_async(self, mock_env_clear, mock_blob_put_response, tmp_path):
+        """Test asynchronous upload_file helper."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_put_response)
+        )
+        local_file = tmp_path / "upload-async.txt"
+        local_file.write_bytes(b"async file upload")
+
+        result = await upload_file_async(local_file, "test.txt", token="test_token")
+
+        assert route.called
+        assert result.url == mock_blob_put_response["url"]
+
+
 class TestBlobCreateFolder:
     """Test blob folder creation."""
 
@@ -1106,6 +1143,129 @@ class TestBlobClient:
         assert len(result.blobs) == 2
 
     @respx.mock
+    def test_blob_client_get(self, mock_env_clear):
+        """Test BlobClient get method."""
+        route = respx.get("https://blob.vercel-storage.com/test.txt").mock(
+            return_value=httpx.Response(200, content=b"blob data")
+        )
+
+        client = BlobClient(token="test_token")
+        result = client.get("https://blob.vercel-storage.com/test.txt")
+
+        assert route.called
+        assert result == b"blob data"
+
+    @respx.mock
+    def test_blob_client_iter_objects(self, mock_env_clear, mock_blob_list_response):
+        """Test BlobClient iter_objects method."""
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_list_response)
+        )
+
+        client = BlobClient(token="test_token")
+        items = list(client.iter_objects())
+
+        assert route.called
+        assert len(items) == 2
+
+    @respx.mock
+    def test_blob_client_copy(self, mock_env_clear, mock_blob_copy_response):
+        """Test BlobClient copy method."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_copy_response)
+        )
+
+        client = BlobClient(token="test_token")
+        result = client.copy("https://blob.vercel-storage.com/source.txt", "copied.txt")
+
+        assert route.called
+        assert result.pathname == "copied.txt"
+
+    @respx.mock
+    def test_blob_client_create_folder(self, mock_env_clear, mock_blob_create_folder_response):
+        """Test BlobClient create_folder method."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_create_folder_response)
+        )
+
+        client = BlobClient(token="test_token")
+        result = client.create_folder("my-folder")
+
+        assert route.called
+        assert result.pathname == "my-folder/"
+
+    @respx.mock
+    def test_blob_client_download_file(self, mock_env_clear, tmp_path):
+        """Test BlobClient download_file method."""
+        route = respx.get("https://blob.vercel-storage.com/download.txt").mock(
+            return_value=httpx.Response(200, content=b"downloaded")
+        )
+        local_path = tmp_path / "downloaded.txt"
+
+        client = BlobClient(token="test_token")
+        result = client.download_file("https://blob.vercel-storage.com/download.txt", local_path)
+
+        assert route.called
+        assert result == str(local_path)
+        assert local_path.read_bytes() == b"downloaded"
+
+    @respx.mock
+    def test_blob_client_upload_file(self, mock_env_clear, mock_blob_put_response, tmp_path):
+        """Test BlobClient upload_file method."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_put_response)
+        )
+        local_file = tmp_path / "client-upload.txt"
+        local_file.write_bytes(b"client upload")
+
+        client = BlobClient(token="test_token")
+        result = client.upload_file(local_file, "test.txt")
+
+        assert route.called
+        assert result.url == mock_blob_put_response["url"]
+
+    @respx.mock
+    def test_blob_client_create_multipart_uploader(self, mock_env_clear):
+        """Test BlobClient create_multipart_uploader method."""
+        import json
+
+        completed_parts: list[dict[str, str | int]] = []
+
+        def mpu_handler(request: httpx.Request) -> httpx.Response:
+            action = request.headers["x-mpu-action"]
+            if action == "create":
+                return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+            if action == "upload":
+                return httpx.Response(200, json={"etag": "etag-1"})
+            if action == "complete":
+                completed_parts.extend(json.loads(request.content.decode()))
+                return httpx.Response(
+                    200,
+                    json={
+                        "url": "https://blob.vercel-storage.com/test-abc123/folder/client-mpu.bin",
+                        "downloadUrl": (
+                            "https://blob.vercel-storage.com/"
+                            "test-abc123/folder/client-mpu.bin?download=1"
+                        ),
+                        "pathname": "folder/client-mpu.bin",
+                        "contentType": "application/octet-stream",
+                        "contentDisposition": 'inline; filename="client-mpu.bin"',
+                    },
+                )
+            raise AssertionError(f"unexpected multipart action: {action}")
+
+        route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
+        client = BlobClient(token="test_token")
+
+        uploader = client.create_multipart_uploader("folder/client-mpu.bin")
+        part = uploader.upload_part(1, b"chunk")
+        result = uploader.complete([part])
+
+        assert route.call_count == 3
+        assert [part["partNumber"] for part in completed_parts] == [1]
+        assert result.pathname == "folder/client-mpu.bin"
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_async_blob_client_put(self, mock_env_clear, mock_blob_put_response):
         """Test AsyncBlobClient put method."""
@@ -1132,6 +1292,173 @@ class TestBlobClient:
 
         assert route.called
         assert result.size == 13
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_get(self, mock_env_clear):
+        """Test AsyncBlobClient get method."""
+        route = respx.get("https://blob.vercel-storage.com/test.txt").mock(
+            return_value=httpx.Response(200, content=b"blob data")
+        )
+
+        client = AsyncBlobClient(token="test_token")
+        result = await client.get("https://blob.vercel-storage.com/test.txt")
+
+        assert route.called
+        assert result == b"blob data"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_list_objects(self, mock_env_clear, mock_blob_list_response):
+        """Test AsyncBlobClient list_objects method."""
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_list_response)
+        )
+
+        client = AsyncBlobClient(token="test_token")
+        result = await client.list_objects()
+
+        assert route.called
+        assert len(result.blobs) == 2
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_iter_objects(self, mock_env_clear, mock_blob_list_response):
+        """Test AsyncBlobClient iter_objects method."""
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_list_response)
+        )
+
+        client = AsyncBlobClient(token="test_token")
+        iterator = await client.iter_objects()
+        items = [item async for item in iterator]
+
+        assert route.called
+        assert len(items) == 2
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_delete(self, mock_env_clear):
+        """Test AsyncBlobClient delete method."""
+        route = respx.post(f"{BLOB_API_BASE}/delete").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        client = AsyncBlobClient(token="test_token")
+        await client.delete("https://blob.vercel-storage.com/test.txt")
+
+        assert route.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_copy(self, mock_env_clear, mock_blob_copy_response):
+        """Test AsyncBlobClient copy method."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_copy_response)
+        )
+
+        client = AsyncBlobClient(token="test_token")
+        result = await client.copy("https://blob.vercel-storage.com/source.txt", "copied.txt")
+
+        assert route.called
+        assert result.pathname == "copied.txt"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_create_folder(
+        self, mock_env_clear, mock_blob_create_folder_response
+    ):
+        """Test AsyncBlobClient create_folder method."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_create_folder_response)
+        )
+
+        client = AsyncBlobClient(token="test_token")
+        result = await client.create_folder("my-folder")
+
+        assert route.called
+        assert result.pathname == "my-folder/"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_download_file(self, mock_env_clear, tmp_path):
+        """Test AsyncBlobClient download_file method."""
+        route = respx.get("https://blob.vercel-storage.com/download.txt").mock(
+            return_value=httpx.Response(200, content=b"downloaded")
+        )
+        local_path = tmp_path / "downloaded-async.txt"
+
+        client = AsyncBlobClient(token="test_token")
+        result = await client.download_file(
+            "https://blob.vercel-storage.com/download.txt", local_path
+        )
+
+        assert route.called
+        assert result == str(local_path)
+        assert local_path.read_bytes() == b"downloaded"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_upload_file(
+        self, mock_env_clear, mock_blob_put_response, tmp_path
+    ):
+        """Test AsyncBlobClient upload_file method."""
+        route = respx.put(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_put_response)
+        )
+        local_file = tmp_path / "client-upload-async.txt"
+        local_file.write_bytes(b"async client upload")
+
+        client = AsyncBlobClient(token="test_token")
+        result = await client.upload_file(local_file, "test.txt")
+
+        assert route.called
+        assert result.url == mock_blob_put_response["url"]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_create_multipart_uploader(self, mock_env_clear):
+        """Test AsyncBlobClient create_multipart_uploader method."""
+        import json
+
+        completed_parts: list[dict[str, str | int]] = []
+
+        def mpu_handler(request: httpx.Request) -> httpx.Response:
+            action = request.headers["x-mpu-action"]
+            if action == "create":
+                return httpx.Response(200, json={"uploadId": "upload-id", "key": "blob-key"})
+            if action == "upload":
+                return httpx.Response(200, json={"etag": "etag-1"})
+            if action == "complete":
+                completed_parts.extend(json.loads(request.content.decode()))
+                return httpx.Response(
+                    200,
+                    json={
+                        "url": (
+                            "https://blob.vercel-storage.com/test-abc123/folder/"
+                            "client-mpu-async.bin"
+                        ),
+                        "downloadUrl": (
+                            "https://blob.vercel-storage.com/"
+                            "test-abc123/folder/client-mpu-async.bin?download=1"
+                        ),
+                        "pathname": "folder/client-mpu-async.bin",
+                        "contentType": "application/octet-stream",
+                        "contentDisposition": 'inline; filename="client-mpu-async.bin"',
+                    },
+                )
+            raise AssertionError(f"unexpected multipart action: {action}")
+
+        route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
+        client = AsyncBlobClient(token="test_token")
+
+        uploader = await client.create_multipart_uploader("folder/client-mpu-async.bin")
+        part = await uploader.upload_part(1, b"chunk")
+        result = await uploader.complete([part])
+
+        assert route.call_count == 3
+        assert [part["partNumber"] for part in completed_parts] == [1]
+        assert result.pathname == "folder/client-mpu-async.bin"
 
 
 class TestBlobErrorHandling:
@@ -1216,3 +1543,20 @@ class TestBlobErrorHandling:
             content=b"[1, 2, 3]",
         )
         assert decode_blob_response_json(response) == [1, 2, 3]
+
+
+class TestBlobPublicHelpers:
+    """Test public non-network blob helpers."""
+
+    def test_get_download_url_preserves_existing_query(self):
+        """Test get_download_url adds download=1 while preserving existing query params."""
+        url = "https://blob.vercel-storage.com/test-abc123/file.txt?foo=bar"
+        download_url = get_download_url(url)
+
+        assert "foo=bar" in download_url
+        assert "download=1" in download_url
+
+    def test_aioblob_module_alias_exports_async_api(self):
+        """Test aioblob alias exposes async API module."""
+        assert hasattr(aioblob, "put")
+        assert hasattr(aioblob, "create_multipart_upload")
