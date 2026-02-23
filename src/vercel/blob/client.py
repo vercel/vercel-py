@@ -12,7 +12,12 @@ from ._core import (
     normalize_delete_urls,
 )
 from .errors import BlobError, BlobNoTokenProvidedError
-from .multipart.api import create_multipart_uploader, create_multipart_uploader_async
+from .multipart.api import (
+    AsyncMultipartUploader,
+    MultipartUploader,
+    create_multipart_uploader,
+    create_multipart_uploader_async,
+)
 from .multipart.core import _AsyncMultipartClient, _SyncMultipartClient
 from .types import (
     CreateFolderResult as CreateFolderResultType,
@@ -260,7 +265,7 @@ class BlobClient:
         add_random_suffix: bool = True,
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
-    ):
+    ) -> MultipartUploader:
         """Create a multipart uploader bound to this client's token."""
         self._ensure_open()
         return create_multipart_uploader(
@@ -504,7 +509,7 @@ class AsyncBlobClient:
         add_random_suffix: bool = True,
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
-    ):
+    ) -> AsyncMultipartUploader:
         """Create an async multipart uploader bound to this client's token."""
         self._ensure_open()
         return await create_multipart_uploader_async(
