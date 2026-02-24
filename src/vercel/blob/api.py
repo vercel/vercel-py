@@ -4,10 +4,15 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from vercel._internal.http import AsyncTransport, SyncTransport, create_base_async_client, create_base_client
-from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.blob.core import request_api_core
 from vercel._internal.blob import PutHeaders
+from vercel._internal.blob.core import request_api_core
+from vercel._internal.http import (
+    AsyncTransport,
+    SyncTransport,
+    create_base_async_client,
+    create_base_client,
+)
+from vercel._internal.iter_coroutine import iter_coroutine
 from vercel.blob.types import UploadProgressEvent
 
 

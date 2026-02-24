@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 import httpx
 
 from vercel._internal.telemetry.tracker import track
+
 from .types import AsyncCache, Cache
 
 HEADERS_VERCEL_CACHE_STATE = "x-vercel-cache-state"

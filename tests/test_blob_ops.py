@@ -8,14 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.blob import validate_access
 from vercel._internal.blob.core import _parse_last_modified
+from vercel._internal.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobError
 from vercel.blob.ops import (
     download_file,
     download_file_async,
 )
-from vercel._internal.blob import validate_access
 
 # Token format: vercel_blob_rw_{storeId}_...
 # extract_store_id_from_token splits on "_" and returns index 3

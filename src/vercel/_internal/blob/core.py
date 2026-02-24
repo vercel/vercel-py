@@ -12,42 +12,6 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 
-from vercel._internal.http import (
-    AsyncTransport,
-    BaseTransport,
-    JSONBody,
-    RawBody,
-    SyncTransport,
-    create_base_async_client,
-    create_base_client,
-)
-from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.telemetry.tracker import track
-from vercel.blob.errors import (
-    BlobAccessError,
-    BlobClientTokenExpiredError,
-    BlobContentTypeNotAllowedError,
-    BlobError,
-    BlobFileTooLargeError,
-    BlobInvalidResponseJSONError,
-    BlobNotFoundError,
-    BlobPathnameMismatchError,
-    BlobServiceNotAvailable,
-    BlobServiceRateLimited,
-    BlobStoreNotFoundError,
-    BlobStoreSuspendedError,
-    BlobUnexpectedResponseContentTypeError,
-    BlobUnknownError,
-)
-from vercel.blob.types import (
-    CreateFolderResult as CreateFolderResultType,
-    GetBlobResult as GetBlobResultType,
-    HeadBlobResult as HeadBlobResultType,
-    ListBlobItem,
-    ListBlobResult as ListBlobResultType,
-    PutBlobResult as PutBlobResultType,
-    UploadProgressEvent,
-)
 from vercel._internal.blob import (
     PutHeaders,
     StreamingBodyWithProgress,
@@ -69,10 +33,43 @@ from vercel._internal.blob import (
     validate_access,
     validate_path,
 )
-from vercel.blob.types import (
+from vercel._internal.http import (
+    AsyncTransport,
+    BaseTransport,
+    JSONBody,
+    RawBody,
+    SyncTransport,
+    create_base_async_client,
+    create_base_client,
+)
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.telemetry.tracker import track
+from vercel._internal.blob import get_download_url
+from vercel._internal.blob.errors import (
+    BlobAccessError,
+    BlobClientTokenExpiredError,
+    BlobContentTypeNotAllowedError,
+    BlobError,
+    BlobFileTooLargeError,
+    BlobInvalidResponseJSONError,
+    BlobNotFoundError,
+    BlobPathnameMismatchError,
+    BlobServiceNotAvailable,
+    BlobServiceRateLimited,
+    BlobStoreNotFoundError,
+    BlobStoreSuspendedError,
+    BlobUnexpectedResponseContentTypeError,
+    BlobUnknownError,
+)
+from vercel._internal.blob.types import (
     Access,
-    OnUploadProgressCallback,
-    get_download_url,
+    CreateFolderResult as CreateFolderResultType,
+    GetBlobResult as GetBlobResultType,
+    HeadBlobResult as HeadBlobResultType,
+    ListBlobItem,
+    ListBlobResult as ListBlobResultType,
+    PutBlobResult as PutBlobResultType,
+    UploadProgressEvent,
 )
 
 BlobProgressCallback = (

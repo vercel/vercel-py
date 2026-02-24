@@ -6,7 +6,7 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from vercel._internal.blob import PutHeaders
-from vercel.blob.types import UploadProgressEvent
+from vercel._internal.blob.types import UploadProgressEvent
 
 AsyncProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]

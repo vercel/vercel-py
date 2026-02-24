@@ -4,12 +4,33 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any, Protocol, TypedDict
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from vercel.blob.errors import BlobError, BlobNoTokenProvidedError
+
+def get_download_url(blob_url: str) -> str:
+    try:
+        parsed = urlparse(blob_url)
+        q = dict(parse_qsl(parsed.query))
+        q["download"] = "1"
+        new_query = urlencode(q)
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                new_query,
+                parsed.fragment,
+            )
+        )
+    except Exception:
+        # Fallback: naive append
+        sep = "&" if "?" in blob_url else "?"
+        return f"{blob_url}{sep}download=1"
+
 
 DEFAULT_VERCEL_BLOB_API_URL = "https://vercel.com/api/blob"
 MAXIMUM_PATHNAME_LENGTH = 950
@@ -98,6 +119,8 @@ def extract_store_id_from_token(token: str) -> str:
 
 
 def validate_path(path: str) -> None:
+    from vercel._internal.blob.errors import BlobError
+
     if not path:
         raise BlobError("path is required")
     if len(path) > MAXIMUM_PATHNAME_LENGTH:
@@ -108,6 +131,8 @@ def validate_path(path: str) -> None:
 
 
 def validate_access(access: str) -> str:
+    from vercel._internal.blob.errors import BlobError
+
     if access not in ("public", "private"):
         raise BlobError('access must be "public" or "private"')
     return access
@@ -214,7 +239,7 @@ class StreamingBodyWithProgress:
 
     def _emit_progress(self) -> None:
         if self._on_progress:
-            from vercel.blob.types import UploadProgressEvent
+            from vercel._internal.blob.types import UploadProgressEvent
 
             total = self._total if self._total else self._loaded
             percentage = round((self._loaded / total) * 100, 2) if total else 0.0
@@ -224,7 +249,7 @@ class StreamingBodyWithProgress:
 
     async def _emit_progress_async(self) -> None:
         if self._on_progress:
-            from vercel.blob.types import UploadProgressEvent
+            from vercel._internal.blob.types import UploadProgressEvent
 
             total = self._total if self._total else self._loaded
             percentage = round((self._loaded / total) * 100, 2) if total else 0.0
@@ -338,6 +363,8 @@ def create_put_headers(
 
 
 def ensure_token(token: str | None) -> str:
+    from vercel._internal.blob.errors import BlobNoTokenProvidedError
+
     token = token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
     if not token:
         raise BlobNoTokenProvidedError()

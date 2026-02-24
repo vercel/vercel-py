@@ -5,12 +5,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterat
 from os import PathLike
 from typing import Any
 
-from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.blob import ensure_token
 from vercel._internal.blob.core import (
     _AsyncBlobOpsClient,
     _SyncBlobOpsClient,
     normalize_delete_urls,
 )
+from vercel._internal.blob.multipart import _AsyncMultipartClient, _SyncMultipartClient
+from vercel._internal.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobError, BlobNoTokenProvidedError
 from vercel.blob.multipart.api import (
     AsyncMultipartUploader,
@@ -18,7 +20,6 @@ from vercel.blob.multipart.api import (
     create_multipart_uploader,
     create_multipart_uploader_async,
 )
-from vercel._internal.blob.multipart import _AsyncMultipartClient, _SyncMultipartClient
 from vercel.blob.types import (
     Access,
     CreateFolderResult as CreateFolderResultType,
@@ -29,7 +30,6 @@ from vercel.blob.types import (
     PutBlobResult as PutBlobResultType,
     UploadProgressEvent,
 )
-from vercel._internal.blob import ensure_token
 
 
 class BlobClient:

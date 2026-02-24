@@ -4,9 +4,6 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from vercel._internal.iter_coroutine import iter_coroutine
-from vercel.blob.errors import BlobError
-from vercel.blob.types import Access, MultipartCreateResult, MultipartPart, PutBlobResult, UploadProgressEvent
 from vercel._internal.blob import (
     PutHeaders,
     create_put_headers,
@@ -14,7 +11,20 @@ from vercel._internal.blob import (
     validate_access,
     validate_path,
 )
-from vercel._internal.blob.multipart import _AsyncMultipartClient, _BaseMultipartClient, _SyncMultipartClient
+from vercel._internal.blob.multipart import (
+    _AsyncMultipartClient,
+    _BaseMultipartClient,
+    _SyncMultipartClient,
+)
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel.blob.errors import BlobError
+from vercel.blob.types import (
+    Access,
+    MultipartCreateResult,
+    MultipartPart,
+    PutBlobResult,
+    UploadProgressEvent,
+)
 
 
 def _validate_multipart_context(path: str, access: Access, token: str | None) -> str:
