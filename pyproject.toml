@@ -60,6 +60,8 @@ markers = [
 
 [tool.mypy]
 ignore_missing_imports = true
+mypy_path = "src"
+explicit_package_bases = true
 
 [tool.ruff]
 line-length = 100
