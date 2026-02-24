@@ -1,26 +1,26 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator
 from os import PathLike
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
-from .._iter_coroutine import iter_coroutine
-from ._core import (
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.blob.core import (
     _AsyncBlobOpsClient,
     _SyncBlobOpsClient,
     normalize_delete_urls,
 )
-from .types import (
+from vercel.blob.types import (
+    Access,
     CreateFolderResult as CreateFolderResultType,
     GetBlobResult as GetBlobResultType,
     HeadBlobResult as HeadBlobResultType,
     ListBlobItem,
     ListBlobResult as ListBlobResultType,
     PutBlobResult as PutBlobResultType,
-)
-from .utils import (
-    Access,
     UploadProgressEvent,
+)
+from vercel._internal.blob import (
     ensure_token,
     validate_access,
 )
@@ -29,7 +29,7 @@ _T = TypeVar("_T")
 
 
 def _run_sync_blob_operation(
-    operation: Callable[[_SyncBlobOpsClient], Awaitable[_T]],
+    operation: Callable[[_SyncBlobOpsClient], Coroutine[None, None, _T]],
 ) -> _T:
     with _SyncBlobOpsClient() as client:
         # Keep exactly one sync bridge at the wrapper boundary.

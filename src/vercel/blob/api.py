@@ -4,10 +4,11 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .._http import AsyncTransport, SyncTransport, create_base_async_client, create_base_client
-from .._iter_coroutine import iter_coroutine
-from ._core import request_api_core
-from .utils import PutHeaders, UploadProgressEvent
+from vercel._internal.http import AsyncTransport, SyncTransport, create_base_async_client, create_base_client
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.blob.core import request_api_core
+from vercel._internal.blob import PutHeaders
+from vercel.blob.types import UploadProgressEvent
 
 
 def _sync_sleep(seconds: float) -> None:

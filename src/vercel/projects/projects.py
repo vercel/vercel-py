@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from .._telemetry.tracker import track
+from vercel._internal.telemetry.tracker import track
 
 __all__ = [
     "get_projects",

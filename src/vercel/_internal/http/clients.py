@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from .config import DEFAULT_TIMEOUT
+from vercel._internal.http.config import DEFAULT_TIMEOUT
 
 
 def _normalize_base_url(base_url: str) -> str:

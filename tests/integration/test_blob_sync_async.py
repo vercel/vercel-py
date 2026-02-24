@@ -34,7 +34,7 @@ from vercel.blob import (
     upload_file,
     upload_file_async,
 )
-from vercel.blob._core import decode_blob_response_json
+from vercel._internal.blob.core import decode_blob_response_json
 from vercel.blob.ops import get, get_async
 
 # Base URL for Vercel Blob API

@@ -40,7 +40,7 @@ def extract_credentials(
     # Try to extract from OIDC token if available
     if token:
         try:
-            from ..oidc.token import decode_oidc_payload
+            from vercel.oidc.token import decode_oidc_payload
 
             payload = decode_oidc_payload(token)
             if not resolved_project_id:
@@ -56,7 +56,7 @@ def extract_credentials(
     if not resolved_project_id or not resolved_team_id:
         try:
             # Import lazily to avoid hard dependency in all environments
-            from ..oidc.utils import find_project_info as _find_project_info  # type: ignore
+            from vercel.oidc.utils import find_project_info as _find_project_info  # type: ignore
 
             project_info = _find_project_info()
             if not resolved_project_id and project_info.get("projectId"):

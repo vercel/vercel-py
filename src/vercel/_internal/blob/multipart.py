@@ -5,8 +5,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 from urllib.parse import quote
 
-from ..api import request_api, request_api_async
-from ..utils import PutHeaders, UploadProgressEvent
+from vercel._internal.blob import PutHeaders
+from vercel.blob.types import UploadProgressEvent
 
 AsyncProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
@@ -127,7 +127,12 @@ class _SyncMultipartClient(_BaseMultipartClient):
         self,
         request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
-        super().__init__(request_api_fn or request_api)
+        if request_api_fn is not None:
+            super().__init__(request_api_fn)
+        else:
+            from vercel.blob.api import request_api
+
+            super().__init__(request_api)
 
 
 class _AsyncMultipartClient(_BaseMultipartClient):
@@ -135,4 +140,9 @@ class _AsyncMultipartClient(_BaseMultipartClient):
         self,
         request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
-        super().__init__(request_api_fn or request_api_async)
+        if request_api_fn is not None:
+            super().__init__(request_api_fn)
+        else:
+            from vercel.blob.api import request_api_async
+
+            super().__init__(request_api_async)

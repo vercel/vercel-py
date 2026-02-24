@@ -1,6 +1,6 @@
 """Shared HTTP infrastructure for Vercel API clients."""
 
-from .clients import (
+from vercel._internal.http.clients import (
     create_base_async_client,
     create_base_client,
     create_headers_async_client,
@@ -8,8 +8,8 @@ from .clients import (
     create_vercel_async_client,
     create_vercel_client,
 )
-from .config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
-from .transport import (
+from vercel._internal.http.config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
+from vercel._internal.http.transport import (
     AsyncTransport,
     BaseTransport,
     BytesBody,

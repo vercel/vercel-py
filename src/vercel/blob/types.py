@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 
 @dataclass(slots=True)
@@ -73,3 +75,42 @@ class GetBlobResult:
 class MultipartPart:
     part_number: int
     etag: str
+
+
+Access = Literal["public", "private"]
+
+
+@dataclass
+class UploadProgressEvent:
+    loaded: int
+    total: int
+    percentage: float
+
+
+OnUploadProgressCallback = (
+    Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
+)
+
+
+def get_download_url(blob_url: str) -> str:
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+        parsed = urlparse(blob_url)
+        q = dict(parse_qsl(parsed.query))
+        q["download"] = "1"
+        new_query = urlencode(q)
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                new_query,
+                parsed.fragment,
+            )
+        )
+    except Exception:
+        # Fallback: naive append
+        sep = "&" if "?" in blob_url else "?"
+        return f"{blob_url}{sep}download=1"

@@ -66,7 +66,7 @@ from .types import (
     MultipartPart,
     PutBlobResult,
 )
-from .utils import Access, OnUploadProgressCallback, UploadProgressEvent, get_download_url
+from .types import Access, OnUploadProgressCallback, UploadProgressEvent, get_download_url
 
 __all__ = [
     # errors

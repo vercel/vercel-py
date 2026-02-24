@@ -9,16 +9,15 @@ from typing import Any, cast
 
 import anyio
 
-from ..._iter_coroutine import iter_coroutine
-from ..errors import BlobError
-from ..utils import (
-    Access,
-    UploadProgressEvent,
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel.blob.errors import BlobError
+from vercel.blob.types import Access, UploadProgressEvent
+from vercel._internal.blob import (
     compute_body_length,
     create_put_headers,
     validate_access,
 )
-from .core import _AsyncMultipartClient, _SyncMultipartClient
+from vercel._internal.blob.multipart import _AsyncMultipartClient, _SyncMultipartClient
 
 DEFAULT_PART_SIZE = 8 * 1024 * 1024  # 8MB
 MIN_PART_SIZE = 5 * 1024 * 1024  # 5 MiB minimum for most backends; last part may be smaller

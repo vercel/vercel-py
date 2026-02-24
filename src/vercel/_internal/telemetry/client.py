@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .credentials import extract_credentials
+from vercel._internal.telemetry.credentials import extract_credentials
 
 _TELEMETRY_ENABLED = os.getenv("VERCEL_TELEMETRY_DISABLED") != "1"
 _TELEMETRY_BRIDGE_URL = os.getenv(

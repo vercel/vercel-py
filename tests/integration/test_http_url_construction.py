@@ -13,14 +13,14 @@ import pytest
 import respx
 from httpx import Response
 
-from vercel._http import (
+from vercel._internal.http import (
     AsyncTransport,
     JSONBody,
     SyncTransport,
     create_base_async_client,
     create_base_client,
 )
-from vercel._iter_coroutine import iter_coroutine
+from vercel._internal.iter_coroutine import iter_coroutine
 
 
 class TestUrlNormalization:

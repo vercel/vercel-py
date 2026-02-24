@@ -25,7 +25,7 @@ from vercel.blob.multipart import (
     upload_part_async,
 )
 from vercel.blob.multipart.uploader import MIN_PART_SIZE
-from vercel.blob.utils import UploadProgressEvent
+from vercel.blob.types import UploadProgressEvent
 
 BLOB_API_BASE = "https://vercel.com/api/blob"
 
