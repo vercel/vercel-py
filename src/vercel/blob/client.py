@@ -11,7 +11,7 @@ from vercel._internal.blob.core import (
     _SyncBlobOpsClient,
     normalize_delete_urls,
 )
-from vercel._internal.blob.multipart import _AsyncMultipartClient, _SyncMultipartClient
+from vercel._internal.blob.multipart import _MultipartClient
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobError, BlobNoTokenProvidedError
 from vercel.blob.multipart.api import (
@@ -278,7 +278,7 @@ class BlobClient:
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
             token=self.token,
-            multipart_client=_SyncMultipartClient(self._ops_client.request_api),
+            multipart_client=_MultipartClient(self._ops_client._request_client),
         )
 
 
@@ -522,5 +522,5 @@ class AsyncBlobClient:
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
             token=self.token,
-            multipart_client=_AsyncMultipartClient(self._ops_client.request_api),
+            multipart_client=_MultipartClient(self._ops_client._request_client),
         )

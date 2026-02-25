@@ -61,6 +61,17 @@ from vercel._internal.blob.errors import (
     BlobUnexpectedResponseContentTypeError,
     BlobUnknownError,
 )
+from vercel._internal.blob.multipart import (
+    DEFAULT_PART_SIZE,
+    _MultipartClient,
+    _MultipartUploadSession,
+    _order_uploaded_parts,
+    _prepare_upload_headers,
+    _shape_complete_upload_result,
+    _validate_part_size,
+    create_async_multipart_upload_runtime,
+    create_sync_multipart_upload_runtime,
+)
 from vercel._internal.blob.types import (
     Access,
     CreateFolderResult as CreateFolderResultType,
@@ -427,6 +438,22 @@ class _BlobRequestClient:
         self._await_progress_callback = await_progress_callback
         self._async_content = async_content
 
+    @property
+    def transport(self) -> BaseTransport:
+        return self._transport
+
+    @property
+    def await_progress_callback(self) -> bool:
+        return self._await_progress_callback
+
+    def close(self) -> None:
+        if isinstance(self._transport, SyncTransport):
+            self._transport.close()
+
+    async def aclose(self) -> None:
+        if isinstance(self._transport, AsyncTransport):
+            await self._transport.aclose()
+
     async def request_api(
         self,
         pathname: str,
@@ -522,22 +549,33 @@ class _BlobRequestClient:
         raise BlobUnknownError()
 
 
-class _BaseBlobOpsClient(_BlobRequestClient):
+def _create_sync_request_client(timeout: float = 30.0) -> _BlobRequestClient:
+    transport = SyncTransport(create_base_client(timeout=timeout))
+    return _BlobRequestClient(
+        transport=transport,
+        sleep_fn=_sync_sleep,
+        await_progress_callback=False,
+        async_content=False,
+    )
+
+
+def _create_async_request_client(timeout: float = 30.0) -> _BlobRequestClient:
+    transport = AsyncTransport(create_base_async_client(timeout=timeout))
+    return _BlobRequestClient(
+        transport=transport,
+    )
+
+
+class _BaseBlobOpsClient:
     def __init__(
         self,
         *,
-        transport: BaseTransport,
-        sleep_fn: SleepFn = asyncio.sleep,
-        await_progress_callback: bool = True,
-        async_content: bool = True,
+        request_client: _BlobRequestClient,
+        multipart_client: _MultipartClient,
         multipart_runtime: Any,
     ) -> None:
-        super().__init__(
-            transport=transport,
-            sleep_fn=sleep_fn,
-            await_progress_callback=await_progress_callback,
-            async_content=async_content,
-        )
+        self._request_client = request_client
+        self._multipart_client = multipart_client
         self._multipart_runtime = multipart_runtime
 
     def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
@@ -549,18 +587,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
     async def _close_download_response(self, response: httpx.Response) -> None:
         await self._close_response(response)
 
-    def _multipart_upload_part_request(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        part_number: int,
-        body: Any,
-        on_upload_progress: BlobProgressCallback | None = None,
-        token: str | None = None,
-    ) -> Any:
+    def _make_upload_part_fn(self) -> Any:
         raise NotImplementedError
 
     async def _multipart_upload(
@@ -576,15 +603,6 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         token: str | None = None,
         on_upload_progress: BlobProgressCallback | None = None,
     ) -> dict[str, Any]:
-        from vercel._internal.blob.multipart import (
-            DEFAULT_PART_SIZE,
-            _MultipartUploadSession,
-            _order_uploaded_parts,
-            _prepare_upload_headers,
-            _shape_complete_upload_result,
-            _validate_part_size,
-        )
-
         headers = _prepare_upload_headers(
             access=access,
             content_type=content_type,
@@ -594,7 +612,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         part_size = _validate_part_size(DEFAULT_PART_SIZE)
 
-        create_response = await self._multipart_create_request(
+        create_response = await self._multipart_client.create_multipart_upload(
             path,
             headers,
             token=token,
@@ -617,13 +635,13 @@ class _BaseBlobOpsClient(_BlobRequestClient):
                     part_size=part_size,
                     total=total,
                     on_upload_progress=on_upload_progress,
-                    upload_part_fn=self._multipart_upload_part_request,
+                    upload_part_fn=self._make_upload_part_fn(),
                 )
             ),
         )
         ordered_parts = _order_uploaded_parts(parts)
 
-        complete_response = await self._multipart_complete_request(
+        complete_response = await self._multipart_client.complete_multipart_upload(
             upload_id=session.upload_id,
             key=session.key,
             path=session.path,
@@ -632,52 +650,6 @@ class _BaseBlobOpsClient(_BlobRequestClient):
             parts=ordered_parts,
         )
         return _shape_complete_upload_result(complete_response)
-
-    async def _multipart_create_request(
-        self,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        *,
-        token: str | None,
-    ) -> dict[str, str]:
-        from vercel._internal.blob.multipart import _build_headers as _build_multipart_headers
-
-        response = await self.request_api(
-            pathname="/mpu",
-            method="POST",
-            token=token,
-            headers=_build_multipart_headers(headers, action="create"),
-            params={"pathname": path},
-        )
-        return cast(dict[str, str], response)
-
-    async def _multipart_complete_request(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        token: str | None,
-        parts: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        from vercel._internal.blob.multipart import _build_headers as _build_multipart_headers
-
-        response = await self.request_api(
-            pathname="/mpu",
-            method="POST",
-            token=token,
-            headers=_build_multipart_headers(
-                headers,
-                action="complete",
-                key=key,
-                upload_id=upload_id,
-                set_json_content_type=True,
-            ),
-            params={"pathname": path},
-            body=parts,
-        )
-        return cast(dict[str, Any], response)
 
     async def put_blob(
         self,
@@ -729,7 +701,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
         raw = cast(
             dict[str, Any],
-            await self.request_api(
+            await self._request_client.request_api(
                 "",
                 "PUT",
                 token=token,
@@ -756,7 +728,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         *,
         token: str,
     ) -> int:
-        await self.request_api(
+        await self._request_client.request_api(
             "/delete",
             "POST",
             token=token,
@@ -776,7 +748,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         token = ensure_token(token)
         resp = cast(
             dict[str, Any],
-            await self.request_api(
+            await self._request_client.request_api(
                 "",
                 "GET",
                 token=token,
@@ -827,7 +799,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         response: httpx.Response | None = None
 
         try:
-            response = await self._transport.send(
+            response = await self._request_client.transport.send(
                 "GET",
                 target_url,
                 headers=headers,
@@ -902,7 +874,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         raw = cast(
             dict[str, Any],
-            await self.request_api(
+            await self._request_client.request_api(
                 "",
                 "PUT",
                 token=token,
@@ -927,7 +899,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         )
         raw = cast(
             dict[str, Any],
-            await self.request_api(
+            await self._request_client.request_api(
                 "",
                 "PUT",
                 token=token,
@@ -1020,7 +992,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         response: httpx.Response | None = None
 
         try:
-            response = await self._transport.send(
+            response = await self._request_client.transport.send(
                 "GET",
                 target_url,
                 headers=headers,
@@ -1043,7 +1015,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
                         progress,
                         bytes_read,
                         total,
-                        await_callback=self._await_progress_callback,
+                        await_callback=self._request_client.await_progress_callback,
                     )
 
             os.replace(tmp, dst)
@@ -1060,56 +1032,19 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
 class _SyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        from vercel._internal.blob.multipart import create_sync_multipart_upload_runtime
-
-        transport = SyncTransport(create_base_client(timeout=timeout))
+        request_client = _create_sync_request_client(timeout)
+        multipart_client = _MultipartClient(request_client)
         super().__init__(
-            transport=transport,
-            sleep_fn=_sync_sleep,
-            await_progress_callback=False,
-            async_content=False,
+            request_client=request_client,
+            multipart_client=multipart_client,
             multipart_runtime=create_sync_multipart_upload_runtime(),
         )
 
     def close(self) -> None:
-        transport = self._transport
-        if isinstance(transport, SyncTransport):
-            transport.close()
+        self._request_client.close()
 
-    def _multipart_upload_part_request(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        part_number: int,
-        body: Any,
-        on_upload_progress: BlobProgressCallback | None = None,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        from vercel._internal.blob.multipart import _build_headers as _build_multipart_headers
-
-        return cast(
-            dict[str, Any],
-            iter_coroutine(
-                self.request_api(
-                    pathname="/mpu",
-                    method="POST",
-                    token=token,
-                    headers=_build_multipart_headers(
-                        headers,
-                        action="upload",
-                        key=key,
-                        upload_id=upload_id,
-                        part_number=part_number,
-                    ),
-                    params={"pathname": path},
-                    body=body,
-                    on_upload_progress=on_upload_progress,
-                )
-            ),
-        )
+    def _make_upload_part_fn(self) -> Any:
+        return lambda **kw: iter_coroutine(self._multipart_client.upload_part(**kw))
 
     def list_objects(
         self,
@@ -1124,7 +1059,7 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
         resp = cast(
             dict[str, Any],
             iter_coroutine(
-                self.request_api(
+                self._request_client.request_api(
                     "",
                     "GET",
                     token=token,
@@ -1197,18 +1132,16 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
 
 class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        from vercel._internal.blob.multipart import create_async_multipart_upload_runtime
-
-        transport = AsyncTransport(create_base_async_client(timeout=timeout))
+        request_client = _create_async_request_client(timeout)
+        multipart_client = _MultipartClient(request_client)
         super().__init__(
-            transport=transport,
+            request_client=request_client,
+            multipart_client=multipart_client,
             multipart_runtime=create_async_multipart_upload_runtime(),
         )
 
     async def aclose(self) -> None:
-        transport = self._transport
-        if isinstance(transport, AsyncTransport):
-            await transport.aclose()
+        await self._request_client.aclose()
 
     async def __aenter__(self) -> _AsyncBlobOpsClient:
         return self
@@ -1216,36 +1149,8 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     async def __aexit__(self, *args: object) -> None:
         await self.aclose()
 
-    async def _multipart_upload_part_request(
-        self,
-        *,
-        upload_id: str,
-        key: str,
-        path: str,
-        headers: PutHeaders | dict[str, str],
-        part_number: int,
-        body: Any,
-        on_upload_progress: BlobProgressCallback | None = None,
-        token: str | None = None,
-    ) -> dict[str, Any]:
-        from vercel._internal.blob.multipart import _build_headers as _build_multipart_headers
-
-        response = await self.request_api(
-            pathname="/mpu",
-            method="POST",
-            token=token,
-            headers=_build_multipart_headers(
-                headers,
-                action="upload",
-                key=key,
-                upload_id=upload_id,
-                part_number=part_number,
-            ),
-            params={"pathname": path},
-            body=body,
-            on_upload_progress=on_upload_progress,
-        )
-        return cast(dict[str, Any], response)
+    def _make_upload_part_fn(self) -> Any:
+        return self._multipart_client.upload_part
 
     def _stream_download_chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
         async def _iterate() -> AsyncIterator[bytes]:
@@ -1272,7 +1177,7 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
         token = ensure_token(token)
         resp = cast(
             dict[str, Any],
-            await self.request_api(
+            await self._request_client.request_api(
                 "",
                 "GET",
                 token=token,
@@ -1327,6 +1232,9 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
 __all__ = [
     "_AsyncBlobOpsClient",
     "_SyncBlobOpsClient",
+    "_BlobRequestClient",
+    "_create_sync_request_client",
+    "_create_async_request_client",
     "build_create_folder_result",
     "build_head_blob_result",
     "build_list_blob_result",
@@ -1337,6 +1245,5 @@ __all__ = [
     "is_network_error",
     "map_blob_error",
     "normalize_delete_urls",
-    "_BlobRequestClient",
     "should_retry",
 ]

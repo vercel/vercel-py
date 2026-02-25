@@ -77,8 +77,10 @@ class TestBlobClientLifecycle:
                 "contentDisposition": 'inline; filename="client-mpu.bin"',
             }
 
+        mock_request_client = MagicMock()
+        mock_request_client.request_api = AsyncMock(side_effect=request_api)
         mock_ops_client = MagicMock()
-        mock_ops_client.request_api = AsyncMock(side_effect=request_api)
+        mock_ops_client._request_client = mock_request_client
 
         with patch("vercel.blob.client._SyncBlobOpsClient", return_value=mock_ops_client):
             client = BlobClient(token="test_token")
@@ -87,7 +89,7 @@ class TestBlobClientLifecycle:
             result = uploader.complete([part])
 
         assert actions == ["create", "upload", "complete"]
-        assert mock_ops_client.request_api.await_count == 3
+        assert mock_request_client.request_api.await_count == 3
         assert result.pathname == "folder/client-mpu.bin"
 
     @pytest.mark.asyncio
@@ -144,8 +146,10 @@ class TestBlobClientLifecycle:
                 "contentDisposition": 'inline; filename="client-mpu-async.bin"',
             }
 
+        mock_request_client = MagicMock()
+        mock_request_client.request_api = AsyncMock(side_effect=request_api)
         mock_ops_client = MagicMock()
-        mock_ops_client.request_api = AsyncMock(side_effect=request_api)
+        mock_ops_client._request_client = mock_request_client
 
         with patch("vercel.blob.client._AsyncBlobOpsClient", return_value=mock_ops_client):
             client = AsyncBlobClient(token="test_token")
@@ -154,5 +158,5 @@ class TestBlobClientLifecycle:
             result = await uploader.complete([part])
 
         assert actions == ["create", "upload", "complete"]
-        assert mock_ops_client.request_api.await_count == 3
+        assert mock_request_client.request_api.await_count == 3
         assert result.pathname == "folder/client-mpu-async.bin"

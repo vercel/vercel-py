@@ -5,7 +5,7 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
 import anyio
@@ -18,6 +18,9 @@ from vercel._internal.blob import (
 )
 from vercel._internal.blob.errors import BlobError
 from vercel._internal.blob.types import Access, UploadProgressEvent
+
+if TYPE_CHECKING:
+    from vercel._internal.blob.core import _BlobRequestClient
 
 AsyncProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
@@ -363,18 +366,15 @@ def _build_headers(
     return request_headers
 
 
-class _BaseMultipartClient:
+class _MultipartClient:
     def __init__(
         self,
-        request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]],
+        request_client: _BlobRequestClient,
     ) -> None:
-        self._request_api_fn = request_api_fn
+        self._request_client = request_client
 
     async def _request_api(self, **kwargs: Any) -> Any:
-        result = self._request_api_fn(**kwargs)
-        if inspect.isawaitable(result):
-            return await cast(Awaitable[Any], result)
-        return result
+        return await self._request_client.request_api(**kwargs)
 
     async def create_multipart_upload(
         self,
@@ -448,102 +448,15 @@ class _BaseMultipartClient:
         return cast(dict[str, Any], response)
 
 
-class _SyncMultipartClient(_BaseMultipartClient):
-    def __init__(
-        self,
-        request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]] | None = None,
-    ) -> None:
-        if request_api_fn is not None:
-            super().__init__(request_api_fn)
-        else:
-            import time
+class _SyncMultipartClient(_MultipartClient):
+    def __init__(self) -> None:
+        from vercel._internal.blob.core import _create_sync_request_client
 
-            from vercel._internal.blob.core import _BlobRequestClient
-            from vercel._internal.http import SyncTransport, create_base_client
-            from vercel._internal.iter_coroutine import iter_coroutine
-
-            def request_api(
-                pathname: str,
-                method: str,
-                *,
-                token: str | None = None,
-                headers: PutHeaders | dict[str, str] | None = None,
-                params: dict[str, Any] | None = None,
-                body: Any = None,
-                on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
-                timeout: float | None = None,
-            ) -> Any:
-                effective_timeout = timeout if timeout is not None else 30.0
-                transport = SyncTransport(create_base_client(timeout=effective_timeout))
-                try:
-                    client = _BlobRequestClient(
-                        transport=transport,
-                        sleep_fn=time.sleep,
-                        await_progress_callback=False,
-                        async_content=False,
-                    )
-                    return iter_coroutine(
-                        client.request_api(
-                            pathname,
-                            method,
-                            token=token,
-                            headers=headers,
-                            params=params,
-                            body=body,
-                            on_upload_progress=on_upload_progress,
-                            timeout=timeout,
-                        )
-                    )
-                finally:
-                    transport.close()
-
-            super().__init__(request_api)
+        super().__init__(_create_sync_request_client())
 
 
-class _AsyncMultipartClient(_BaseMultipartClient):
-    def __init__(
-        self,
-        request_api_fn: Callable[..., Any] | Callable[..., Awaitable[Any]] | None = None,
-    ) -> None:
-        if request_api_fn is not None:
-            super().__init__(request_api_fn)
-        else:
-            from vercel._internal.blob.core import _BlobRequestClient
-            from vercel._internal.http import AsyncTransport, create_base_async_client
+class _AsyncMultipartClient(_MultipartClient):
+    def __init__(self) -> None:
+        from vercel._internal.blob.core import _create_async_request_client
 
-            async def request_api_async(
-                pathname: str,
-                method: str,
-                *,
-                token: str | None = None,
-                headers: PutHeaders | dict[str, str] | None = None,
-                params: dict[str, Any] | None = None,
-                body: Any = None,
-                on_upload_progress: (
-                    Callable[[UploadProgressEvent], None]
-                    | Callable[[UploadProgressEvent], Awaitable[None]]
-                    | None
-                ) = None,
-                timeout: float | None = None,
-            ) -> Any:
-                effective_timeout = timeout if timeout is not None else 30.0
-                transport = AsyncTransport(create_base_async_client(timeout=effective_timeout))
-                try:
-                    client = _BlobRequestClient(
-                        transport=transport,
-                        async_content=True,
-                    )
-                    return await client.request_api(
-                        pathname,
-                        method,
-                        token=token,
-                        headers=headers,
-                        params=params,
-                        body=body,
-                        on_upload_progress=on_upload_progress,
-                        timeout=timeout,
-                    )
-                finally:
-                    await transport.aclose()
-
-            super().__init__(request_api_async)
+        super().__init__(_create_async_request_client())

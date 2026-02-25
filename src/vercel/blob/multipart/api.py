@@ -13,7 +13,7 @@ from vercel._internal.blob import (
 )
 from vercel._internal.blob.multipart import (
     _AsyncMultipartClient,
-    _BaseMultipartClient,
+    _MultipartClient,
     _SyncMultipartClient,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -253,7 +253,7 @@ class _BaseMultipartUploader:
         key: str,
         headers: PutHeaders | dict[str, str],
         token: str | None,
-        multipart_client: _BaseMultipartClient,
+        multipart_client: _MultipartClient,
     ):
         self._path = path
         self._upload_id = upload_id
@@ -378,7 +378,7 @@ def create_multipart_uploader(
     overwrite: bool = False,
     cache_control_max_age: int | None = None,
     token: str | None = None,
-    multipart_client: _BaseMultipartClient | None = None,
+    multipart_client: _MultipartClient | None = None,
 ) -> MultipartUploader:
     resolved_token = _validate_multipart_context(path, access, token)
     headers = _build_put_headers(
@@ -412,7 +412,7 @@ async def create_multipart_uploader_async(
     overwrite: bool = False,
     cache_control_max_age: int | None = None,
     token: str | None = None,
-    multipart_client: _BaseMultipartClient | None = None,
+    multipart_client: _MultipartClient | None = None,
 ) -> AsyncMultipartUploader:
     resolved_token = _validate_multipart_context(path, access, token)
     headers = _build_put_headers(
