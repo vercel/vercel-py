@@ -576,7 +576,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
         token: str | None = None,
         on_upload_progress: BlobProgressCallback | None = None,
     ) -> dict[str, Any]:
-        from vercel.blob.multipart.uploader import (
+        from vercel._internal.blob.multipart import (
             DEFAULT_PART_SIZE,
             _MultipartUploadSession,
             _order_uploaded_parts,
@@ -1060,7 +1060,7 @@ class _BaseBlobOpsClient(_BlobRequestClient):
 
 class _SyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        from vercel.blob.multipart.uploader import create_sync_multipart_upload_runtime
+        from vercel._internal.blob.multipart import create_sync_multipart_upload_runtime
 
         transport = SyncTransport(create_base_client(timeout=timeout))
         super().__init__(
@@ -1197,7 +1197,7 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
 
 class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        from vercel.blob.multipart.uploader import create_async_multipart_upload_runtime
+        from vercel._internal.blob.multipart import create_async_multipart_upload_runtime
 
         transport = AsyncTransport(create_base_async_client(timeout=timeout))
         super().__init__(
@@ -1323,38 +1323,6 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
                 break
 
 
-async def request_api_core(
-    pathname: str,
-    method: str,
-    *,
-    token: str | None = None,
-    headers: PutHeaders | dict[str, str] | None = None,
-    params: dict[str, Any] | None = None,
-    body: Any = None,
-    on_upload_progress: BlobProgressCallback | None = None,
-    timeout: float | None = None,
-    transport: BaseTransport,
-    sleep_fn: SleepFn = asyncio.sleep,
-    await_progress_callback: bool = True,
-    async_content: bool = True,
-) -> Any:
-    request_client = _BlobRequestClient(
-        transport=transport,
-        sleep_fn=sleep_fn,
-        await_progress_callback=await_progress_callback,
-        async_content=async_content,
-    )
-    return await request_client.request_api(
-        pathname,
-        method,
-        token=token,
-        headers=headers,
-        params=params,
-        body=body,
-        on_upload_progress=on_upload_progress,
-        timeout=timeout,
-    )
-
 
 __all__ = [
     "_AsyncBlobOpsClient",
@@ -1369,6 +1337,6 @@ __all__ = [
     "is_network_error",
     "map_blob_error",
     "normalize_delete_urls",
-    "request_api_core",
+    "_BlobRequestClient",
     "should_retry",
 ]
