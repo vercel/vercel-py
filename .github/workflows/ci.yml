@@ -30,21 +30,16 @@ jobs:
         run: uv pip install -e .[dev]
 
       - name: Lint
-        run: |
-          # The CI ensures that the code is formatted and complain if not.
-          # It's on US to commit already formatted clean code.
-          uv run ruff check
+        run: ./scripts/lint.sh
 
       - name: Typecheck
-        run: |
-          uv run mypy src
-          uv run python -c "import vercel, vercel.cache, vercel.headers, vercel.oidc, vercel.sandbox"
+        run: ./scripts/typecheck.sh
 
       - name: Run tests
-        run: uv run pytest -v --capture=tee-sys --ignore=tests/test_examples.py
+        run: ./scripts/test.sh
 
       - name: Run example tests
-        run: uv run pytest -v --capture=tee-sys tests/test_examples.py -n auto
+        run: ./scripts/test-examples.sh
 
       - name: Build package
-        run: uv run python -m build
+        run: ./scripts/build.sh
