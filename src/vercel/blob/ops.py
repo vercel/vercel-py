@@ -9,8 +9,8 @@ from vercel._internal.blob import (
     validate_access,
 )
 from vercel._internal.blob.core import (
-    _AsyncBlobOpsClient,
-    _SyncBlobOpsClient,
+    AsyncBlobOpsClient,
+    SyncBlobOpsClient,
     normalize_delete_urls,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -29,9 +29,9 @@ _T = TypeVar("_T")
 
 
 def _run_sync_blob_operation(
-    operation: Callable[[_SyncBlobOpsClient], Coroutine[None, None, _T]],
+    operation: Callable[[SyncBlobOpsClient], Coroutine[None, None, _T]],
 ) -> _T:
-    with _SyncBlobOpsClient() as client:
+    with SyncBlobOpsClient() as client:
         # Keep exactly one sync bridge at the wrapper boundary.
         return iter_coroutine(operation(client))
 
@@ -85,7 +85,7 @@ async def put_async(
     ) = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         result, _ = await client.put_blob(
             path,
             body,
@@ -123,7 +123,7 @@ async def delete_async(
 ) -> None:
     token = ensure_token(token)
     normalized_urls = normalize_delete_urls(url_or_path)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         await client.delete_blob(
             normalized_urls,
             token=token,
@@ -142,7 +142,7 @@ def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
 
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
     token = ensure_token(token)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         return await client.head_blob(
             url_or_path,
             token=token,
@@ -184,7 +184,7 @@ async def get_async(
 ) -> GetBlobResultType:
     token = ensure_token(token)
     validate_access(access)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         return await client.get_blob(
             url_or_path,
             access=access,
@@ -205,7 +205,7 @@ def list_objects(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    with _SyncBlobOpsClient() as client:
+    with SyncBlobOpsClient() as client:
         return client.list_objects(
             limit=limit,
             prefix=prefix,
@@ -224,7 +224,7 @@ async def list_objects_async(
     token: str | None = None,
 ) -> ListBlobResultType:
     token = ensure_token(token)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         return await client.list_objects(
             limit=limit,
             prefix=prefix,
@@ -244,7 +244,7 @@ def iter_objects(
     cursor: str | None = None,
 ) -> Iterator[ListBlobItem]:
     token = ensure_token(token)
-    with _SyncBlobOpsClient() as client:
+    with SyncBlobOpsClient() as client:
         yield from client.iter_objects(
             prefix=prefix,
             mode=mode,
@@ -265,7 +265,7 @@ async def iter_objects_async(
     cursor: str | None = None,
 ) -> AsyncIterator[ListBlobItem]:
     token = ensure_token(token)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         async for item in client.iter_objects(
             prefix=prefix,
             mode=mode,
@@ -315,7 +315,7 @@ async def copy_async(
     token: str | None = None,
 ) -> PutBlobResultType:
     token = ensure_token(token)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         return await client.copy_blob(
             src_path,
             dst_path,
@@ -351,7 +351,7 @@ async def create_folder_async(
     overwrite: bool = False,
 ) -> CreateFolderResultType:
     token = ensure_token(token)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         return await client.create_folder(
             path,
             token=token,
@@ -406,7 +406,7 @@ async def upload_file_async(
         | None
     ) = None,
 ) -> PutBlobResultType:
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         return await client.upload_file(
             local_path,
             path,
@@ -464,7 +464,7 @@ async def download_file_async(
 ) -> str:
     token = ensure_token(token)
     validate_access(access)
-    async with _AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient() as client:
         return await client.download_file(
             url_or_path,
             local_path,

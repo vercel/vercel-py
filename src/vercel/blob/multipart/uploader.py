@@ -7,15 +7,15 @@ from vercel._internal.blob import compute_body_length
 from vercel._internal.blob.multipart import (
     DEFAULT_PART_SIZE,
     MIN_PART_SIZE,
-    _AsyncMultipartClient,
-    _MultipartUploadSession,
-    _SyncMultipartClient,
-    _order_uploaded_parts,
-    _prepare_upload_headers,
-    _shape_complete_upload_result,
-    _validate_part_size,
+    AsyncMultipartClient,
+    MultipartUploadSession,
+    SyncMultipartClient,
     create_async_multipart_upload_runtime,
     create_sync_multipart_upload_runtime,
+    order_uploaded_parts,
+    prepare_upload_headers,
+    shape_complete_upload_result,
+    validate_part_size,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel.blob.types import Access, UploadProgressEvent
@@ -34,18 +34,18 @@ def auto_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    client = _SyncMultipartClient()
-    headers = _prepare_upload_headers(
+    client = SyncMultipartClient()
+    headers = prepare_upload_headers(
         access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
     )
-    part_size = _validate_part_size(part_size)
+    part_size = validate_part_size(part_size)
 
     create_response = iter_coroutine(client.create_multipart_upload(path, headers, token=token))
-    session = _MultipartUploadSession(
+    session = MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
         path=path,
@@ -63,7 +63,7 @@ def auto_multipart_upload(
         on_upload_progress=on_upload_progress,
         upload_part_fn=lambda **kwargs: iter_coroutine(client.upload_part(**kwargs)),
     )
-    ordered_parts = _order_uploaded_parts(parts)
+    ordered_parts = order_uploaded_parts(parts)
 
     complete_response = iter_coroutine(
         client.complete_multipart_upload(
@@ -75,7 +75,7 @@ def auto_multipart_upload(
             parts=ordered_parts,
         )
     )
-    return _shape_complete_upload_result(complete_response)
+    return shape_complete_upload_result(complete_response)
 
 
 async def auto_multipart_upload_async(
@@ -95,18 +95,18 @@ async def auto_multipart_upload_async(
     ) = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    client = _AsyncMultipartClient()
-    headers = _prepare_upload_headers(
+    client = AsyncMultipartClient()
+    headers = prepare_upload_headers(
         access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
         overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
     )
-    part_size = _validate_part_size(part_size)
+    part_size = validate_part_size(part_size)
 
     create_response = await client.create_multipart_upload(path, headers, token=token)
-    session = _MultipartUploadSession(
+    session = MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
         path=path,
@@ -124,7 +124,7 @@ async def auto_multipart_upload_async(
         on_upload_progress=on_upload_progress,
         upload_part_fn=client.upload_part,
     )
-    ordered_parts = _order_uploaded_parts(parts)
+    ordered_parts = order_uploaded_parts(parts)
 
     complete_response = await client.complete_multipart_upload(
         upload_id=session.upload_id,
@@ -134,4 +134,4 @@ async def auto_multipart_upload_async(
         token=session.token,
         parts=ordered_parts,
     )
-    return _shape_complete_upload_result(complete_response)
+    return shape_complete_upload_result(complete_response)

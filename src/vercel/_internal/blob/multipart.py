@@ -20,7 +20,7 @@ from vercel._internal.blob.errors import BlobError
 from vercel._internal.blob.types import Access, UploadProgressEvent
 
 if TYPE_CHECKING:
-    from vercel._internal.blob.core import _BlobRequestClient
+    from vercel._internal.blob.core import BlobRequestClient
 
 AsyncProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
@@ -43,7 +43,7 @@ MAX_CONCURRENCY = 6
 
 
 @dataclass(frozen=True)
-class _MultipartUploadSession:
+class MultipartUploadSession:
     upload_id: str
     key: str
     path: str
@@ -56,14 +56,14 @@ class _MultipartUploadSession:
 # ---------------------------------------------------------------------------
 
 
-def _validate_part_size(part_size: int) -> int:
+def validate_part_size(part_size: int) -> int:
     ps = int(part_size)
     if ps < MIN_PART_SIZE:
         raise BlobError(f"part_size must be at least {MIN_PART_SIZE} bytes (5 MiB)")
     return ps
 
 
-def _prepare_upload_headers(
+def prepare_upload_headers(
     *,
     access: Access,
     content_type: str | None,
@@ -88,13 +88,13 @@ def _normalize_part_upload_result(part_number: int, response: dict[str, Any]) ->
     return {"partNumber": part_number, "etag": response["etag"]}
 
 
-def _order_uploaded_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def order_uploaded_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ordered_parts = list(parts)
     ordered_parts.sort(key=lambda part: int(part["partNumber"]))
     return ordered_parts
 
 
-def _shape_complete_upload_result(response: dict[str, Any]) -> dict[str, Any]:
+def shape_complete_upload_result(response: dict[str, Any]) -> dict[str, Any]:
     shaped = {
         "url": response["url"],
         "downloadUrl": response["downloadUrl"],
@@ -199,7 +199,7 @@ class _SyncMultipartUploadRuntime:
     def upload(
         self,
         *,
-        session: _MultipartUploadSession,
+        session: MultipartUploadSession,
         body: Any,
         part_size: int,
         total: int,
@@ -257,7 +257,7 @@ class _AsyncMultipartUploadRuntime:
     async def upload(
         self,
         *,
-        session: _MultipartUploadSession,
+        session: MultipartUploadSession,
         body: Any,
         part_size: int,
         total: int,
@@ -366,10 +366,10 @@ def _build_headers(
     return request_headers
 
 
-class _MultipartClient:
+class MultipartClient:
     def __init__(
         self,
-        request_client: _BlobRequestClient,
+        request_client: BlobRequestClient,
     ) -> None:
         self._request_client = request_client
 
@@ -448,15 +448,15 @@ class _MultipartClient:
         return cast(dict[str, Any], response)
 
 
-class _SyncMultipartClient(_MultipartClient):
+class SyncMultipartClient(MultipartClient):
     def __init__(self) -> None:
-        from vercel._internal.blob.core import _create_sync_request_client
+        from vercel._internal.blob.core import create_sync_request_client
 
-        super().__init__(_create_sync_request_client())
+        super().__init__(create_sync_request_client())
 
 
-class _AsyncMultipartClient(_MultipartClient):
+class AsyncMultipartClient(MultipartClient):
     def __init__(self) -> None:
-        from vercel._internal.blob.core import _create_async_request_client
+        from vercel._internal.blob.core import create_async_request_client
 
-        super().__init__(_create_async_request_client())
+        super().__init__(create_async_request_client())

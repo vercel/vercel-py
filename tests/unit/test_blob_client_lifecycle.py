@@ -33,7 +33,7 @@ class TestBlobClientLifecycle:
         mock_ops_client.head_blob = AsyncMock(return_value=_head_result())
         mock_ops_client.list_objects = MagicMock(return_value=_list_result())
 
-        with patch("vercel.blob.client._SyncBlobOpsClient", return_value=mock_ops_client) as ctor:
+        with patch("vercel.blob.client.SyncBlobOpsClient", return_value=mock_ops_client) as ctor:
             client = BlobClient(token="test_token")
             client.head("file.txt")
             client.list_objects()
@@ -46,7 +46,7 @@ class TestBlobClientLifecycle:
         mock_ops_client = MagicMock()
         mock_ops_client.head_blob = AsyncMock(return_value=_head_result())
 
-        with patch("vercel.blob.client._SyncBlobOpsClient", return_value=mock_ops_client):
+        with patch("vercel.blob.client.SyncBlobOpsClient", return_value=mock_ops_client):
             client = BlobClient(token="test_token")
             client.close()
             client.close()
@@ -82,7 +82,7 @@ class TestBlobClientLifecycle:
         mock_ops_client = MagicMock()
         mock_ops_client._request_client = mock_request_client
 
-        with patch("vercel.blob.client._SyncBlobOpsClient", return_value=mock_ops_client):
+        with patch("vercel.blob.client.SyncBlobOpsClient", return_value=mock_ops_client):
             client = BlobClient(token="test_token")
             uploader = client.create_multipart_uploader("folder/client-mpu.bin")
             part = uploader.upload_part(1, b"chunk")
@@ -98,7 +98,7 @@ class TestBlobClientLifecycle:
         mock_ops_client.head_blob = AsyncMock(return_value=_head_result())
         mock_ops_client.list_objects = AsyncMock(return_value=_list_result())
 
-        with patch("vercel.blob.client._AsyncBlobOpsClient", return_value=mock_ops_client) as ctor:
+        with patch("vercel.blob.client.AsyncBlobOpsClient", return_value=mock_ops_client) as ctor:
             client = AsyncBlobClient(token="test_token")
             await client.head("file.txt")
             await client.list_objects()
@@ -113,7 +113,7 @@ class TestBlobClientLifecycle:
         mock_ops_client.aclose = AsyncMock()
         mock_ops_client.head_blob = AsyncMock(return_value=_head_result())
 
-        with patch("vercel.blob.client._AsyncBlobOpsClient", return_value=mock_ops_client):
+        with patch("vercel.blob.client.AsyncBlobOpsClient", return_value=mock_ops_client):
             client = AsyncBlobClient(token="test_token")
             await client.aclose()
             await client.aclose()
@@ -151,7 +151,7 @@ class TestBlobClientLifecycle:
         mock_ops_client = MagicMock()
         mock_ops_client._request_client = mock_request_client
 
-        with patch("vercel.blob.client._AsyncBlobOpsClient", return_value=mock_ops_client):
+        with patch("vercel.blob.client.AsyncBlobOpsClient", return_value=mock_ops_client):
             client = AsyncBlobClient(token="test_token")
             uploader = await client.create_multipart_uploader("folder/client-mpu-async.bin")
             part = await uploader.upload_part(1, b"chunk")

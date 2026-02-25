@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from vercel._internal.blob import validate_access
-from vercel._internal.blob.core import _parse_last_modified
+from vercel._internal.blob.core import parse_last_modified
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobError
 from vercel.blob.ops import (
@@ -24,15 +24,15 @@ STORE_ID = "storeid123"
 
 
 # ---------------------------------------------------------------------------
-# _parse_last_modified — pure logic
+# parse_last_modified — pure logic
 # ---------------------------------------------------------------------------
 class TestParseLastModified:
     def test_rfc7231_date(self):
-        dt = _parse_last_modified("Tue, 15 Nov 1994 08:12:31 GMT")
+        dt = parse_last_modified("Tue, 15 Nov 1994 08:12:31 GMT")
         assert dt == datetime(1994, 11, 15, 8, 12, 31, tzinfo=timezone.utc)
 
     def test_iso8601_date(self):
-        dt = _parse_last_modified("2024-01-15T10:30:00+00:00")
+        dt = parse_last_modified("2024-01-15T10:30:00+00:00")
         assert dt.year == 2024
         assert dt.month == 1
         assert dt.day == 15
@@ -41,13 +41,13 @@ class TestParseLastModified:
 
     def test_none_returns_approx_now(self):
         before = datetime.now(tz=timezone.utc)
-        dt = _parse_last_modified(None)
+        dt = parse_last_modified(None)
         after = datetime.now(tz=timezone.utc)
         assert before <= dt <= after
 
     def test_invalid_string_returns_approx_now(self):
         before = datetime.now(tz=timezone.utc)
-        dt = _parse_last_modified("not-a-date")
+        dt = parse_last_modified("not-a-date")
         after = datetime.now(tz=timezone.utc)
         assert before <= dt <= after
 
@@ -121,7 +121,7 @@ class TestDownloadFileAsync:
         mock_core_client.__aenter__ = AsyncMock(return_value=mock_core_client)
         mock_core_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("vercel.blob.ops._AsyncBlobOpsClient", return_value=mock_core_client):
+        with patch("vercel.blob.ops.AsyncBlobOpsClient", return_value=mock_core_client):
             result = await download_file_async(
                 "my/file.txt", str(dest), token=TOKEN, access="public"
             )
@@ -145,7 +145,7 @@ class TestDownloadFileAsync:
         mock_core_client.__aenter__ = AsyncMock(return_value=mock_core_client)
         mock_core_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("vercel.blob.ops._AsyncBlobOpsClient", return_value=mock_core_client):
+        with patch("vercel.blob.ops.AsyncBlobOpsClient", return_value=mock_core_client):
             await download_file_async("my/secret.txt", str(dest), token=TOKEN, access="private")
 
         kwargs = mock_core_client.download_file.await_args.kwargs

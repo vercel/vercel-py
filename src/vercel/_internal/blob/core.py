@@ -63,14 +63,14 @@ from vercel._internal.blob.errors import (
 )
 from vercel._internal.blob.multipart import (
     DEFAULT_PART_SIZE,
-    _MultipartClient,
-    _MultipartUploadSession,
-    _order_uploaded_parts,
-    _prepare_upload_headers,
-    _shape_complete_upload_result,
-    _validate_part_size,
+    MultipartClient,
+    MultipartUploadSession,
     create_async_multipart_upload_runtime,
     create_sync_multipart_upload_runtime,
+    order_uploaded_parts,
+    prepare_upload_headers,
+    shape_complete_upload_result,
+    validate_part_size,
 )
 from vercel._internal.blob.types import (
     Access,
@@ -406,7 +406,7 @@ def _build_cache_bypass_url(blob_url: str) -> str:
     )
 
 
-def _parse_last_modified(value: str | None) -> datetime:
+def parse_last_modified(value: str | None) -> datetime:
     if not value:
         return datetime.now(tz=timezone.utc)
     try:
@@ -419,7 +419,7 @@ def _parse_last_modified(value: str | None) -> datetime:
         return datetime.now(tz=timezone.utc)
 
 
-class _BlobRequestClient:
+class BlobRequestClient:
     _transport: BaseTransport
     _sleep_fn: SleepFn
     _await_progress_callback: bool
@@ -549,9 +549,9 @@ class _BlobRequestClient:
         raise BlobUnknownError()
 
 
-def _create_sync_request_client(timeout: float = 30.0) -> _BlobRequestClient:
+def create_sync_request_client(timeout: float = 30.0) -> BlobRequestClient:
     transport = SyncTransport(create_base_client(timeout=timeout))
-    return _BlobRequestClient(
+    return BlobRequestClient(
         transport=transport,
         sleep_fn=_sync_sleep,
         await_progress_callback=False,
@@ -559,19 +559,19 @@ def _create_sync_request_client(timeout: float = 30.0) -> _BlobRequestClient:
     )
 
 
-def _create_async_request_client(timeout: float = 30.0) -> _BlobRequestClient:
+def create_async_request_client(timeout: float = 30.0) -> BlobRequestClient:
     transport = AsyncTransport(create_base_async_client(timeout=timeout))
-    return _BlobRequestClient(
+    return BlobRequestClient(
         transport=transport,
     )
 
 
-class _BaseBlobOpsClient:
+class BaseBlobOpsClient:
     def __init__(
         self,
         *,
-        request_client: _BlobRequestClient,
-        multipart_client: _MultipartClient,
+        request_client: BlobRequestClient,
+        multipart_client: MultipartClient,
         multipart_runtime: Any,
     ) -> None:
         self._request_client = request_client
@@ -603,21 +603,21 @@ class _BaseBlobOpsClient:
         token: str | None = None,
         on_upload_progress: BlobProgressCallback | None = None,
     ) -> dict[str, Any]:
-        headers = _prepare_upload_headers(
+        headers = prepare_upload_headers(
             access=access,
             content_type=content_type,
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
         )
-        part_size = _validate_part_size(DEFAULT_PART_SIZE)
+        part_size = validate_part_size(DEFAULT_PART_SIZE)
 
         create_response = await self._multipart_client.create_multipart_upload(
             path,
             headers,
             token=token,
         )
-        session = _MultipartUploadSession(
+        session = MultipartUploadSession(
             upload_id=create_response["uploadId"],
             key=create_response["key"],
             path=path,
@@ -639,7 +639,7 @@ class _BaseBlobOpsClient:
                 )
             ),
         )
-        ordered_parts = _order_uploaded_parts(parts)
+        ordered_parts = order_uploaded_parts(parts)
 
         complete_response = await self._multipart_client.complete_multipart_upload(
             upload_id=session.upload_id,
@@ -649,7 +649,7 @@ class _BaseBlobOpsClient:
             token=session.token,
             parts=ordered_parts,
         )
-        return _shape_complete_upload_result(complete_response)
+        return shape_complete_upload_result(complete_response)
 
     async def put_blob(
         self,
@@ -817,7 +817,7 @@ class _BaseBlobOpsClient:
                     size=None,
                     content_disposition=response.headers.get("content-disposition", ""),
                     cache_control=response.headers.get("cache-control", ""),
-                    uploaded_at=_parse_last_modified(response.headers.get("last-modified")),
+                    uploaded_at=parse_last_modified(response.headers.get("last-modified")),
                     etag=response.headers.get("etag", ""),
                     content=b"",
                     status_code=304,
@@ -832,7 +832,7 @@ class _BaseBlobOpsClient:
                 size=int(content_length) if content_length else len(response.content),
                 content_disposition=response.headers.get("content-disposition", ""),
                 cache_control=response.headers.get("cache-control", ""),
-                uploaded_at=_parse_last_modified(response.headers.get("last-modified")),
+                uploaded_at=parse_last_modified(response.headers.get("last-modified")),
                 etag=response.headers.get("etag", ""),
                 content=response.content,
                 status_code=response.status_code,
@@ -1030,10 +1030,10 @@ class _BaseBlobOpsClient:
         return dst
 
 
-class _SyncBlobOpsClient(_BaseBlobOpsClient):
+class SyncBlobOpsClient(BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        request_client = _create_sync_request_client(timeout)
-        multipart_client = _MultipartClient(request_client)
+        request_client = create_sync_request_client(timeout)
+        multipart_client = MultipartClient(request_client)
         super().__init__(
             request_client=request_client,
             multipart_client=multipart_client,
@@ -1123,17 +1123,17 @@ class _SyncBlobOpsClient(_BaseBlobOpsClient):
     async def _close_response(self, response: httpx.Response) -> None:
         response.close()
 
-    def __enter__(self) -> _SyncBlobOpsClient:
+    def __enter__(self) -> SyncBlobOpsClient:
         return self
 
     def __exit__(self, *args: object) -> None:
         self.close()
 
 
-class _AsyncBlobOpsClient(_BaseBlobOpsClient):
+class AsyncBlobOpsClient(BaseBlobOpsClient):
     def __init__(self, *, timeout: float = 30.0) -> None:
-        request_client = _create_async_request_client(timeout)
-        multipart_client = _MultipartClient(request_client)
+        request_client = create_async_request_client(timeout)
+        multipart_client = MultipartClient(request_client)
         super().__init__(
             request_client=request_client,
             multipart_client=multipart_client,
@@ -1143,7 +1143,7 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
     async def aclose(self) -> None:
         await self._request_client.aclose()
 
-    async def __aenter__(self) -> _AsyncBlobOpsClient:
+    async def __aenter__(self) -> AsyncBlobOpsClient:
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -1230,11 +1230,11 @@ class _AsyncBlobOpsClient(_BaseBlobOpsClient):
 
 
 __all__ = [
-    "_AsyncBlobOpsClient",
-    "_SyncBlobOpsClient",
-    "_BlobRequestClient",
-    "_create_sync_request_client",
-    "_create_async_request_client",
+    "AsyncBlobOpsClient",
+    "SyncBlobOpsClient",
+    "BlobRequestClient",
+    "create_sync_request_client",
+    "create_async_request_client",
     "build_create_folder_result",
     "build_head_blob_result",
     "build_list_blob_result",

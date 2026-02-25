@@ -7,11 +7,11 @@ from typing import Any
 
 from vercel._internal.blob import ensure_token
 from vercel._internal.blob.core import (
-    _AsyncBlobOpsClient,
-    _SyncBlobOpsClient,
+    AsyncBlobOpsClient,
+    SyncBlobOpsClient,
     normalize_delete_urls,
 )
-from vercel._internal.blob.multipart import _MultipartClient
+from vercel._internal.blob.multipart import MultipartClient
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobError, BlobNoTokenProvidedError
 from vercel.blob.multipart.api import (
@@ -41,7 +41,7 @@ class BlobClient:
             raise BlobNoTokenProvidedError()
         self.token = ensure_token(resolved_token)
 
-        self._ops_client = _SyncBlobOpsClient()
+        self._ops_client = SyncBlobOpsClient()
         self._closed = False
 
     def _ensure_open(self) -> None:
@@ -278,7 +278,7 @@ class BlobClient:
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
             token=self.token,
-            multipart_client=_MultipartClient(self._ops_client._request_client),
+            multipart_client=MultipartClient(self._ops_client._request_client),
         )
 
 
@@ -291,7 +291,7 @@ class AsyncBlobClient:
             raise BlobNoTokenProvidedError()
         self.token = ensure_token(resolved_token)
 
-        self._ops_client = _AsyncBlobOpsClient()
+        self._ops_client = AsyncBlobOpsClient()
         self._closed = False
 
     def _ensure_open(self) -> None:
@@ -522,5 +522,5 @@ class AsyncBlobClient:
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
             token=self.token,
-            multipart_client=_MultipartClient(self._ops_client._request_client),
+            multipart_client=MultipartClient(self._ops_client._request_client),
         )
