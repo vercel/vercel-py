@@ -6,7 +6,6 @@ from typing import Any
 from vercel._internal.blob import compute_body_length
 from vercel._internal.blob.multipart import (
     DEFAULT_PART_SIZE,
-    MIN_PART_SIZE,
     AsyncMultipartClient,
     MultipartUploadSession,
     SyncMultipartClient,

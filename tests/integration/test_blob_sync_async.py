@@ -83,7 +83,7 @@ class TestBlobPut:
         progress_percentages: list[float] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            body = b"".join(request.stream)
+            body = b"".join(request.stream)  # type: ignore[arg-type]
             assert body == payload
             return httpx.Response(200, json=mock_blob_put_response)
 
@@ -110,7 +110,7 @@ class TestBlobPut:
 
         async def handler(request: httpx.Request) -> httpx.Response:
             body = b""
-            async for chunk in request.stream:
+            async for chunk in request.stream:  # type: ignore[union-attr]
                 body += chunk
             assert body == payload
             return httpx.Response(200, json=mock_blob_put_response)

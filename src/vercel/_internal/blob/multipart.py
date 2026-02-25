@@ -12,7 +12,6 @@ import anyio
 
 from vercel._internal.blob import (
     PutHeaders,
-    compute_body_length,
     create_put_headers,
     validate_access,
 )

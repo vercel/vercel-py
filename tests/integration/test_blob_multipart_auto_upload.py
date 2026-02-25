@@ -10,6 +10,7 @@ import httpx
 import pytest
 import respx
 
+from vercel._internal.blob.multipart import MIN_PART_SIZE
 from vercel.blob.multipart import (
     AsyncMultipartUploader,
     MultipartUploader,
@@ -24,7 +25,6 @@ from vercel.blob.multipart import (
     upload_part,
     upload_part_async,
 )
-from vercel.blob.multipart.uploader import MIN_PART_SIZE
 from vercel.blob.types import UploadProgressEvent
 
 BLOB_API_BASE = "https://vercel.com/api/blob"
