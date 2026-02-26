@@ -13,6 +13,7 @@ from .errors import (
     BlobFileTooLargeError,
     BlobInvalidResponseJSONError,
     BlobNotFoundError,
+    BlobNoTokenProvidedError,
     BlobPathnameMismatchError,
     BlobRequestAbortedError,
     BlobServiceNotAvailable,
@@ -88,6 +89,7 @@ __all__ = [
     "BlobInvalidResponseJSONError",
     "BlobServiceNotAvailable",
     "BlobServiceRateLimited",
+    "BlobNoTokenProvidedError",
     "BlobRequestAbortedError",
     # ops
     "put",
