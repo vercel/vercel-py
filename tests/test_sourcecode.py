@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SOURCE_DIRS = ["src", "tests", "examples"]
 
 
 class TestLint(unittest.TestCase):
@@ -15,7 +16,7 @@ class TestLint(unittest.TestCase):
 
         try:
             subprocess.run(
-                [sys.executable, "-m", "ruff", "check"],
+                [sys.executable, "-m", "ruff", "check", *SOURCE_DIRS],
                 check=True,
                 capture_output=True,
                 cwd=PROJECT_ROOT,
@@ -30,7 +31,7 @@ class TestLint(unittest.TestCase):
 
         try:
             subprocess.run(
-                [sys.executable, "-m", "ruff", "format", "--check", "."],
+                [sys.executable, "-m", "ruff", "format", "--check", *SOURCE_DIRS],
                 check=True,
                 capture_output=True,
                 cwd=PROJECT_ROOT,
@@ -58,6 +59,7 @@ class TestTypecheck(unittest.TestCase):
                     "--config-file",
                     str(config_path),
                     "src",
+                    "tests",
                 ],
                 check=True,
                 capture_output=True,
