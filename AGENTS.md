@@ -4,7 +4,7 @@ Requires Python >= 3.10. Uses `uv` for dependency management.
 
 # Scripts
 
-- `./scripts/lint.sh` — Run ruff linter
-- `./scripts/typecheck.sh` — Run mypy and verify module imports
-- `./scripts/test.sh` — Run unit tests (excludes example tests). Accepts extra pytest args.
+- `./scripts/test.sh` — Run all tests including lint and typecheck (excludes example tests). Accepts extra pytest args.
 - `./scripts/test-examples.sh` — Run example tests in parallel. Accepts extra pytest args.
+- `./scripts/lint.sh` — Run lint tests only (ruff check + format). Accepts extra pytest args.
+- `./scripts/typecheck.sh` — Run typecheck tests only (mypy + module imports). Accepts extra pytest args.
