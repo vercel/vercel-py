@@ -124,3 +124,7 @@ venv.bak/
 **/*.env
 
 uv.lock
+
+# Node (changesets tooling)
+node_modules/
+package.json

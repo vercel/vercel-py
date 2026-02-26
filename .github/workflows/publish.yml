@@ -1,27 +1,59 @@
 name: Publish PyPI
+
 on:
   push:
     branches:
-      - main   # publish on push to main
-
-permissions:
-  contents: write  # required for creating tags
-  id-token: write  # required for Trusted Publishing (OIDC)
+      - main
 
 jobs:
-  check-version:
+  release:
+    name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
-      should-publish: ${{ steps.version-check.outputs.should-publish }}
+      should-publish: ${{ steps.publish-check.outputs.should-publish }}
+      version: ${{ steps.get-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.14"
-      - name: Check if version already published
-        id: version-check
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Get version
+        id: get-version
         run: |
-          VERSION=$(python scripts/get-version.py)
+          VERSION=$(uv run scripts/get-version.py)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # Generate ephemeral package.json for changesets
+      - name: Generate package.json
+        run: echo '{"name":"vercel","version":"'"$VERSION"'","private":true}' > package.json
+
+      - name: Create Release Pull Request or Check Publish
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: |
+            echo '{"name":"vercel","version":"'"$VERSION"'","private":true}' > package.json
+            pnpm dlx --package="@changesets/cli@2.29.4" \
+              --package="@svitejs/changesets-changelog-github-compact@1.1.0" \
+              changeset version
+            uv run scripts/sync-version.py
+            rm -f package.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if should publish
+        id: publish-check
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        run: |
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/vercel/$VERSION/json")
           if [ "$HTTP_STATUS" = "200" ]; then
             echo "Version $VERSION already exists on PyPI, skipping publish"
@@ -31,26 +63,31 @@ jobs:
             echo "should-publish=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Clean up package.json
+        if: always()
+        run: rm -f package.json
+
   publish:
-    needs: check-version
-    if: needs.check-version.outputs.should-publish == 'true'
+    name: Publish to PyPI
+    needs: release
+    if: needs.release.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     environment:
       name: pypi
       url: https://pypi.org/p/vercel
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
       - uses: astral-sh/setup-uv@v3
       - run: uv venv --python 3.14
       - run: uv pip install build
       - name: Create tag from version
         run: |
-          VERSION=$(python scripts/get-version.py)
           TAG="v$VERSION"
-          # Check if tag already exists
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping tag creation"
           else
@@ -60,11 +97,6 @@ jobs:
             git tag "$TAG"
             git push origin "$TAG"
           fi
-      - name: Verify tag matches version
-        run: |
-          VERSION=$(python scripts/get-version.py)
-          TAG="v$VERSION"
-          echo "Verifying tag $TAG matches version $VERSION"
       - name: Build
         run: uv run python -m build
       - name: Publish to PyPI

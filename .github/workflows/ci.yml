@@ -37,3 +37,20 @@ jobs:
 
       - name: Build package
         run: ./scripts/build.sh
+
+  enforce-changeset:
+    name: Enforce Changeset
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - run: bash scripts/changeset.sh status --since=origin/main
