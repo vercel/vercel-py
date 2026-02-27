@@ -113,9 +113,7 @@ class TestBuildGetResult:
             },
             content=b"Hello, world!",
         )
-        result = _build_get_result(
-            resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt"
-        )
+        result = _build_get_result(resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt")
         assert result.status_code == resp.status_code
         assert result.content == b"Hello, world!"
         assert result.size == 13
@@ -130,9 +128,7 @@ class TestBuildGetResult:
                 "etag": '"abc"',
             },
         )
-        result = _build_get_result(
-            resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt"
-        )
+        result = _build_get_result(resp, "https://s.public.blob.vercel-storage.com/f.txt", "f.txt")
         assert result.status_code == 304
         assert result.content == b""
         assert result.size is None
@@ -163,9 +159,7 @@ class TestDownloadFile:
         """Return a mock httpx.Client whose stream() yields *chunk_data*."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.headers = httpx.Headers(
-            {"Content-Length": str(len(chunk_data))}
-        )
+        mock_resp.headers = httpx.Headers({"Content-Length": str(len(chunk_data))})
         mock_resp.iter_bytes.return_value = iter([chunk_data])
         mock_resp.raise_for_status = MagicMock()
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
@@ -183,9 +177,7 @@ class TestDownloadFile:
         mock_client = self._mock_sync_download(chunk_data)
 
         with patch("vercel.blob.ops.httpx.Client", return_value=mock_client):
-            result = download_file(
-                "my/file.txt", str(dest), token=TOKEN, access="public"
-            )
+            result = download_file("my/file.txt", str(dest), token=TOKEN, access="public")
 
         assert result == str(dest)
         assert dest.read_bytes() == chunk_data
@@ -199,9 +191,7 @@ class TestDownloadFile:
         mock_client = self._mock_sync_download(b"secret")
 
         with patch("vercel.blob.ops.httpx.Client", return_value=mock_client):
-            download_file(
-                "my/secret.txt", str(dest), token=TOKEN, access="private"
-            )
+            download_file("my/secret.txt", str(dest), token=TOKEN, access="private")
 
         headers = mock_client.stream.call_args[1]["headers"]
         assert headers["authorization"] == f"Bearer {TOKEN}"
@@ -216,9 +206,7 @@ class TestDownloadFileAsync:
         """Return a mock httpx.AsyncClient whose stream() yields *chunk_data*."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.headers = httpx.Headers(
-            {"Content-Length": str(len(chunk_data))}
-        )
+        mock_resp.headers = httpx.Headers({"Content-Length": str(len(chunk_data))})
         mock_resp.raise_for_status = MagicMock()
 
         async def aiter_bytes():
@@ -239,9 +227,7 @@ class TestDownloadFileAsync:
         chunk_data = b"async file content"
         mock_client = self._mock_async_download(chunk_data)
 
-        with patch(
-            "vercel.blob.ops.httpx.AsyncClient", return_value=mock_client
-        ):
+        with patch("vercel.blob.ops.httpx.AsyncClient", return_value=mock_client):
             result = await download_file_async(
                 "my/file.txt", str(dest), token=TOKEN, access="public"
             )
@@ -253,12 +239,8 @@ class TestDownloadFileAsync:
         dest = tmp_path / "private_async.txt"
         mock_client = self._mock_async_download(b"async secret")
 
-        with patch(
-            "vercel.blob.ops.httpx.AsyncClient", return_value=mock_client
-        ):
-            await download_file_async(
-                "my/secret.txt", str(dest), token=TOKEN, access="private"
-            )
+        with patch("vercel.blob.ops.httpx.AsyncClient", return_value=mock_client):
+            await download_file_async("my/secret.txt", str(dest), token=TOKEN, access="private")
 
         headers = mock_client.stream.call_args[1]["headers"]
         assert headers["authorization"] == f"Bearer {TOKEN}"

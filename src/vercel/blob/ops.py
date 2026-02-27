@@ -445,9 +445,7 @@ def _parse_last_modified(value: str | None) -> datetime:
         return datetime.now(tz=timezone.utc)
 
 
-def _build_get_result(
-    resp: httpx.Response, blob_url: str, pathname: str
-) -> GetBlobResultType:
+def _build_get_result(resp: httpx.Response, blob_url: str, pathname: str) -> GetBlobResultType:
     """Build a GetBlobResult from an httpx response."""
     if resp.status_code == 304:
         return GetBlobResultType(
@@ -485,10 +483,16 @@ def _build_cache_bypass_url(blob_url: str) -> str:
     params = parse_qs(parsed.query)
     params["cache"] = ["0"]
     query = urlencode(params, doseq=True)
-    return urlunparse((
-        parsed.scheme, parsed.netloc, parsed.path,
-        parsed.params, query, parsed.fragment,
-    ))
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            query,
+            parsed.fragment,
+        )
+    )
 
 
 def get(
