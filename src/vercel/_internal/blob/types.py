@@ -70,6 +70,9 @@ class GetBlobResult:
     content: bytes
     status_code: int
 
+    def __bytes__(self) -> bytes:
+        return self.content
+
 
 @dataclass(slots=True)
 class MultipartPart:
