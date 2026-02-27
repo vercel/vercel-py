@@ -4,14 +4,33 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
 from datetime import datetime
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Protocol, TypedDict
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from .errors import BlobError, BlobNoTokenProvidedError
 
-Access = Literal["public", "private"]
+def get_download_url(blob_url: str) -> str:
+    try:
+        parsed = urlparse(blob_url)
+        q = dict(parse_qsl(parsed.query))
+        q["download"] = "1"
+        new_query = urlencode(q)
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                new_query,
+                parsed.fragment,
+            )
+        )
+    except Exception:
+        # Fallback: naive append
+        sep = "&" if "?" in blob_url else "?"
+        return f"{blob_url}{sep}download=1"
+
 
 DEFAULT_VERCEL_BLOB_API_URL = "https://vercel.com/api/blob"
 MAXIMUM_PATHNAME_LENGTH = 950
@@ -100,6 +119,8 @@ def extract_store_id_from_token(token: str) -> str:
 
 
 def validate_path(path: str) -> None:
+    from vercel._internal.blob.errors import BlobError
+
     if not path:
         raise BlobError("path is required")
     if len(path) > MAXIMUM_PATHNAME_LENGTH:
@@ -109,13 +130,15 @@ def validate_path(path: str) -> None:
             raise BlobError(f'path cannot contain "{invalid}", please encode it if needed')
 
 
-def validate_access(access: Access) -> Access:
+def validate_access(access: str) -> str:
+    from vercel._internal.blob.errors import BlobError
+
     if access not in ("public", "private"):
         raise BlobError('access must be "public" or "private"')
     return access
 
 
-def construct_blob_url(store_id: str, pathname: str, access: Access) -> str:
+def construct_blob_url(store_id: str, pathname: str, access: str) -> str:
     """Construct a blob storage URL based on access type.
 
     Public:  https://{storeId}.public.blob.vercel-storage.com/{pathname}
@@ -150,19 +173,6 @@ def compute_body_length(body: Any) -> int:
     return 0
 
 
-# Progress
-@dataclass
-class UploadProgressEvent:
-    loaded: int
-    total: int
-    percentage: float
-
-
-OnUploadProgressCallback = (
-    Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
-)
-
-
 class SupportsRead(Protocol):
     def read(self, size: int = -1) -> bytes:  # pragma: no cover - Protocol
         ...
@@ -178,7 +188,7 @@ class StreamingBodyWithProgress:
     def __init__(
         self,
         body: bytes | bytearray | memoryview | str | SupportsRead | Iterable[bytes],
-        on_progress: OnUploadProgressCallback | None,
+        on_progress: Callable | None,
         chunk_size: int = 64 * 1024,
         total: int | None = None,
     ) -> None:
@@ -229,6 +239,8 @@ class StreamingBodyWithProgress:
 
     def _emit_progress(self) -> None:
         if self._on_progress:
+            from vercel._internal.blob.types import UploadProgressEvent
+
             total = self._total if self._total else self._loaded
             percentage = round((self._loaded / total) * 100, 2) if total else 0.0
             self._on_progress(
@@ -237,6 +249,8 @@ class StreamingBodyWithProgress:
 
     async def _emit_progress_async(self) -> None:
         if self._on_progress:
+            from vercel._internal.blob.types import UploadProgressEvent
+
             total = self._total if self._total else self._loaded
             percentage = round((self._loaded / total) * 100, 2) if total else 0.0
             result = self._on_progress(
@@ -313,30 +327,6 @@ def parse_datetime(value: str) -> datetime:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def get_download_url(blob_url: str) -> str:
-    try:
-        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-
-        parsed = urlparse(blob_url)
-        q = dict(parse_qsl(parsed.query))
-        q["download"] = "1"
-        new_query = urlencode(q)
-        return urlunparse(
-            (
-                parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                new_query,
-                parsed.fragment,
-            )
-        )
-    except Exception:
-        # Fallback: naive append
-        sep = "&" if "?" in blob_url else "?"
-        return f"{blob_url}{sep}download=1"
-
-
 # TypedDict with real HTTP header keys. Use functional syntax to allow hyphens.
 PutHeaders = TypedDict(
     "PutHeaders",
@@ -356,7 +346,7 @@ def create_put_headers(
     add_random_suffix: bool | None = None,
     allow_overwrite: bool | None = None,
     cache_control_max_age: int | None = None,
-    access: Access | None = None,
+    access: str | None = None,
 ) -> PutHeaders:
     headers: PutHeaders = {}
     if content_type:
@@ -373,6 +363,8 @@ def create_put_headers(
 
 
 def ensure_token(token: str | None) -> str:
+    from vercel._internal.blob.errors import BlobNoTokenProvidedError
+
     token = token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
     if not token:
         raise BlobNoTokenProvidedError()

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from .._telemetry.tracker import track
+from vercel._internal.telemetry.tracker import track
+
 from .types import AsyncCache, Cache
 
 

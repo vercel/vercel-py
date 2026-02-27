@@ -1,3 +1,5 @@
+from vercel._internal.blob import get_download_url
+
 from . import aio as aioblob
 from .client import (
     AsyncBlobClient,
@@ -9,13 +11,16 @@ from .errors import (
     BlobContentTypeNotAllowedError,
     BlobError,
     BlobFileTooLargeError,
+    BlobInvalidResponseJSONError,
     BlobNotFoundError,
+    BlobNoTokenProvidedError,
     BlobPathnameMismatchError,
     BlobRequestAbortedError,
     BlobServiceNotAvailable,
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
     BlobStoreSuspendedError,
+    BlobUnexpectedResponseContentTypeError,
     BlobUnknownError,
 )
 from .multipart import (
@@ -55,6 +60,7 @@ from .ops import (
     upload_file_async,
 )
 from .types import (
+    Access,
     CreateFolderResult,
     GetBlobResult,
     HeadBlobResult,
@@ -62,9 +68,10 @@ from .types import (
     ListBlobResult,
     MultipartCreateResult,
     MultipartPart,
+    OnUploadProgressCallback,
     PutBlobResult,
+    UploadProgressEvent,
 )
-from .utils import Access, OnUploadProgressCallback, UploadProgressEvent, get_download_url
 
 __all__ = [
     # errors
@@ -78,8 +85,11 @@ __all__ = [
     "BlobStoreSuspendedError",
     "BlobUnknownError",
     "BlobNotFoundError",
+    "BlobUnexpectedResponseContentTypeError",
+    "BlobInvalidResponseJSONError",
     "BlobServiceNotAvailable",
     "BlobServiceRateLimited",
+    "BlobNoTokenProvidedError",
     "BlobRequestAbortedError",
     # ops
     "put",

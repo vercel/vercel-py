@@ -4,25 +4,87 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from ..errors import BlobError
-from ..types import MultipartCreateResult, MultipartPart, PutBlobResult
-from ..utils import (
-    Access,
+from vercel._internal.blob import (
     PutHeaders,
-    UploadProgressEvent,
     create_put_headers,
     ensure_token,
     validate_access,
     validate_path,
 )
-from .core import (
-    call_complete_multipart_upload,
-    call_complete_multipart_upload_async,
-    call_create_multipart_upload,
-    call_create_multipart_upload_async,
-    call_upload_part,
-    call_upload_part_async,
+from vercel._internal.blob.multipart import (
+    AsyncMultipartClient,
+    MultipartClient,
+    SyncMultipartClient,
 )
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel.blob.errors import BlobError
+from vercel.blob.types import (
+    Access,
+    MultipartCreateResult,
+    MultipartPart,
+    PutBlobResult,
+    UploadProgressEvent,
+)
+
+
+def _validate_multipart_context(path: str, access: Access, token: str | None) -> str:
+    resolved_token = ensure_token(token)
+    validate_path(path)
+    validate_access(access)
+    return resolved_token
+
+
+def _build_put_headers(
+    *,
+    access: Access,
+    content_type: str | None = None,
+    add_random_suffix: bool = False,
+    overwrite: bool = False,
+    cache_control_max_age: int | None = None,
+) -> dict[str, str]:
+    return cast(
+        dict[str, str],
+        create_put_headers(
+            content_type=content_type,
+            add_random_suffix=add_random_suffix,
+            allow_overwrite=overwrite,
+            cache_control_max_age=cache_control_max_age,
+            access=access,
+        ),
+    )
+
+
+def _build_multipart_create_result(response: dict[str, Any]) -> MultipartCreateResult:
+    return MultipartCreateResult(upload_id=response["uploadId"], key=response["key"])
+
+
+def _build_multipart_part_result(part_number: int, response: dict[str, Any]) -> MultipartPart:
+    return MultipartPart(part_number=part_number, etag=response["etag"])
+
+
+def _build_put_blob_result(response: dict[str, Any]) -> PutBlobResult:
+    return PutBlobResult(
+        url=response["url"],
+        download_url=response["downloadUrl"],
+        pathname=response["pathname"],
+        content_type=response["contentType"],
+        content_disposition=response["contentDisposition"],
+    )
+
+
+def _normalize_complete_parts(parts: list[MultipartPart]) -> list[dict[str, Any]]:
+    return [{"partNumber": part.part_number, "etag": part.etag} for part in parts]
+
+
+def _validate_part_upload_inputs(part_number: int, body: Any) -> None:
+    if part_number < 1 or part_number > 10000:
+        raise BlobError("part_number must be between 1 and 10,000")
+
+    if isinstance(body, dict) and not hasattr(body, "read"):
+        raise BlobError(
+            "Body must be a string, bytes, or file-like object. "
+            "You sent a plain dictionary, double check what you're trying to upload."
+        )
 
 
 def create_multipart_upload(
@@ -35,20 +97,18 @@ def create_multipart_upload(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-
-    headers = create_put_headers(
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-        access=access,
     )
-
-    resp = call_create_multipart_upload(path, headers, token=token)
-    return MultipartCreateResult(upload_id=resp["uploadId"], key=resp["key"])
+    response = iter_coroutine(
+        SyncMultipartClient().create_multipart_upload(path, headers, token=resolved_token)
+    )
+    return _build_multipart_create_result(response)
 
 
 async def create_multipart_upload_async(
@@ -61,18 +121,18 @@ async def create_multipart_upload_async(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> MultipartCreateResult:
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-    headers = create_put_headers(
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-        access=access,
     )
-    resp = await call_create_multipart_upload_async(path, headers, token=token)
-    return MultipartCreateResult(upload_id=resp["uploadId"], key=resp["key"])
+    response = await AsyncMultipartClient().create_multipart_upload(
+        path, headers, token=resolved_token
+    )
+    return _build_multipart_create_result(response)
 
 
 def upload_part(
@@ -87,22 +147,22 @@ def upload_part(
     content_type: str | None = None,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> MultipartPart:
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-
-    headers = create_put_headers(content_type=content_type, access=access)
-    resp = call_upload_part(
-        upload_id=upload_id,
-        key=key,
-        path=path,
-        headers=headers,
-        token=token,
-        part_number=part_number,
-        body=body,
-        on_upload_progress=on_upload_progress,
+    resolved_token = _validate_multipart_context(path, access, token)
+    _validate_part_upload_inputs(part_number, body)
+    headers = _build_put_headers(access=access, content_type=content_type)
+    response = iter_coroutine(
+        SyncMultipartClient().upload_part(
+            upload_id=upload_id,
+            key=key,
+            path=path,
+            headers=headers,
+            part_number=part_number,
+            body=body,
+            on_upload_progress=on_upload_progress,
+            token=resolved_token,
+        ),
     )
-    return MultipartPart(part_number=part_number, etag=resp["etag"])
+    return _build_multipart_part_result(part_number, response)
 
 
 async def upload_part_async(
@@ -121,22 +181,20 @@ async def upload_part_async(
         | None
     ) = None,
 ) -> MultipartPart:
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-
-    headers = create_put_headers(content_type=content_type, access=access)
-    resp = await call_upload_part_async(
+    resolved_token = _validate_multipart_context(path, access, token)
+    _validate_part_upload_inputs(part_number, body)
+    headers = _build_put_headers(access=access, content_type=content_type)
+    response = await AsyncMultipartClient().upload_part(
         upload_id=upload_id,
         key=key,
         path=path,
         headers=headers,
-        token=token,
         part_number=part_number,
         body=body,
         on_upload_progress=on_upload_progress,
+        token=resolved_token,
     )
-    return MultipartPart(part_number=part_number, etag=resp["etag"])
+    return _build_multipart_part_result(part_number, response)
 
 
 def complete_multipart_upload(
@@ -149,26 +207,19 @@ def complete_multipart_upload(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-    headers = create_put_headers(content_type=content_type, access=access)
-
-    resp = call_complete_multipart_upload(
-        upload_id=upload_id,
-        key=key,
-        path=path,
-        headers=headers,
-        token=token,
-        parts=[{"partNumber": p.part_number, "etag": p.etag} for p in parts],
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(access=access, content_type=content_type)
+    response = iter_coroutine(
+        SyncMultipartClient().complete_multipart_upload(
+            upload_id=upload_id,
+            key=key,
+            path=path,
+            headers=headers,
+            parts=_normalize_complete_parts(parts),
+            token=resolved_token,
+        ),
     )
-    return PutBlobResult(
-        url=resp["url"],
-        download_url=resp["downloadUrl"],
-        pathname=resp["pathname"],
-        content_type=resp["contentType"],
-        content_disposition=resp["contentDisposition"],
-    )
+    return _build_put_blob_result(response)
 
 
 async def complete_multipart_upload_async(
@@ -181,43 +232,20 @@ async def complete_multipart_upload_async(
     upload_id: str,
     key: str,
 ) -> PutBlobResult:
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-
-    headers = create_put_headers(content_type=content_type, access=access)
-    resp = await call_complete_multipart_upload_async(
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(access=access, content_type=content_type)
+    response = await AsyncMultipartClient().complete_multipart_upload(
         upload_id=upload_id,
         key=key,
         path=path,
         headers=headers,
-        token=token,
-        parts=[{"partNumber": p.part_number, "etag": p.etag} for p in parts],
+        parts=_normalize_complete_parts(parts),
+        token=resolved_token,
     )
-    return PutBlobResult(
-        url=resp["url"],
-        download_url=resp["downloadUrl"],
-        pathname=resp["pathname"],
-        content_type=resp["contentType"],
-        content_disposition=resp["contentDisposition"],
-    )
+    return _build_put_blob_result(response)
 
 
-class MultipartUploader:
-    """
-    A convenience wrapper for multipart uploads that encapsulates the upload context.
-
-    This provides a cleaner API than the manual approach where you have to pass
-    upload_id, key, pathname, etc. to every function call, while still giving you
-    control over when and how parts are uploaded (unlike the automatic flow).
-
-    Example:
-        >>> uploader = create_multipart_uploader("path/to/file.bin")
-        >>> part1 = uploader.upload_part(1, b"data chunk 1")
-        >>> part2 = uploader.upload_part(2, b"data chunk 2")
-        >>> result = uploader.complete([part1, part2])
-    """
-
+class _BaseMultipartUploader:
     def __init__(
         self,
         path: str,
@@ -225,12 +253,14 @@ class MultipartUploader:
         key: str,
         headers: PutHeaders | dict[str, str],
         token: str | None,
+        multipart_client: MultipartClient,
     ):
         self._path = path
         self._upload_id = upload_id
         self._key = key
         self._headers: dict[str, str] = cast(dict[str, str], headers)
         self._token = token
+        self._multipart_client = multipart_client
 
     @property
     def upload_id(self) -> str:
@@ -242,6 +272,8 @@ class MultipartUploader:
         """The key (blob identifier) for this multipart upload."""
         return self._key
 
+
+class MultipartUploader(_BaseMultipartUploader):
     def upload_part(
         self,
         part_number: int,
@@ -250,116 +282,43 @@ class MultipartUploader:
         on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
         per_part_progress: Callable[[int, UploadProgressEvent], None] | None = None,
     ) -> MultipartPart:
-        """
-        Upload a single part of the multipart upload.
+        _validate_part_upload_inputs(part_number, body)
 
-        Args:
-            part_number: The part number (must be between 1 and 10,000)
-            body: The content to upload for this part (bytes, str, or file-like object)
-            on_upload_progress: Optional callback for upload progress tracking
-
-        Returns:
-            A dict with 'partNumber' and 'etag' fields to pass to complete()
-
-        Raises:
-            BlobError: If body is a plain dict/object
-        """
-        if part_number < 1 or part_number > 10000:
-            raise BlobError("part_number must be between 1 and 10,000")
-
-        if isinstance(body, dict) and not hasattr(body, "read"):
-            raise BlobError(
-                "Body must be a string, bytes, or file-like object. "
-                "You sent a plain dictionary, double check what you're trying to upload."
-            )
-
-        # Compose per-part progress if provided
         effective = on_upload_progress
         if per_part_progress is not None and on_upload_progress is None:
 
             def effective(evt: UploadProgressEvent) -> None:
                 per_part_progress(part_number, evt)
 
-        result = call_upload_part(
-            upload_id=self._upload_id,
-            key=self._key,
-            path=self._path,
-            headers=self._headers,
-            part_number=part_number,
-            body=body,
-            on_upload_progress=effective,
-            token=self._token,
+        result = iter_coroutine(
+            self._multipart_client.upload_part(
+                upload_id=self._upload_id,
+                key=self._key,
+                path=self._path,
+                headers=self._headers,
+                part_number=part_number,
+                body=body,
+                on_upload_progress=effective,
+                token=self._token,
+            )
         )
-
-        return MultipartPart(part_number=part_number, etag=result["etag"])
+        return _build_multipart_part_result(part_number, result)
 
     def complete(self, parts: list[MultipartPart]) -> PutBlobResult:
-        """
-        Complete the multipart upload by assembling the uploaded parts.
-
-        Args:
-            parts: List of parts returned from upload_part() calls.
-                   Each part should have 'partNumber' and 'etag' fields.
-
-        Returns:
-            The result of the completed upload with URL and metadata
-        """
-        resp = call_complete_multipart_upload(
-            upload_id=self._upload_id,
-            key=self._key,
-            path=self._path,
-            headers=self._headers,
-            parts=[{"partNumber": p.part_number, "etag": p.etag} for p in parts],
-            token=self._token,
+        response = iter_coroutine(
+            self._multipart_client.complete_multipart_upload(
+                upload_id=self._upload_id,
+                key=self._key,
+                path=self._path,
+                headers=self._headers,
+                parts=_normalize_complete_parts(parts),
+                token=self._token,
+            )
         )
-        return PutBlobResult(
-            url=resp["url"],
-            download_url=resp["downloadUrl"],
-            pathname=resp["pathname"],
-            content_type=resp["contentType"],
-            content_disposition=resp["contentDisposition"],
-        )
+        return _build_put_blob_result(response)
 
 
-class AsyncMultipartUploader:
-    """
-    An async convenience wrapper for multipart uploads that encapsulates the upload context.
-
-    This provides a cleaner API than the manual approach where you have to pass
-    upload_id, key, pathname, etc. to every function call, while still giving you
-    control over when and how parts are uploaded (unlike the automatic flow).
-
-    Example:
-        >>> uploader = await create_multipart_uploader_async("path/to/file.bin")
-        >>> part1 = await uploader.upload_part(1, b"data chunk 1")
-        >>> part2 = await uploader.upload_part(2, b"data chunk 2")
-        >>> result = await uploader.complete([part1, part2])
-    """
-
-    def __init__(
-        self,
-        path: str,
-        upload_id: str,
-        key: str,
-        headers: PutHeaders | dict[str, str],
-        token: str | None,
-    ):
-        self._path = path
-        self._upload_id = upload_id
-        self._key = key
-        self._headers: dict[str, str] = cast(dict[str, str], headers)
-        self._token = token
-
-    @property
-    def upload_id(self) -> str:
-        """The upload ID for this multipart upload."""
-        return self._upload_id
-
-    @property
-    def key(self) -> str:
-        """The key (blob identifier) for this multipart upload."""
-        return self._key
-
+class AsyncMultipartUploader(_BaseMultipartUploader):
     async def upload_part(
         self,
         part_number: int,
@@ -376,39 +335,17 @@ class AsyncMultipartUploader:
             | None
         ) = None,
     ) -> MultipartPart:
-        """
-        Upload a single part of the multipart upload.
+        _validate_part_upload_inputs(part_number, body)
 
-        Args:
-            part_number: The part number (must be between 1 and 10,000)
-            body: The content to upload for this part (bytes, str, or file-like object)
-            on_upload_progress: Optional callback for upload progress tracking
-
-        Returns:
-            A dict with 'partNumber' and 'etag' fields to pass to complete()
-
-        Raises:
-            BlobError: If body is a plain dict/object
-        """
-        if part_number < 1 or part_number > 10000:
-            raise BlobError("part_number must be between 1 and 10,000")
-
-        if isinstance(body, dict) and not hasattr(body, "read"):
-            raise BlobError(
-                "Body must be a string, bytes, or file-like object. "
-                "You sent a plain dictionary, double check what you're trying to upload."
-            )
-
-        # Compose per-part progress if provided
         effective_progress = on_upload_progress
         if per_part_progress is not None and on_upload_progress is None:
 
             async def effective_progress(evt: UploadProgressEvent):
-                res = per_part_progress(part_number, evt)
-                if inspect.isawaitable(res):
-                    await res
+                result = per_part_progress(part_number, evt)
+                if inspect.isawaitable(result):
+                    await result
 
-        result = await call_upload_part_async(
+        response = await self._multipart_client.upload_part(
             upload_id=self._upload_id,
             key=self._key,
             path=self._path,
@@ -418,35 +355,18 @@ class AsyncMultipartUploader:
             on_upload_progress=effective_progress,
             token=self._token,
         )
-
-        return MultipartPart(part_number=part_number, etag=result["etag"])
+        return _build_multipart_part_result(part_number, response)
 
     async def complete(self, parts: list[MultipartPart]) -> PutBlobResult:
-        """
-        Complete the multipart upload by assembling the uploaded parts.
-
-        Args:
-            parts: List of parts returned from upload_part() calls.
-                   Each part should have 'partNumber' and 'etag' fields.
-
-        Returns:
-            The result of the completed upload with URL and metadata
-        """
-        resp = await call_complete_multipart_upload_async(
+        response = await self._multipart_client.complete_multipart_upload(
             upload_id=self._upload_id,
             key=self._key,
             path=self._path,
             headers=self._headers,
-            parts=[{"partNumber": p.part_number, "etag": p.etag} for p in parts],
+            parts=_normalize_complete_parts(parts),
             token=self._token,
         )
-        return PutBlobResult(
-            url=resp["url"],
-            download_url=resp["downloadUrl"],
-            pathname=resp["pathname"],
-            content_type=resp["contentType"],
-            content_disposition=resp["contentDisposition"],
-        )
+        return _build_put_blob_result(response)
 
 
 def create_multipart_uploader(
@@ -458,54 +378,28 @@ def create_multipart_uploader(
     overwrite: bool = False,
     cache_control_max_age: int | None = None,
     token: str | None = None,
+    multipart_client: MultipartClient | None = None,
 ) -> MultipartUploader:
-    """
-    Create a multipart uploader with a cleaner API than the manual approach.
-
-    It provides more control than the automatic approach (you control part creation
-    and concurrency) while being cleaner than the manual approach (no need to pass
-    upload_id, key, pathname to every call).
-
-    Args:
-        path: The path inside the blob store (includes filename and extension)
-        access: Access level, defaults to "public"
-        content_type: The media type for the file (auto-detected from extension if not provided)
-        add_random_suffix: Whether to add a random suffix to the pathname (default: True)
-        overwrite: Whether to allow overwriting existing files (default: False)
-        cache_control_max_age: Cache duration in seconds (default: one year)
-        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or
-               VERCEL_BLOB_READ_WRITE_TOKEN env var)
-
-    Returns:
-        A MultipartUploader instance with upload_part() and complete() methods
-
-    Example:
-        >>> uploader = create_multipart_uploader("large-file.bin")
-        >>> parts = []
-        >>> for i, chunk in enumerate(chunks, start=1):
-        ...     part = uploader.upload_part(i, chunk)
-        ...     parts.append(part)
-        >>> result = uploader.complete(parts)
-    """
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-
-    headers = create_put_headers(
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-        access=access,
     )
-    create_resp = call_create_multipart_upload(path, headers, token=token)
+    effective_multipart_client = multipart_client or SyncMultipartClient()
+    create_response = iter_coroutine(
+        effective_multipart_client.create_multipart_upload(path, headers, token=resolved_token)
+    )
 
     return MultipartUploader(
         path=path,
-        upload_id=create_resp["uploadId"],
-        key=create_resp["key"],
+        upload_id=create_response["uploadId"],
+        key=create_response["key"],
         headers=headers,
-        token=token,
+        token=resolved_token,
+        multipart_client=effective_multipart_client,
     )
 
 
@@ -518,52 +412,26 @@ async def create_multipart_uploader_async(
     overwrite: bool = False,
     cache_control_max_age: int | None = None,
     token: str | None = None,
+    multipart_client: MultipartClient | None = None,
 ) -> AsyncMultipartUploader:
-    """
-    Create an async multipart uploader with a cleaner API than the manual approach.
-
-    It provides more control than the automatic approach (you control part creation
-    and concurrency) while being cleaner than the manual approach (no need to pass
-    upload_id, key, pathname to every call).
-
-    Args:
-        path: The path inside the blob store (includes filename and extension)
-        access: Access level, defaults to "public"
-        content_type: The media type for the file (auto-detected from extension if not provided)
-        add_random_suffix: Whether to add a random suffix to the pathname (default: True)
-        overwrite: Whether to allow overwriting existing files (default: False)
-        cache_control_max_age: Cache duration in seconds (default: one year)
-        token: Authentication token (defaults to BLOB_READ_WRITE_TOKEN or
-            VERCEL_BLOB_READ_WRITE_TOKEN env var)
-
-    Returns:
-        An AsyncMultipartUploader instance with upload_part() and complete() methods
-
-    Example:
-        >>> uploader = await create_multipart_uploader_async("large-file.bin")
-        >>> parts = []
-        >>> for i, chunk in enumerate(chunks, start=1):
-        ...     part = await uploader.upload_part(i, chunk)
-        ...     parts.append(part)
-        >>> result = await uploader.complete(parts)
-    """
-    token = ensure_token(token)
-    validate_path(path)
-    validate_access(access)
-    headers = create_put_headers(
+    resolved_token = _validate_multipart_context(path, access, token)
+    headers = _build_put_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-        access=access,
     )
-
-    create_resp = await call_create_multipart_upload_async(path, headers, token=token)
+    effective_multipart_client = multipart_client or AsyncMultipartClient()
+    create_response = await effective_multipart_client.create_multipart_upload(
+        path, headers, token=resolved_token
+    )
 
     return AsyncMultipartUploader(
         path=path,
-        upload_id=create_resp["uploadId"],
-        key=create_resp["key"],
+        upload_id=create_response["uploadId"],
+        key=create_response["key"],
         headers=headers,
-        token=token,
+        token=resolved_token,
+        multipart_client=effective_multipart_client,
     )

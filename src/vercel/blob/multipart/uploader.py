@@ -1,110 +1,23 @@
 from __future__ import annotations
 
-import asyncio
-import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..errors import BlobError
-from ..utils import (
-    Access,
-    UploadProgressEvent,
-    compute_body_length,
-    create_put_headers,
-    validate_access,
+from vercel._internal.blob import compute_body_length
+from vercel._internal.blob.multipart import (
+    DEFAULT_PART_SIZE,
+    AsyncMultipartClient,
+    MultipartUploadSession,
+    SyncMultipartClient,
+    create_async_multipart_upload_runtime,
+    create_sync_multipart_upload_runtime,
+    order_uploaded_parts,
+    prepare_upload_headers,
+    shape_complete_upload_result,
+    validate_part_size,
 )
-from .core import (
-    call_complete_multipart_upload,
-    call_complete_multipart_upload_async,
-    call_create_multipart_upload,
-    call_create_multipart_upload_async,
-    call_upload_part,
-    call_upload_part_async,
-)
-
-DEFAULT_PART_SIZE = 8 * 1024 * 1024  # 8MB
-MIN_PART_SIZE = 5 * 1024 * 1024  # 5 MiB minimum for most backends; last part may be smaller
-MAX_CONCURRENCY = 6
-
-
-def _validate_part_size(part_size: int) -> int:
-    ps = int(part_size)
-    if ps < MIN_PART_SIZE:
-        raise BlobError(f"part_size must be at least {MIN_PART_SIZE} bytes (5 MiB)")
-    return ps
-
-
-def _iter_part_bytes(body: Any, part_size: int) -> Iterator[bytes]:
-    # bytes-like
-    if isinstance(body, (bytes, bytearray, memoryview)):
-        view = memoryview(body)
-        offset = 0
-        while offset < len(view):
-            end = min(offset + part_size, len(view))
-            yield bytes(view[offset:end])
-            offset = end
-        return
-    # str
-    if isinstance(body, str):
-        data = body.encode("utf-8")
-        view = memoryview(data)
-        offset = 0
-        while offset < len(view):
-            end = min(offset + part_size, len(view))
-            yield bytes(view[offset:end])
-            offset = end
-        return
-    # file-like object
-    if hasattr(body, "read"):
-        while True:
-            chunk = body.read(part_size)  # type: ignore[attr-defined]
-            if not chunk:
-                break
-            if not isinstance(chunk, (bytes, bytearray, memoryview)):
-                chunk = bytes(chunk)
-            yield bytes(chunk)
-        return
-    # Iterable[bytes]
-    if isinstance(body, Iterable):  # type: ignore[arg-type]
-        buffer = bytearray()
-        for ch in body:  # type: ignore[assignment]
-            if not isinstance(ch, (bytes, bytearray, memoryview)):
-                ch = bytes(ch)
-            buffer.extend(ch)
-            while len(buffer) >= part_size:
-                yield bytes(buffer[:part_size])
-                del buffer[:part_size]
-        if buffer:
-            yield bytes(buffer)
-        return
-    # Fallback: coerce to bytes and slice
-    data = bytes(body)
-    view = memoryview(data)
-    offset = 0
-    while offset < len(view):
-        end = min(offset + part_size, len(view))
-        yield bytes(view[offset:end])
-        offset = end
-
-
-async def _aiter_part_bytes(body: Any, part_size: int) -> AsyncIterator[bytes]:
-    # AsyncIterable[bytes]
-    if hasattr(body, "__aiter__"):
-        buffer = bytearray()
-        async for ch in body:  # type: ignore[misc]
-            if not isinstance(ch, (bytes, bytearray, memoryview)):
-                ch = bytes(ch)
-            buffer.extend(ch)
-            while len(buffer) >= part_size:
-                yield bytes(buffer[:part_size])
-                del buffer[:part_size]
-        if buffer:
-            yield bytes(buffer)
-        return
-    # Delegate to sync iterator for other cases
-    for chunk in _iter_part_bytes(body, part_size):
-        yield chunk
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel.blob.types import Access, UploadProgressEvent
 
 
 def auto_multipart_upload(
@@ -120,80 +33,48 @@ def auto_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    validate_access(access)
-    headers = create_put_headers(
+    client = SyncMultipartClient()
+    headers = prepare_upload_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-        access=access,
     )
+    part_size = validate_part_size(part_size)
 
-    part_size = _validate_part_size(part_size)
-
-    create_resp = call_create_multipart_upload(path, headers, token=token)
-    upload_id = create_resp["uploadId"]
-    key = create_resp["key"]
-
-    total = compute_body_length(body)
-    loaded_per_part: dict[int, int] = {}
-    loaded_lock = threading.Lock()
-    results: list[dict] = []
-
-    def upload_one(part_number: int, content: bytes) -> dict:
-        def progress(evt: UploadProgressEvent) -> None:
-            with loaded_lock:
-                loaded_per_part[part_number] = int(evt.loaded)
-                if on_upload_progress:
-                    loaded = sum(loaded_per_part.values())
-                    pct = round((loaded / total) * 100, 2) if total else 0.0
-                    on_upload_progress(
-                        UploadProgressEvent(loaded=loaded, total=total, percentage=pct)
-                    )
-
-        resp = call_upload_part(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            token=token,
-            part_number=part_number,
-            body=content,
-            on_upload_progress=progress,
-        )
-        return {"partNumber": part_number, "etag": resp["etag"]}
-
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as executor:
-        inflight = set()
-        part_no = 1
-        for chunk in _iter_part_bytes(body, part_size):
-            fut = executor.submit(upload_one, part_no, chunk)
-            inflight.add(fut)
-            part_no += 1
-            if len(inflight) >= MAX_CONCURRENCY:
-                done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
-                for d in done:
-                    results.append(d.result())
-
-        if inflight:
-            done, _ = wait(inflight)
-            for d in done:
-                results.append(d.result())
-
-    # Ensure parts are ordered by partNumber
-    results.sort(key=lambda p: int(p["partNumber"]))
-
-    if on_upload_progress:
-        on_upload_progress(UploadProgressEvent(loaded=total, total=total, percentage=100.0))
-
-    return call_complete_multipart_upload(
-        upload_id=upload_id,
-        key=key,
+    create_response = iter_coroutine(client.create_multipart_upload(path, headers, token=token))
+    session = MultipartUploadSession(
+        upload_id=create_response["uploadId"],
+        key=create_response["key"],
         path=path,
         headers=headers,
         token=token,
-        parts=results,
     )
+
+    runtime = create_sync_multipart_upload_runtime()
+    total = compute_body_length(body)
+    parts = runtime.upload(
+        session=session,
+        body=body,
+        part_size=part_size,
+        total=total,
+        on_upload_progress=on_upload_progress,
+        upload_part_fn=lambda **kwargs: iter_coroutine(client.upload_part(**kwargs)),
+    )
+    ordered_parts = order_uploaded_parts(parts)
+
+    complete_response = iter_coroutine(
+        client.complete_multipart_upload(
+            upload_id=session.upload_id,
+            key=session.key,
+            path=session.path,
+            headers=session.headers,
+            token=session.token,
+            parts=ordered_parts,
+        )
+    )
+    return shape_complete_upload_result(complete_response)
 
 
 async def auto_multipart_upload_async(
@@ -213,93 +94,43 @@ async def auto_multipart_upload_async(
     ) = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    validate_access(access)
-    headers = create_put_headers(
+    client = AsyncMultipartClient()
+    headers = prepare_upload_headers(
+        access=access,
         content_type=content_type,
         add_random_suffix=add_random_suffix,
-        allow_overwrite=overwrite,
+        overwrite=overwrite,
         cache_control_max_age=cache_control_max_age,
-        access=access,
     )
+    part_size = validate_part_size(part_size)
 
-    part_size = _validate_part_size(part_size)
-
-    create_resp = await call_create_multipart_upload_async(path, headers, token=token)
-    upload_id = create_resp["uploadId"]
-    key = create_resp["key"]
-
-    total = compute_body_length(body)
-    loaded_per_part: dict[int, int] = {}
-    results: list[dict] = []
-
-    def _make_progress(part_number: int):
-        if on_upload_progress and asyncio.iscoroutinefunction(on_upload_progress):
-
-            async def progress_async(evt: UploadProgressEvent):
-                loaded_per_part[part_number] = int(evt.loaded)
-                loaded = sum(loaded_per_part.values())
-                pct = round((loaded / total) * 100, 2) if total else 0.0
-                await on_upload_progress(
-                    UploadProgressEvent(loaded=loaded, total=total, percentage=pct)
-                )
-
-            return progress_async
-        else:
-
-            def progress(evt: UploadProgressEvent) -> None:
-                loaded_per_part[part_number] = int(evt.loaded)
-                if on_upload_progress:
-                    loaded = sum(loaded_per_part.values())
-                    pct = round((loaded / total) * 100, 2) if total else 0.0
-                    on_upload_progress(
-                        UploadProgressEvent(loaded=loaded, total=total, percentage=pct)
-                    )
-
-            return progress
-
-    async def upload_one(part_number: int, content: bytes) -> dict:
-        resp = await call_upload_part_async(
-            upload_id=upload_id,
-            key=key,
-            path=path,
-            headers=headers,
-            part_number=part_number,
-            body=content,
-            on_upload_progress=_make_progress(part_number),
-            token=token,
-        )
-        return {"partNumber": part_number, "etag": resp["etag"]}
-
-    inflight: set[asyncio.Task] = set()
-    part_no = 1
-    async for chunk in _aiter_part_bytes(body, part_size):
-        t = asyncio.create_task(upload_one(part_no, chunk))
-        inflight.add(t)
-        part_no += 1
-        if len(inflight) >= MAX_CONCURRENCY:
-            done, inflight = await asyncio.wait(inflight, return_when=asyncio.FIRST_COMPLETED)
-            for d in done:
-                results.append(d.result())
-
-    if inflight:
-        done, _ = await asyncio.wait(inflight, return_when=asyncio.ALL_COMPLETED)
-        for d in done:
-            results.append(d.result())
-
-    results.sort(key=lambda p: int(p["partNumber"]))
-
-    if on_upload_progress:
-        loaded = sum(loaded_per_part.values())
-        pct = round((loaded / total) * 100, 2) if total else 100.0
-        result = on_upload_progress(UploadProgressEvent(loaded=loaded, total=total, percentage=pct))
-        if asyncio.iscoroutine(result):
-            await result
-
-    return await call_complete_multipart_upload_async(
-        upload_id=upload_id,
-        key=key,
+    create_response = await client.create_multipart_upload(path, headers, token=token)
+    session = MultipartUploadSession(
+        upload_id=create_response["uploadId"],
+        key=create_response["key"],
         path=path,
         headers=headers,
         token=token,
-        parts=results,
     )
+
+    runtime = create_async_multipart_upload_runtime()
+    total = compute_body_length(body)
+    parts = await runtime.upload(
+        session=session,
+        body=body,
+        part_size=part_size,
+        total=total,
+        on_upload_progress=on_upload_progress,
+        upload_part_fn=client.upload_part,
+    )
+    ordered_parts = order_uploaded_parts(parts)
+
+    complete_response = await client.complete_multipart_upload(
+        upload_id=session.upload_id,
+        key=session.key,
+        path=session.path,
+        headers=session.headers,
+        token=session.token,
+        parts=ordered_parts,
+    )
+    return shape_complete_upload_result(complete_response)
