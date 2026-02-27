@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
+
 from ..oidc import Credentials, get_credentials
-from .api_client import APIClient, AsyncAPIClient
 from .command import (
     AsyncCommand,
     AsyncCommandFinished,
@@ -37,7 +39,7 @@ def _normalize_source(source: Source | None) -> dict[str, Any] | None:
 
 @dataclass
 class AsyncSandbox:
-    client: AsyncAPIClient
+    client: AsyncSandboxOpsClient
     sandbox: SandboxModel
     routes: list[dict[str, Any]]
 
@@ -98,7 +100,7 @@ class AsyncSandbox:
             Created AsyncSandbox instance.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncAPIClient(team_id=creds.team_id, token=creds.token)
+        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=creds.project_id,
             source=_normalize_source(source),
@@ -123,7 +125,7 @@ class AsyncSandbox:
         team_id: str | None = None,
     ) -> AsyncSandbox:
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncAPIClient(team_id=creds.team_id, token=creds.token)
+        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = await client.get_sandbox(sandbox_id=sandbox_id)
         return AsyncSandbox(
             client=client,
@@ -273,7 +275,7 @@ class AsyncSandbox:
 
 @dataclass
 class Sandbox:
-    client: APIClient
+    client: SyncSandboxOpsClient
     sandbox: SandboxModel
     routes: list[dict[str, Any]]
 
@@ -337,15 +339,17 @@ class Sandbox:
             Created Sandbox instance.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = APIClient(team_id=creds.team_id, token=creds.token)
-        resp: SandboxAndRoutesResponse = client.create_sandbox(
-            project_id=creds.project_id,
-            source=_normalize_source(source),
-            ports=ports,
-            timeout=timeout,
-            resources=resources,
-            runtime=runtime,
-            interactive=interactive,
+        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        resp: SandboxAndRoutesResponse = iter_coroutine(
+            client.create_sandbox(
+                project_id=creds.project_id,
+                source=_normalize_source(source),
+                ports=ports,
+                timeout=timeout,
+                resources=resources,
+                runtime=runtime,
+                interactive=interactive,
+            )
         )
         return Sandbox(
             client=client,
@@ -362,8 +366,8 @@ class Sandbox:
         team_id: str | None = None,
     ) -> Sandbox:
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = APIClient(team_id=creds.team_id, token=creds.token)
-        resp: SandboxAndRoutesResponse = client.get_sandbox(sandbox_id=sandbox_id)
+        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        resp: SandboxAndRoutesResponse = iter_coroutine(client.get_sandbox(sandbox_id=sandbox_id))
         return Sandbox(
             client=client,
             sandbox=resp.sandbox,
@@ -377,7 +381,7 @@ class Sandbox:
         raise ValueError(f"No route for port {port}")
 
     def get_command(self, cmd_id: str) -> Command:
-        resp = self.client.get_command(sandbox_id=self.sandbox.id, cmd_id=cmd_id)
+        resp = iter_coroutine(self.client.get_command(sandbox_id=self.sandbox.id, cmd_id=cmd_id))
         assert isinstance(resp, CommandResponse)
         return Command(client=self.client, sandbox_id=self.sandbox.id, cmd=resp.command)
 
@@ -390,13 +394,15 @@ class Sandbox:
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> CommandFinished:
-        command_response = self.client.run_command(
-            sandbox_id=self.sandbox.id,
-            command=cmd,
-            args=args or [],
-            cwd=cwd,
-            env=env or {},
-            sudo=sudo,
+        command_response = iter_coroutine(
+            self.client.run_command(
+                sandbox_id=self.sandbox.id,
+                command=cmd,
+                args=args or [],
+                cwd=cwd,
+                env=env or {},
+                sudo=sudo,
+            )
         )
         command = Command(
             client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command
@@ -412,32 +418,36 @@ class Sandbox:
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> Command:
-        command_response = self.client.run_command(
-            sandbox_id=self.sandbox.id,
-            command=cmd,
-            args=args or [],
-            cwd=cwd,
-            env=env or {},
-            sudo=sudo,
+        command_response = iter_coroutine(
+            self.client.run_command(
+                sandbox_id=self.sandbox.id,
+                command=cmd,
+                args=args or [],
+                cwd=cwd,
+                env=env or {},
+                sudo=sudo,
+            )
         )
         return Command(client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command)
 
     def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
-        self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        iter_coroutine(self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
 
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
-        return self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        return iter_coroutine(self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
 
     def write_files(self, files: list[WriteFile]) -> None:
-        self.client.write_files(
-            sandbox_id=self.sandbox.id,
-            cwd=self.sandbox.cwd,
-            extract_dir="/",
-            files=files,
+        iter_coroutine(
+            self.client.write_files(
+                sandbox_id=self.sandbox.id,
+                cwd=self.sandbox.cwd,
+                extract_dir="/",
+                files=files,
+            )
         )
 
     def stop(self) -> None:
-        self.client.stop_sandbox(sandbox_id=self.sandbox.id)
+        iter_coroutine(self.client.stop_sandbox(sandbox_id=self.sandbox.id))
 
     def extend_timeout(self, duration: int) -> None:
         """
@@ -449,7 +459,9 @@ class Sandbox:
         Args:
             duration: The duration in milliseconds to extend the timeout by.
         """
-        response = self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
+        response = iter_coroutine(
+            self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
+        )
         self.sandbox = response.sandbox
 
     def snapshot(self) -> SnapshotClass:
@@ -459,7 +471,7 @@ class Sandbox:
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        response = self.client.create_snapshot(sandbox_id=self.sandbox.id)
+        response = iter_coroutine(self.client.create_snapshot(sandbox_id=self.sandbox.id))
         self.sandbox = response.sandbox
         return SnapshotClass(client=self.client, snapshot=response.snapshot)
 
