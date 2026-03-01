@@ -4,77 +4,9 @@ These tests make real API calls and require VERCEL_TOKEN and VERCEL_TEAM_ID envi
 Run with: pytest tests/live/test_sandbox_live.py -v
 """
 
-import time
-
 import pytest
 
 from .conftest import requires_sandbox_credentials
-
-
-def wait_for_sandbox_running(sandbox, timeout: float = 30.0, poll_interval: float = 0.5):
-    """Wait for sandbox to reach 'running' status.
-
-    Args:
-        sandbox: The sandbox instance to wait for.
-        timeout: Maximum time to wait in seconds.
-        poll_interval: Time between status checks in seconds.
-
-    Raises:
-        TimeoutError: If sandbox doesn't reach 'running' status within timeout.
-    """
-    start = time.time()
-    while time.time() - start < timeout:
-        if sandbox.status == "running":
-            return
-        # Re-fetch sandbox to get updated status
-        from vercel.sandbox import Sandbox
-
-        updated = Sandbox.get(
-            sandbox_id=sandbox.sandbox_id,
-            token=sandbox.client._token,
-            team_id=sandbox.client._team_id,
-        )
-        sandbox.sandbox = updated.sandbox
-        updated.client.close()
-        if sandbox.status == "running":
-            return
-        time.sleep(poll_interval)
-    raise TimeoutError(f"Sandbox did not reach 'running' status within {timeout}s")
-
-
-async def wait_for_sandbox_running_async(
-    sandbox, timeout: float = 30.0, poll_interval: float = 0.5
-):
-    """Wait for async sandbox to reach 'running' status.
-
-    Args:
-        sandbox: The async sandbox instance to wait for.
-        timeout: Maximum time to wait in seconds.
-        poll_interval: Time between status checks in seconds.
-
-    Raises:
-        TimeoutError: If sandbox doesn't reach 'running' status within timeout.
-    """
-    import asyncio
-
-    start = time.time()
-    while time.time() - start < timeout:
-        if sandbox.status == "running":
-            return
-        # Re-fetch sandbox to get updated status
-        from vercel.sandbox import AsyncSandbox
-
-        updated = await AsyncSandbox.get(
-            sandbox_id=sandbox.sandbox_id,
-            token=sandbox.client._token,
-            team_id=sandbox.client._team_id,
-        )
-        sandbox.sandbox = updated.sandbox
-        await updated.client.aclose()
-        if sandbox.status == "running":
-            return
-        await asyncio.sleep(poll_interval)
-    raise TimeoutError(f"Sandbox did not reach 'running' status within {timeout}s")
 
 
 @requires_sandbox_credentials
@@ -97,7 +29,7 @@ class TestSandboxLive:
             # Verify creation
             assert sandbox.sandbox_id is not None
             # Wait for sandbox to be running (may start in 'pending' state)
-            wait_for_sandbox_running(sandbox)
+            sandbox.wait_for_status("running")
             assert sandbox.status == "running"
 
             # Run a simple command
@@ -132,7 +64,7 @@ class TestSandboxLive:
             # Verify creation
             assert sandbox.sandbox_id is not None
             # Wait for sandbox to be running (may start in 'pending' state)
-            await wait_for_sandbox_running_async(sandbox)
+            await sandbox.wait_for_status("running")
             assert sandbox.status == "running"
 
             # Run a simple command
@@ -263,7 +195,7 @@ class TestSandboxLive:
 
         try:
             # Wait for sandbox to be running before fetching
-            wait_for_sandbox_running(original)
+            original.wait_for_status("running")
 
             # Get the same sandbox by ID
             fetched = Sandbox.get(

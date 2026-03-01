@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -131,6 +132,39 @@ class AsyncSandbox:
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
+        )
+
+    async def refresh(self) -> None:
+        """Re-fetch this sandbox's state from the API, updating in place."""
+        resp = await self.client.get_sandbox(sandbox_id=self.sandbox.id)
+        self.sandbox = resp.sandbox
+        self.routes = [r.model_dump() for r in resp.routes]
+
+    async def wait_for_status(
+        self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
+    ) -> None:
+        """Wait for this sandbox to reach the given status.
+
+        Args:
+            status: The target status to wait for (e.g. ``"running"``).
+            timeout: Maximum time to wait in seconds.
+            poll_interval: Time between status checks in seconds.
+
+        Raises:
+            TimeoutError: If the sandbox does not reach *status* within *timeout*.
+        """
+        import asyncio
+
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            if self.status == status:
+                return
+            await asyncio.sleep(poll_interval)
+            await self.refresh()
+        if self.status == status:
+            return
+        raise TimeoutError(
+            f"Sandbox {self.sandbox_id} did not reach '{status}' status within {timeout}s"
         )
 
     def domain(self, port: int) -> str:
@@ -372,6 +406,37 @@ class Sandbox:
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
+        )
+
+    def refresh(self) -> None:
+        """Re-fetch this sandbox's state from the API, updating in place."""
+        resp = iter_coroutine(self.client.get_sandbox(sandbox_id=self.sandbox.id))
+        self.sandbox = resp.sandbox
+        self.routes = [r.model_dump() for r in resp.routes]
+
+    def wait_for_status(
+        self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
+    ) -> None:
+        """Wait for this sandbox to reach the given status.
+
+        Args:
+            status: The target status to wait for (e.g. ``"running"``).
+            timeout: Maximum time to wait in seconds.
+            poll_interval: Time between status checks in seconds.
+
+        Raises:
+            TimeoutError: If the sandbox does not reach *status* within *timeout*.
+        """
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            if self.status == status:
+                return
+            time.sleep(poll_interval)
+            self.refresh()
+        if self.status == status:
+            return
+        raise TimeoutError(
+            f"Sandbox {self.sandbox_id} did not reach '{status}' status within {timeout}s"
         )
 
     def domain(self, port: int) -> str:
