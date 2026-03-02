@@ -131,7 +131,9 @@ class SandboxRequestClient:
         path: str,
         **kwargs: Any,
     ) -> Any:
-        r = await self.request(method, path, **kwargs)
+        headers = kwargs.pop("headers", None) or {}
+        headers.setdefault("content-type", "application/json")
+        r = await self.request(method, path, headers=headers, **kwargs)
         return r.json()
 
 
