@@ -9,11 +9,12 @@ loop, while ``AsyncSandboxOpsClient`` uses a real ``AsyncTransport``.
 from __future__ import annotations
 
 import io
-import os
+import platform
 import posixpath
 import sys
 import tarfile
 from collections.abc import AsyncGenerator, Generator
+from importlib.metadata import version as _pkg_version
 from typing import Any
 
 import httpx
@@ -38,9 +39,14 @@ from vercel.sandbox.models import (
     WriteFile,
 )
 
-VERSION = "0.1.0"
+try:
+    VERSION = _pkg_version("vercel")
+except Exception:
+    VERSION = "development"
+
+PLATFORM = platform.uname()
 USER_AGENT = (
-    f"vercel/sandbox/{VERSION} (Python/{sys.version}; {os.uname().sysname}/{os.uname().machine})"
+    f"vercel/sandbox/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
 
 
