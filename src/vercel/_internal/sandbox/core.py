@@ -97,7 +97,7 @@ class SandboxRequestClient:
             stream=stream,
         )
 
-        if stream or 200 <= response.status_code < 300:
+        if 200 <= response.status_code < 300:
             return response
 
         # Parse a helpful error message
