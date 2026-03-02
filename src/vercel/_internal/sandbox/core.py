@@ -20,11 +20,11 @@ from typing import Any
 import httpx
 
 from vercel._internal.http import (
-    AsyncTransport,
-    BaseTransport,
     BytesBody,
     JSONBody,
-    SyncTransport,
+    RequestClient,
+    create_async_request_client,
+    create_request_client,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.errors import APIError
@@ -51,21 +51,19 @@ USER_AGENT = (
 
 
 # ---------------------------------------------------------------------------
-# Request client — auth, teamId, error handling
+# Request client — error handling + request_json convenience
 # ---------------------------------------------------------------------------
 
 
 class SandboxRequestClient:
-    """Low-level request layer wrapping a :class:`BaseTransport`.
+    """Low-level request layer wrapping a :class:`RequestClient`.
 
-    Adds authorisation headers, ``teamId`` query param, and translates
-    non-2xx responses into :class:`APIError`.
+    Translates non-2xx responses into :class:`APIError` and provides
+    a ``request_json`` convenience method.
     """
 
-    def __init__(self, *, transport: BaseTransport, token: str, team_id: str) -> None:
-        self._transport = transport
-        self._token = token
-        self._team_id = team_id
+    def __init__(self, *, request_client: RequestClient) -> None:
+        self._client = request_client
 
     async def request(
         self,
@@ -77,21 +75,14 @@ class SandboxRequestClient:
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        req_headers: dict[str, str] = {
-            "user-agent": USER_AGENT,
-            "authorization": f"Bearer {self._token}",
-        }
-        if headers:
-            req_headers.update(headers)
-
-        params: dict[str, Any] = {"teamId": self._team_id}
+        params: dict[str, Any] | None = None
         if query:
-            params.update({k: v for k, v in query.items() if v is not None})
+            params = {k: v for k, v in query.items() if v is not None}
 
-        response = await self._transport.send(
+        response = await self._client.send(
             method,
             path,
-            headers=req_headers,
+            headers=headers,
             params=params,
             body=body,
             stream=stream,
@@ -352,12 +343,15 @@ class BaseSandboxOpsClient:
 
 class SyncSandboxOpsClient(BaseSandboxOpsClient):
     def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
-        client = httpx.Client(base_url=host.rstrip("/"), timeout=httpx.Timeout(None))
-        transport = SyncTransport(client)
-        self._request_client = SandboxRequestClient(
-            transport=transport, token=token, team_id=team_id
+        rc = create_request_client(
+            token=token,
+            base_headers={"user-agent": USER_AGENT},
+            base_params={"teamId": team_id},
+            timeout=None,
+            base_url=host,
         )
-        self._transport = transport
+        self._request_client = SandboxRequestClient(request_client=rc)
+        self._rc = rc
 
     def get_logs(self, *, sandbox_id: str, cmd_id: str) -> Generator[LogLine, None, None]:
         resp = iter_coroutine(self._get_log_stream(sandbox_id=sandbox_id, cmd_id=cmd_id))
@@ -380,7 +374,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
             resp.close()
 
     def close(self) -> None:
-        self._transport.close()
+        self._rc.close()
 
     def __enter__(self) -> SyncSandboxOpsClient:
         return self
@@ -396,12 +390,15 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
 
 class AsyncSandboxOpsClient(BaseSandboxOpsClient):
     def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
-        client = httpx.AsyncClient(base_url=host.rstrip("/"), timeout=httpx.Timeout(None))
-        transport = AsyncTransport(client)
-        self._request_client = SandboxRequestClient(
-            transport=transport, token=token, team_id=team_id
+        rc = create_async_request_client(
+            token=token,
+            base_headers={"user-agent": USER_AGENT},
+            base_params={"teamId": team_id},
+            timeout=None,
+            base_url=host,
         )
-        self._transport = transport
+        self._request_client = SandboxRequestClient(request_client=rc)
+        self._rc = rc
 
     async def get_logs(self, *, sandbox_id: str, cmd_id: str) -> AsyncGenerator[LogLine, None]:
         resp = await self._get_log_stream(sandbox_id=sandbox_id, cmd_id=cmd_id)
@@ -424,7 +421,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             await resp.aclose()
 
     async def aclose(self) -> None:
-        await self._transport.aclose()
+        await self._rc.aclose()
 
     async def __aenter__(self) -> AsyncSandboxOpsClient:
         return self

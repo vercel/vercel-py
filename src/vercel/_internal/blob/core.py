@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 import os
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -18,8 +16,6 @@ from vercel._internal.blob import (
     compute_body_length,
     construct_blob_url,
     create_put_headers,
-    debug,
-    ensure_token,
     extract_store_id_from_token,
     get_api_url,
     get_api_version,
@@ -72,14 +68,14 @@ from vercel._internal.blob.types import (
     UploadProgressEvent,
 )
 from vercel._internal.http import (
-    AsyncTransport,
     BaseTransport,
     JSONBody,
     RawBody,
-    SyncTransport,
-    create_base_async_client,
-    create_base_client,
+    RequestClient,
+    create_async_request_client as _create_async_rc,
+    create_request_client as _create_sync_rc,
 )
+from vercel._internal.http.request_client import RetryPolicy
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.telemetry.tracker import track
 
@@ -89,15 +85,10 @@ BlobProgressCallback = (
 DownloadProgressCallback = (
     Callable[[int, int | None], None] | Callable[[int, int | None], Awaitable[None]]
 )
-SleepFn = Callable[[float], Awaitable[None] | None]
 PUT_BODY_OBJECT_ERROR = (
     "Body must be a string, buffer or stream. "
     "You sent a plain object, double check what you're trying to upload."
 )
-
-
-def _sync_sleep(seconds: float) -> None:
-    time.sleep(seconds)
 
 
 async def _await_if_necessary(value: Any) -> Any:
@@ -155,8 +146,11 @@ def should_retry(code: str) -> bool:
     return code in {"unknown_error", "service_unavailable", "internal_server_error"}
 
 
-def is_network_error(exc: Exception) -> bool:
-    return isinstance(exc, httpx.TransportError)
+def _retry_on_blob_response(response: httpx.Response) -> bool:
+    if 200 <= response.status_code < 300:
+        return False
+    code, _ = map_blob_error(response)
+    return should_retry(code)
 
 
 def decode_blob_response(response: httpx.Response) -> Any:
@@ -211,19 +205,8 @@ async def _emit_download_progress(
         await cast(Awaitable[None], result)
 
 
-async def _sleep_with_backoff(
-    sleep_fn: SleepFn,
-    attempt: int,
-) -> None:
-    delay = min(2**attempt * 0.1, 2.0)
-    result = sleep_fn(delay)
-    if inspect.isawaitable(result):
-        await cast(Awaitable[None], result)
-
-
 def _build_headers(
     *,
-    token: str,
     request_id: str,
     attempt: int,
     extra_headers: dict[str, str],
@@ -233,7 +216,6 @@ def _build_headers(
     api_version: str,
 ) -> dict[str, str]:
     final_headers = {
-        "authorization": f"Bearer {token}",
         "x-api-blob-request-id": request_id,
         "x-api-blob-request-attempt": str(attempt),
         "x-api-version": api_version,
@@ -420,46 +402,53 @@ def parse_last_modified(value: str | None) -> datetime:
 
 
 class BlobRequestClient:
-    _transport: BaseTransport
-    _sleep_fn: SleepFn
+    _request_client: RequestClient
     _await_progress_callback: bool
     _async_content: bool
 
     def __init__(
         self,
         *,
-        transport: BaseTransport,
-        sleep_fn: SleepFn = asyncio.sleep,
+        request_client: RequestClient,
         await_progress_callback: bool = True,
         async_content: bool = True,
     ) -> None:
-        self._transport = transport
-        self._sleep_fn = sleep_fn
+        self._request_client = request_client
         self._await_progress_callback = await_progress_callback
         self._async_content = async_content
 
     @property
+    def token(self) -> str:
+        return self._request_client.token
+
+    @property
     def transport(self) -> BaseTransport:
-        return self._transport
+        return self._request_client.transport
 
     @property
     def await_progress_callback(self) -> bool:
         return self._await_progress_callback
 
     def close(self) -> None:
-        if isinstance(self._transport, SyncTransport):
-            self._transport.close()
+        self._request_client.close()
+
+    async def send(
+        self,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Delegate to RequestClient.send() (includes auth + header merging)."""
+        return await self._request_client.send(method, path, **kwargs)
 
     async def aclose(self) -> None:
-        if isinstance(self._transport, AsyncTransport):
-            await self._transport.aclose()
+        await self._request_client.aclose()
 
     async def request_api(
         self,
         pathname: str,
         method: str,
         *,
-        token: str | None = None,
         headers: PutHeaders | dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         body: Any = None,
@@ -467,10 +456,9 @@ class BlobRequestClient:
         timeout: float | None = None,
         decode_mode: Literal["json", "any", "none"] = "json",
     ) -> Any:
-        token = ensure_token(token)
+        token = self.token
         store_id = extract_store_id_from_token(token)
         request_id = make_request_id(store_id)
-        retries = get_retries()
         api_version = get_api_version()
         extra_headers = get_proxy_through_alternative_api_header_from_env()
         request_headers = cast(dict[str, str], headers or {})
@@ -488,10 +476,11 @@ class BlobRequestClient:
         url = get_api_url(pathname)
         effective_timeout = timeout if timeout is not None else 30.0
 
-        for attempt in range(retries + 1):
-            try:
-                final_headers = _build_headers(
-                    token=token,
+        try:
+            resp = await self._request_client.send(
+                method,
+                url,
+                headers=lambda attempt: _build_headers(
                     request_id=request_id,
                     attempt=attempt,
                     extra_headers=extra_headers,
@@ -499,70 +488,89 @@ class BlobRequestClient:
                     send_body_length=send_body_length,
                     total_length=total_length,
                     api_version=api_version,
-                )
-                request_body = _build_request_body(
+                ),
+                params=params,
+                body=lambda _attempt: _build_request_body(
                     body,
                     on_upload_progress=on_upload_progress,
                     async_content=self._async_content,
+                ),
+                timeout=effective_timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise BlobUnknownError() from exc
+
+        if 200 <= resp.status_code < 300:
+            if on_upload_progress:
+                await _emit_progress(
+                    on_upload_progress,
+                    UploadProgressEvent(
+                        loaded=total_length or 0,
+                        total=total_length or 0,
+                        percentage=100.0,
+                    ),
+                    await_callback=self._await_progress_callback,
                 )
-                resp = await self._transport.send(
-                    method=method,
-                    path=url,
-                    headers=final_headers,
-                    params=params,
-                    body=request_body,
-                    timeout=effective_timeout,
-                )
+            if decode_mode == "none":
+                return None
+            if decode_mode == "json":
+                return decode_blob_response_json(resp)
+            return decode_blob_response(resp)
 
-                if 200 <= resp.status_code < 300:
-                    if on_upload_progress:
-                        await _emit_progress(
-                            on_upload_progress,
-                            UploadProgressEvent(
-                                loaded=total_length or 0,
-                                total=total_length or 0,
-                                percentage=100.0,
-                            ),
-                            await_callback=self._await_progress_callback,
-                        )
-                    if decode_mode == "none":
-                        return None
-                    if decode_mode == "json":
-                        return decode_blob_response_json(resp)
-                    return decode_blob_response(resp)
-
-                code, mapped = map_blob_error(resp)
-                if should_retry(code) and attempt < retries:
-                    debug(f"retrying API request to {pathname}", code)
-                    await _sleep_with_backoff(self._sleep_fn, attempt)
-                    continue
-                raise mapped
-            except Exception as exc:
-                if is_network_error(exc) and attempt < retries:
-                    debug(f"retrying API request to {pathname}", str(exc))
-                    await _sleep_with_backoff(self._sleep_fn, attempt)
-                    continue
-                if isinstance(exc, httpx.HTTPError):
-                    raise BlobUnknownError() from exc
-                raise
-
-        raise BlobUnknownError()
+        _, mapped = map_blob_error(resp)
+        raise mapped
 
 
-def create_sync_request_client(timeout: float = 30.0) -> BlobRequestClient:
-    transport = SyncTransport(create_base_client(timeout=timeout))
+_BLOB_TOKEN_ENV_VARS = ["BLOB_READ_WRITE_TOKEN", "VERCEL_BLOB_READ_WRITE_TOKEN"]
+
+
+def _create_blob_rc(factory, **kwargs: Any) -> RequestClient:  # type: ignore[type-arg]
+    """Call an http-layer factory, converting RuntimeError to BlobNoTokenProvidedError."""
+    from vercel._internal.blob.errors import BlobNoTokenProvidedError
+
+    try:
+        return factory(**kwargs)
+    except RuntimeError:
+        raise BlobNoTokenProvidedError() from None
+
+
+def create_sync_request_client(
+    token: str | None = None, timeout: float = 30.0
+) -> BlobRequestClient:
+    retry_policy = RetryPolicy(
+        retries=get_retries(),
+        retry_on_response=_retry_on_blob_response,
+    )
+    rc = _create_blob_rc(
+        _create_sync_rc,
+        token=token,
+        token_env_vars=_BLOB_TOKEN_ENV_VARS,
+        retry=retry_policy,
+        timeout=timeout,
+    )
     return BlobRequestClient(
-        transport=transport,
-        sleep_fn=_sync_sleep,
+        request_client=rc,
         await_progress_callback=False,
         async_content=False,
     )
 
 
-def create_async_request_client(timeout: float = 30.0) -> BlobRequestClient:
-    transport = AsyncTransport(create_base_async_client(timeout=timeout))
+def create_async_request_client(
+    token: str | None = None, timeout: float = 30.0
+) -> BlobRequestClient:
+    retry_policy = RetryPolicy(
+        retries=get_retries(),
+        retry_on_response=_retry_on_blob_response,
+    )
+    rc = _create_blob_rc(
+        _create_async_rc,
+        token=token,
+        token_env_vars=_BLOB_TOKEN_ENV_VARS,
+        retry=retry_policy,
+        timeout=timeout,
+    )
     return BlobRequestClient(
-        transport=transport,
+        request_client=rc,
     )
 
 
@@ -600,7 +608,6 @@ class BaseBlobOpsClient:
         add_random_suffix: bool = False,
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
-        token: str | None = None,
         on_upload_progress: BlobProgressCallback | None = None,
     ) -> dict[str, Any]:
         headers = prepare_upload_headers(
@@ -615,14 +622,12 @@ class BaseBlobOpsClient:
         create_response = await self._multipart_client.create_multipart_upload(
             path,
             headers,
-            token=token,
         )
         session = MultipartUploadSession(
             upload_id=create_response["uploadId"],
             key=create_response["key"],
             path=path,
             headers=headers,
-            token=token,
         )
 
         total = compute_body_length(body)
@@ -646,7 +651,6 @@ class BaseBlobOpsClient:
             key=session.key,
             path=session.path,
             headers=session.headers,
-            token=session.token,
             parts=ordered_parts,
         )
         return shape_complete_upload_result(complete_response)
@@ -665,7 +669,6 @@ class BaseBlobOpsClient:
         multipart: bool,
         on_upload_progress: BlobProgressCallback | None,
     ) -> tuple[PutBlobResultType, bool]:
-        token = ensure_token(token)
         _validate_put_inputs(path, body, access)
 
         headers = create_put_headers(
@@ -676,6 +679,8 @@ class BaseBlobOpsClient:
             access=access,
         )
 
+        resolved_token = self._request_client.token
+
         if multipart:
             raw = await self._multipart_upload(
                 path,
@@ -685,13 +690,12 @@ class BaseBlobOpsClient:
                 add_random_suffix=add_random_suffix,
                 overwrite=overwrite,
                 cache_control_max_age=cache_control_max_age,
-                token=token,
                 on_upload_progress=on_upload_progress,
             )
             result = build_put_blob_result(raw)
             track(
                 "blob_put",
-                token=token,
+                token=resolved_token,
                 access=access,
                 content_type=content_type,
                 multipart=True,
@@ -704,7 +708,6 @@ class BaseBlobOpsClient:
             await self._request_client.request_api(
                 "",
                 "PUT",
-                token=token,
                 headers=headers,
                 params={"pathname": path},
                 body=body,
@@ -714,7 +717,7 @@ class BaseBlobOpsClient:
         result = build_put_blob_result(raw)
         track(
             "blob_put",
-            token=token,
+            token=resolved_token,
             access=access,
             content_type=content_type,
             multipart=False,
@@ -725,33 +728,26 @@ class BaseBlobOpsClient:
     async def delete_blob(
         self,
         urls: list[str],
-        *,
-        token: str,
     ) -> int:
         await self._request_client.request_api(
             "/delete",
             "POST",
-            token=token,
             headers={"content-type": "application/json"},
             body={"urls": urls},
             decode_mode="none",
         )
-        track("blob_delete", token=token, count=len(urls))
+        track("blob_delete", token=self._request_client.token, count=len(urls))
         return len(urls)
 
     async def head_blob(
         self,
         url_or_path: str,
-        *,
-        token: str | None,
     ) -> HeadBlobResultType:
-        token = ensure_token(token)
         resp = cast(
             dict[str, Any],
             await self._request_client.request_api(
                 "",
                 "GET",
-                token=token,
                 params={"url": url_or_path},
             ),
         )
@@ -762,13 +758,12 @@ class BaseBlobOpsClient:
         url_or_path: str,
         *,
         access: Access,
-        token: str | None,
         timeout: float | None,
         use_cache: bool,
         if_none_match: str | None,
         default_timeout: float,
     ) -> GetBlobResultType:
-        token = ensure_token(token)
+        token = self._request_client.token
         validate_access(access)
         target_url = url_or_path
         pathname: str
@@ -779,7 +774,7 @@ class BaseBlobOpsClient:
             if store_id:
                 target_url = construct_blob_url(store_id, pathname, access)
             else:
-                head_result = await self.head_blob(target_url, token=token)
+                head_result = await self.head_blob(target_url)
                 target_url = head_result.url
                 pathname = head_result.pathname
                 download_url = head_result.download_url
@@ -855,15 +850,13 @@ class BaseBlobOpsClient:
         add_random_suffix: bool,
         overwrite: bool,
         cache_control_max_age: int | None,
-        token: str | None,
     ) -> PutBlobResultType:
-        token = ensure_token(token)
         validate_path(dst_path)
         validate_access(access)
 
         src_url = src_path
         if not is_url(src_url):
-            src_url = (await self.head_blob(src_url, token=token)).url
+            src_url = (await self.head_blob(src_url)).url
 
         headers = create_put_headers(
             content_type=content_type,
@@ -877,7 +870,6 @@ class BaseBlobOpsClient:
             await self._request_client.request_api(
                 "",
                 "PUT",
-                token=token,
                 headers=headers,
                 params={"pathname": str(dst_path), "fromUrl": src_url},
             ),
@@ -888,10 +880,8 @@ class BaseBlobOpsClient:
         self,
         path: str,
         *,
-        token: str | None,
         overwrite: bool,
     ) -> CreateFolderResultType:
-        token = ensure_token(token)
         folder_path = path if path.endswith("/") else f"{path}/"
         headers = create_put_headers(
             add_random_suffix=False,
@@ -902,7 +892,6 @@ class BaseBlobOpsClient:
             await self._request_client.request_api(
                 "",
                 "PUT",
-                token=token,
                 headers=headers,
                 params={"pathname": folder_path},
             ),
@@ -924,7 +913,6 @@ class BaseBlobOpsClient:
         on_upload_progress: BlobProgressCallback | None,
         missing_local_path_error: str,
     ) -> PutBlobResultType:
-        token = ensure_token(token)
         if not local_path:
             raise BlobError(missing_local_path_error)
         if not path:
@@ -960,13 +948,12 @@ class BaseBlobOpsClient:
         local_path: str | os.PathLike,
         *,
         access: Access,
-        token: str | None,
         timeout: float | None,
         overwrite: bool,
         create_parents: bool,
         progress: DownloadProgressCallback | None,
     ) -> str:
-        token = ensure_token(token)
+        token = self._request_client.token
         validate_access(access)
         if is_url(url_or_path):
             target_url = get_download_url(url_or_path)
@@ -974,7 +961,7 @@ class BaseBlobOpsClient:
             blob_url = construct_blob_url(store_id, url_or_path.lstrip("/"), access)
             target_url = get_download_url(blob_url)
         else:
-            meta = await self.head_blob(url_or_path, token=token)
+            meta = await self.head_blob(url_or_path)
             target_url = meta.download_url or meta.url
 
         dst = os.fspath(local_path)
@@ -1031,8 +1018,8 @@ class BaseBlobOpsClient:
 
 
 class SyncBlobOpsClient(BaseBlobOpsClient):
-    def __init__(self, *, timeout: float = 30.0) -> None:
-        request_client = create_sync_request_client(timeout)
+    def __init__(self, *, token: str | None = None, timeout: float = 30.0) -> None:
+        request_client = create_sync_request_client(token=token, timeout=timeout)
         multipart_client = MultipartClient(request_client)
         super().__init__(
             request_client=request_client,
@@ -1053,16 +1040,13 @@ class SyncBlobOpsClient(BaseBlobOpsClient):
         prefix: str | None,
         cursor: str | None,
         mode: str | None,
-        token: str | None,
     ) -> ListBlobResultType:
-        token = ensure_token(token)
         resp = cast(
             dict[str, Any],
             iter_coroutine(
                 self._request_client.request_api(
                     "",
                     "GET",
-                    token=token,
                     params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
                 )
             ),
@@ -1074,7 +1058,6 @@ class SyncBlobOpsClient(BaseBlobOpsClient):
         *,
         prefix: str | None,
         mode: str | None,
-        token: str | None,
         batch_size: int | None,
         limit: int | None,
         cursor: str | None,
@@ -1096,7 +1079,6 @@ class SyncBlobOpsClient(BaseBlobOpsClient):
                 prefix=prefix,
                 cursor=next_cursor,
                 mode=mode,
-                token=token,
             )
 
             for item in page.blobs:
@@ -1131,8 +1113,8 @@ class SyncBlobOpsClient(BaseBlobOpsClient):
 
 
 class AsyncBlobOpsClient(BaseBlobOpsClient):
-    def __init__(self, *, timeout: float = 30.0) -> None:
-        request_client = create_async_request_client(timeout)
+    def __init__(self, *, token: str | None = None, timeout: float = 30.0) -> None:
+        request_client = create_async_request_client(token=token, timeout=timeout)
         multipart_client = MultipartClient(request_client)
         super().__init__(
             request_client=request_client,
@@ -1172,15 +1154,12 @@ class AsyncBlobOpsClient(BaseBlobOpsClient):
         prefix: str | None,
         cursor: str | None,
         mode: str | None,
-        token: str | None,
     ) -> ListBlobResultType:
-        token = ensure_token(token)
         resp = cast(
             dict[str, Any],
             await self._request_client.request_api(
                 "",
                 "GET",
-                token=token,
                 params=build_list_params(limit=limit, prefix=prefix, cursor=cursor, mode=mode),
             ),
         )
@@ -1191,7 +1170,6 @@ class AsyncBlobOpsClient(BaseBlobOpsClient):
         *,
         prefix: str | None,
         mode: str | None,
-        token: str | None,
         batch_size: int | None,
         limit: int | None,
         cursor: str | None,
@@ -1213,7 +1191,6 @@ class AsyncBlobOpsClient(BaseBlobOpsClient):
                 prefix=prefix,
                 cursor=next_cursor,
                 mode=mode,
-                token=token,
             )
 
             for item in page.blobs:
@@ -1241,7 +1218,6 @@ __all__ = [
     "build_put_blob_result",
     "decode_blob_response",
     "get_telemetry_size_bytes",
-    "is_network_error",
     "map_blob_error",
     "normalize_delete_urls",
     "should_retry",
