@@ -14,37 +14,47 @@ import sys
 
 print("Hello from Python inside Vercel Sandbox!")
 print("Python version:", sys.version)
-print("ENV SAMPLE:", os.getenv("SAMPLE_ENV", "<missing>"))
+print("SAMPLE_ENV:", os.getenv("SAMPLE_ENV", "<missing>"))
+print("EXTRA_ENV:", os.getenv("EXTRA_ENV", "<missing>"))
 """
 
 
 async def main() -> None:
     runtime = os.getenv("SANDBOX_RUNTIME") or None  # e.g., "python311"
 
-    async with await Sandbox.create(timeout=120_000, runtime=runtime) as sandbox:
-        # Write a Python file to the sandbox working directory
+    # Default env vars are inherited by all commands in the sandbox
+    async with await Sandbox.create(
+        timeout=120_000, runtime=runtime, env={"SAMPLE_ENV": "default"}
+    ) as sandbox:
         await sandbox.write_files(
             [
                 {"path": "main.py", "content": PY_CODE},
             ]
         )
 
-        # Try python3 first, then fall back to python
-        cmd = await sandbox.run_command_detached(
-            "bash",
-            [
-                "-lc",
-                f"cd {sandbox.sandbox.cwd} && (python3 main.py || python main.py)",
-            ],
-            env={"SAMPLE_ENV": "works"},
-        )
+        run_py = f"cd {sandbox.sandbox.cwd} && (python3 main.py || python main.py)"
 
-        out = await cmd.stdout()
-        done = await cmd.wait()
-        print("========= OUTPUT =========")
-        print(out, end="")
-        print("==========================")
-        print("exit:", done.exit_code)
+        # Run 1: add EXTRA_ENV per-command; SAMPLE_ENV keeps its default
+        cmd1 = await sandbox.run_command_detached(
+            "bash",
+            ["-lc", run_py],
+            env={"EXTRA_ENV": "added"},
+        )
+        done1 = await cmd1.wait()
+        print("=== Run 1: add EXTRA_ENV, keep default SAMPLE_ENV ===")
+        print(await cmd1.stdout(), end="")
+        print(f"exit: {done1.exit_code}\n")
+
+        # Run 2: override SAMPLE_ENV per-command
+        cmd2 = await sandbox.run_command_detached(
+            "bash",
+            ["-lc", run_py],
+            env={"SAMPLE_ENV": "overridden", "EXTRA_ENV": "added"},
+        )
+        done2 = await cmd2.wait()
+        print("=== Run 2: override SAMPLE_ENV, add EXTRA_ENV ===")
+        print(await cmd2.stdout(), end="")
+        print(f"exit: {done2.exit_code}")
 
 
 if __name__ == "__main__":

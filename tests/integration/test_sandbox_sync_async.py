@@ -120,6 +120,69 @@ class TestSandboxCreate:
 
         sandbox.client.close()
 
+    @respx.mock
+    def test_create_sandbox_with_env_sync(self, mock_env_clear, mock_sandbox_create_response):
+        """Test sandbox creation with env dict."""
+        from vercel.sandbox import Sandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            env={"NODE_ENV": "production"},
+        )
+
+        assert route.called
+        import json
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["env"] == {"NODE_ENV": "production"}
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_with_env_async(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        """Test async sandbox creation with env dict."""
+        from vercel.sandbox import AsyncSandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            env={"NODE_ENV": "production"},
+        )
+
+        assert route.called
+        import json
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["env"] == {"NODE_ENV": "production"}
+
+        await sandbox.client.aclose()
+
 
 class TestSandboxGet:
     """Test sandbox get operations."""
