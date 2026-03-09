@@ -48,7 +48,7 @@ func main() {
 async def main() -> None:
     runtime = (
         os.getenv("SANDBOX_RUNTIME") or "node22"
-    )  # note: go runtime is not pre-installed; install via dnf
+    )  # note: go runtime is not pre-installed; installed from go.dev
 
     # Gin default port
     port = 3000
@@ -61,21 +61,30 @@ async def main() -> None:
             ]
         )
 
-        # Ensure Go toolchain is available in the Amazon Linux 2023 base image
-        print("Installing Go (golang) and Git via dnf...")
-        dnf_cmd = await sandbox.run_command_detached(
+        # Install the latest Go toolchain directly from go.dev and git via dnf
+        print("Installing latest Go from go.dev and Git via dnf...")
+        install_cmd = await sandbox.run_command_detached(
             "bash",
             [
                 "-lc",
-                ("dnf install -y golang git"),
+                (
+                    "dnf install -y git tar gzip && "
+                    "GO_VERSION=$(curl -fsSL https://go.dev/VERSION?m=text | head -1) && "
+                    'echo "Installing $GO_VERSION..." && '
+                    "curl -fsSL https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz | "
+                    "tar -C /usr/local -xzf - && "
+                    "ln -sf /usr/local/go/bin/go /usr/local/bin/go && "
+                    "ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt && "
+                    "go version"
+                ),
             ],
             sudo=True,
         )
-        async for line in dnf_cmd.logs():
+        async for line in install_cmd.logs():
             print(line.data, end="")
-        dnf_done = await dnf_cmd.wait()
-        if dnf_done.exit_code != 0:
-            raise SystemExit("dnf install failed")
+        install_done = await install_cmd.wait()
+        if install_done.exit_code != 0:
+            raise SystemExit("Go/git install failed")
 
         print("Initializing Go module and fetching Gin...")
         mod_cmd = await sandbox.run_command_detached(

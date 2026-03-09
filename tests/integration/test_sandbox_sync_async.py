@@ -795,3 +795,270 @@ class TestSandboxDomain:
             sandbox.domain(9999)
 
         sandbox.client.close()
+
+
+class TestSandboxRefresh:
+    """Test sandbox refresh operations."""
+
+    @respx.mock
+    def test_refresh_sync(self, mock_env_clear, mock_sandbox_get_response):
+        """Test synchronous sandbox refresh updates state in place."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        # Mock get sandbox (initial fetch)
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={
+                        "sandbox": mock_sandbox_get_response,
+                        "routes": [],
+                    },
+                ),
+                # Second call (refresh) returns updated status
+                httpx.Response(
+                    200,
+                    json={
+                        "sandbox": {**mock_sandbox_get_response, "status": "stopped"},
+                        "routes": [
+                            {
+                                "port": 3000,
+                                "subdomain": "new-route",
+                                "url": "https://new-route.vercel.run",
+                            }
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert sandbox.status == "running"
+        assert sandbox.routes == []
+
+        sandbox.refresh()
+
+        assert sandbox.status == "stopped"
+        assert len(sandbox.routes) == 1
+        assert sandbox.routes[0]["port"] == 3000
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_async(self, mock_env_clear, mock_sandbox_get_response):
+        """Test asynchronous sandbox refresh updates state in place."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={
+                        "sandbox": mock_sandbox_get_response,
+                        "routes": [],
+                    },
+                ),
+                httpx.Response(
+                    200,
+                    json={
+                        "sandbox": {**mock_sandbox_get_response, "status": "stopped"},
+                        "routes": [],
+                    },
+                ),
+            ]
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert sandbox.status == "running"
+
+        await sandbox.refresh()
+
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
+
+
+class TestSandboxWaitForStatus:
+    """Test sandbox wait_for_status operations."""
+
+    @respx.mock
+    def test_wait_for_status_already_matched(self, mock_env_clear, mock_sandbox_get_response):
+        """Test wait_for_status returns immediately if already at target status."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert sandbox.status == "running"
+        # Should return immediately without making additional API calls
+        sandbox.wait_for_status("running")
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_wait_for_status_polls(self, mock_env_clear, mock_sandbox_get_response):
+        """Test wait_for_status polls until status matches."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                # Initial get returns pending
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                # First refresh: still pending
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                # Second refresh: now running
+                httpx.Response(
+                    200,
+                    json={"sandbox": mock_sandbox_get_response, "routes": []},
+                ),
+            ]
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert sandbox.status == "pending"
+        sandbox.wait_for_status("running", poll_interval=0.01)
+        assert sandbox.status == "running"
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_wait_for_status_timeout(self, mock_env_clear, mock_sandbox_get_response):
+        """Test wait_for_status raises TimeoutError."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": pending_response, "routes": []},
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'running' status"):
+            sandbox.wait_for_status("running", timeout=0.05, poll_interval=0.01)
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_async_polls(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async wait_for_status polls until status matches."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": mock_sandbox_get_response, "routes": []},
+                ),
+            ]
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert sandbox.status == "pending"
+        await sandbox.wait_for_status("running", poll_interval=0.01)
+        assert sandbox.status == "running"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_async_timeout(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async wait_for_status raises TimeoutError."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": pending_response, "routes": []},
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'running' status"):
+            await sandbox.wait_for_status("running", timeout=0.05, poll_interval=0.01)
+
+        await sandbox.client.aclose()

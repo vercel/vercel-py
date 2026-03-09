@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
+
 from ..oidc import Credentials, get_credentials
-from .api_client import APIClient, AsyncAPIClient
 from .models import Snapshot as SnapshotModel
 
 
@@ -12,7 +14,7 @@ from .models import Snapshot as SnapshotModel
 class AsyncSnapshot:
     """A Snapshot is a saved state of a Sandbox that can be used to create new Sandboxes."""
 
-    client: AsyncAPIClient
+    client: AsyncSandboxOpsClient
     snapshot: SnapshotModel
 
     @property
@@ -50,7 +52,7 @@ class AsyncSnapshot:
     ) -> AsyncSnapshot:
         """Retrieve an existing snapshot by ID."""
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncAPIClient(team_id=creds.team_id, token=creds.token)
+        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp = await client.get_snapshot(snapshot_id=snapshot_id)
         return AsyncSnapshot(client=client, snapshot=resp.snapshot)
 
@@ -64,7 +66,7 @@ class AsyncSnapshot:
 class Snapshot:
     """A Snapshot is a saved state of a Sandbox that can be used to create new Sandboxes."""
 
-    client: APIClient
+    client: SyncSandboxOpsClient
     snapshot: SnapshotModel
 
     @property
@@ -102,11 +104,11 @@ class Snapshot:
     ) -> Snapshot:
         """Retrieve an existing snapshot by ID."""
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = APIClient(team_id=creds.team_id, token=creds.token)
-        resp = client.get_snapshot(snapshot_id=snapshot_id)
+        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        resp = iter_coroutine(client.get_snapshot(snapshot_id=snapshot_id))
         return Snapshot(client=client, snapshot=resp.snapshot)
 
     def delete(self) -> None:
         """Delete this snapshot."""
-        resp = self.client.delete_snapshot(snapshot_id=self.snapshot.id)
+        resp = iter_coroutine(self.client.delete_snapshot(snapshot_id=self.snapshot.id))
         self.snapshot = resp.snapshot

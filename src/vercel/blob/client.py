@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from os import PathLike
 from typing import Any
 
-from vercel._internal.blob import ensure_token
 from vercel._internal.blob.core import (
     AsyncBlobOpsClient,
     SyncBlobOpsClient,
@@ -13,7 +11,7 @@ from vercel._internal.blob.core import (
 )
 from vercel._internal.blob.multipart import MultipartClient
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel.blob.errors import BlobError, BlobNoTokenProvidedError
+from vercel.blob.errors import BlobError
 from vercel.blob.multipart.api import (
     AsyncMultipartUploader,
     MultipartUploader,
@@ -34,15 +32,12 @@ from vercel.blob.types import (
 
 class BlobClient:
     def __init__(self, token: str | None = None):
-        resolved_token = (
-            token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
-        )
-        if not resolved_token:
-            raise BlobNoTokenProvidedError()
-        self.token = ensure_token(resolved_token)
-
-        self._ops_client = SyncBlobOpsClient()
+        self._ops_client = SyncBlobOpsClient(token=token)
         self._closed = False
+
+    @property
+    def token(self) -> str:
+        return self._ops_client._request_client.token
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -84,7 +79,7 @@ class BlobClient:
                 add_random_suffix=add_random_suffix,
                 overwrite=overwrite,
                 cache_control_max_age=cache_control_max_age,
-                token=self.token,
+                token=None,
                 multipart=multipart,
                 on_upload_progress=on_upload_progress,
             )
@@ -105,7 +100,6 @@ class BlobClient:
             self._ops_client.get_blob(
                 url_or_path,
                 access=access,
-                token=self.token,
                 timeout=timeout,
                 use_cache=use_cache,
                 if_none_match=if_none_match,
@@ -118,7 +112,6 @@ class BlobClient:
         return iter_coroutine(
             self._ops_client.head_blob(
                 url_or_path,
-                token=self.token,
             )
         )
 
@@ -128,7 +121,6 @@ class BlobClient:
         iter_coroutine(
             self._ops_client.delete_blob(
                 normalized_urls,
-                token=self.token,
             )
         )
 
@@ -146,7 +138,6 @@ class BlobClient:
             prefix=prefix,
             cursor=cursor,
             mode=mode,
-            token=self.token,
         )
 
     def iter_objects(
@@ -162,7 +153,6 @@ class BlobClient:
         return self._ops_client.iter_objects(
             prefix=prefix,
             mode=mode,
-            token=self.token,
             batch_size=batch_size,
             limit=limit,
             cursor=cursor,
@@ -189,7 +179,6 @@ class BlobClient:
                 add_random_suffix=add_random_suffix,
                 overwrite=overwrite,
                 cache_control_max_age=cache_control_max_age,
-                token=self.token,
             )
         )
 
@@ -198,7 +187,6 @@ class BlobClient:
         return iter_coroutine(
             self._ops_client.create_folder(
                 path,
-                token=self.token,
                 overwrite=overwrite,
             )
         )
@@ -220,7 +208,6 @@ class BlobClient:
                 url_or_path,
                 local_path,
                 access=access,
-                token=self.token,
                 timeout=timeout,
                 overwrite=overwrite,
                 create_parents=create_parents,
@@ -251,7 +238,7 @@ class BlobClient:
                 add_random_suffix=add_random_suffix,
                 overwrite=overwrite,
                 cache_control_max_age=cache_control_max_age,
-                token=self.token,
+                token=None,
                 multipart=multipart,
                 on_upload_progress=on_upload_progress,
                 missing_local_path_error="src_path is required",
@@ -284,15 +271,12 @@ class BlobClient:
 
 class AsyncBlobClient:
     def __init__(self, token: str | None = None):
-        resolved_token = (
-            token or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")
-        )
-        if not resolved_token:
-            raise BlobNoTokenProvidedError()
-        self.token = ensure_token(resolved_token)
-
-        self._ops_client = AsyncBlobOpsClient()
+        self._ops_client = AsyncBlobOpsClient(token=token)
         self._closed = False
+
+    @property
+    def token(self) -> str:
+        return self._ops_client._request_client.token
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -337,7 +321,7 @@ class AsyncBlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=self.token,
+            token=None,
             multipart=multipart,
             on_upload_progress=on_upload_progress,
         )
@@ -356,7 +340,6 @@ class AsyncBlobClient:
         return await self._ops_client.get_blob(
             url_or_path,
             access=access,
-            token=self.token,
             timeout=timeout,
             use_cache=use_cache,
             if_none_match=if_none_match,
@@ -367,7 +350,6 @@ class AsyncBlobClient:
         self._ensure_open()
         return await self._ops_client.head_blob(
             url_or_path,
-            token=self.token,
         )
 
     async def delete(self, url_or_path: str | Iterable[str]) -> None:
@@ -375,7 +357,6 @@ class AsyncBlobClient:
         normalized_urls = normalize_delete_urls(url_or_path)
         await self._ops_client.delete_blob(
             normalized_urls,
-            token=self.token,
         )
 
     async def iter_objects(
@@ -391,7 +372,6 @@ class AsyncBlobClient:
         return self._ops_client.iter_objects(
             prefix=prefix,
             mode=mode,
-            token=self.token,
             batch_size=batch_size,
             limit=limit,
             cursor=cursor,
@@ -411,14 +391,12 @@ class AsyncBlobClient:
             prefix=prefix,
             cursor=cursor,
             mode=mode,
-            token=self.token,
         )
 
     async def create_folder(self, path: str, *, overwrite: bool = False) -> CreateFolderResultType:
         self._ensure_open()
         return await self._ops_client.create_folder(
             path,
-            token=self.token,
             overwrite=overwrite,
         )
 
@@ -442,7 +420,6 @@ class AsyncBlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=self.token,
         )
 
     async def download_file(
@@ -463,7 +440,6 @@ class AsyncBlobClient:
             url_or_path,
             local_path,
             access=access,
-            token=self.token,
             timeout=timeout,
             overwrite=overwrite,
             create_parents=create_parents,
@@ -496,7 +472,7 @@ class AsyncBlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=self.token,
+            token=None,
             multipart=multipart,
             on_upload_progress=on_upload_progress,
             missing_local_path_error="local_path is required",

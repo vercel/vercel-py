@@ -3,15 +3,15 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Generator
 from dataclasses import dataclass
 
-import httpx
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.sandbox import APIError, AsyncSandboxOpsClient, SyncSandboxOpsClient
 
-from .api_client import APIClient, AsyncAPIClient
 from .models import Command as CommandModel, CommandFinishedResponse, LogLine
 
 
 @dataclass
 class AsyncCommand:
-    client: AsyncAPIClient
+    client: AsyncSandboxOpsClient
     sandbox_id: str
     cmd: CommandModel
 
@@ -61,9 +61,9 @@ class AsyncCommand:
             await self.client.kill_command(
                 sandbox_id=self.sandbox_id, command_id=self.cmd.id, signal=signal
             )
-        except httpx.HTTPStatusError as e:
+        except APIError as e:
             # Command may already have exited; ignore 404s
-            if e.response is not None and e.response.status_code == 404:
+            if e.status_code == 404:
                 return
             raise
 
@@ -81,7 +81,7 @@ class AsyncCommandFinished(AsyncCommand):
 
 @dataclass
 class Command:
-    client: APIClient
+    client: SyncSandboxOpsClient
     sandbox_id: str
     cmd: CommandModel
 
@@ -101,7 +101,9 @@ class Command:
         yield from self.client.get_logs(sandbox_id=self.sandbox_id, cmd_id=self.cmd.id)
 
     def wait(self) -> CommandFinished:
-        resp = self.client.get_command(sandbox_id=self.sandbox_id, cmd_id=self.cmd.id, wait=True)
+        resp = iter_coroutine(
+            self.client.get_command(sandbox_id=self.sandbox_id, cmd_id=self.cmd.id, wait=True)
+        )
         assert isinstance(resp, CommandFinishedResponse)
         return CommandFinished(
             client=self.client,
@@ -125,11 +127,13 @@ class Command:
 
     def kill(self, signal: int = 15) -> None:
         try:
-            self.client.kill_command(
-                sandbox_id=self.sandbox_id, command_id=self.cmd.id, signal=signal
+            iter_coroutine(
+                self.client.kill_command(
+                    sandbox_id=self.sandbox_id, command_id=self.cmd.id, signal=signal
+                )
             )
-        except httpx.HTTPStatusError as e:
-            if e.response is not None and e.response.status_code == 404:
+        except APIError as e:
+            if e.status_code == 404:
                 return
             raise
 

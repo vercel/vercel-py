@@ -33,7 +33,7 @@ def auto_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    client = SyncMultipartClient()
+    client = SyncMultipartClient(token=token)
     headers = prepare_upload_headers(
         access=access,
         content_type=content_type,
@@ -43,13 +43,12 @@ def auto_multipart_upload(
     )
     part_size = validate_part_size(part_size)
 
-    create_response = iter_coroutine(client.create_multipart_upload(path, headers, token=token))
+    create_response = iter_coroutine(client.create_multipart_upload(path, headers))
     session = MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
         path=path,
         headers=headers,
-        token=token,
     )
 
     runtime = create_sync_multipart_upload_runtime()
@@ -70,7 +69,6 @@ def auto_multipart_upload(
             key=session.key,
             path=session.path,
             headers=session.headers,
-            token=session.token,
             parts=ordered_parts,
         )
     )
@@ -94,7 +92,7 @@ async def auto_multipart_upload_async(
     ) = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    client = AsyncMultipartClient()
+    client = AsyncMultipartClient(token=token)
     headers = prepare_upload_headers(
         access=access,
         content_type=content_type,
@@ -104,13 +102,12 @@ async def auto_multipart_upload_async(
     )
     part_size = validate_part_size(part_size)
 
-    create_response = await client.create_multipart_upload(path, headers, token=token)
+    create_response = await client.create_multipart_upload(path, headers)
     session = MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
         path=path,
         headers=headers,
-        token=token,
     )
 
     runtime = create_async_multipart_upload_runtime()
@@ -130,7 +127,6 @@ async def auto_multipart_upload_async(
         key=session.key,
         path=session.path,
         headers=session.headers,
-        token=session.token,
         parts=ordered_parts,
     )
     return shape_complete_upload_result(complete_response)

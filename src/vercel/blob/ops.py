@@ -4,10 +4,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Itera
 from os import PathLike
 from typing import Any, TypeVar
 
-from vercel._internal.blob import (
-    ensure_token,
-    validate_access,
-)
 from vercel._internal.blob.core import (
     AsyncBlobOpsClient,
     SyncBlobOpsClient,
@@ -30,8 +26,10 @@ _T = TypeVar("_T")
 
 def _run_sync_blob_operation(
     operation: Callable[[SyncBlobOpsClient], Coroutine[None, None, _T]],
+    *,
+    token: str | None = None,
 ) -> _T:
-    with SyncBlobOpsClient() as client:
+    with SyncBlobOpsClient(token=token) as client:
         # Keep exactly one sync bridge at the wrapper boundary.
         return iter_coroutine(operation(client))
 
@@ -49,7 +47,6 @@ def put(
     multipart: bool = False,
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
 ) -> PutBlobResultType:
-    token = ensure_token(token)
     result, _ = _run_sync_blob_operation(
         lambda client: client.put_blob(
             path,
@@ -62,7 +59,8 @@ def put(
             token=token,
             multipart=multipart,
             on_upload_progress=on_upload_progress,
-        )
+        ),
+        token=token,
     )
     return result
 
@@ -84,8 +82,7 @@ async def put_async(
         | None
     ) = None,
 ) -> PutBlobResultType:
-    token = ensure_token(token)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         result, _ = await client.put_blob(
             path,
             body,
@@ -106,13 +103,12 @@ def delete(
     *,
     token: str | None = None,
 ) -> None:
-    token = ensure_token(token)
     normalized_urls = normalize_delete_urls(url_or_path)
     _run_sync_blob_operation(
         lambda client: client.delete_blob(
             normalized_urls,
-            token=token,
-        )
+        ),
+        token=token,
     )
 
 
@@ -121,31 +117,26 @@ async def delete_async(
     *,
     token: str | None = None,
 ) -> None:
-    token = ensure_token(token)
     normalized_urls = normalize_delete_urls(url_or_path)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         await client.delete_blob(
             normalized_urls,
-            token=token,
         )
 
 
 def head(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
-    token = ensure_token(token)
     return _run_sync_blob_operation(
         lambda client: client.head_blob(
             url_or_path,
-            token=token,
-        )
+        ),
+        token=token,
     )
 
 
 async def head_async(url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
-    token = ensure_token(token)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         return await client.head_blob(
             url_or_path,
-            token=token,
         )
 
 
@@ -158,18 +149,16 @@ def get(
     use_cache: bool = True,
     if_none_match: str | None = None,
 ) -> GetBlobResultType:
-    token = ensure_token(token)
-    validate_access(access)
     return _run_sync_blob_operation(
         lambda client: client.get_blob(
             url_or_path,
             access=access,
-            token=token,
             timeout=timeout,
             use_cache=use_cache,
             if_none_match=if_none_match,
             default_timeout=30.0,
-        )
+        ),
+        token=token,
     )
 
 
@@ -182,13 +171,10 @@ async def get_async(
     use_cache: bool = True,
     if_none_match: str | None = None,
 ) -> GetBlobResultType:
-    token = ensure_token(token)
-    validate_access(access)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         return await client.get_blob(
             url_or_path,
             access=access,
-            token=token,
             timeout=timeout,
             use_cache=use_cache,
             if_none_match=if_none_match,
@@ -204,14 +190,12 @@ def list_objects(
     mode: str | None = None,
     token: str | None = None,
 ) -> ListBlobResultType:
-    token = ensure_token(token)
-    with SyncBlobOpsClient() as client:
+    with SyncBlobOpsClient(token=token) as client:
         return client.list_objects(
             limit=limit,
             prefix=prefix,
             cursor=cursor,
             mode=mode,
-            token=token,
         )
 
 
@@ -223,14 +207,12 @@ async def list_objects_async(
     mode: str | None = None,
     token: str | None = None,
 ) -> ListBlobResultType:
-    token = ensure_token(token)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         return await client.list_objects(
             limit=limit,
             prefix=prefix,
             cursor=cursor,
             mode=mode,
-            token=token,
         )
 
 
@@ -243,12 +225,10 @@ def iter_objects(
     limit: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[ListBlobItem]:
-    token = ensure_token(token)
-    with SyncBlobOpsClient() as client:
+    with SyncBlobOpsClient(token=token) as client:
         yield from client.iter_objects(
             prefix=prefix,
             mode=mode,
-            token=token,
             batch_size=batch_size,
             limit=limit,
             cursor=cursor,
@@ -264,12 +244,10 @@ async def iter_objects_async(
     limit: int | None = None,
     cursor: str | None = None,
 ) -> AsyncIterator[ListBlobItem]:
-    token = ensure_token(token)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         async for item in client.iter_objects(
             prefix=prefix,
             mode=mode,
-            token=token,
             batch_size=batch_size,
             limit=limit,
             cursor=cursor,
@@ -288,7 +266,6 @@ def copy(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> PutBlobResultType:
-    token = ensure_token(token)
     return _run_sync_blob_operation(
         lambda client: client.copy_blob(
             src_path,
@@ -298,8 +275,8 @@ def copy(
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=token,
-        )
+        ),
+        token=token,
     )
 
 
@@ -314,8 +291,7 @@ async def copy_async(
     cache_control_max_age: int | None = None,
     token: str | None = None,
 ) -> PutBlobResultType:
-    token = ensure_token(token)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         return await client.copy_blob(
             src_path,
             dst_path,
@@ -324,7 +300,6 @@ async def copy_async(
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=token,
         )
 
 
@@ -334,13 +309,12 @@ def create_folder(
     token: str | None = None,
     overwrite: bool = False,
 ) -> CreateFolderResultType:
-    token = ensure_token(token)
     return _run_sync_blob_operation(
         lambda client: client.create_folder(
             path,
-            token=token,
             overwrite=overwrite,
-        )
+        ),
+        token=token,
     )
 
 
@@ -350,11 +324,9 @@ async def create_folder_async(
     token: str | None = None,
     overwrite: bool = False,
 ) -> CreateFolderResultType:
-    token = ensure_token(token)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         return await client.create_folder(
             path,
-            token=token,
             overwrite=overwrite,
         )
 
@@ -385,7 +357,8 @@ def upload_file(
             multipart=multipart,
             on_upload_progress=on_upload_progress,
             missing_local_path_error="src_path is required",
-        )
+        ),
+        token=token,
     )
 
 
@@ -406,7 +379,7 @@ async def upload_file_async(
         | None
     ) = None,
 ) -> PutBlobResultType:
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         return await client.upload_file(
             local_path,
             path,
@@ -433,19 +406,17 @@ def download_file(
     create_parents: bool = True,
     progress: Callable[[int, int | None], None] | None = None,
 ) -> str:
-    token = ensure_token(token)
-    validate_access(access)
     return _run_sync_blob_operation(
         lambda client: client.download_file(
             url_or_path,
             local_path,
             access=access,
-            token=token,
             timeout=timeout,
             overwrite=overwrite,
             create_parents=create_parents,
             progress=progress,
-        )
+        ),
+        token=token,
     )
 
 
@@ -462,14 +433,11 @@ async def download_file_async(
         Callable[[int, int | None], None] | Callable[[int, int | None], Awaitable[None]] | None
     ) = None,
 ) -> str:
-    token = ensure_token(token)
-    validate_access(access)
-    async with AsyncBlobOpsClient() as client:
+    async with AsyncBlobOpsClient(token=token) as client:
         return await client.download_file(
             url_or_path,
             local_path,
             access=access,
-            token=token,
             timeout=timeout,
             overwrite=overwrite,
             create_parents=create_parents,

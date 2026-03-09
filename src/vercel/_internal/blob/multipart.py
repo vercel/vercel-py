@@ -47,7 +47,6 @@ class MultipartUploadSession:
     key: str
     path: str
     headers: dict[str, str]
-    token: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +221,6 @@ class _SyncMultipartUploadRuntime:
                 key=session.key,
                 path=session.path,
                 headers=session.headers,
-                token=session.token,
                 part_number=part_number,
                 body=content,
                 on_upload_progress=progress,
@@ -293,7 +291,6 @@ class _AsyncMultipartUploadRuntime:
                 part_number=part_number,
                 body=content,
                 on_upload_progress=part_progress_callback(part_number),
-                token=session.token,
             )
             return _normalize_part_upload_result(part_number, response)
 
@@ -379,13 +376,10 @@ class MultipartClient:
         self,
         path: str,
         headers: PutHeaders | dict[str, str],
-        *,
-        token: str | None = None,
     ) -> dict[str, str]:
         response = await self._request_api(
             pathname="/mpu",
             method="POST",
-            token=token,
             headers=_build_headers(headers, action="create"),
             params={"pathname": path},
         )
@@ -401,12 +395,10 @@ class MultipartClient:
         part_number: int,
         body: Any,
         on_upload_progress: AsyncProgressCallback | None = None,
-        token: str | None = None,
     ) -> dict[str, Any]:
         response = await self._request_api(
             pathname="/mpu",
             method="POST",
-            token=token,
             headers=_build_headers(
                 headers,
                 action="upload",
@@ -428,12 +420,10 @@ class MultipartClient:
         path: str,
         headers: PutHeaders | dict[str, str],
         parts: list[dict[str, Any]],
-        token: str | None = None,
     ) -> dict[str, Any]:
         response = await self._request_api(
             pathname="/mpu",
             method="POST",
-            token=token,
             headers=_build_headers(
                 headers,
                 action="complete",
@@ -448,14 +438,14 @@ class MultipartClient:
 
 
 class SyncMultipartClient(MultipartClient):
-    def __init__(self) -> None:
+    def __init__(self, token: str | None = None) -> None:
         from vercel._internal.blob.core import create_sync_request_client
 
-        super().__init__(create_sync_request_client())
+        super().__init__(create_sync_request_client(token=token))
 
 
 class AsyncMultipartClient(MultipartClient):
-    def __init__(self) -> None:
+    def __init__(self, token: str | None = None) -> None:
         from vercel._internal.blob.core import create_async_request_client
 
-        super().__init__(create_async_request_client())
+        super().__init__(create_async_request_client(token=token))
