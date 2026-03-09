@@ -183,6 +183,7 @@ class BaseSandboxOpsClient:
         resources: dict[str, Any] | None = None,
         runtime: str | None = None,
         interactive: bool = False,
+        env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
         body: dict[str, Any] = {"projectId": project_id}
         if ports:
@@ -197,6 +198,8 @@ class BaseSandboxOpsClient:
             body["runtime"] = runtime
         if interactive:
             body["__interactive"] = True
+        if env is not None:
+            body["env"] = env
 
         data = await self._request_client.request_json("POST", "/v1/sandboxes", body=JSONBody(body))
         return SandboxAndRoutesResponse.model_validate(data)

@@ -82,6 +82,7 @@ class AsyncSandbox:
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
+        env: dict[str, str] | None = None,
     ) -> AsyncSandbox:
         """Create a new sandbox.
 
@@ -96,6 +97,8 @@ class AsyncSandbox:
             team_id: Team ID (uses OIDC if not provided).
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
+            env: Default environment variables for the sandbox. These are inherited
+                by all commands unless overridden per-command.
 
         Returns:
             Created AsyncSandbox instance.
@@ -110,6 +113,7 @@ class AsyncSandbox:
             resources=resources,
             runtime=runtime,
             interactive=interactive,
+            env=env,
         )
         return AsyncSandbox(
             client=client,
@@ -353,6 +357,7 @@ class Sandbox:
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
+        env: dict[str, str] | None = None,
     ) -> Sandbox:
         """Create a new sandbox.
 
@@ -368,6 +373,8 @@ class Sandbox:
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
                 Note: For interactive shell sessions, use AsyncSandbox instead.
+            env: Default environment variables for the sandbox. These are inherited
+                by all commands unless overridden per-command.
 
         Returns:
             Created Sandbox instance.
@@ -383,6 +390,7 @@ class Sandbox:
                 resources=resources,
                 runtime=runtime,
                 interactive=interactive,
+                env=env,
             )
         )
         return Sandbox(
