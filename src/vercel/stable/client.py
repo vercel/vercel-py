@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.stable.options import merge_root_options
 from vercel._internal.stable.runtime import AsyncRuntime, SyncRuntime
+from vercel._internal.stable.sdk.request_client import SdkClientLineage, SdkRequestState
 from vercel.stable.blob.client import AsyncBlobClient, SyncBlobClient
 from vercel.stable.cache.client import AsyncCacheClient, SyncCacheClient
 from vercel.stable.options import BlobOptions, CacheOptions, RootOptions, SandboxOptions, SdkOptions
@@ -39,7 +40,12 @@ class SyncVercel:
         headers: dict[str, str] | None = None,
     ) -> SyncSdk:
         return SyncSdk(
-            _runtime=self._runtime,
+            _lineage=SdkClientLineage(
+                runtime=self._runtime,
+                root_timeout=self._options.timeout,
+                env=self._options.env,
+                request_state=SdkRequestState(),
+            ),
             _options=SdkOptions(
                 token=token,
                 base_url=base_url,
@@ -118,7 +124,12 @@ class AsyncVercel:
         headers: dict[str, str] | None = None,
     ) -> AsyncSdk:
         return AsyncSdk(
-            _runtime=self._runtime,
+            _lineage=SdkClientLineage(
+                runtime=self._runtime,
+                root_timeout=self._options.timeout,
+                env=self._options.env,
+                request_state=SdkRequestState(),
+            ),
             _options=SdkOptions(
                 token=token,
                 base_url=base_url,
