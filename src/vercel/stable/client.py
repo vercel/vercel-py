@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.stable.cache.client import CacheClientLineage
 from vercel._internal.stable.options import merge_root_options
 from vercel._internal.stable.runtime import AsyncRuntime, SyncRuntime
 from vercel._internal.stable.sdk.request_client import SdkClientLineage, SdkRequestState
@@ -71,10 +73,23 @@ class SyncVercel:
         *,
         endpoint: str | None = None,
         headers: dict[str, str] | None = None,
+        namespace: str | None = None,
+        namespace_separator: str | None = None,
+        key_hash_function: Callable[[str], str] | None = None,
     ) -> SyncCacheClient:
         return SyncCacheClient(
-            _runtime=self._runtime,
-            _options=CacheOptions(endpoint=endpoint, headers=dict(headers or {})),
+            _lineage=CacheClientLineage(
+                runtime=self._runtime,
+                root_timeout=self._options.timeout,
+                env=self._options.env,
+            ),
+            _options=CacheOptions(
+                endpoint=endpoint,
+                headers=dict(headers or {}),
+                namespace=namespace,
+                namespace_separator=namespace_separator,
+                key_hash_function=key_hash_function,
+            ),
         )
 
     def get_sandbox(
@@ -155,10 +170,23 @@ class AsyncVercel:
         *,
         endpoint: str | None = None,
         headers: dict[str, str] | None = None,
+        namespace: str | None = None,
+        namespace_separator: str | None = None,
+        key_hash_function: Callable[[str], str] | None = None,
     ) -> AsyncCacheClient:
         return AsyncCacheClient(
-            _runtime=self._runtime,
-            _options=CacheOptions(endpoint=endpoint, headers=dict(headers or {})),
+            _lineage=CacheClientLineage(
+                runtime=self._runtime,
+                root_timeout=self._options.timeout,
+                env=self._options.env,
+            ),
+            _options=CacheOptions(
+                endpoint=endpoint,
+                headers=dict(headers or {}),
+                namespace=namespace,
+                namespace_separator=namespace_separator,
+                key_hash_function=key_hash_function,
+            ),
         )
 
     def get_sandbox(
