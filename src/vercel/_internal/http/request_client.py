@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -37,6 +37,7 @@ class RetryPolicy:
 def _resolve_token(
     token: str | None,
     token_env_vars: str | Sequence[str],
+    env: Mapping[str, str] | None = None,
 ) -> str:
     if token:
         return token
@@ -44,8 +45,9 @@ def _resolve_token(
     env_names: Sequence[str] = (
         [token_env_vars] if isinstance(token_env_vars, str) else token_env_vars
     )
+    _env: Mapping[str, str] = env if env is not None else os.environ
     for name in env_names:
-        value = os.getenv(name)
+        value = _env.get(name)
         if value:
             return value
 
@@ -67,13 +69,14 @@ class RequestClient:
         transport: BaseTransport,
         token: str | None = None,
         token_env_vars: str | Sequence[str] = "VERCEL_TOKEN",
+        env: Mapping[str, str] | None = None,
         base_headers: dict[str, str] | None = None,
         base_params: dict[str, Any] | None = None,
         retry: RetryPolicy | None = None,
         sleep_fn: SleepFn,
     ) -> None:
         self._transport = transport
-        self._token = _resolve_token(token, token_env_vars)
+        self._token = _resolve_token(token, token_env_vars, env)
         self._retry = retry or RetryPolicy()
         self._sleep_fn = sleep_fn
 
