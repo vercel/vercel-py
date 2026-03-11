@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
 from vercel.stable.options import RootOptions
 
@@ -37,7 +37,7 @@ def merge_dataclass_options(options: _T, **changes: object) -> _T:
     updates = {key: value for key, value in changes.items() if value is not None}
     if not updates:
         return options
-    return replace(options, **updates)
+    return cast(_T, replace(cast(Any, options), **updates))
 
 
 __all__ = ["merge_mapping", "merge_root_options", "merge_dataclass_options"]
