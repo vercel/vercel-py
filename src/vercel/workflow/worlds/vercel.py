@@ -1,9 +1,8 @@
 import asyncio
-import concurrent.futures
-import contextvars
 import datetime
 import os
 import platform
+import traceback
 import urllib.parse
 from typing import Any, TypeVar
 
@@ -241,19 +240,8 @@ class VercelWorld(w.World):
                         delay_seconds=delay_seconds,
                     )
             except Exception:
-                import traceback
                 traceback.print_exc()
                 raise
-
-        loop_ctx: contextvars.ContextVar[asyncio.AbstractEventLoop] = contextvars.ContextVar(
-            "loop_ctx"
-        )
-
-        def queue_handler(message: Any, metadata: vqs_client.MessageMetadata) -> None:
-            fut: concurrent.futures.Future[None] = concurrent.futures.Future()
-            loop = loop_ctx.get()
-            loop.call_soon_threadsafe(loop.create_task, async_handler(fut, message, metadata))
-            fut.result()
 
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
             content_type = request.get_header("content-type")
@@ -263,13 +251,9 @@ class VercelWorld(w.World):
                     status=400,
                 )
             raw_body = await request.get_body()
-            token = loop_ctx.set(asyncio.get_running_loop())
-            try:
-                status_code, headers, body = await asyncio.to_thread(
-                    vqs_client.handle_queue_callback, raw_body
-                )
-            finally:
-                loop_ctx.reset(token)
+            status_code, headers, body = await asyncio.to_thread(
+                vqs_client.handle_queue_callback, raw_body
+            )
             return w.HTTPResponse(status_code, body, dict(headers))
 
         return http_handler

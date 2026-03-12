@@ -16,7 +16,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "anyio>=4.0.0",
     "cbor2>=5.8.0",
-    "vercel-workers @ git+https://github.com/vercel/vercel.git@main#subdirectory=python/vercel-workers ; python_version >= '3.12'",
+    "vercel-workers>=0.0.12 ; python_version >= '3.12'",
     "python-dotenv"
 ]
 
