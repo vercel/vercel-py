@@ -306,7 +306,7 @@ class RunStartedEvent(BaseEvent):
 
 
 class RunCompletedEventData(BaseModel):
-    result: list[bytes]
+    output: list[bytes]
 
     def into_event(self) -> "RunCompletedEvent":
         return RunCompletedEvent(eventData=self)

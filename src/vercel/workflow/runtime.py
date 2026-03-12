@@ -179,7 +179,7 @@ async def workflow_handler(
     else:
         await world.events_create(
             run_id,
-            w.RunCompletedEventData(result=[output]).into_event(),
+            w.RunCompletedEventData(output=[output]).into_event(),
         )
 
     return None
