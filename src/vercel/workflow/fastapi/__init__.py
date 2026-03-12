@@ -1,5 +1,7 @@
 import fastapi
 
+from vercel.headers import set_headers
+
 from .. import runtime, world as w
 
 
@@ -23,6 +25,11 @@ def make_fastapi_response(response: w.HTTPResponse) -> fastapi.Response:
 
 
 def with_workflow(app: fastapi.FastAPI) -> fastapi.FastAPI:
+    @app.middleware("http")
+    async def set_vercel_headers(request: fastapi.Request, call_next):
+        set_headers(request.headers)
+        return await call_next(request)
+
     router = fastapi.APIRouter(prefix="/.well-known/workflow/v1", tags=["Workflow"])
 
     workflow_entrypoint = runtime.workflow_entrypoint()

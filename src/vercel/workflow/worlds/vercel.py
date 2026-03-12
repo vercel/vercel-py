@@ -30,6 +30,16 @@ MAX_DELAY_SECONDS = float(
 T = TypeVar("T", bound=w.BaseModel)
 
 
+def _cbor_tag_hook(decoder: cbor2.CBORDecoder, tag: cbor2.CBORTag) -> Any:
+    if tag.tag == 64:
+        return tag.value
+    return tag
+
+
+def _cbor_filter_undefined(decoder: cbor2.CBORDecoder, value: dict[str, Any]) -> dict[str, Any]:
+    return {k: None if v is cbor2.undefined else v for k, v in value.items()}
+
+
 class VercelWorld(w.World):
     def __init__(
         self,
@@ -48,7 +58,7 @@ class VercelWorld(w.World):
         # header if override is set)
         # When not using proxy, use the default workflow-server URL (with /api path appended)
         if self._using_proxy:
-            self._base_url = "https://api.vercel.com/v1/workflow"
+            self._base_url = "https://api.vercel.com/v2/workflow"
         else:
             default_host = WORKFLOW_SERVER_URL_OVERRIDE or "https://vercel-workflow.com"
             self._base_url = f"{default_host}/api"
@@ -113,7 +123,7 @@ class VercelWorld(w.World):
 
         # utils.ts, parseResponseBody
         if "application/cbor" in resp.headers.get("Content-Type", ""):
-            result = cbor2.loads(resp.content)
+            result = cbor2.loads(resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined)
         else:
             result = resp.json()
 
@@ -130,6 +140,7 @@ class VercelWorld(w.World):
                     "url": f"{self._base_url}{endpoint}",
                     "status": resp.status_code,
                     "code": result.get("code"),
+                    "extras": result,
                 },
             )
 
@@ -170,7 +181,7 @@ class VercelWorld(w.World):
             headers["Vqs-Delay-Seconds"] = str(delay_seconds)
         try:
             response = await vqs_client.send_async(
-                queue_name,
+                ''.join(char if char.isalnum() or char in '-_' else '-' for char in queue_name),
                 payload,
                 idempotency_key=idempotency_key,
                 deployment_id=deployment_id,
@@ -180,7 +191,7 @@ class VercelWorld(w.World):
                 # so this ends up being `/api/v2/messages` when arriving at the queue server,
                 # which is the same as the default basePath in VQS client.
                 base_path="/queues/v2/messages" if self._using_proxy else None,
-                custom_headers=self._headers | headers,
+                headers=self._headers | headers,
             )
             return response["messageId"]
         except vqs_client.DuplicateIdempotencyKeyError:
@@ -193,8 +204,11 @@ class VercelWorld(w.World):
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
+        @vqs_client.subscribe(
+            topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
+        )
         async def async_handler(
-            fut: concurrent.futures.Future[None], body: Any, meta: vqs_client.MessageMetadata
+            body: Any, meta: vqs_client.MessageMetadata
         ) -> None:
             try:
                 if not isinstance(body, dict):
@@ -226,21 +240,15 @@ class VercelWorld(w.World):
                         deployment_id=body.get("deploymentId"),
                         delay_seconds=delay_seconds,
                     )
-            except Exception as e:
-                fut.set_exception(e)
-            except BaseException:
-                fut.cancel()
+            except Exception:
+                import traceback
+                traceback.print_exc()
                 raise
-            else:
-                fut.set_result(None)
 
         loop_ctx: contextvars.ContextVar[asyncio.AbstractEventLoop] = contextvars.ContextVar(
             "loop_ctx"
         )
 
-        @vqs_client.subscribe(
-            topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
-        )
         def queue_handler(message: Any, metadata: vqs_client.MessageMetadata) -> None:
             fut: concurrent.futures.Future[None] = concurrent.futures.Future()
             loop = loop_ctx.get()
@@ -279,23 +287,13 @@ class VercelWorld(w.World):
         )
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
-        if data.event_type == "run_created":
-            return w.EventResult(
-                run=await self._cbor_request(
-                    "POST",
-                    "/v1/runs/create",
-                    data=data.event_data.model_dump(),
-                    schema=w.WorkflowRunAdaptor,
-                )
-            )
-
-        return w.EventResult(
-            event=await self._cbor_request(
-                "POST",
-                f"/v1/runs/{run_id}/events",
-                data=data.model_dump(),
-                schema=w.EventAdaptor,
-            )
+        run_id_path = "null" if run_id is None else run_id
+        remote_ref_behavior = "resolve" if data.event_type in {"run_created", "run_started", "step_started"} else "lazy"
+        return await self._cbor_request(
+            "POST",
+            f"/v2/runs/{run_id_path}/events",
+            data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+            schema=w.EventResult,
         )
 
     async def events_list(

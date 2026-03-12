@@ -42,9 +42,9 @@ class WorkflowOrchestratorContext:
 
     async def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
         workflow = core.get_workflow(workflow_run.workflow_name)
-        if not workflow_run.input.startswith(b"json"):
+        if not workflow_run.input[0].startswith(b"json"):
             raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
-        args, kwargs = json.loads(workflow_run.input[len(b"json") :].decode())
+        args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
         token = self._ctx.set(self)
         try:
             self._fut = asyncio.ensure_future(workflow.func(*args, **kwargs))
@@ -76,8 +76,8 @@ class WorkflowOrchestratorContext:
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
-                    if data.startswith(b"json"):
-                        result = json.loads(data[len(b"json") :].decode())
+                    if data[0].startswith(b"json"):
+                        result = json.loads(data[0][len(b"json") :].decode())
                     else:
                         self._fut.cancel(
                             f"Unsupported step result encoding for "
@@ -108,6 +108,8 @@ async def workflow_handler(
         result = await world.events_create(run_id, w.RunStartedEvent())
         assert result.run is not None
         workflow_run = result.run
+    elif workflow_run.status == "cancelled":
+        return
 
     # At this point, the workflow is "running" and `startedAt` should
     # definitely be set.
@@ -155,16 +157,16 @@ async def workflow_handler(
         if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
             for sus in context.suspensions.values():
                 if not sus.has_created_event:
-                    data = w.StepCreatedEventData(stepName=sus.step.name, input=sus.input)
+                    data = w.StepCreatedEventData(stepName=sus.step.name, input=[sus.input])
                     await world.events_create(run_id, data.into_event(sus.correlation_id))
                     await world.queue(
                         f"__wkf_step_{sus.step.name}",
                         w.StepInvokePayload(
-                            workflow_name=workflow_run.workflow_name,
-                            workflow_run_id=run_id,
-                            workflow_started_at=workflow_started_at,
-                            step_id=sus.correlation_id,
-                            requested_at=datetime.now(UTC),
+                            workflowName=workflow_run.workflow_name,
+                            workflowRunId=run_id,
+                            workflowStartedAt=workflow_started_at,
+                            stepId=sus.correlation_id,
+                            requestedAt=datetime.now(UTC),
                         ),
                     )
         elif isinstance(e, Exception):
@@ -177,7 +179,7 @@ async def workflow_handler(
     else:
         await world.events_create(
             run_id,
-            w.RunCompletedEventData(result=output).into_event(),
+            w.RunCompletedEventData(result=[output]).into_event(),
         )
 
     return None
@@ -225,7 +227,7 @@ async def step_handler(
         # Re-invoke the workflow to handle the failed step
         await world.queue(
             f"__wkf_workflow_{req.workflow_name}",
-            w.WorkflowInvokePayload(run_id=req.workflow_run_id, requested_at=datetime.now(UTC)),
+            w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
         )
         return None
 
@@ -243,7 +245,7 @@ async def step_handler(
             if is_terminal_step:
                 await world.queue(
                     f"__wkf_workflow_{req.workflow_name}",
-                    w.WorkflowInvokePayload(run_id=req.workflow_run_id),
+                    w.WorkflowInvokePayload(runId=req.workflow_run_id),
                 )
             return None
 
@@ -264,9 +266,9 @@ async def step_handler(
             raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
 
         # Deserialize step input
-        if not step_run.input.startswith(b"json"):
+        if not step_run.input[0].startswith(b"json"):
             raise RuntimeError(f"Unsupported step input encoding for step {req.step_id}")
-        args, kwargs = json.loads(step_run.input[len(b"json") :].decode())
+        args, kwargs = json.loads(step_run.input[0][len(b"json") :].decode())
 
         # Execute the step function
         result = await step.func(*args, **kwargs)
@@ -277,7 +279,7 @@ async def step_handler(
         # Complete the step via event
         await world.events_create(
             req.workflow_run_id,
-            w.StepCompletedEventData(result=output).into_event(req.step_id),
+            w.StepCompletedEventData(result=[output]).into_event(req.step_id),
         )
 
     except Exception as e:
@@ -331,7 +333,7 @@ async def step_handler(
     # Re-invoke the workflow to continue execution
     await world.queue(
         f"__wkf_workflow_{req.workflow_name}",
-        w.WorkflowInvokePayload(run_id=req.workflow_run_id, requested_at=datetime.now(UTC)),
+        w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
     )
     return None
 
@@ -380,7 +382,7 @@ async def start[**P, T](wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwar
     deployment_id = await world.get_deployment_id()
     input_data = b"json" + json.dumps([args, kwargs], sort_keys=True).encode()
     data = w.RunCreatedEventData(
-        deploymentId=deployment_id, workflowName=wf.workflow_id, input=input_data
+        deploymentId=deployment_id, workflowName=wf.workflow_id, input=[input_data]
     )
     result = await world.events_create(None, data.into_event())
 
@@ -391,7 +393,7 @@ async def start[**P, T](wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwar
     run_id = result.run.run_id
     await world.queue(
         f"__wkf_workflow_{wf.workflow_id}",
-        w.WorkflowInvokePayload(run_id=run_id),
+        w.WorkflowInvokePayload(runId=run_id),
         deployment_id=deployment_id,
     )
 
