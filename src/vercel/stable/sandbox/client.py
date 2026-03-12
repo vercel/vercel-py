@@ -21,7 +21,7 @@ class SyncSandboxClient:
         base_url: str | None = None,
         team_id: str | None = None,
         team_slug: str | None = None,
-    ) -> "SyncSandboxClient":
+    ) -> SyncSandboxClient:
         return SyncSandboxClient(
             _runtime=self._runtime,
             _options=merge_dataclass_options(
@@ -46,7 +46,7 @@ class AsyncSandboxClient:
         base_url: str | None = None,
         team_id: str | None = None,
         team_slug: str | None = None,
-    ) -> "AsyncSandboxClient":
+    ) -> AsyncSandboxClient:
         return AsyncSandboxClient(
             _runtime=self._runtime,
             _options=merge_dataclass_options(

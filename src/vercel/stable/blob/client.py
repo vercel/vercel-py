@@ -19,7 +19,7 @@ class SyncBlobClient:
         *,
         token: str | None = None,
         base_url: str | None = None,
-    ) -> "SyncBlobClient":
+    ) -> SyncBlobClient:
         return SyncBlobClient(
             _runtime=self._runtime,
             _options=merge_dataclass_options(self._options, token=token, base_url=base_url),
@@ -36,7 +36,7 @@ class AsyncBlobClient:
         *,
         token: str | None = None,
         base_url: str | None = None,
-    ) -> "AsyncBlobClient":
+    ) -> AsyncBlobClient:
         return AsyncBlobClient(
             _runtime=self._runtime,
             _options=merge_dataclass_options(self._options, token=token, base_url=base_url),

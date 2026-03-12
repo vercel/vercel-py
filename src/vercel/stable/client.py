@@ -6,7 +6,6 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.stable.cache.client import CacheClientLineage
 from vercel._internal.stable.options import merge_root_options
 from vercel._internal.stable.runtime import AsyncRuntime, SyncRuntime
