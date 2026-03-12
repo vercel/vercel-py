@@ -133,6 +133,45 @@ async def test_request_defaults_content_type_header_for_json_bodies() -> None:
     assert headers["content-type"] == "application/json"
 
 
+@pytest.mark.asyncio
+async def test_request_uses_env_token_and_scope_when_options_do_not_override() -> None:
+    transport = _Transport(httpx.Response(200, json={}))
+    client = VercelRequestClient(
+        _lineage=SdkClientLineage(
+            runtime=cast(Any, _Runtime(transport)),
+            root_timeout=5.0,
+            env={"VERCEL_TOKEN": "env-token"},
+        ),
+        _options=SdkOptions(team_id="team_123", team_slug="team-slug"),
+        _sleep_fn=sync_sleep,
+    )
+
+    await client.request("GET", "/v1/projects")
+
+    assert transport.last_kwargs is not None
+    headers = cast(dict[str, str], transport.last_kwargs["headers"])
+    params = cast(dict[str, str], transport.last_kwargs["params"])
+    assert headers["authorization"] == "Bearer env-token"
+    assert headers["accept"] == "application/json"
+    assert params == {"teamId": "team_123", "slug": "team-slug"}
+
+
+@pytest.mark.asyncio
+async def test_request_missing_token_raises_runtime_error() -> None:
+    client = VercelRequestClient(
+        _lineage=SdkClientLineage(
+            runtime=cast(Any, _Runtime(_Transport(httpx.Response(200, json={})))),
+            root_timeout=5.0,
+            env={},
+        ),
+        _options=SdkOptions(),
+        _sleep_fn=sync_sleep,
+    )
+
+    with pytest.raises(RuntimeError, match="Missing API token"):
+        await client.request("GET", "/v1/projects")
+
+
 # ---------------------------------------------------------------------------
 # Property-based tests
 # ---------------------------------------------------------------------------

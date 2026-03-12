@@ -89,6 +89,16 @@ class TestBaseHeaders:
         iter_coroutine(rc.send("GET", "/test"))
         assert transport.calls[0]["headers"] == {}
 
+    def test_token_compatibility_raises_without_bearer_header(self) -> None:
+        rc = RequestClient(
+            transport=FakeTransport(),
+            base_headers={"x-custom": "value"},
+            sleep_fn=_noop_sleep,
+        )
+
+        with pytest.raises(RuntimeError, match="no configured bearer token"):
+            _ = rc.token
+
     def test_token_compatibility_reads_bearer_header(self) -> None:
         rc = RequestClient(
             transport=FakeTransport(),

@@ -97,6 +97,46 @@ def test_cache_remote_uses_bare_key_urls_and_revalidate() -> None:
     assert revalidate_route.calls[0].request.url.params["tags"] == "user,feed"
 
 
+@respx.mock
+def test_cache_remote_can_resolve_endpoint_and_headers_from_root_env() -> None:
+    endpoint = "https://cache.example.com/v1"
+    set_route = respx.post("https://cache.example.com/v1/env$abc123").mock(
+        return_value=Response(200, json={"status": "OK"})
+    )
+    get_route = respx.get("https://cache.example.com/v1/env$abc123").mock(
+        return_value=Response(200, json={"name": "Ada"}, headers={"x-vercel-cache-state": "fresh"})
+    )
+
+    vc = vercel.create_sync_client(
+        timeout=5.0,
+        env={
+            "RUNTIME_CACHE_ENDPOINT": endpoint,
+            "RUNTIME_CACHE_HEADERS": '{"x-cache-env":"env-token"}',
+        },
+    )
+    cache = vc.get_cache(
+        headers={"x-cache-overlay": "overlay-token"},
+        namespace="env",
+        key_hash_function=lambda key: "abc123",
+    )
+
+    try:
+        cache.set("user", {"name": "Ada"})
+        assert cache.get("user") == {"name": "Ada"}
+    finally:
+        vc.close()
+
+    assert set_route.called
+    set_request = set_route.calls[0].request
+    assert set_request.headers["x-cache-env"] == "env-token"
+    assert set_request.headers["x-cache-overlay"] == "overlay-token"
+
+    assert get_route.called
+    get_request = get_route.calls[0].request
+    assert get_request.headers["x-cache-env"] == "env-token"
+    assert get_request.headers["x-cache-overlay"] == "overlay-token"
+
+
 def test_sync_cache_ensure_connected_reuses_root_lineage() -> None:
     vc = vercel.create_sync_client()
     cache_a = vc.get_cache(namespace="stable-a")
