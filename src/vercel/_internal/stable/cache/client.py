@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -9,7 +10,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from vercel._internal.http import JSONBody
+import httpx
+
+from vercel._internal.http import JSONBody, RequestClient, sync_sleep
+from vercel._internal.http.request_client import SleepFn
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.stable.runtime import AsyncRuntime, SyncRuntime
 from vercel.stable.options import CacheOptions, CacheSetOptions
@@ -108,6 +112,12 @@ class CacheClientLineage:
     root_timeout: float | None
     env: Mapping[str, str]
     store: _SharedCacheStore = field(default_factory=lambda: _SHARED_STORE)
+    request_state: CacheRequestState = field(default_factory=lambda: CacheRequestState())
+
+
+@dataclass(slots=True)
+class CacheRequestState:
+    request_client: RequestClient | None = None
 
 
 def _load_env_headers(env: Mapping[str, str]) -> Mapping[str, str]:
@@ -140,9 +150,60 @@ def uses_remote_cache(options: CacheOptions, env: Mapping[str, str]) -> bool:
 
 
 @dataclass(slots=True)
+class StableCacheRequestClient:
+    _lineage: CacheClientLineage
+    _options: CacheOptions
+    _sleep_fn: SleepFn
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        body: JSONBody | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> httpx.Response:
+        request_client = await self._get_request_client()
+        return await request_client.send(
+            method,
+            self._build_url(path),
+            params=params,
+            body=body,
+            headers=headers,
+            timeout=self._lineage.root_timeout if timeout is None else timeout,
+        )
+
+    def uses_remote_cache(self) -> bool:
+        return uses_remote_cache(self._options, self._lineage.env)
+
+    async def _get_request_client(self) -> RequestClient:
+        request_client = self._lineage.request_state.request_client
+        if request_client is None:
+            transport = await self._lineage.runtime.get_transport(
+                timeout=self._lineage.root_timeout,
+            )
+            request_client = RequestClient(
+                transport=transport,
+                base_headers=self._base_headers(),
+                sleep_fn=self._sleep_fn,
+            )
+            self._lineage.request_state.request_client = request_client
+        return request_client
+
+    def _build_url(self, path: str) -> str:
+        return _join_cache_url(resolve_cache_endpoint(self._options, self._lineage.env), path)
+
+    def _base_headers(self) -> dict[str, str]:
+        return resolve_cache_headers(self._options, self._lineage.env)
+
+
+@dataclass(slots=True)
 class StableCacheBackend:
     _lineage: CacheClientLineage
     _options: CacheOptions
+    _request_client: StableCacheRequestClient
 
     def transform_key(self, key: str) -> str:
         return create_key_transformer(
@@ -153,10 +214,10 @@ class StableCacheBackend:
 
     async def get(self, key: str) -> object | None:
         transformed = self.transform_key(key)
-        if not uses_remote_cache(self._options, self._lineage.env):
+        if not self._request_client.uses_remote_cache():
             return self._lineage.store.get(transformed)
 
-        response = await self._send_remote("GET", transformed)
+        response = await self._request_client.request("GET", transformed)
         if response.status_code == 404:
             return None
         if response.status_code != 200:
@@ -173,51 +234,60 @@ class StableCacheBackend:
         options: Mapping[str, Any] | CacheSetOptions | None = None,
     ) -> None:
         transformed = self.transform_key(key)
-        if not uses_remote_cache(self._options, self._lineage.env):
+        if not self._request_client.uses_remote_cache():
             self._lineage.store.set(transformed, value, options)
             return
 
         headers = _cache_headers(options)
-        await self._send_remote("POST", transformed, body=JSONBody(value), headers=headers)
+        await self._request_client.request(
+            "POST",
+            transformed,
+            body=JSONBody(value),
+            headers=headers,
+        )
 
     async def delete(self, key: str) -> None:
         transformed = self.transform_key(key)
-        if not uses_remote_cache(self._options, self._lineage.env):
+        if not self._request_client.uses_remote_cache():
             self._lineage.store.delete(transformed)
             return
 
-        await self._send_remote("DELETE", transformed)
+        await self._request_client.request("DELETE", transformed)
 
     async def expire_tag(self, tag: str | Sequence[str]) -> None:
         tags = [tag] if isinstance(tag, str) else [value for value in tag if isinstance(value, str)]
-        if not uses_remote_cache(self._options, self._lineage.env):
+        if not self._request_client.uses_remote_cache():
             self._lineage.store.expire_tag(tags)
             return
 
-        await self._send_remote("POST", "revalidate", params={"tags": ",".join(tags)})
+        await self._request_client.request("POST", "revalidate", params={"tags": ",".join(tags)})
 
     async def contains(self, key: str) -> bool:
         return await self.get(key) is not None
 
-    async def _send_remote(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        body: JSONBody | None = None,
-        headers: dict[str, str] | None = None,
-    ):
-        transport = await self._lineage.runtime.get_transport(timeout=self._lineage.root_timeout)
-        response = await transport.send(
-            method,
-            _join_cache_url(resolve_cache_endpoint(self._options, self._lineage.env), path),
-            params=params,
-            body=body,
-            headers={**resolve_cache_headers(self._options, self._lineage.env), **(headers or {})},
-            timeout=self._lineage.root_timeout,
-        )
-        return response
+
+def create_sync_request_client(
+    *,
+    lineage: CacheClientLineage,
+    options: CacheOptions,
+) -> StableCacheRequestClient:
+    return StableCacheRequestClient(
+        _lineage=lineage,
+        _options=options,
+        _sleep_fn=sync_sleep,
+    )
+
+
+def create_async_request_client(
+    *,
+    lineage: CacheClientLineage,
+    options: CacheOptions,
+) -> StableCacheRequestClient:
+    return StableCacheRequestClient(
+        _lineage=lineage,
+        _options=options,
+        _sleep_fn=asyncio.sleep,
+    )
 
 
 def sync_get(
@@ -291,15 +361,20 @@ def _cache_headers(options: Mapping[str, Any] | CacheSetOptions | None) -> dict[
 
 
 __all__ = [
+    "CacheClientLineage",
+    "CacheRequestState",
     "StableCacheBackend",
+    "StableCacheRequestClient",
     "create_key_transformer",
+    "create_async_request_client",
+    "create_sync_request_client",
     "default_key_hash_function",
     "resolve_cache_endpoint",
     "resolve_cache_headers",
+    "uses_remote_cache",
     "sync_contains",
     "sync_delete",
     "sync_expire_tag",
     "sync_get",
     "sync_set",
-    "uses_remote_cache",
 ]

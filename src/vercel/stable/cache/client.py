@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from vercel._internal.stable.cache import (
+    CacheClientLineage,
+    CacheRequestState,
+    StableCacheBackend,
+    create_async_request_client,
+    create_sync_request_client,
     sync_contains,
     sync_delete,
     sync_expire_tag,
     sync_get,
     sync_set,
 )
-from vercel._internal.stable.cache.client import CacheClientLineage, StableCacheBackend
 from vercel._internal.stable.options import merge_dataclass_options, merge_mapping
-from vercel._internal.stable.runtime import AsyncRuntime
+from vercel._internal.stable.runtime import AsyncRuntime, SyncRuntime
 from vercel.stable.options import CacheOptions, CacheSetOptions
 
 
@@ -23,6 +27,12 @@ from vercel.stable.options import CacheOptions, CacheSetOptions
 class SyncCacheClient:
     _lineage: CacheClientLineage
     _options: CacheOptions
+    _runtime: SyncRuntime = field(init=False, repr=False)
+    _root_timeout: float | None = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_runtime", self._lineage.runtime)
+        object.__setattr__(self, "_root_timeout", self._lineage.root_timeout)
 
     def with_options(
         self,
@@ -34,7 +44,13 @@ class SyncCacheClient:
         key_hash_function: Callable[[str], str] | None = None,
     ) -> SyncCacheClient:
         return SyncCacheClient(
-            _lineage=self._lineage,
+            _lineage=CacheClientLineage(
+                runtime=self._lineage.runtime,
+                root_timeout=self._lineage.root_timeout,
+                env=self._lineage.env,
+                store=self._lineage.store,
+                request_state=CacheRequestState(),
+            ),
             _options=merge_dataclass_options(
                 self._options,
                 endpoint=endpoint,
@@ -46,7 +62,7 @@ class SyncCacheClient:
         )
 
     def ensure_connected(self) -> SyncCacheClient:
-        self._lineage.runtime.ensure_connected(timeout=self._lineage.root_timeout)
+        self._runtime.ensure_connected(timeout=self._root_timeout)
         return self
 
     def get(self, key: str) -> object | None:
@@ -75,10 +91,14 @@ class SyncCacheClient:
             raise KeyError(key)
         return value
 
-    def _backend(self) -> StableCacheBackend:
+    def _backend(self):
         return StableCacheBackend(
             _lineage=self._lineage,
             _options=self._options,
+            _request_client=create_sync_request_client(
+                lineage=self._lineage,
+                options=self._options,
+            ),
         )
 
 
@@ -86,6 +106,12 @@ class SyncCacheClient:
 class AsyncCacheClient:
     _lineage: CacheClientLineage
     _options: CacheOptions
+    _runtime: AsyncRuntime = field(init=False, repr=False)
+    _root_timeout: float | None = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_runtime", self._lineage.runtime)
+        object.__setattr__(self, "_root_timeout", self._lineage.root_timeout)
 
     def with_options(
         self,
@@ -97,7 +123,13 @@ class AsyncCacheClient:
         key_hash_function: Callable[[str], str] | None = None,
     ) -> AsyncCacheClient:
         return AsyncCacheClient(
-            _lineage=self._lineage,
+            _lineage=CacheClientLineage(
+                runtime=self._lineage.runtime,
+                root_timeout=self._lineage.root_timeout,
+                env=self._lineage.env,
+                store=self._lineage.store,
+                request_state=CacheRequestState(),
+            ),
             _options=merge_dataclass_options(
                 self._options,
                 endpoint=endpoint,
@@ -109,9 +141,7 @@ class AsyncCacheClient:
         )
 
     async def ensure_connected(self) -> AsyncCacheClient:
-        await cast(AsyncRuntime, self._lineage.runtime).ensure_connected(
-            timeout=self._lineage.root_timeout
-        )
+        await cast(AsyncRuntime, self._runtime).ensure_connected(timeout=self._root_timeout)
         return self
 
     async def get(self, key: str) -> object | None:
@@ -134,10 +164,14 @@ class AsyncCacheClient:
     async def contains(self, key: str) -> bool:
         return await self._backend().contains(key)
 
-    def _backend(self) -> StableCacheBackend:
+    def _backend(self):
         return StableCacheBackend(
             _lineage=self._lineage,
             _options=self._options,
+            _request_client=create_async_request_client(
+                lineage=self._lineage,
+                options=self._options,
+            ),
         )
 
 

@@ -1,8 +1,13 @@
 """Private stable cache helpers."""
 
 from vercel._internal.stable.cache.client import (
+    CacheClientLineage,
+    CacheRequestState,
     StableCacheBackend,
+    StableCacheRequestClient,
+    create_async_request_client,
     create_key_transformer,
+    create_sync_request_client,
     default_key_hash_function,
     resolve_cache_endpoint,
     resolve_cache_headers,
@@ -15,8 +20,13 @@ from vercel._internal.stable.cache.client import (
 )
 
 __all__ = [
+    "CacheClientLineage",
+    "CacheRequestState",
     "StableCacheBackend",
+    "StableCacheRequestClient",
     "create_key_transformer",
+    "create_async_request_client",
+    "create_sync_request_client",
     "default_key_hash_function",
     "resolve_cache_endpoint",
     "resolve_cache_headers",

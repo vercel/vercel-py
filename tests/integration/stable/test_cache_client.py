@@ -122,7 +122,10 @@ def test_sync_cache_with_options_keeps_shared_store_but_derives_request_overlays
         _clear_cache_store(base, child)
         base.set("user", {"name": "Ada"})
 
-        assert base._lineage is child._lineage
+        assert base._lineage is not child._lineage
+        assert base._lineage.runtime is child._lineage.runtime
+        assert base._lineage.store is child._lineage.store
+        assert base._lineage.request_state is not child._lineage.request_state
         assert child.get("user") is None
         assert child._options.headers["x-cache-token"] == "overlay"
         assert child._options.namespace == "stable-b"
@@ -166,6 +169,34 @@ def test_sync_cache_with_options_inherits_remote_endpoint_and_hash_function() ->
     assert child_route.called
     assert base_route.calls[0].request.headers["x-cache-token"] == "base-token"
     assert child_route.calls[0].request.headers["x-cache-token"] == "child-token"
+
+
+@respx.mock
+def test_sync_cache_reuses_request_client_per_cache_lineage() -> None:
+    endpoint = "https://cache.example.com/v1"
+    route = respx.get("https://cache.example.com/v1/ns$abc123").mock(
+        return_value=Response(200, json={"name": "Ada"}, headers={"x-vercel-cache-state": "fresh"})
+    )
+
+    vc = vercel.create_sync_client(timeout=5.0)
+    cache = vc.get_cache(
+        endpoint=endpoint,
+        headers={"x-cache-token": "cache-token"},
+        namespace="ns",
+        key_hash_function=lambda key: "abc123",
+    )
+
+    try:
+        assert cache._lineage.request_state.request_client is None
+        assert cache.get("user") == {"name": "Ada"}
+        request_client = cache._lineage.request_state.request_client
+        assert request_client is not None
+        assert cache.get("user") == {"name": "Ada"}
+        assert cache._lineage.request_state.request_client is request_client
+    finally:
+        vc.close()
+
+    assert route.called
 
 
 @pytest.mark.asyncio

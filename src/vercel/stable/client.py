@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from vercel._internal.stable.cache.client import CacheClientLineage
+from vercel._internal.stable.cache.client import CacheClientLineage, CacheRequestState
 from vercel._internal.stable.options import merge_root_options
 from vercel._internal.stable.runtime import AsyncRuntime, SyncRuntime
 from vercel._internal.stable.sdk.request_client import SdkClientLineage, SdkRequestState
@@ -88,6 +88,7 @@ class SyncVercel:
                 runtime=self._runtime,
                 root_timeout=self._options.timeout,
                 env=self._options.env,
+                request_state=CacheRequestState(),
             ),
             _options=CacheOptions(
                 endpoint=endpoint,
@@ -191,6 +192,7 @@ class AsyncVercel:
                 runtime=self._runtime,
                 root_timeout=self._options.timeout,
                 env=self._options.env,
+                request_state=CacheRequestState(),
             ),
             _options=CacheOptions(
                 endpoint=endpoint,
