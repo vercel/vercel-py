@@ -1,11 +1,10 @@
-"""Shared request-level HTTP client with token resolution, header/param merging, and retry."""
+"""Shared request-level HTTP client with header/param merging and retry."""
 
 from __future__ import annotations
 
 import inspect
-import os
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -34,67 +33,37 @@ class RetryPolicy:
     backoff_max: float = 2.0
 
 
-def _resolve_token(
-    token: str | None,
-    token_env_vars: str | Sequence[str],
-    env: Mapping[str, str] | None = None,
-) -> str:
-    if token:
-        return token
-
-    env_names: Sequence[str] = (
-        [token_env_vars] if isinstance(token_env_vars, str) else token_env_vars
-    )
-    _env: Mapping[str, str] = env if env is not None else os.environ
-    for name in env_names:
-        value = _env.get(name)
-        if value:
-            return value
-
-    names_str = ", ".join(env_names)
-    raise RuntimeError(f"Missing API token. Pass token=... or set one of: {names_str}.")
-
-
 class RequestClient:
-    """Shared request client with token resolution, base headers/params, and retry.
-
-    Token is resolved at construction time and stored.  Every ``send()`` call
-    merges base headers/params with per-request overrides (per-request wins)
-    and optionally retries with exponential backoff.
-    """
+    """Shared request client with base headers/params and retry."""
 
     def __init__(
         self,
         *,
         transport: BaseTransport,
-        token: str | None = None,
-        token_env_vars: str | Sequence[str] = "VERCEL_TOKEN",
-        env: Mapping[str, str] | None = None,
         base_headers: dict[str, str] | None = None,
         base_params: dict[str, Any] | None = None,
         retry: RetryPolicy | None = None,
         sleep_fn: SleepFn,
     ) -> None:
         self._transport = transport
-        self._token = _resolve_token(token, token_env_vars, env)
         self._retry = retry or RetryPolicy()
         self._sleep_fn = sleep_fn
-
-        headers = dict(base_headers) if base_headers else {}
-        headers.setdefault("authorization", f"Bearer {self._token}")
-        self._base_headers = headers
-
+        self._base_headers = dict(base_headers) if base_headers else {}
         self._base_params: dict[str, Any] = dict(base_params) if base_params else {}
 
     @property
-    def token(self) -> str:
-        """The resolved API token."""
-        return self._token
+    def transport(self) -> BaseTransport:
+        """The underlying transport."""
+        return self._transport
 
     @property
-    def transport(self) -> BaseTransport:
-        """The underlying transport (for direct access when needed)."""
-        return self._transport
+    def token(self) -> str:
+        """Compatibility accessor for bearer-auth clients."""
+        authorization = self._base_headers.get("authorization")
+        bearer_prefix = "Bearer "
+        if authorization and authorization.startswith(bearer_prefix):
+            return authorization[len(bearer_prefix) :]
+        raise RuntimeError("RequestClient has no configured bearer token.")
 
     def _merge_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
         merged = dict(self._base_headers)

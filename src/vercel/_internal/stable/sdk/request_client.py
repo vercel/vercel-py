@@ -101,8 +101,6 @@ class VercelRequestClient:
             )
             request_client = RequestClient(
                 transport=transport,
-                token=self._options.token,
-                env=self._lineage.env,
                 base_headers=self._base_headers(),
                 base_params=self._base_params(),
                 sleep_fn=self._sleep_fn,
@@ -111,7 +109,10 @@ class VercelRequestClient:
         return request_client
 
     def _base_headers(self) -> dict[str, str]:
-        headers = {"accept": "application/json"}
+        headers = {
+            "accept": "application/json",
+            "authorization": f"Bearer {self._resolve_token()}",
+        }
         headers.update(self._options.headers)
         return headers
 
@@ -135,6 +136,16 @@ class VercelRequestClient:
             return
 
         raise error_for_status(response.status_code, _extract_error_details(response))
+
+    def _resolve_token(self) -> str:
+        if self._options.token:
+            return self._options.token
+
+        value = self._lineage.env.get("VERCEL_TOKEN")
+        if value:
+            return value
+
+        raise RuntimeError("Missing API token. Pass token=... or set one of: VERCEL_TOKEN.")
 
 
 def _coerce_request_body(body: dict[str, Any] | RequestBody) -> RequestBody:
