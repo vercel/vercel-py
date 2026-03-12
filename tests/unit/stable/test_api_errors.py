@@ -8,7 +8,11 @@ from hypothesis import given, strategies as st
 
 from vercel._internal.http import sync_sleep
 from vercel._internal.stable.errors import ErrorDetails, error_for_status
-from vercel._internal.stable.sdk.request_client import SdkClientLineage, VercelRequestClient
+from vercel._internal.stable.sdk.request_client import (
+    SdkClientLineage,
+    VercelRequestClient,
+    decode_json_object_response,
+)
 from vercel.stable.errors import APIResponseError, ConflictError
 from vercel.stable.options import SdkOptions
 
@@ -25,8 +29,12 @@ class _Runtime:
 class _Transport:
     def __init__(self, response: httpx.Response) -> None:
         self._response = response
+        self.last_args: tuple[object, ...] | None = None
+        self.last_kwargs: dict[str, object] | None = None
 
     async def send(self, *args: object, **kwargs: object) -> httpx.Response:
+        self.last_args = args
+        self.last_kwargs = dict(kwargs)
         return self._response
 
 
@@ -54,7 +62,7 @@ async def test_http_errors_include_structured_metadata() -> None:
     )
 
     with pytest.raises(ConflictError) as excinfo:
-        await client.send_json("POST", "/v1/projects")
+        decode_json_object_response(await client.request("POST", "/v1/projects"))
 
     error = excinfo.value
     assert str(error) == "Project already exists."
@@ -93,7 +101,7 @@ async def test_http_error_fallback_uses_headers_for_ids() -> None:
     )
 
     with pytest.raises(APIResponseError) as excinfo:
-        await client.send("GET", "/v1/projects")
+        await client.request("GET", "/v1/projects")
 
     error = excinfo.value
     assert str(error) == "500 Internal Server Error"
@@ -102,6 +110,27 @@ async def test_http_error_fallback_uses_headers_for_ids() -> None:
     assert error.request_id == "req_from_header"
     assert error.trace_id == "trace_from_header"
     assert error.payload is None
+
+
+@pytest.mark.asyncio
+async def test_request_defaults_content_type_header_for_json_bodies() -> None:
+    transport = _Transport(httpx.Response(200, json={}))
+    client = VercelRequestClient(
+        _lineage=SdkClientLineage(
+            runtime=cast(Any, _Runtime(transport)),
+            root_timeout=5.0,
+            env={},
+        ),
+        _options=SdkOptions(token="token"),
+        _sleep_fn=sync_sleep,
+    )
+
+    decode_json_object_response(await client.request("POST", "/v1/projects", body={}))
+
+    assert transport.last_kwargs is not None
+    headers = cast(dict[str, str], transport.last_kwargs["headers"])
+    assert headers["accept"] == "application/json"
+    assert headers["content-type"] == "application/json"
 
 
 # ---------------------------------------------------------------------------

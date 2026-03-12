@@ -6,7 +6,10 @@ import urllib.parse
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
-from vercel._internal.stable.sdk.request_client import VercelRequestClient
+from vercel._internal.stable.sdk.request_client import (
+    VercelRequestClient,
+    decode_json_object_response,
+)
 from vercel.stable.options import ProjectWriteRequest
 
 if TYPE_CHECKING:
@@ -32,10 +35,12 @@ class ProjectsBackend:
         if effective_page_size is not None:
             params["limit"] = effective_page_size
 
-        payload = await self._request_client.send_json(
-            "GET",
-            "/v10/projects",
-            params=params or None,
+        payload = decode_json_object_response(
+            await self._request_client.request(
+                "GET",
+                "/v10/projects",
+                params=params or None,
+            )
         )
         return _parse_project_page(payload)
 
@@ -46,10 +51,12 @@ class ProjectsBackend:
         team_id: str | None = None,
         team_slug: str | None = None,
     ) -> Project:
-        payload = await self._request_client.send_json(
-            "GET",
-            _project_path(id_or_name),
-            params=_override_scope(team_id=team_id, team_slug=team_slug),
+        payload = decode_json_object_response(
+            await self._request_client.request(
+                "GET",
+                _project_path(id_or_name),
+                params=_override_scope(team_id=team_id, team_slug=team_slug),
+            )
         )
         return _parse_project(payload)
 
@@ -67,20 +74,22 @@ class ProjectsBackend:
         output_directory: str | None = None,
         root_directory: str | None = None,
     ) -> Project:
-        payload = await self._request_client.send_json(
-            "POST",
-            "/v11/projects",
-            body=_project_write_body(
-                request=request,
-                body=body,
-                name=name,
-                framework=framework,
-                public_source=public_source,
-                build_command=build_command,
-                dev_command=dev_command,
-                install_command=install_command,
-                output_directory=output_directory,
-                root_directory=root_directory,
+        payload = decode_json_object_response(
+            await self._request_client.request(
+                "POST",
+                "/v11/projects",
+                body=_project_write_body(
+                    request=request,
+                    body=body,
+                    name=name,
+                    framework=framework,
+                    public_source=public_source,
+                    build_command=build_command,
+                    dev_command=dev_command,
+                    install_command=install_command,
+                    output_directory=output_directory,
+                    root_directory=root_directory,
+                ),
             ),
         )
         return _parse_project(payload)
@@ -100,20 +109,22 @@ class ProjectsBackend:
         output_directory: str | None = None,
         root_directory: str | None = None,
     ) -> Project:
-        payload = await self._request_client.send_json(
-            "PATCH",
-            _project_path(id_or_name),
-            body=_project_write_body(
-                request=request,
-                body=body,
-                name=name,
-                framework=framework,
-                public_source=public_source,
-                build_command=build_command,
-                dev_command=dev_command,
-                install_command=install_command,
-                output_directory=output_directory,
-                root_directory=root_directory,
+        payload = decode_json_object_response(
+            await self._request_client.request(
+                "PATCH",
+                _project_path(id_or_name),
+                body=_project_write_body(
+                    request=request,
+                    body=body,
+                    name=name,
+                    framework=framework,
+                    public_source=public_source,
+                    build_command=build_command,
+                    dev_command=dev_command,
+                    install_command=install_command,
+                    output_directory=output_directory,
+                    root_directory=root_directory,
+                ),
             ),
         )
         return _parse_project(payload)
@@ -125,7 +136,7 @@ class ProjectsBackend:
         team_id: str | None = None,
         team_slug: str | None = None,
     ) -> None:
-        await self._request_client.send(
+        await self._request_client.request(
             "DELETE",
             _project_path(id_or_name),
             params=_override_scope(team_id=team_id, team_slug=team_slug),

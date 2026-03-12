@@ -6,7 +6,10 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
 from vercel._internal.http import RawBody
-from vercel._internal.stable.sdk.request_client import VercelRequestClient
+from vercel._internal.stable.sdk.request_client import (
+    VercelRequestClient,
+    decode_json_object_response,
+)
 from vercel.stable.options import DeploymentCreateRequest
 
 if TYPE_CHECKING:
@@ -31,22 +34,24 @@ class DeploymentsBackend:
         force_new: bool | None = None,
         skip_auto_detection_confirmation: bool | None = None,
     ) -> Deployment:
-        payload = await self._request_client.send_json(
-            "POST",
-            "/v13/deployments",
-            params=_deployment_params(
-                team_id=team_id,
-                team_slug=team_slug,
-                force_new=force_new,
-                skip_auto_detection_confirmation=skip_auto_detection_confirmation,
-            ),
-            body=_deployment_body(
-                request=request,
-                body=body,
-                name=name,
-                project=project,
-                target=target,
-                files=files,
+        payload = decode_json_object_response(
+            await self._request_client.request(
+                "POST",
+                "/v13/deployments",
+                params=_deployment_params(
+                    team_id=team_id,
+                    team_slug=team_slug,
+                    force_new=force_new,
+                    skip_auto_detection_confirmation=skip_auto_detection_confirmation,
+                ),
+                body=_deployment_body(
+                    request=request,
+                    body=body,
+                    name=name,
+                    project=project,
+                    target=target,
+                    files=files,
+                ),
             ),
         )
         return _parse_deployment(payload)
@@ -74,12 +79,14 @@ class DeploymentsBackend:
         if x_now_size is not None:
             headers["x-now-size"] = str(x_now_size)
 
-        payload = await self._request_client.send_json(
-            "POST",
-            "/v2/files",
-            params=_deployment_params(team_id=team_id, team_slug=team_slug),
-            body=RawBody(bytes(content)),
-            headers=headers,
+        payload = decode_json_object_response(
+            await self._request_client.request(
+                "POST",
+                "/v2/files",
+                params=_deployment_params(team_id=team_id, team_slug=team_slug),
+                body=RawBody(bytes(content)),
+                headers=headers,
+            )
         )
         return _parse_uploaded_file(payload)
 

@@ -43,7 +43,7 @@ class VercelRequestClient:
     _options: SdkOptions
     _sleep_fn: SleepFn
 
-    async def send(
+    async def request(
         self,
         method: str,
         path: str,
@@ -52,46 +52,21 @@ class VercelRequestClient:
         body: dict[str, Any] | RequestBody = None,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        raise_for_status: bool = True,
     ) -> httpx.Response:
         request_client = await self._get_request_client()
+        request_body = _coerce_request_body(body)
         response = await request_client.send(
             method,
             self._build_url(path),
             params=params,
-            body=_coerce_request_body(body),
-            headers=headers,
+            body=request_body,
+            headers=_request_headers(headers, request_body),
             timeout=self._lineage.root_timeout if timeout is None else timeout,
         )
-        self._raise_for_status(response)
+        if raise_for_status:
+            self._raise_for_status(response)
         return response
-
-    async def send_json(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        body: dict[str, Any] | RequestBody = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> dict[str, Any]:
-        response = await self.send(
-            method,
-            path,
-            params=params,
-            body=body,
-            headers=headers,
-            timeout=timeout,
-        )
-        if not response.content:
-            return {}
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise APIResponseError(
-                "Expected a JSON object response from the Vercel API.",
-                status_code=response.status_code,
-            )
-        return payload
 
     async def _get_request_client(self) -> RequestClient:
         request_client = self._lineage.request_state.request_client
@@ -154,6 +129,47 @@ def _coerce_request_body(body: dict[str, Any] | RequestBody) -> RequestBody:
     if isinstance(body, (JSONBody, RawBody)):
         return body
     return JSONBody(body)
+
+
+def decode_json_response(response: httpx.Response) -> object | None:
+    if not response.content:
+        return None
+    return response.json()
+
+
+def decode_json_object_response(response: httpx.Response) -> dict[str, Any]:
+    payload = decode_json_response(response)
+    if payload is None:
+        return {}
+    return require_json_object(payload, response=response)
+
+
+def require_json_object(
+    payload: object,
+    *,
+    response: httpx.Response,
+) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        return payload
+    raise APIResponseError(
+        "Expected a JSON object response from the Vercel API.",
+        status_code=response.status_code,
+    )
+
+
+def _request_headers(
+    headers: dict[str, str] | None,
+    body: RequestBody,
+) -> dict[str, str] | None:
+    request_headers = dict(headers) if headers else {}
+    if isinstance(body, JSONBody) and not _has_header(request_headers, "content-type"):
+        request_headers["content-type"] = "application/json"
+    return request_headers or None
+
+
+def _has_header(headers: dict[str, str], name: str) -> bool:
+    normalized_name = name.casefold()
+    return any(key.casefold() == normalized_name for key in headers)
 
 
 def create_sync_request_client(
@@ -264,6 +280,9 @@ def _extract_trace_id(payload: object, response: httpx.Response) -> str | None:
 
 
 __all__ = [
+    "decode_json_object_response",
+    "decode_json_response",
+    "require_json_object",
     "SdkClientLineage",
     "SdkRequestState",
     "VercelRequestClient",
