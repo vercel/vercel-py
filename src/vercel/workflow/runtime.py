@@ -6,7 +6,7 @@ import json
 import random
 import traceback
 from datetime import UTC, datetime
-from typing import Any, ParamSpec, Self, TypeVar
+from typing import Any, Literal, ParamSpec, Self, TypeVar
 
 from . import core, ulid, world as w
 
@@ -372,9 +372,35 @@ async def get_all_workflow_run_events(run_id: str) -> list[w.Event]:
     return all_events
 
 
-@dataclasses.dataclass
 class Run:
-    run_id: str
+    def __init__(self, run_id: str) -> None:
+        self._run_id = run_id
+        self._world = w.get_world()
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    async def status(self) -> Literal["pending", "running", "completed", "failed", "cancelled"]:
+        run = await self._world.runs_get(self._run_id)
+        return run.status
+
+    async def return_value(self) -> Any:
+        while True:
+            run = await self._world.runs_get(self._run_id)
+            if run.status == "completed":
+                if not run.output[0].startswith(b"json"):
+                    raise RuntimeError(f"Unsupported workflow output encoding for {run.run_id}")
+                return json.loads(run.output[0][len(b"json") :].decode())
+
+            elif run.status == "cancelled":
+                raise RuntimeError("workflow cancelled")
+
+            elif run.status == "failed":
+                raise RuntimeError("workflow failed")
+
+            else:
+                await asyncio.sleep(1)
 
 
 async def start[**P, T](wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
