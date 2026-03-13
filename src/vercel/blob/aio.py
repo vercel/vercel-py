@@ -1,3 +1,5 @@
+from vercel._internal.blob import get_download_url
+
 from .client import (
     AsyncBlobClient,
 )
@@ -35,13 +37,16 @@ from .ops import (
     upload_file_async as upload_file,
 )
 from .types import (
+    Access,
     CreateFolderResult,
+    GetBlobResult,
     HeadBlobResult,
     ListBlobItem,
     ListBlobResult,
+    OnUploadProgressCallback,
     PutBlobResult,
+    UploadProgressEvent,
 )
-from .utils import OnUploadProgressCallback, UploadProgressEvent, get_download_url
 
 __all__ = [
     # errors
@@ -78,10 +83,13 @@ __all__ = [
     "AsyncBlobClient",
     # helpers
     "get_download_url",
+    # types
+    "Access",
     "UploadProgressEvent",
     "OnUploadProgressCallback",
     # types
     "PutBlobResult",
+    "GetBlobResult",
     "HeadBlobResult",
     "ListBlobResult",
     "ListBlobItem",

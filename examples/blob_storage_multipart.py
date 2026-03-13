@@ -202,7 +202,10 @@ if __name__ == "__main__":
         print("Please set it to run these examples.")
         exit(1)
 
+    async def async_main():
+        await async_example()
+        await async_with_file_example()
+
     comparison_example()
     sync_example()
-    asyncio.run(async_example())
-    asyncio.run(async_with_file_example())
+    asyncio.run(async_main())

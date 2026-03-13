@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 if TYPE_CHECKING:
-    from .client import TelemetryClient
+    from vercel._internal.telemetry.client import TelemetryClient
 
 # Singleton telemetry client instance with thread-safe initialization
 _telemetry_client = None
@@ -34,7 +34,7 @@ def get_client() -> TelemetryClient | None:
         client = _telemetry_client
         if client is None:
             try:
-                from .client import TelemetryClient
+                from vercel._internal.telemetry.client import TelemetryClient
 
                 _telemetry_client = TelemetryClient()
             except Exception:

@@ -1,3 +1,5 @@
+from vercel._internal.blob import get_download_url
+
 from . import aio as aioblob
 from .client import (
     AsyncBlobClient,
@@ -9,13 +11,16 @@ from .errors import (
     BlobContentTypeNotAllowedError,
     BlobError,
     BlobFileTooLargeError,
+    BlobInvalidResponseJSONError,
     BlobNotFoundError,
+    BlobNoTokenProvidedError,
     BlobPathnameMismatchError,
     BlobRequestAbortedError,
     BlobServiceNotAvailable,
     BlobServiceRateLimited,
     BlobStoreNotFoundError,
     BlobStoreSuspendedError,
+    BlobUnexpectedResponseContentTypeError,
     BlobUnknownError,
 )
 from .multipart import (
@@ -41,6 +46,8 @@ from .ops import (
     delete_async,
     download_file,
     download_file_async,
+    get,
+    get_async,
     head,
     head_async,
     iter_objects,
@@ -53,15 +60,18 @@ from .ops import (
     upload_file_async,
 )
 from .types import (
+    Access,
     CreateFolderResult,
+    GetBlobResult,
     HeadBlobResult,
     ListBlobItem,
     ListBlobResult,
     MultipartCreateResult,
     MultipartPart,
+    OnUploadProgressCallback,
     PutBlobResult,
+    UploadProgressEvent,
 )
-from .utils import OnUploadProgressCallback, UploadProgressEvent, get_download_url
 
 __all__ = [
     # errors
@@ -75,8 +85,11 @@ __all__ = [
     "BlobStoreSuspendedError",
     "BlobUnknownError",
     "BlobNotFoundError",
+    "BlobUnexpectedResponseContentTypeError",
+    "BlobInvalidResponseJSONError",
     "BlobServiceNotAvailable",
     "BlobServiceRateLimited",
+    "BlobNoTokenProvidedError",
     "BlobRequestAbortedError",
     # ops
     "put",
@@ -85,6 +98,8 @@ __all__ = [
     "delete_async",
     "head",
     "head_async",
+    "get",
+    "get_async",
     "list_objects",
     "list_objects_async",
     "iter_objects",
@@ -116,9 +131,11 @@ __all__ = [
     # helpers
     "get_download_url",
     # types
+    "Access",
     "UploadProgressEvent",
     "OnUploadProgressCallback",
     "PutBlobResult",
+    "GetBlobResult",
     "HeadBlobResult",
     "ListBlobResult",
     "ListBlobItem",

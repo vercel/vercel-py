@@ -4,30 +4,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vercel"
-version = "0.3.8"
+version = "0.5.2"
 description = "Python SDK for Vercel"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
-    "vercel-sandbox>=0.0.4",
     "httpx>=0.27.0",
     "pydantic>=2.7.0",
     "anyio>=4.0.0",
+    "python-dotenv",
+    "websockets>=12.0",
     "cbor2>=5.8.0",
     "vercel-workers>=0.0.12 ; python_version >= '3.12'",
-    "python-dotenv"
 ]
 
 [project.scripts]
 vercel = "vercel.__main__:main"
+vercel-sandbox = "vercel.sandbox.__main__:main"
+sandbox = "vercel.sandbox.__main__:main"
 
 [dependency-groups]
 dev = [
     "ruff>=0.5.0",
     "pytest>=7.0.0",
     "pytest-asyncio",
+    "pytest-xdist",
+    "respx>=0.21.0",
     "mypy",
     "build",
     "twine",
@@ -52,9 +56,14 @@ vercel = ["py.typed"]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+    "live: requires live API credentials (VERCEL_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",
+]
 
 [tool.mypy]
 ignore_missing_imports = true
+explicit_package_bases = true
+mypy_path = ["src"]
 
 [tool.ruff]
 line-length = 100

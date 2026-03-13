@@ -153,6 +153,10 @@ Notes:
 
 Requires `BLOB_READ_WRITE_TOKEN` to be set as an env var or `token` to be set when constructing a client
 
+`BlobClient` and `AsyncBlobClient` keep a long-lived HTTP transport for the life of
+the client instance. Prefer `with BlobClient(...)` / `async with AsyncBlobClient(...)`
+or call `close()` / `aclose()` explicitly when done.
+
 
 #### Sync
 
@@ -160,19 +164,17 @@ Requires `BLOB_READ_WRITE_TOKEN` to be set as an env var or `token` to be set wh
 ```python
 from vercel.blob import BlobClient
 
-client = BlobClient()  
-# or BlobClient(token="...")
-
-# Create a folder entry, upload a local file, list, then download
-client.create_folder("examples/assets", overwrite=True)
-uploaded = client.upload_file(
-    "./README.md",
-    "examples/assets/readme-copy.txt",
-    access="public",
-    content_type="text/plain",
-)
-listing = client.list_objects(prefix="examples/assets/")
-client.download_file(uploaded.url, "/tmp/readme-copy.txt", overwrite=True)
+with BlobClient() as client:  # or BlobClient(token="...")
+    # Create a folder entry, upload a local file, list, then download
+    client.create_folder("examples/assets", overwrite=True)
+    uploaded = client.upload_file(
+        "./README.md",
+        "examples/assets/readme-copy.txt",
+        access="public",
+        content_type="text/plain",
+    )
+    listing = client.list_objects(prefix="examples/assets/")
+    client.download_file(uploaded.url, "/tmp/readme-copy.txt", overwrite=True)
 ```
 
 Async usage:
@@ -182,21 +184,20 @@ import asyncio
 from vercel.blob import AsyncBlobClient
 
 async def main():
-    client = AsyncBlobClient()  # uses BLOB_READ_WRITE_TOKEN from env
+    async with AsyncBlobClient() as client:  # uses BLOB_READ_WRITE_TOKEN from env
+        # Upload bytes
+        uploaded = await client.put(
+            "examples/assets/hello.txt",
+            b"hello from python",
+            access="public",
+            content_type="text/plain",
+        )
 
-    # Upload bytes
-    uploaded = await client.put(
-        "examples/assets/hello.txt",
-        b"hello from python",
-        access="public",
-        content_type="text/plain",
-    )
-
-    # Inspect metadata, list, download bytes, then delete
-    meta = await client.head(uploaded.url)
-    listing = await client.list_objects(prefix="examples/assets/")
-    content = await client.get(uploaded.url)
-    await client.delete([b.url for b in listing.blobs])
+        # Inspect metadata, list, download bytes, then delete
+        meta = await client.head(uploaded.url)
+        listing = await client.list_objects(prefix="examples/assets/")
+        content = await client.get(uploaded.url)
+        await client.delete([b.url for b in listing.blobs])
 
 asyncio.run(main())
 ```
@@ -206,18 +207,17 @@ Synchronous usage:
 ```python
 from vercel.blob import BlobClient
 
-client = BlobClient()  # or BlobClient(token="...")
-
-# Create a folder entry, upload a local file, list, then download
-client.create_folder("examples/assets", overwrite=True)
-uploaded = client.upload_file(
-    "./README.md",
-    "examples/assets/readme-copy.txt",
-    access="public",
-    content_type="text/plain",
-)
-listing = client.list_objects(prefix="examples/assets/")
-client.download_file(uploaded.url, "/tmp/readme-copy.txt", overwrite=True)
+with BlobClient() as client:  # or BlobClient(token="...")
+    # Create a folder entry, upload a local file, list, then download
+    client.create_folder("examples/assets", overwrite=True)
+    uploaded = client.upload_file(
+        "./README.md",
+        "examples/assets/readme-copy.txt",
+        access="public",
+        content_type="text/plain",
+    )
+    listing = client.list_objects(prefix="examples/assets/")
+    client.download_file(uploaded.url, "/tmp/readme-copy.txt", overwrite=True)
 ```
 
 #### Multipart Uploads
@@ -253,17 +253,20 @@ A middle-ground that provides a clean API while giving you control over parts an
 from vercel.blob import BlobClient, create_multipart_uploader
 
 # Create the uploader (initializes the upload)
-client = BlobClient()
-uploader = client.create_multipart_uploader("large-file.bin", content_type="application/octet-stream")
+with BlobClient() as client:
+    uploader = client.create_multipart_uploader(
+        "large-file.bin",
+        content_type="application/octet-stream",
+    )
 
-# Upload parts (you control when and how)
-parts = []
-for i, chunk in enumerate(chunks, start=1):
-    part = uploader.upload_part(i, chunk)
-    parts.append(part)
+    # Upload parts (you control when and how)
+    parts = []
+    for i, chunk in enumerate(chunks, start=1):
+        part = uploader.upload_part(i, chunk)
+        parts.append(part)
 
-# Complete the upload
-result = uploader.complete(parts)
+    # Complete the upload
+    result = uploader.complete(parts)
 ```
 
 Async version with concurrent uploads:
@@ -271,15 +274,15 @@ Async version with concurrent uploads:
 ```python
 from vercel.blob import AsyncBlobClient, create_multipart_uploader_async
 
-client = AsyncBlobClient()
-uploader = await client.create_multipart_uploader("large-file.bin")
+async with AsyncBlobClient() as client:
+    uploader = await client.create_multipart_uploader("large-file.bin")
 
-# Upload parts concurrently
-tasks = [uploader.upload_part(i, chunk) for i, chunk in enumerate(chunks, start=1)]
-parts = await asyncio.gather(*tasks)
+    # Upload parts concurrently
+    tasks = [uploader.upload_part(i, chunk) for i, chunk in enumerate(chunks, start=1)]
+    parts = await asyncio.gather(*tasks)
 
-# Complete
-result = await uploader.complete(parts)
+    # Complete
+    result = await uploader.complete(parts)
 ```
 
 The uploader pattern is ideal when you:
