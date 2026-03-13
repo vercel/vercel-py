@@ -59,10 +59,16 @@ class RequestClient:
     @property
     def token(self) -> str:
         """Compatibility accessor for bearer-auth clients."""
-        authorization = self._base_headers.get("authorization")
-        bearer_prefix = "Bearer "
-        if authorization and authorization.startswith(bearer_prefix):
-            return authorization[len(bearer_prefix) :]
+        # HTTP header names and auth schemes are case-insensitive.
+        authorization: str | None = None
+        for name, value in self._base_headers.items():
+            if name.lower() == "authorization":
+                authorization = value
+                break
+        if authorization:
+            scheme, _, token = authorization.partition(" ")
+            if scheme.lower() == "bearer" and token:
+                return token
         raise RuntimeError("RequestClient has no configured bearer token.")
 
     def _merge_headers(self, headers: dict[str, str] | None) -> dict[str, str]:

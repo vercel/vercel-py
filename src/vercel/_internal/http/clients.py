@@ -46,7 +46,13 @@ def _merge_bearer_auth(
     token: str,
 ) -> dict[str, str]:
     headers = dict(base_headers) if base_headers else {}
-    headers.setdefault("authorization", f"Bearer {token}")
+
+    # Respect any user-specified Authorization header, regardless of case.
+    for header_name in headers:
+        if header_name.lower() == "authorization":
+            return headers
+
+    headers["authorization"] = f"Bearer {token}"
     return headers
 
 
