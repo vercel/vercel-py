@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,22 +27,6 @@ class SdkOptions:
 class BlobOptions:
     token: str | None = None
     base_url: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CacheOptions:
-    endpoint: str | None = None
-    headers: Mapping[str, str] = field(default_factory=dict)
-    namespace: str | None = None
-    namespace_separator: str | None = None
-    key_hash_function: Callable[[str], str] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CacheSetOptions:
-    ttl: float | None = None
-    tags: Sequence[str] = ()
-    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +67,6 @@ __all__ = [
     "RootOptions",
     "SdkOptions",
     "BlobOptions",
-    "CacheOptions",
-    "CacheSetOptions",
     "ProjectWriteRequest",
     "DeploymentCreateRequest",
     "SandboxOptions",

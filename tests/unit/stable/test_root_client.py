@@ -28,7 +28,6 @@ def test_client_creation_defers_env_access() -> None:
     client = create_sync_client(timeout=12.0, env=env)
     _ = client.get_sdk(token="token")
     _ = client.get_blob(token="blob-token")
-    _ = client.get_cache(endpoint="https://cache.example.com")
     _ = client.get_sandbox(token="sandbox-token")
 
     assert env.get_calls == [], "create_sync_client should not access env at creation time"

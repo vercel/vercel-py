@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from vercel._internal.stable.cache.client import CacheClientLineage, CacheRequestState
 from vercel._internal.stable.options import merge_root_options
 from vercel._internal.stable.runtime import AsyncRuntime, SyncRuntime
 from vercel._internal.stable.sdk.request_client import SdkClientLineage, SdkRequestState
 from vercel.stable.blob.client import AsyncBlobClient, SyncBlobClient
-from vercel.stable.cache.client import AsyncCacheClient, SyncCacheClient
-from vercel.stable.options import BlobOptions, CacheOptions, RootOptions, SandboxOptions, SdkOptions
+from vercel.stable.options import BlobOptions, RootOptions, SandboxOptions, SdkOptions
 from vercel.stable.sandbox.client import AsyncSandboxClient, SyncSandboxClient
 from vercel.stable.sdk.client import AsyncSdk, SyncSdk
 
@@ -72,31 +70,6 @@ class SyncVercel:
         return SyncBlobClient(
             _runtime=self._runtime,
             _options=BlobOptions(token=token, base_url=base_url),
-        )
-
-    def get_cache(
-        self,
-        *,
-        endpoint: str | None = None,
-        headers: dict[str, str] | None = None,
-        namespace: str | None = None,
-        namespace_separator: str | None = None,
-        key_hash_function: Callable[[str], str] | None = None,
-    ) -> SyncCacheClient:
-        return SyncCacheClient(
-            _lineage=CacheClientLineage(
-                runtime=self._runtime,
-                root_timeout=self._options.timeout,
-                env=self._options.env,
-                request_state=CacheRequestState(),
-            ),
-            _options=CacheOptions(
-                endpoint=endpoint,
-                headers=dict(headers or {}),
-                namespace=namespace,
-                namespace_separator=namespace_separator,
-                key_hash_function=key_hash_function,
-            ),
         )
 
     def get_sandbox(
@@ -176,31 +149,6 @@ class AsyncVercel:
         return AsyncBlobClient(
             _runtime=self._runtime,
             _options=BlobOptions(token=token, base_url=base_url),
-        )
-
-    def get_cache(
-        self,
-        *,
-        endpoint: str | None = None,
-        headers: dict[str, str] | None = None,
-        namespace: str | None = None,
-        namespace_separator: str | None = None,
-        key_hash_function: Callable[[str], str] | None = None,
-    ) -> AsyncCacheClient:
-        return AsyncCacheClient(
-            _lineage=CacheClientLineage(
-                runtime=self._runtime,
-                root_timeout=self._options.timeout,
-                env=self._options.env,
-                request_state=CacheRequestState(),
-            ),
-            _options=CacheOptions(
-                endpoint=endpoint,
-                headers=dict(headers or {}),
-                namespace=namespace,
-                namespace_separator=namespace_separator,
-                key_hash_function=key_hash_function,
-            ),
         )
 
     def get_sandbox(
