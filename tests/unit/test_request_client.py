@@ -1,8 +1,6 @@
 """Unit tests for RequestClient."""
 
-import os
 from typing import Any
-from unittest.mock import patch
 
 import httpx
 import pytest
@@ -81,105 +79,47 @@ def _noop_sleep(seconds: float) -> None:
     pass
 
 
-class TestTokenResolution:
-    def test_explicit_token(self) -> None:
-        transport = FakeTransport()
-        rc = RequestClient(
-            transport=transport,
-            token="explicit-tok",
-            sleep_fn=_noop_sleep,
-        )
-        assert rc.token == "explicit-tok"
-
-    def test_token_from_default_env_var(self) -> None:
-        transport = FakeTransport()
-        with patch.dict(os.environ, {"VERCEL_TOKEN": "env-tok"}):
-            rc = RequestClient(
-                transport=transport,
-                sleep_fn=_noop_sleep,
-            )
-        assert rc.token == "env-tok"
-
-    def test_token_from_custom_env_var(self) -> None:
-        transport = FakeTransport()
-        with patch.dict(os.environ, {"MY_TOKEN": "custom-tok"}, clear=False):
-            rc = RequestClient(
-                transport=transport,
-                token_env_vars="MY_TOKEN",
-                sleep_fn=_noop_sleep,
-            )
-        assert rc.token == "custom-tok"
-
-    def test_token_from_multiple_env_vars_first_wins(self) -> None:
-        transport = FakeTransport()
-        with patch.dict(
-            os.environ, {"FIRST_TOKEN": "first", "SECOND_TOKEN": "second"}, clear=False
-        ):
-            rc = RequestClient(
-                transport=transport,
-                token_env_vars=["FIRST_TOKEN", "SECOND_TOKEN"],
-                sleep_fn=_noop_sleep,
-            )
-        assert rc.token == "first"
-
-    def test_token_from_multiple_env_vars_fallback(self) -> None:
-        transport = FakeTransport()
-        env = {"SECOND_TOKEN": "fallback"}
-        with patch.dict(os.environ, env, clear=False):
-            # Ensure FIRST_TOKEN is not set
-            os.environ.pop("FIRST_TOKEN", None)
-            rc = RequestClient(
-                transport=transport,
-                token_env_vars=["FIRST_TOKEN", "SECOND_TOKEN"],
-                sleep_fn=_noop_sleep,
-            )
-        assert rc.token == "fallback"
-
-    def test_missing_token_raises_runtime_error(self) -> None:
-        transport = FakeTransport()
-        with patch.dict(os.environ, {}, clear=True):
-            with pytest.raises(RuntimeError, match="Missing API token"):
-                RequestClient(
-                    transport=transport,
-                    token_env_vars="NONEXISTENT_VAR",
-                    sleep_fn=_noop_sleep,
-                )
-
-
-class TestAuthHeader:
-    def test_auth_header_added_automatically(self) -> None:
+class TestBaseHeaders:
+    def test_request_client_does_not_add_auth_header(self) -> None:
         transport = FakeTransport([_make_response(200)])
         rc = RequestClient(
             transport=transport,
-            token="my-token",
             sleep_fn=_noop_sleep,
         )
         iter_coroutine(rc.send("GET", "/test"))
-        assert transport.calls[0]["headers"]["authorization"] == "Bearer my-token"
+        assert transport.calls[0]["headers"] == {}
 
-
-class TestHeaderMerging:
-    def test_base_headers_sent(self) -> None:
-        transport = FakeTransport([_make_response(200)])
+    def test_token_compatibility_raises_without_bearer_header(self) -> None:
         rc = RequestClient(
-            transport=transport,
-            token="tok",
+            transport=FakeTransport(),
             base_headers={"x-custom": "value"},
             sleep_fn=_noop_sleep,
         )
-        iter_coroutine(rc.send("GET", "/test"))
-        assert transport.calls[0]["headers"]["x-custom"] == "value"
+
+        with pytest.raises(RuntimeError, match="no configured bearer token"):
+            _ = rc.token
+
+    def test_token_compatibility_reads_bearer_header(self) -> None:
+        rc = RequestClient(
+            transport=FakeTransport(),
+            base_headers={"authorization": "Bearer compat-token"},
+            sleep_fn=_noop_sleep,
+        )
+        assert rc.token == "compat-token"
 
     def test_per_request_headers_override_base(self) -> None:
         transport = FakeTransport([_make_response(200)])
         rc = RequestClient(
             transport=transport,
-            token="tok",
-            base_headers={"x-custom": "base-value"},
+            base_headers={
+                "authorization": "Bearer base-token",
+                "x-custom": "base-value",
+            },
             sleep_fn=_noop_sleep,
         )
         iter_coroutine(rc.send("GET", "/test", headers={"x-custom": "override"}))
         assert transport.calls[0]["headers"]["x-custom"] == "override"
+        assert transport.calls[0]["headers"]["authorization"] == "Bearer base-token"
 
 
 class TestParamMerging:
@@ -187,7 +127,6 @@ class TestParamMerging:
         transport = FakeTransport([_make_response(200)])
         rc = RequestClient(
             transport=transport,
-            token="tok",
             base_params={"teamId": "team_123"},
             sleep_fn=_noop_sleep,
         )
@@ -198,7 +137,6 @@ class TestParamMerging:
         transport = FakeTransport([_make_response(200)])
         rc = RequestClient(
             transport=transport,
-            token="tok",
             base_params={"teamId": "base"},
             sleep_fn=_noop_sleep,
         )
@@ -211,7 +149,6 @@ class TestNoRetry:
         transport = FakeTransport([_make_response(500)])
         rc = RequestClient(
             transport=transport,
-            token="tok",
             sleep_fn=_noop_sleep,
         )
         resp = iter_coroutine(rc.send("GET", "/test"))
@@ -225,7 +162,6 @@ class TestRetryOnNetworkError:
         transport = RaisingTransport(fail_count=2, success_response=success)
         rc = RequestClient(
             transport=transport,
-            token="tok",
             retry=RetryPolicy(retries=3, retry_on_network_error=True),
             sleep_fn=_noop_sleep,
         )
@@ -237,7 +173,6 @@ class TestRetryOnNetworkError:
         transport = RaisingTransport(fail_count=5, success_response=_make_response(200))
         rc = RequestClient(
             transport=transport,
-            token="tok",
             retry=RetryPolicy(retries=2, retry_on_network_error=True),
             sleep_fn=_noop_sleep,
         )
@@ -251,7 +186,6 @@ class TestRetryOnResponse:
         transport = FakeTransport(responses)
         rc = RequestClient(
             transport=transport,
-            token="tok",
             retry=RetryPolicy(
                 retries=3,
                 retry_on_response=lambda r: r.status_code >= 500,
@@ -267,7 +201,6 @@ class TestRetryOnResponse:
         transport = FakeTransport(responses)
         rc = RequestClient(
             transport=transport,
-            token="tok",
             retry=RetryPolicy(
                 retries=2,
                 retry_on_response=lambda r: r.status_code >= 500,
@@ -290,7 +223,6 @@ class TestBackoff:
         transport = FakeTransport(responses)
         rc = RequestClient(
             transport=transport,
-            token="tok",
             retry=RetryPolicy(
                 retries=4,
                 retry_on_response=lambda r: r.status_code >= 500,
@@ -317,7 +249,6 @@ class TestBackoff:
         transport = FakeTransport(responses)
         rc = RequestClient(
             transport=transport,
-            token="tok",
             retry=RetryPolicy(
                 retries=10,
                 retry_on_response=lambda r: r.status_code >= 500,
@@ -336,7 +267,7 @@ class TestSendWithRetryCallables:
         transport = FakeTransport(responses)
         rc = RequestClient(
             transport=transport,
-            token="tok",
+            base_headers={"authorization": "Bearer retry-token"},
             retry=RetryPolicy(
                 retries=1,
                 retry_on_response=lambda r: r.status_code >= 500,
@@ -372,15 +303,14 @@ class TestSendWithRetryCallables:
         assert transport.calls[1]["headers"]["x-attempt"] == "1"
         assert transport.calls[0]["body"] == JSONBody({"attempt": 0})
         assert transport.calls[1]["body"] == JSONBody({"attempt": 1})
-        assert transport.calls[0]["headers"]["authorization"] == "Bearer tok"
-        assert transport.calls[1]["headers"]["authorization"] == "Bearer tok"
+        assert transport.calls[0]["headers"]["authorization"] == "Bearer retry-token"
+        assert transport.calls[1]["headers"]["authorization"] == "Bearer retry-token"
 
     def test_factory_method_retries_network_errors(self) -> None:
         success = _make_response(200)
         transport = RaisingTransport(fail_count=2, success_response=success)
         rc = RequestClient(
             transport=transport,
-            token="tok",
             retry=RetryPolicy(retries=2, retry_on_network_error=True),
             sleep_fn=_noop_sleep,
         )
@@ -410,8 +340,10 @@ class TestSyncTransportEndToEnd:
 
         rc = RequestClient(
             transport=transport,
-            token="test-token",
-            base_headers={"user-agent": "test/1.0"},
+            base_headers={
+                "authorization": "Bearer test-token",
+                "user-agent": "test/1.0",
+            },
             base_params={"teamId": "team_abc"},
             sleep_fn=_noop_sleep,
         )
