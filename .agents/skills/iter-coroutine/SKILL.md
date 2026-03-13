@@ -1,3 +1,7 @@
+---
+name: iter_coroutine
+description: Refactor or create modules that need both sync and async public APIs using the iter-coroutine pattern. TRIGGER when adding a new feature that requires sync+async variants, migrating duplicated sync/async implementations to shared logic, or wiring a module into the shared HTTP transport layer.
+---
 # Iter-Coroutine + Base/Runtime Migration
 
 Refactor sync+async modules to eliminate duplication using the iter-coroutine
