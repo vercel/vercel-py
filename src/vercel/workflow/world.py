@@ -511,7 +511,7 @@ class PaginationOptions(BaseModel):
     )
 
 
-class PaginatedResult(Generic[T], BaseModel):
+class PaginatedResult(BaseModel, Generic[T]):
     data: list[T]
     cursor: str | None
     has_more: bool = pydantic.Field(alias="hasMore")
