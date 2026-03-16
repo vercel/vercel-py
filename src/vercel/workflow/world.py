@@ -6,9 +6,11 @@ from datetime import datetime
 from typing import (
     Annotated,
     Any,
+    Generic,
     Literal,
     Protocol,
     Self,
+    TypeAlias,
     TypeVar,
     overload,
 )
@@ -16,9 +18,9 @@ from typing import (
 import pydantic
 
 T = TypeVar("T")
-type QueuePrefix = Literal["__wkf_step_", "__wkf_workflow_"]
+QueuePrefix: TypeAlias = Literal["__wkf_step_", "__wkf_workflow_"]
 # OpenTelemetry trace context for distributed tracing
-type TraceCarrier = dict[str, str]
+TraceCarrier: TypeAlias = dict[str, str]
 
 
 class BaseModel(pydantic.BaseModel):
@@ -74,7 +76,7 @@ class HealthCheckPayload(BaseModel):
     correlation_id: str = pydantic.Field(alias="correlationId")
 
 
-type QueuePayload = WorkflowInvokePayload | StepInvokePayload | HealthCheckPayload
+QueuePayload: TypeAlias = WorkflowInvokePayload | StepInvokePayload | HealthCheckPayload
 
 
 class StructuredError(BaseModel):
@@ -83,11 +85,11 @@ class StructuredError(BaseModel):
     code: str | None = None
 
 
-type WorkflowRunStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
-type StepStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
+WorkflowRunStatus: TypeAlias = Literal["pending", "running", "completed", "failed", "cancelled"]
+StepStatus: TypeAlias = Literal["pending", "running", "completed", "failed", "cancelled"]
 
 
-class _ContextWrapper[T]:
+class _ContextWrapper(Generic[T]):
     def __init__(self, value: T):
         self.value = value
 
@@ -110,9 +112,9 @@ class BaseWorkflowRun(BaseModel):
     execution_context: dict[str, Any] | None = pydantic.Field(
         default=None, alias="executionContext"
     )
-    input: list[bytes] | str | None = (
-        None  # run_created returns input as str `'[Circular]'`, while run_completed returns input_ref
-    )
+    # run_created returns input as str `'[Circular]'`,
+    # while run_completed returns input_ref
+    input: list[bytes] | str | None = None
     output: list[bytes] | None = None
     error: StructuredError | None = None
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
@@ -178,7 +180,7 @@ class FailedWorkflowRun(BaseWorkflowRun):
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
 
-type WorkflowRun = Annotated[
+WorkflowRun: TypeAlias = Annotated[
     NonFinalWorkflowRun | CancelledWorkflowRun | CompletedWorkflowRun | FailedWorkflowRun,
     pydantic.Field(discriminator="status"),
 ]
@@ -238,7 +240,7 @@ class FailedWorkflowStep(BaseWorkflowStep):
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
 
-type WorkflowStep = Annotated[
+WorkflowStep: TypeAlias = Annotated[
     NonFinalWorkflowStep | CancelledWorkflowStep | CompletedWorkflowStep | FailedWorkflowStep,
     pydantic.Field(discriminator="status"),
 ]
@@ -470,7 +472,7 @@ class WaitCompletedEvent(BaseEvent):
     correlation_id: str = pydantic.Field(alias="correlationId")
 
 
-type CreateEventRequest = (
+CreateEventRequest: TypeAlias = (
     RunStartedEvent
     | RunCompletedEvent
     | RunFailedEvent
@@ -482,7 +484,7 @@ type CreateEventRequest = (
     | WaitCreatedEvent
     | WaitCompletedEvent
 )
-type Event = Annotated[
+Event: TypeAlias = Annotated[
     (
         RunCreatedEvent
         | RunStartedEvent
@@ -509,7 +511,7 @@ class PaginationOptions(BaseModel):
     )
 
 
-class PaginatedResult[T](BaseModel):
+class PaginatedResult(Generic[T], BaseModel):
     data: list[T]
     cursor: str | None
     has_more: bool = pydantic.Field(alias="hasMore")

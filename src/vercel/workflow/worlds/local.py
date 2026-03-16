@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 import cbor2
 import pydantic
+
 from vercel.workers import client as vqs_client
 
 from .. import world as w
@@ -249,7 +250,8 @@ class LocalWorld(w.World):
             if current_run and is_run_terminal(current_run.status):
                 if validated_step.status != "running":
                     raise RuntimeError(
-                        f'Cannot modify non-running step on run in terminal state "{current_run.status}"'
+                        f'Cannot modify non-running step on run in terminal state '
+                        f'"{current_run.status}"'
                     )
 
         event = w.EventAdaptor.validate_python(
@@ -397,20 +399,21 @@ class LocalWorld(w.World):
             if validated_step:
                 if validated_step.retry_after and validated_step.retry_after > now:
                     raise RuntimeError(
-                        f'Cannot start step "{data.correlation_id}": retryAfter timestamp has not been reached yet'
+                        f'Cannot start step "{data.correlation_id}": '
+                        f'retryAfter timestamp has not been reached yet'
                     )
 
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
                 step = w.NonFinalWorkflowStep.model_validate(
                     validated_step.model_dump()
-                    | dict(
-                        status="running",
-                        startedAt=validated_step.started_at or now,
-                        attempt=validated_step.attempt + 1,
-                        retryAfter=None,
-                        updatedAt=now,
-                    )
+                    | {
+                        "status": "running",
+                        "startedAt": validated_step.started_at or now,
+                        "attempt": validated_step.attempt + 1,
+                        "retryAfter": None,
+                        "updatedAt": now,
+                    }
                 )
                 write_json(step_path, step, overwrite=True)
 
@@ -421,12 +424,12 @@ class LocalWorld(w.World):
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
                 step = w.CompletedWorkflowStep.model_validate(
                     validated_step.model_dump()
-                    | dict(
-                        status="completed",
-                        output=completed_data.result,
-                        completedAt=now,
-                        updatedAt=now,
-                    )
+                    | {
+                        "status": "completed",
+                        "output": completed_data.result,
+                        "completedAt": now,
+                        "updatedAt": now,
+                    }
                 )
                 write_json(step_path, step, overwrite=True)
 
@@ -455,12 +458,12 @@ class LocalWorld(w.World):
                 )
                 step = w.FailedWorkflowStep.model_validate(
                     validated_step.model_dump()
-                    | dict(
-                        status="failed",
-                        error=error,
-                        completedAt=now,
-                        updatedAt=now,
-                    )
+                    | {
+                        "status": "failed",
+                        "error": error,
+                        "completedAt": now,
+                        "updatedAt": now,
+                    }
                 )
                 write_json(step_path, step, overwrite=True)
 

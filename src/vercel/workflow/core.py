@@ -1,5 +1,5 @@
 from collections.abc import Callable, Coroutine
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, Generic, ParamSpec, TypeVar
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -7,7 +7,7 @@ _workflows: dict[str, "Workflow[Any, Any]"] = {}
 _steps: dict[str, "Step[Any, Any]"] = {}
 
 
-class Workflow[**P, T]:
+class Workflow(Generic[P, T]):
     def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
         self.func = func
         module = getattr(func, "__module__", "<unknown module>")
@@ -16,7 +16,7 @@ class Workflow[**P, T]:
         _workflows[self.workflow_id] = self
 
 
-def workflow[**P, T](func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
+def workflow(func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
     return Workflow(func)
 
 
@@ -24,7 +24,7 @@ def get_workflow(workflow_id: str) -> Workflow[Any, Any]:
     return _workflows[workflow_id]
 
 
-class Step[**P, T]:
+class Step(Generic[P, T]):
     max_retries: int = 3
 
     def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
@@ -48,7 +48,7 @@ class Step[**P, T]:
         return await self.func(*args, **kwargs)
 
 
-def step[**P, T](func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
+def step(func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
     return Step(func)
 
 

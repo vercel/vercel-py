@@ -6,7 +6,7 @@ import json
 import random
 import traceback
 from datetime import UTC, datetime
-from typing import Any, Literal, ParamSpec, Self, TypeVar
+from typing import Any, Generic, Literal, ParamSpec, Self, TypeVar
 
 from . import core, ulid, world as w
 
@@ -16,7 +16,7 @@ SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 
 
 @dataclasses.dataclass
-class Suspension[T]:
+class Suspension(Generic[T]):
     correlation_id: str
     step: core.Step[Any, T]
     input: bytes
@@ -52,7 +52,7 @@ class WorkflowOrchestratorContext:
             self._ctx.reset(token)
         return await self._fut
 
-    async def run_step[**P, T](self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         input_data = b"json" + json.dumps((args, kwargs), sort_keys=True).encode()
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
@@ -403,7 +403,7 @@ class Run:
                 await asyncio.sleep(1)
 
 
-async def start[**P, T](wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
+async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     input_data = b"json" + json.dumps([args, kwargs], sort_keys=True).encode()
