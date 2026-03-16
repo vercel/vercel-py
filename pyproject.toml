@@ -16,6 +16,8 @@ dependencies = [
     "anyio>=4.0.0",
     "python-dotenv",
     "websockets>=12.0",
+    "cbor2>=5.8.0",
+    "vercel-workers>=0.0.12 ; python_version >= '3.12'",
 ]
 
 [project.scripts]
