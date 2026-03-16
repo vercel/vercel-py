@@ -122,7 +122,9 @@ class VercelWorld(w.World):
 
         # utils.ts, parseResponseBody
         if "application/cbor" in resp.headers.get("Content-Type", ""):
-            result = cbor2.loads(resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined)
+            result = cbor2.loads(
+                resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
+            )
         else:
             result = resp.json()
 
@@ -180,7 +182,7 @@ class VercelWorld(w.World):
             headers["Vqs-Delay-Seconds"] = str(delay_seconds)
         try:
             response = await vqs_client.send_async(
-                ''.join(char if char.isalnum() or char in '-_' else '-' for char in queue_name),
+                "".join(char if char.isalnum() or char in "-_" else "-" for char in queue_name),
                 payload,
                 idempotency_key=idempotency_key,
                 deployment_id=deployment_id,
@@ -206,9 +208,7 @@ class VercelWorld(w.World):
         @vqs_client.subscribe(
             topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
         )
-        async def async_handler(
-            body: Any, meta: vqs_client.MessageMetadata
-        ) -> None:
+        async def async_handler(body: Any, meta: vqs_client.MessageMetadata) -> None:
             try:
                 if not isinstance(body, dict):
                     raise ValueError("Invalid message body: expected a JSON object")
@@ -272,7 +272,11 @@ class VercelWorld(w.World):
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         run_id_path = "null" if run_id is None else run_id
-        remote_ref_behavior = "resolve" if data.event_type in {"run_created", "run_started", "step_started"} else "lazy"
+        remote_ref_behavior = (
+            "resolve"
+            if data.event_type in {"run_created", "run_started", "step_started"}
+            else "lazy"
+        )
         return await self._cbor_request(
             "POST",
             f"/v2/runs/{run_id_path}/events",

@@ -110,7 +110,9 @@ class BaseWorkflowRun(BaseModel):
     execution_context: dict[str, Any] | None = pydantic.Field(
         default=None, alias="executionContext"
     )
-    input: list[bytes] | str | None = None  # run_created returns input as str `'[Circular]'`, while run_completed returns input_ref
+    input: list[bytes] | str | None = (
+        None  # run_created returns input as str `'[Circular]'`, while run_completed returns input_ref
+    )
     output: list[bytes] | None = None
     error: StructuredError | None = None
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
@@ -254,7 +256,9 @@ class BaseEvent(BaseModel):
     correlation_id: str | None = pydantic.Field(
         default=None, alias="correlationId", exclude_if=lambda e: e is None
     )
-    spec_version: Literal[1, 2] = pydantic.Field(default=2, alias="specVersion")  # 1: legacy JSON, 2: devalue
+    spec_version: Literal[1, 2] = pydantic.Field(
+        default=2, alias="specVersion"
+    )  # 1: legacy JSON, 2: devalue
     server_props: ServerProps | None = pydantic.Field(default=None, exclude=True)
 
     @pydantic.model_validator(mode="before")
@@ -479,18 +483,20 @@ type CreateEventRequest = (
     | WaitCompletedEvent
 )
 type Event = Annotated[
-    (RunCreatedEvent
-     | RunStartedEvent
-     | RunCompletedEvent
-     | RunFailedEvent
-     | StepCreatedEvent
-     | StepStartedEvent
-     | StepRetryingEvent
-     | StepCompletedEvent
-     | StepFailedEvent
-     | WaitCreatedEvent
-     | WaitCompletedEvent
-     ), pydantic.Field(discriminator="event_type")
+    (
+        RunCreatedEvent
+        | RunStartedEvent
+        | RunCompletedEvent
+        | RunFailedEvent
+        | StepCreatedEvent
+        | StepStartedEvent
+        | StepRetryingEvent
+        | StepCompletedEvent
+        | StepFailedEvent
+        | WaitCreatedEvent
+        | WaitCompletedEvent
+    ),
+    pydantic.Field(discriminator="event_type"),
 ]
 EventAdaptor: pydantic.TypeAdapter[Event] = pydantic.TypeAdapter(Event)
 

@@ -493,7 +493,10 @@ class LocalWorld(w.World):
             for f in directory.iterdir()
             if f.suffix == ".json" and f.stem.startswith(f"{run_id}-")
         ]
-        items.sort(key=lambda item: (item.server_props.created_at, item.server_props.event_id), reverse=desc)
+        items.sort(
+            key=lambda item: (item.server_props.created_at, item.server_props.event_id),
+            reverse=desc,
+        )
         return w.PaginatedResult(
             data=items,
             cursor=None,
