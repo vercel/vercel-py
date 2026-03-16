@@ -42,6 +42,8 @@ class WorkflowOrchestratorContext:
 
     async def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
         workflow = core.get_workflow(workflow_run.workflow_name)
+        if not workflow_run.input or not isinstance(workflow_run.input, list):
+            raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
         if not workflow_run.input[0].startswith(b"json"):
             raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
         args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
@@ -109,7 +111,7 @@ async def workflow_handler(
         assert result.run is not None
         workflow_run = result.run
     elif workflow_run.status == "cancelled":
-        return
+        return None
 
     # At this point, the workflow is "running" and `startedAt` should
     # definitely be set.
@@ -266,6 +268,8 @@ async def step_handler(
             raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
 
         # Deserialize step input
+        if not step_run.input:
+            raise RuntimeError(f"Step '{req.step_id}' has no input")
         if not step_run.input[0].startswith(b"json"):
             raise RuntimeError(f"Unsupported step input encoding for step {req.step_id}")
         args, kwargs = json.loads(step_run.input[0][len(b"json") :].decode())
@@ -389,6 +393,8 @@ class Run:
         while True:
             run = await self._world.runs_get(self._run_id)
             if run.status == "completed":
+                if not run.output:
+                    raise RuntimeError(f"Completed workflow {run.run_id} has no output")
                 if not run.output[0].startswith(b"json"):
                     raise RuntimeError(f"Unsupported workflow output encoding for {run.run_id}")
                 return json.loads(run.output[0][len(b"json") :].decode())

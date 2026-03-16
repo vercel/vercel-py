@@ -186,7 +186,10 @@ class LocalWorld(w.World):
     async def steps_get(self, run_id: str, step_id: str) -> w.WorkflowStep:
         composite_key = f"{run_id}-{step_id}"
         step_path = self.data_dir / "steps" / f"{composite_key}.json"
-        return read_json(step_path, w.WorkflowStepAdaptor)
+        step = read_json(step_path, w.WorkflowStepAdaptor)
+        if step is None:
+            raise RuntimeError(f"Step {step_id} not found in run {run_id}")
+        return step
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         event_id = f"evnt_{self.monotonic_ulid(None)}"
@@ -222,7 +225,7 @@ class LocalWorld(w.World):
                 write_json(event_path, event.model_dump() | event.server_props.model_dump())
                 return w.EventResult(event=event, run=current_run)
 
-            if data.event_type in run_terminal_events or data.event_data == "run_cancelled":
+            if data.event_type in run_terminal_events or data.event_type == "run_cancelled":
                 raise RuntimeError(
                     f"Cannot transition run from terminal state {current_run.status}"
                 )
@@ -250,7 +253,7 @@ class LocalWorld(w.World):
             if current_run and is_run_terminal(current_run.status):
                 if validated_step.status != "running":
                     raise RuntimeError(
-                        f'Cannot modify non-running step on run in terminal state '
+                        f"Cannot modify non-running step on run in terminal state "
                         f'"{current_run.status}"'
                     )
 
@@ -380,6 +383,7 @@ class LocalWorld(w.World):
 
         elif data.event_type == "step_created" and hasattr(data, "event_data"):
             step_data = data.event_data
+            assert isinstance(step_data.input, list)
             step = w.NonFinalWorkflowStep(
                 runId=effective_run_id,
                 stepId=data.correlation_id,
@@ -400,7 +404,7 @@ class LocalWorld(w.World):
                 if validated_step.retry_after and validated_step.retry_after > now:
                     raise RuntimeError(
                         f'Cannot start step "{data.correlation_id}": '
-                        f'retryAfter timestamp has not been reached yet'
+                        f"retryAfter timestamp has not been reached yet"
                     )
 
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
@@ -418,7 +422,6 @@ class LocalWorld(w.World):
                 write_json(step_path, step, overwrite=True)
 
         elif data.event_type == "step_completed" and hasattr(data, "event_data"):
-            completed_data = data.event_data
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
@@ -426,7 +429,7 @@ class LocalWorld(w.World):
                     validated_step.model_dump()
                     | {
                         "status": "completed",
-                        "output": completed_data.result,
+                        "output": data.event_data.result,
                         "completedAt": now,
                         "updatedAt": now,
                     }
@@ -434,22 +437,24 @@ class LocalWorld(w.World):
                 write_json(step_path, step, overwrite=True)
 
         elif data.event_type == "step_failed" and hasattr(data, "event_data"):
-            failed_data = data.event_data
+            step_failed_data = data.event_data
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
-                if isinstance(failed_data.error, str):
-                    error_msg = failed_data.error
-                elif isinstance(failed_data.error, dict) and "message" in failed_data.error:
-                    error_msg = failed_data.error["message"]
-                elif hasattr(failed_data.error, "message"):
-                    error_msg = failed_data.error.message
+                if isinstance(step_failed_data.error, str):
+                    error_msg = step_failed_data.error
+                elif (
+                    isinstance(step_failed_data.error, dict) and "message" in step_failed_data.error
+                ):
+                    error_msg = step_failed_data.error["message"]
+                elif hasattr(step_failed_data.error, "message"):
+                    error_msg = step_failed_data.error.message
                 else:
                     error_msg = "Unknown error"
-                if isinstance(failed_data.error, dict) and "stack" in failed_data.error:
-                    error_stack = failed_data.error["stack"]
-                elif hasattr(failed_data.error, "stack"):
-                    error_stack = failed_data.error.stack
+                if isinstance(step_failed_data.error, dict) and "stack" in step_failed_data.error:
+                    error_stack = step_failed_data.error["stack"]
+                elif hasattr(step_failed_data.error, "stack"):
+                    error_stack = step_failed_data.error.stack
                 else:
                     error_stack = None
                 error = w.StructuredError(
@@ -469,7 +474,10 @@ class LocalWorld(w.World):
 
         composite_key = f"{effective_run_id}-{event_id}"
         event_path = self.data_dir / "events" / f"{composite_key}.json"
-        write_json(event_path, event.model_dump() | event.server_props.model_dump())
+        if event.server_props:
+            write_json(event_path, event.model_dump() | event.server_props.model_dump())
+        else:
+            write_json(event_path, event.model_dump())
 
         return w.EventResult(
             event=event,
@@ -496,12 +504,14 @@ class LocalWorld(w.World):
             for f in directory.iterdir()
             if f.suffix == ".json" and f.stem.startswith(f"{run_id}-")
         ]
-        items.sort(
-            key=lambda item: (item.server_props.created_at, item.server_props.event_id),
+        # Filter out None items and ensure all items have server_props
+        valid_items = [item for item in items if item is not None and item.server_props is not None]
+        valid_items.sort(
+            key=lambda item: (item.server_props.created_at, item.server_props.event_id),  # type: ignore[union-attr]
             reverse=desc,
         )
         return w.PaginatedResult(
-            data=items,
+            data=valid_items,
             cursor=None,
             hasMore=False,
         )
