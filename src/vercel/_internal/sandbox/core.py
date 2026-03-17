@@ -367,7 +367,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
             token=token,
             base_headers={"user-agent": USER_AGENT},
             base_params={"teamId": team_id},
-            timeout=None,
+            timeout=180.0,
             base_url=host,
         )
         self._request_client = SandboxRequestClient(request_client=rc)
@@ -414,7 +414,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             token=token,
             base_headers={"user-agent": USER_AGENT},
             base_params={"teamId": team_id},
-            timeout=None,
+            timeout=180.0,
             base_url=host,
         )
         self._request_client = SandboxRequestClient(request_client=rc)
