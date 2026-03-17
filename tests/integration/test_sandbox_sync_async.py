@@ -402,6 +402,14 @@ class TestSandboxRunCommand:
 class TestSandboxFileOperations:
     """Test sandbox file operations."""
 
+    @staticmethod
+    def _extract_written_file(request: httpx.Request, name: str) -> tuple[tarfile.TarInfo, bytes]:
+        with tarfile.open(fileobj=BytesIO(request.content), mode="r:gz") as tar:
+            info = tar.getmember(name)
+            extracted = tar.extractfile(info)
+            assert extracted is not None
+            return info, extracted.read()
+
     @respx.mock
     def test_write_files_sync_includes_mode(self, mock_env_clear, mock_sandbox_get_response):
         """Test synchronous file write preserves optional file mode in tarball."""
@@ -444,12 +452,84 @@ class TestSandboxFileOperations:
         request = route.calls.last.request
         assert request.headers["x-cwd"] == "/"
 
-        with tarfile.open(fileobj=BytesIO(request.content), mode="r:gz") as tar:
-            info = tar.getmember("app/bin/hello.sh")
-            assert info.mode == 0o755
-            extracted = tar.extractfile(info)
-            assert extracted is not None
-            assert extracted.read() == b"#!/bin/sh\necho hello\n"
+        info, data = self._extract_written_file(request, "app/bin/hello.sh")
+        assert info.mode == 0o755
+        assert data == b"#!/bin/sh\necho hello\n"
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_write_files_sync_ignores_none_mode(self, mock_env_clear, mock_sandbox_get_response):
+        """Test sync file write ignores mode=None instead of treating it as present."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/write").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.write_files([{"path": "tmp/file.txt", "content": b"hello", "mode": None}])
+
+        assert route.called
+        info, data = self._extract_written_file(route.calls.last.request, "app/tmp/file.txt")
+        assert info.mode == tarfile.TarInfo("tmp/file.txt").mode
+        assert data == b"hello"
+
+        sandbox.client.close()
+
+    @pytest.mark.parametrize("mode", [-1, 0o1000, 999999999])
+    @respx.mock
+    def test_write_files_sync_rejects_out_of_range_mode(
+        self, mock_env_clear, mock_sandbox_get_response, mode: int
+    ):
+        """Test sync file write rejects invalid mode integers with a clear error."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/write").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(ValueError, match="mode must be an integer between 0 and 0o777"):
+            sandbox.write_files([{"path": "tmp/file.txt", "content": b"hello", "mode": mode}])
+
+        assert not route.called
 
         sandbox.client.close()
 
@@ -496,12 +576,9 @@ class TestSandboxFileOperations:
         request = route.calls.last.request
         assert request.headers["x-cwd"] == "/"
 
-        with tarfile.open(fileobj=BytesIO(request.content), mode="r:gz") as tar:
-            info = tar.getmember("app/bin/hello.sh")
-            assert info.mode == 0o755
-            extracted = tar.extractfile(info)
-            assert extracted is not None
-            assert extracted.read() == b"#!/bin/sh\necho hello\n"
+        info, data = self._extract_written_file(request, "app/bin/hello.sh")
+        assert info.mode == 0o755
+        assert data == b"#!/bin/sh\necho hello\n"
 
         await sandbox.client.aclose()
 
