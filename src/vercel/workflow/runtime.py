@@ -454,14 +454,16 @@ def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
         ms = sum(items)
         if ms < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now() + timedelta(milliseconds=ms)
+        return datetime.now(UTC) + timedelta(milliseconds=ms)
 
     elif isinstance(param, (int, float)):
         if param < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now() + timedelta(milliseconds=param)
+        return datetime.now(UTC) + timedelta(milliseconds=param)
 
     elif isinstance(param, datetime):
+        if param.tzinfo is None:
+            raise RuntimeError(f"Duration parameter must have tzinfo")
         return param
 
     else:
