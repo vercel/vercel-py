@@ -463,7 +463,7 @@ def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
 
     elif isinstance(param, datetime):
         if param.tzinfo is None:
-            raise RuntimeError(f"Duration parameter must have tzinfo")
+            raise RuntimeError("Duration parameter must have tzinfo")
         return param
 
     else:
