@@ -3,6 +3,9 @@
 Tests both sync and async variants (Sandbox and AsyncSandbox).
 """
 
+import tarfile
+from io import BytesIO
+
 import httpx
 import pytest
 import respx
@@ -398,6 +401,109 @@ class TestSandboxRunCommand:
 
 class TestSandboxFileOperations:
     """Test sandbox file operations."""
+
+    @respx.mock
+    def test_write_files_sync_includes_mode(self, mock_env_clear, mock_sandbox_get_response):
+        """Test synchronous file write preserves optional file mode in tarball."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/write").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.write_files(
+            [
+                {
+                    "path": "bin/hello.sh",
+                    "content": b"#!/bin/sh\necho hello\n",
+                    "mode": 0o755,
+                }
+            ]
+        )
+
+        assert route.called
+        request = route.calls.last.request
+        assert request.headers["x-cwd"] == "/"
+
+        with tarfile.open(fileobj=BytesIO(request.content), mode="r:gz") as tar:
+            info = tar.getmember("app/bin/hello.sh")
+            assert info.mode == 0o755
+            extracted = tar.extractfile(info)
+            assert extracted is not None
+            assert extracted.read() == b"#!/bin/sh\necho hello\n"
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_write_files_async_includes_mode(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async file write preserves optional file mode in tarball."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/write").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        await sandbox.write_files(
+            [
+                {
+                    "path": "bin/hello.sh",
+                    "content": b"#!/bin/sh\necho hello\n",
+                    "mode": 0o755,
+                }
+            ]
+        )
+
+        assert route.called
+        request = route.calls.last.request
+        assert request.headers["x-cwd"] == "/"
+
+        with tarfile.open(fileobj=BytesIO(request.content), mode="r:gz") as tar:
+            info = tar.getmember("app/bin/hello.sh")
+            assert info.mode == 0o755
+            extracted = tar.extractfile(info)
+            assert extracted is not None
+            assert extracted.read() == b"#!/bin/sh\necho hello\n"
+
+        await sandbox.client.aclose()
 
     @respx.mock
     def test_read_file_sync(

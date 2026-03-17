@@ -155,6 +155,8 @@ def _build_tarball(files: list[WriteFile], cwd: str, extract_dir: str) -> bytes:
             rel = normalize_path(f["path"])
             info = tarfile.TarInfo(name=rel)
             info.size = len(data)
+            if "mode" in f:
+                info.mode = f["mode"]
             tar.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
 
