@@ -454,6 +454,9 @@ class StepFailedEvent(BaseEvent):
 class WaitCreatedEventData(BaseModel):
     resume_at: datetime = pydantic.Field(alias="resumeAt")
 
+    def into_event(self, correlation_id: str) -> "WaitCreatedEvent":
+        return WaitCreatedEvent(correlationId=correlation_id, eventData=self)
+
 
 class WaitCreatedEvent(BaseEvent):
     event_type: Literal["wait_created"] = pydantic.Field(

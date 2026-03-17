@@ -1,3 +1,4 @@
+import datetime
 from collections.abc import Callable, Coroutine
 from typing import Any, Generic, ParamSpec, TypeVar
 
@@ -40,12 +41,11 @@ class Step(Generic[P, T]):
         try:
             ctx = runtime.WorkflowOrchestratorContext.current()
         except LookupError:
-            pass
-        else:
-            return await ctx.run_step(self, *args, **kwargs)
+            raise RuntimeError(
+                "cannot call step outside workflow; use a wrapper function instead"
+            ) from None
 
-        # @step decorator works like a no-op when called directly
-        return await self.func(*args, **kwargs)
+        return await ctx.run_step(self, *args, **kwargs)
 
 
 def step(func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
@@ -54,3 +54,14 @@ def step(func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
 
 def get_step(step_name: str) -> Step[Any, Any]:
     return _steps[step_name]
+
+
+async def sleep(param: int | float | datetime.datetime | str) -> None:
+    from . import runtime
+
+    try:
+        ctx = runtime.WorkflowOrchestratorContext.current()
+    except LookupError:
+        raise RuntimeError("cannot call sleep outside workflow") from None
+
+    await ctx.run_wait(param)

@@ -4,9 +4,12 @@ import dataclasses
 import functools
 import json
 import random
+import re
 import traceback
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, Self, TypeVar
+
+import anyio
 
 from . import core, ulid, world as w
 
@@ -24,6 +27,14 @@ class Suspension(Generic[T]):
     has_created_event: bool = False
 
 
+@dataclasses.dataclass
+class Wait:
+    correlation_id: str
+    resume_at: datetime
+    future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
+    has_created_event: bool = False
+
+
 class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
@@ -33,7 +44,7 @@ class WorkflowOrchestratorContext:
         prng = random.Random(seed)
         self.generate_ulid = functools.partial(ulid.monotonic_factory(prng.random), started_at)
         self._fut: asyncio.Future[Any] | None = None
-        self.suspensions: dict[str, Suspension[Any]] = {}
+        self.suspensions: dict[str, Wait | Suspension[Any]] = {}
         self.resume_handle: asyncio.Handle | None = None
 
     @classmethod
@@ -62,6 +73,16 @@ class WorkflowOrchestratorContext:
             self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         return await sus.future
 
+    async def run_wait(self, param: int | float | datetime | str) -> None:
+        wait = Wait(
+            correlation_id=f"wait_{self.generate_ulid()}",
+            resume_at=(parse_duration_to_date(param)),
+        )
+        self.suspensions[wait.correlation_id] = wait
+        if self.resume_handle is None:
+            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
+        await wait.future
+
     def resume(self) -> None:
         self.resume_handle = None
 
@@ -73,7 +94,7 @@ class WorkflowOrchestratorContext:
             self.replay_index += 1
 
             match event:
-                case w.StepCreatedEvent():
+                case w.StepCreatedEvent() | w.WaitCreatedEvent():
                     self.suspensions[event.correlation_id].has_created_event = True
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
@@ -87,6 +108,10 @@ class WorkflowOrchestratorContext:
                         )
                         return
                     sus.future.set_result(result)
+
+                case w.WaitCompletedEvent():
+                    wait = self.suspensions.pop(event.correlation_id)
+                    wait.future.set_result(None)
 
                 case w.StepFailedEvent(event_data=w.StepFailedEventData(error=e)):
                     sus = self.suspensions.pop(event.correlation_id)
@@ -157,25 +182,14 @@ async def workflow_handler(
         output = b"json" + json.dumps(result).encode()
     except BaseException as e:
         if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
-            for sus in context.suspensions.values():
-                if not sus.has_created_event:
-                    data = w.StepCreatedEventData(stepName=sus.step.name, input=[sus.input])
-                    await world.events_create(run_id, data.into_event(sus.correlation_id))
-                    await world.queue(
-                        f"__wkf_step_{sus.step.name}",
-                        w.StepInvokePayload(
-                            workflowName=workflow_run.workflow_name,
-                            workflowRunId=run_id,
-                            workflowStartedAt=workflow_started_at,
-                            stepId=sus.correlation_id,
-                            requestedAt=datetime.now(UTC),
-                        ),
-                    )
+            # Workflow suspended, continue outside the try..except block
+            pass
         elif isinstance(e, Exception):
             await world.events_create(
                 run_id,
                 w.RunFailedEventData(error=str(e)).into_event(),
             )
+            return None
         else:
             raise
     else:
@@ -183,8 +197,40 @@ async def workflow_handler(
             run_id,
             w.RunCompletedEventData(output=[output]).into_event(),
         )
+        return None
 
-    return None
+    async with anyio.create_task_group() as tg:
+        for sus in context.suspensions.values():
+            if sus.has_created_event:
+                pass
+            elif isinstance(sus, Suspension):
+                step_data = w.StepCreatedEventData(stepName=sus.step.name, input=[sus.input])
+                tg.start_soon(world.events_create, run_id, step_data.into_event(sus.correlation_id))
+                tg.start_soon(
+                    world.queue,
+                    f"__wkf_step_{sus.step.name}",
+                    w.StepInvokePayload(
+                        workflowName=workflow_run.workflow_name,
+                        workflowRunId=run_id,
+                        workflowStartedAt=workflow_started_at,
+                        stepId=sus.correlation_id,
+                        requestedAt=datetime.now(UTC),
+                    ),
+                )
+            elif isinstance(sus, Wait):
+                wait_data = w.WaitCreatedEventData(resumeAt=sus.resume_at)
+                tg.start_soon(world.events_create, run_id, wait_data.into_event(sus.correlation_id))
+
+    now = datetime.now(UTC)
+    min_timeout_seconds = -1.0
+    for sus in context.suspensions.values():
+        if isinstance(sus, Wait):
+            seconds = (sus.resume_at - now).total_seconds()
+            if min_timeout_seconds < 0:
+                min_timeout_seconds = seconds
+            else:
+                min_timeout_seconds = min(min_timeout_seconds, seconds)
+    return None if min_timeout_seconds < 0 else min_timeout_seconds
 
 
 async def step_handler(
@@ -374,6 +420,52 @@ async def get_all_workflow_run_events(run_id: str) -> list[w.Event]:
         has_more = response.has_more
         cursor = response.cursor
     return all_events
+
+
+duration_re = re.compile(
+    r"(-?\d+(?:\.\d+)?)\s*(ms|s|seconds?|m|minutes?|h|hours?|d|days?|w|weeks?)",
+    re.IGNORECASE,
+)
+duration_units = {
+    "ms": 1,
+    "s": 1_000,
+    "second": 1_000,
+    "seconds": 1_000,
+    "m": 60 * 1_000,
+    "minute": 60 * 1_000,
+    "minutes": 60 * 1_000,
+    "h": 60 * 60 * 1_000,
+    "hour": 60 * 60 * 1_000,
+    "hours": 60 * 60 * 1_000,
+    "d": 24 * 60 * 60 * 1_000,
+    "day": 24 * 60 * 60 * 1_000,
+    "days": 24 * 60 * 60 * 1_000,
+    "w": 7 * 24 * 60 * 60 * 1_000,
+    "week": 7 * 24 * 60 * 60 * 1_000,
+    "weeks": 7 * 24 * 60 * 60 * 1_000,
+}
+
+
+def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
+    if isinstance(param, str):
+        items = [float(v) * duration_units[u] for v, u in duration_re.findall(param)]
+        if not items:
+            raise RuntimeError(f"Invalid duration parameter: {param}")
+        ms = sum(items)
+        if ms < 0:
+            raise RuntimeError(f"Duration parameter must be non-negative: {param}")
+        return datetime.now() + timedelta(milliseconds=ms)
+
+    elif isinstance(param, (int, float)):
+        if param < 0:
+            raise RuntimeError(f"Duration parameter must be non-negative: {param}")
+        return datetime.now() + timedelta(milliseconds=param)
+
+    elif isinstance(param, datetime):
+        return param
+
+    else:
+        raise RuntimeError(f"Invalid duration parameter: {param}")
 
 
 class Run:
