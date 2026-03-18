@@ -5,8 +5,11 @@ from dataclasses import dataclass
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import APIError, AsyncSandboxOpsClient, SyncSandboxOpsClient
-
-from .models import Command as CommandModel, CommandFinishedResponse, LogLine
+from vercel._internal.sandbox.models import (
+    Command as CommandModel,
+    CommandFinishedResponse,
+    LogLine,
+)
 
 
 @dataclass

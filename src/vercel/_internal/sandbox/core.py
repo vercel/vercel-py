@@ -28,7 +28,7 @@ from vercel._internal.http import (
 )
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.errors import APIError
-from vercel.sandbox.models import (
+from vercel._internal.sandbox.models import (
     CommandFinishedResponse,
     CommandResponse,
     CreateSnapshotResponse,
