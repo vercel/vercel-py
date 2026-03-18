@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-import inspect
 import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.models import (
     CommandResponse,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
     Source,
     WriteFile,
+)
+from vercel._internal.sandbox.network_policy import (
+    ApiNetworkPolicy,
+    NetworkPolicy,
 )
 
 from ..oidc import Credentials, get_credentials
@@ -22,12 +25,8 @@ from .command import (
     Command,
     CommandFinished,
 )
-from .network_policy import to_api_network_policy
 from .pty.shell import start_interactive_shell
 from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
-from .types import NetworkPolicy
-
-_NETWORK_POLICY_UNSET = inspect.Signature.empty
 
 
 def _normalize_source(source: Source | None) -> dict[str, Any] | None:
@@ -41,14 +40,6 @@ def _normalize_source(source: Source | None) -> dict[str, Any] | None:
     }
 
     return {key_map.get(k, k): v for k, v in source.items()}
-
-
-def _normalize_network_policy(
-    network_policy: NetworkPolicy | object,
-) -> dict[str, Any] | None:
-    if network_policy is _NETWORK_POLICY_UNSET or network_policy is None:
-        return None
-    return to_api_network_policy(cast(NetworkPolicy, network_policy))
 
 
 @dataclass
@@ -100,7 +91,7 @@ class AsyncSandbox:
         team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
-        network_policy: NetworkPolicy | object = _NETWORK_POLICY_UNSET,
+        network_policy: NetworkPolicy | None = None,
     ) -> AsyncSandbox:
         """Create a new sandbox.
 
@@ -132,7 +123,7 @@ class AsyncSandbox:
             runtime=runtime,
             interactive=interactive,
             env=env,
-            network_policy=_normalize_network_policy(network_policy),
+            network_policy=network_policy,
         )
         return AsyncSandbox(
             client=client,
@@ -166,7 +157,7 @@ class AsyncSandbox:
     async def update_network_policy(self, network_policy: NetworkPolicy) -> NetworkPolicy:
         response = await self.client.update_network_policy(
             sandbox_id=self.sandbox.id,
-            network_policy=to_api_network_policy(network_policy),
+            network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
         )
         self.sandbox = response.sandbox
         updated_network_policy = self.sandbox.network_policy
@@ -391,7 +382,7 @@ class Sandbox:
         team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
-        network_policy: NetworkPolicy | object = _NETWORK_POLICY_UNSET,
+        network_policy: NetworkPolicy | None = None,
     ) -> Sandbox:
         """Create a new sandbox.
 
@@ -425,7 +416,7 @@ class Sandbox:
                 runtime=runtime,
                 interactive=interactive,
                 env=env,
-                network_policy=_normalize_network_policy(network_policy),
+                network_policy=network_policy,
             )
         )
         return Sandbox(
@@ -461,7 +452,7 @@ class Sandbox:
         response = iter_coroutine(
             self.client.update_network_policy(
                 sandbox_id=self.sandbox.id,
-                network_policy=to_api_network_policy(network_policy),
+                network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
             )
         )
         self.sandbox = response.sandbox

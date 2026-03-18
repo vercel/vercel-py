@@ -11,6 +11,13 @@ import httpx
 import pytest
 import respx
 
+from vercel.sandbox import (
+    NetworkPolicyCustom,
+    NetworkPolicyRule,
+    NetworkPolicySubnets,
+    NetworkTransformer,
+)
+
 # Base URL for Vercel Sandbox API
 SANDBOX_API_BASE = "https://api.vercel.com"
 
@@ -197,13 +204,13 @@ class TestSandboxCreateNetworkPolicy:
             ("allow-all", {"mode": "allow-all"}),
             ("deny-all", {"mode": "deny-all"}),
             (
-                {
-                    "allow": ["example.com", "*.example.net"],
-                    "subnets": {
-                        "allow": ["10.0.0.0/8"],
-                        "deny": ["192.168.0.0/16"],
-                    },
-                },
+                NetworkPolicyCustom(
+                    allow=["example.com", "*.example.net"],
+                    subnets=NetworkPolicySubnets(
+                        allow=["10.0.0.0/8"],
+                        deny=["192.168.0.0/16"],
+                    ),
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com", "*.example.net"],
@@ -212,13 +219,15 @@ class TestSandboxCreateNetworkPolicy:
                 },
             ),
             (
-                {
-                    "allow": {
+                NetworkPolicyCustom(
+                    allow={
                         "example.com": [
-                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                            NetworkPolicyRule(
+                                transform=[NetworkTransformer(headers={"X-Trace": "trace-value"})]
+                            )
                         ]
                     }
-                },
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com"],
@@ -271,13 +280,13 @@ class TestSandboxCreateNetworkPolicy:
             ("allow-all", {"mode": "allow-all"}),
             ("deny-all", {"mode": "deny-all"}),
             (
-                {
-                    "allow": ["example.com", "*.example.net"],
-                    "subnets": {
-                        "allow": ["10.0.0.0/8"],
-                        "deny": ["192.168.0.0/16"],
-                    },
-                },
+                NetworkPolicyCustom(
+                    allow=["example.com", "*.example.net"],
+                    subnets=NetworkPolicySubnets(
+                        allow=["10.0.0.0/8"],
+                        deny=["192.168.0.0/16"],
+                    ),
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com", "*.example.net"],
@@ -286,13 +295,15 @@ class TestSandboxCreateNetworkPolicy:
                 },
             ),
             (
-                {
-                    "allow": {
+                NetworkPolicyCustom(
+                    allow={
                         "example.com": [
-                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                            NetworkPolicyRule(
+                                transform=[NetworkTransformer(headers={"X-Trace": "trace-value"})]
+                            )
                         ]
                     }
-                },
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com"],
@@ -510,9 +521,15 @@ class TestSandboxGet:
         )
 
         assert route.called
-        assert sandbox.network_policy == {
-            "allow": {"example.com": [{"transform": [{"headers": {"X-Trace": "<redacted>"}}]}]}
-        }
+        assert sandbox.network_policy == NetworkPolicyCustom(
+            allow={
+                "example.com": [
+                    NetworkPolicyRule(
+                        transform=[NetworkTransformer(headers={"X-Trace": "<redacted>"})]
+                    )
+                ]
+            }
+        )
 
         await sandbox.client.aclose()
 
@@ -525,35 +542,37 @@ class TestSandboxUpdateNetworkPolicy:
         [
             ("deny-all", {"mode": "deny-all"}, "deny-all"),
             (
-                {
-                    "allow": ["example.com", "*.example.net"],
-                    "subnets": {
-                        "allow": ["10.0.0.0/8"],
-                        "deny": ["192.168.0.0/16"],
-                    },
-                },
+                NetworkPolicyCustom(
+                    allow=["example.com", "*.example.net"],
+                    subnets=NetworkPolicySubnets(
+                        allow=["10.0.0.0/8"],
+                        deny=["192.168.0.0/16"],
+                    ),
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com", "*.example.net"],
                     "allowedCIDRs": ["10.0.0.0/8"],
                     "deniedCIDRs": ["192.168.0.0/16"],
                 },
-                {
-                    "allow": ["example.com", "*.example.net"],
-                    "subnets": {
-                        "allow": ["10.0.0.0/8"],
-                        "deny": ["192.168.0.0/16"],
-                    },
-                },
+                NetworkPolicyCustom(
+                    allow=["example.com", "*.example.net"],
+                    subnets=NetworkPolicySubnets(
+                        allow=["10.0.0.0/8"],
+                        deny=["192.168.0.0/16"],
+                    ),
+                ),
             ),
             (
-                {
-                    "allow": {
+                NetworkPolicyCustom(
+                    allow={
                         "example.com": [
-                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                            NetworkPolicyRule(
+                                transform=[NetworkTransformer(headers={"X-Trace": "trace-value"})]
+                            )
                         ]
                     }
-                },
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com"],
@@ -561,11 +580,15 @@ class TestSandboxUpdateNetworkPolicy:
                         {"domain": "example.com", "headers": {"X-Trace": "trace-value"}}
                     ],
                 },
-                {
-                    "allow": {
-                        "example.com": [{"transform": [{"headers": {"X-Trace": "<redacted>"}}]}]
+                NetworkPolicyCustom(
+                    allow={
+                        "example.com": [
+                            NetworkPolicyRule(
+                                transform=[NetworkTransformer(headers={"X-Trace": "<redacted>"})]
+                            )
+                        ]
                     }
-                },
+                ),
             ),
         ],
         ids=["deny_all", "list_form", "record_form"],
@@ -620,35 +643,37 @@ class TestSandboxUpdateNetworkPolicy:
         [
             ("deny-all", {"mode": "deny-all"}, "deny-all"),
             (
-                {
-                    "allow": ["example.com", "*.example.net"],
-                    "subnets": {
-                        "allow": ["10.0.0.0/8"],
-                        "deny": ["192.168.0.0/16"],
-                    },
-                },
+                NetworkPolicyCustom(
+                    allow=["example.com", "*.example.net"],
+                    subnets=NetworkPolicySubnets(
+                        allow=["10.0.0.0/8"],
+                        deny=["192.168.0.0/16"],
+                    ),
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com", "*.example.net"],
                     "allowedCIDRs": ["10.0.0.0/8"],
                     "deniedCIDRs": ["192.168.0.0/16"],
                 },
-                {
-                    "allow": ["example.com", "*.example.net"],
-                    "subnets": {
-                        "allow": ["10.0.0.0/8"],
-                        "deny": ["192.168.0.0/16"],
-                    },
-                },
+                NetworkPolicyCustom(
+                    allow=["example.com", "*.example.net"],
+                    subnets=NetworkPolicySubnets(
+                        allow=["10.0.0.0/8"],
+                        deny=["192.168.0.0/16"],
+                    ),
+                ),
             ),
             (
-                {
-                    "allow": {
+                NetworkPolicyCustom(
+                    allow={
                         "example.com": [
-                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                            NetworkPolicyRule(
+                                transform=[NetworkTransformer(headers={"X-Trace": "trace-value"})]
+                            )
                         ]
                     }
-                },
+                ),
                 {
                     "mode": "custom",
                     "allowedDomains": ["example.com"],
@@ -656,11 +681,15 @@ class TestSandboxUpdateNetworkPolicy:
                         {"domain": "example.com", "headers": {"X-Trace": "trace-value"}}
                     ],
                 },
-                {
-                    "allow": {
-                        "example.com": [{"transform": [{"headers": {"X-Trace": "<redacted>"}}]}]
+                NetworkPolicyCustom(
+                    allow={
+                        "example.com": [
+                            NetworkPolicyRule(
+                                transform=[NetworkTransformer(headers={"X-Trace": "<redacted>"})]
+                            )
+                        ]
                     }
-                },
+                ),
             ),
         ],
         ids=["deny_all", "list_form", "record_form"],

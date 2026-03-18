@@ -2,14 +2,19 @@ import asyncio
 
 from dotenv import load_dotenv
 
-from vercel.sandbox import AsyncSandbox, Sandbox
+from vercel.sandbox import AsyncSandbox, NetworkPolicyCustom, Sandbox
 
 load_dotenv()
 
 
 async def async_demo() -> None:
     # Requires env vars: VERCEL_OIDC_TOKEN + VERCEL_PROJECT_ID + VERCEL_TEAM_ID
-    async with await AsyncSandbox.create(timeout=60_000) as sandbox:  # 1 minute sandbox
+    async with await AsyncSandbox.create(
+        timeout=60_000,
+        network_policy="allow-all",
+    ) as sandbox:  # 1 minute sandbox
+        print("async network policy:", sandbox.network_policy)
+
         # One-shot command (waits)
         res = await sandbox.run_command("bash", ["-lc", "echo async hello && echo async err 1>&2"])
         print("async exit:", res.exit_code)
@@ -22,10 +27,20 @@ async def async_demo() -> None:
             print("async", line.stream, line.data, end="")
         await detached.wait()
 
+        updated_policy = await sandbox.update_network_policy(
+            NetworkPolicyCustom(allow=["example.com"])
+        )
+        print("async updated network policy:", updated_policy)
+
 
 def sync_demo() -> None:
     # Requires env vars: VERCEL_OIDC_TOKEN + VERCEL_PROJECT_ID + VERCEL_TEAM_ID
-    with Sandbox.create(timeout=60_000) as sandbox:  # 1 minute sandbox
+    with Sandbox.create(
+        timeout=60_000,
+        network_policy="allow-all",
+    ) as sandbox:  # 1 minute sandbox
+        print("sync network policy:", sandbox.network_policy)
+
         # One-shot command (waits)
         res = sandbox.run_command("bash", ["-lc", "echo sync hello && echo sync err 1>&2"])
         print("sync exit:", res.exit_code)
@@ -37,6 +52,9 @@ def sync_demo() -> None:
         for line in detached.logs():
             print("sync", line.stream, line.data, end="")
         detached.wait()
+
+        updated_policy = sandbox.update_network_policy(NetworkPolicyCustom(allow=["example.com"]))
+        print("sync updated network policy:", updated_policy)
 
 
 if __name__ == "__main__":

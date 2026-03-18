@@ -38,6 +38,10 @@ from vercel._internal.sandbox.models import (
     SnapshotResponse,
     WriteFile,
 )
+from vercel._internal.sandbox.network_policy import (
+    ApiNetworkPolicy,
+    NetworkPolicy,
+)
 
 try:
     VERSION = _pkg_version("vercel")
@@ -199,7 +203,7 @@ class BaseSandboxOpsClient:
         timeout: int | None = None,
         resources: dict[str, Any] | None = None,
         runtime: str | None = None,
-        network_policy: dict[str, Any] | None = None,
+        network_policy: NetworkPolicy | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
@@ -215,7 +219,7 @@ class BaseSandboxOpsClient:
         if runtime is not None:
             body["runtime"] = runtime
         if network_policy is not None:
-            body["networkPolicy"] = network_policy
+            body["networkPolicy"] = ApiNetworkPolicy.from_network_policy(network_policy).to_dict()
         if interactive:
             body["__interactive"] = True
         if env is not None:
@@ -232,12 +236,12 @@ class BaseSandboxOpsClient:
         self,
         *,
         sandbox_id: str,
-        network_policy: dict[str, Any],
+        network_policy: ApiNetworkPolicy,
     ) -> SandboxResponse:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/network-policy",
-            body=JSONBody({"networkPolicy": network_policy}),
+            body=JSONBody({"networkPolicy": network_policy.to_dict()}),
         )
         return SandboxResponse.model_validate(data)
 

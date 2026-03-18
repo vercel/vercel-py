@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
-if TYPE_CHECKING:
-    from vercel.sandbox.types import NetworkPolicy
-
-
-_REDACTED_HEADER_VALUE = "<redacted>"
+from vercel._internal.sandbox.network_policy import ApiNetworkPolicy, NetworkPolicy
 
 # Source types for Sandbox.create()
 
@@ -70,13 +65,29 @@ class Sandbox(BaseModel):
     cwd: str
     updated_at: int = Field(alias="updatedAt")
     interactive_port: int | None = Field(default=None, alias="interactivePort")
-    network_policy_data: dict[str, Any] | None = Field(default=None, alias="networkPolicy")
+    network_policy_data: ApiNetworkPolicy | None = Field(default=None, alias="networkPolicy")
+    _network_policy: NetworkPolicy | None = PrivateAttr(default=None)
+
+    @field_validator("network_policy_data", mode="before")
+    @classmethod
+    def _parse_network_policy_data(cls, value: object) -> ApiNetworkPolicy | None:
+        if value is None:
+            return None
+        if isinstance(value, ApiNetworkPolicy):
+            return value
+        if isinstance(value, dict):
+            return ApiNetworkPolicy.from_payload(value)
+        raise TypeError("networkPolicy must be a mapping")
+
+    def model_post_init(self, __context: object) -> None:
+        if self.network_policy_data is None:
+            self._network_policy = None
+            return
+        self._network_policy = self.network_policy_data.to_network_policy()
 
     @property
     def network_policy(self) -> NetworkPolicy | None:
-        if self.network_policy_data is None:
-            return None
-        return _from_api_network_policy(self.network_policy_data)
+        return self._network_policy
 
 
 class SandboxRoute(BaseModel):
@@ -198,54 +209,3 @@ class CreateSnapshotResponse(BaseModel):
 
     snapshot: Snapshot
     sandbox: Sandbox
-
-
-def _subnets_from_api(network_policy: Mapping[str, Any]) -> dict[str, list[str]]:
-    allowed = network_policy.get("allowedCIDRs") if "allowedCIDRs" in network_policy else None
-    denied = network_policy.get("deniedCIDRs") if "deniedCIDRs" in network_policy else None
-
-    subnet_payload: dict[str, list[str]] = {}
-    if allowed is not None:
-        subnet_payload["allow"] = list(allowed)
-    if denied is not None:
-        subnet_payload["deny"] = list(denied)
-    return subnet_payload
-
-
-def _from_api_network_policy(network_policy: Mapping[str, Any]) -> NetworkPolicy:
-    mode = network_policy.get("mode")
-    if mode in ("allow-all", "deny-all"):
-        return cast("NetworkPolicy", mode)
-
-    allowed_domains = list(network_policy.get("allowedDomains") or [])
-    injection_rules = list(network_policy.get("injectionRules") or [])
-    subnets = _subnets_from_api(network_policy)
-
-    if not injection_rules:
-        list_policy_result: dict[str, Any] = {"allow": allowed_domains}
-        if subnets:
-            list_policy_result["subnets"] = subnets
-        return cast("NetworkPolicy", list_policy_result)
-
-    allow: dict[str, list[dict[str, list[dict[str, dict[str, str]]]]]] = {
-        domain: [] for domain in allowed_domains
-    }
-    for rule in injection_rules:
-        domain = rule.get("domain")
-        if not isinstance(domain, str):
-            continue
-
-        allow.setdefault(domain, [])
-        header_names = rule.get("headerNames")
-        if header_names is None and isinstance(rule.get("headers"), Mapping):
-            header_names = list(rule["headers"].keys())
-        header_names = header_names or []
-        headers = {name: _REDACTED_HEADER_VALUE for name in header_names if isinstance(name, str)}
-        if not headers:
-            continue
-        allow[domain].append({"transform": [{"headers": headers}]})
-
-    record_policy_result: dict[str, Any] = {"allow": allow}
-    if subnets:
-        record_policy_result["subnets"] = subnets
-    return cast("NetworkPolicy", record_policy_result)

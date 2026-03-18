@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from vercel.sandbox import (
+    NetworkPolicyCustom,
+    NetworkPolicyRule,
+    NetworkTransformer,
+)
 from vercel.sandbox.models import Sandbox as SandboxModel
 
 
@@ -35,9 +40,15 @@ class TestSandboxModelNetworkPolicy:
             }
         )
 
-        assert sandbox.network_policy == {
-            "allow": {"example.com": [{"transform": [{"headers": {"X-Trace": "<redacted>"}}]}]}
-        }
+        assert sandbox.network_policy == NetworkPolicyCustom(
+            allow={
+                "example.com": [
+                    NetworkPolicyRule(
+                        transform=[NetworkTransformer(headers={"X-Trace": "<redacted>"})]
+                    )
+                ]
+            }
+        )
 
     def test_model_accepts_missing_network_policy(self) -> None:
         sandbox = SandboxModel.model_validate(

@@ -79,8 +79,6 @@ class TestTypecheck(unittest.TestCase):
             "vercel.headers",
             "vercel.oidc",
             "vercel.sandbox",
-            "vercel.sandbox.network_policy",
-            "vercel.sandbox.types",
         ]
         for module in modules:
             try:
