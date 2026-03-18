@@ -638,6 +638,38 @@ class TestSandboxUpdateNetworkPolicy:
 
         sandbox.client.close()
 
+    @respx.mock
+    def test_update_sandbox_sync_raises_when_response_omits_network_policy(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/network-policy").mock(
+            return_value=httpx.Response(200, json={"sandbox": mock_sandbox_get_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(RuntimeError, match="did not include network policy"):
+            sandbox.update_network_policy("deny-all")
+
+        sandbox.client.close()
+
     @pytest.mark.parametrize(
         ("network_policy", "expected_api_policy", "expected_public_policy"),
         [
@@ -737,6 +769,39 @@ class TestSandboxUpdateNetworkPolicy:
         assert body == {"networkPolicy": expected_api_policy}
         assert result == expected_public_policy
         assert sandbox.network_policy == expected_public_policy
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_update_sandbox_async_raises_when_response_omits_network_policy(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/network-policy").mock(
+            return_value=httpx.Response(200, json={"sandbox": mock_sandbox_get_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(RuntimeError, match="did not include network policy"):
+            await sandbox.update_network_policy("deny-all")
 
         await sandbox.client.aclose()
 

@@ -108,6 +108,8 @@ class AsyncSandbox:
                 will have an interactive port for PTY connections.
             env: Default environment variables for the sandbox. These are inherited
                 by all commands unless overridden per-command.
+            network_policy: Sandbox network policy. Accepts ``"allow-all"``,
+                ``"deny-all"``, or ``NetworkPolicyCustom``. Omitted when ``None``.
 
         Returns:
             Created AsyncSandbox instance.
@@ -161,7 +163,8 @@ class AsyncSandbox:
         )
         self.sandbox = response.sandbox
         updated_network_policy = self.sandbox.network_policy
-        assert updated_network_policy is not None
+        if updated_network_policy is None:
+            raise RuntimeError("Sandbox API response did not include network policy")
         return updated_network_policy
 
     async def wait_for_status(
@@ -400,6 +403,8 @@ class Sandbox:
                 Note: For interactive shell sessions, use AsyncSandbox instead.
             env: Default environment variables for the sandbox. These are inherited
                 by all commands unless overridden per-command.
+            network_policy: Sandbox network policy. Accepts ``"allow-all"``,
+                ``"deny-all"``, or ``NetworkPolicyCustom``. Omitted when ``None``.
 
         Returns:
             Created Sandbox instance.
@@ -457,7 +462,8 @@ class Sandbox:
         )
         self.sandbox = response.sandbox
         updated_network_policy = self.sandbox.network_policy
-        assert updated_network_policy is not None
+        if updated_network_policy is None:
+            raise RuntimeError("Sandbox API response did not include network policy")
         return updated_network_policy
 
     def wait_for_status(
