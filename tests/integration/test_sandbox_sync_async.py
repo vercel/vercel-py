@@ -3,6 +3,7 @@
 Tests both sync and async variants (Sandbox and AsyncSandbox).
 """
 
+import json
 import tarfile
 from io import BytesIO
 
@@ -187,6 +188,210 @@ class TestSandboxCreate:
         await sandbox.client.aclose()
 
 
+class TestSandboxCreateNetworkPolicy:
+    """Test sandbox creation request serialization for network policy."""
+
+    @pytest.mark.parametrize(
+        ("network_policy", "expected_policy"),
+        [
+            ("allow-all", {"mode": "allow-all"}),
+            ("deny-all", {"mode": "deny-all"}),
+            (
+                {
+                    "allow": ["example.com", "*.example.net"],
+                    "subnets": {
+                        "allow": ["10.0.0.0/8"],
+                        "deny": ["192.168.0.0/16"],
+                    },
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com", "*.example.net"],
+                    "allowedCIDRs": ["10.0.0.0/8"],
+                    "deniedCIDRs": ["192.168.0.0/16"],
+                },
+            ),
+            (
+                {
+                    "allow": {
+                        "example.com": [
+                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                        ]
+                    }
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com"],
+                    "injectionRules": [
+                        {"domain": "example.com", "headers": {"X-Trace": "trace-value"}}
+                    ],
+                },
+            ),
+        ],
+        ids=["allow_all", "deny_all", "list_form", "record_form"],
+    )
+    @respx.mock
+    def test_create_sandbox_sync_serializes_network_policy(
+        self, mock_env_clear, mock_sandbox_create_response, network_policy, expected_policy
+    ):
+        from vercel.sandbox import Sandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": mock_sandbox_create_response, "routes": []},
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            ports=[3000, 8080],
+            timeout=600000,
+            runtime="nodejs20.x",
+            network_policy=network_policy,
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {
+            "projectId": "prj_test123",
+            "ports": [3000, 8080],
+            "timeout": 600000,
+            "runtime": "nodejs20.x",
+            "networkPolicy": expected_policy,
+        }
+
+        sandbox.client.close()
+
+    @pytest.mark.parametrize(
+        ("network_policy", "expected_policy"),
+        [
+            ("allow-all", {"mode": "allow-all"}),
+            ("deny-all", {"mode": "deny-all"}),
+            (
+                {
+                    "allow": ["example.com", "*.example.net"],
+                    "subnets": {
+                        "allow": ["10.0.0.0/8"],
+                        "deny": ["192.168.0.0/16"],
+                    },
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com", "*.example.net"],
+                    "allowedCIDRs": ["10.0.0.0/8"],
+                    "deniedCIDRs": ["192.168.0.0/16"],
+                },
+            ),
+            (
+                {
+                    "allow": {
+                        "example.com": [
+                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                        ]
+                    }
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com"],
+                    "injectionRules": [
+                        {"domain": "example.com", "headers": {"X-Trace": "trace-value"}}
+                    ],
+                },
+            ),
+        ],
+        ids=["allow_all", "deny_all", "list_form", "record_form"],
+    )
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_async_serializes_network_policy(
+        self, mock_env_clear, mock_sandbox_create_response, network_policy, expected_policy
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": mock_sandbox_create_response, "routes": []},
+            )
+        )
+
+        sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            ports=[3000, 8080],
+            timeout=600000,
+            runtime="nodejs20.x",
+            network_policy=network_policy,
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {
+            "projectId": "prj_test123",
+            "ports": [3000, 8080],
+            "timeout": 600000,
+            "runtime": "nodejs20.x",
+            "networkPolicy": expected_policy,
+        }
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    def test_create_sandbox_sync_omits_network_policy_when_not_provided(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": mock_sandbox_create_response, "routes": []},
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert "networkPolicy" not in body
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_async_omits_network_policy_when_not_provided(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": mock_sandbox_create_response, "routes": []},
+            )
+        )
+
+        sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert "networkPolicy" not in body
+
+        await sandbox.client.aclose()
+
+
 class TestSandboxGet:
     """Test sandbox get operations."""
 
@@ -245,6 +450,264 @@ class TestSandboxGet:
 
         assert route.called
         assert sandbox.sandbox_id == sandbox_id
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    def test_get_sandbox_sync_exposes_mode_network_policy(
+        self, mock_env_clear, mock_sandbox_get_response_with_mode_network_policy
+    ):
+        """Test synchronous get sandbox exposes a converted mode policy."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response_with_mode_network_policy,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert route.called
+        assert sandbox.network_policy == "allow-all"
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_get_sandbox_async_exposes_custom_network_policy(
+        self, mock_env_clear, mock_sandbox_get_response_with_custom_network_policy
+    ):
+        """Test asynchronous get sandbox exposes a converted custom policy."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response_with_custom_network_policy,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert route.called
+        assert sandbox.network_policy == {
+            "allow": {"example.com": [{"transform": [{"headers": {"X-Trace": "<redacted>"}}]}]}
+        }
+
+        await sandbox.client.aclose()
+
+
+class TestSandboxUpdateNetworkPolicy:
+    """Test sandbox network policy updates."""
+
+    @pytest.mark.parametrize(
+        ("network_policy", "expected_api_policy", "expected_public_policy"),
+        [
+            ("deny-all", {"mode": "deny-all"}, "deny-all"),
+            (
+                {
+                    "allow": ["example.com", "*.example.net"],
+                    "subnets": {
+                        "allow": ["10.0.0.0/8"],
+                        "deny": ["192.168.0.0/16"],
+                    },
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com", "*.example.net"],
+                    "allowedCIDRs": ["10.0.0.0/8"],
+                    "deniedCIDRs": ["192.168.0.0/16"],
+                },
+                {
+                    "allow": ["example.com", "*.example.net"],
+                    "subnets": {
+                        "allow": ["10.0.0.0/8"],
+                        "deny": ["192.168.0.0/16"],
+                    },
+                },
+            ),
+            (
+                {
+                    "allow": {
+                        "example.com": [
+                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                        ]
+                    }
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com"],
+                    "injectionRules": [
+                        {"domain": "example.com", "headers": {"X-Trace": "trace-value"}}
+                    ],
+                },
+                {
+                    "allow": {
+                        "example.com": [{"transform": [{"headers": {"X-Trace": "<redacted>"}}]}]
+                    }
+                },
+            ),
+        ],
+        ids=["deny_all", "list_form", "record_form"],
+    )
+    @respx.mock
+    def test_update_sandbox_sync_updates_network_policy(
+        self,
+        mock_env_clear,
+        mock_sandbox_get_response,
+        network_policy,
+        expected_api_policy,
+        expected_public_policy,
+    ):
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        updated_response = dict(mock_sandbox_get_response)
+        updated_response["networkPolicy"] = expected_api_policy
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/network-policy").mock(
+            return_value=httpx.Response(200, json={"sandbox": updated_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        result = sandbox.update_network_policy(network_policy)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"networkPolicy": expected_api_policy}
+        assert result == expected_public_policy
+        assert sandbox.network_policy == expected_public_policy
+
+        sandbox.client.close()
+
+    @pytest.mark.parametrize(
+        ("network_policy", "expected_api_policy", "expected_public_policy"),
+        [
+            ("deny-all", {"mode": "deny-all"}, "deny-all"),
+            (
+                {
+                    "allow": ["example.com", "*.example.net"],
+                    "subnets": {
+                        "allow": ["10.0.0.0/8"],
+                        "deny": ["192.168.0.0/16"],
+                    },
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com", "*.example.net"],
+                    "allowedCIDRs": ["10.0.0.0/8"],
+                    "deniedCIDRs": ["192.168.0.0/16"],
+                },
+                {
+                    "allow": ["example.com", "*.example.net"],
+                    "subnets": {
+                        "allow": ["10.0.0.0/8"],
+                        "deny": ["192.168.0.0/16"],
+                    },
+                },
+            ),
+            (
+                {
+                    "allow": {
+                        "example.com": [
+                            {"transform": [{"headers": {"X-Trace": "trace-value"}}]},
+                        ]
+                    }
+                },
+                {
+                    "mode": "custom",
+                    "allowedDomains": ["example.com"],
+                    "injectionRules": [
+                        {"domain": "example.com", "headers": {"X-Trace": "trace-value"}}
+                    ],
+                },
+                {
+                    "allow": {
+                        "example.com": [{"transform": [{"headers": {"X-Trace": "<redacted>"}}]}]
+                    }
+                },
+            ),
+        ],
+        ids=["deny_all", "list_form", "record_form"],
+    )
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_update_sandbox_async_updates_network_policy(
+        self,
+        mock_env_clear,
+        mock_sandbox_get_response,
+        network_policy,
+        expected_api_policy,
+        expected_public_policy,
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        updated_response = dict(mock_sandbox_get_response)
+        updated_response["networkPolicy"] = expected_api_policy
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/network-policy").mock(
+            return_value=httpx.Response(200, json={"sandbox": updated_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        result = await sandbox.update_network_policy(network_policy)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"networkPolicy": expected_api_policy}
+        assert result == expected_public_policy
+        assert sandbox.network_policy == expected_public_policy
 
         await sandbox.client.aclose()
 

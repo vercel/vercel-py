@@ -186,6 +186,29 @@ class TestBlobClientClassParity:
 class TestSandboxClassParity:
     """Test Sandbox and AsyncSandbox method parity."""
 
+    def test_create_signatures_include_network_policy(self):
+        """Test that both sandbox create methods accept network_policy."""
+        import inspect
+
+        from vercel.sandbox import AsyncSandbox, Sandbox
+
+        sync_params = inspect.signature(Sandbox.create).parameters
+        async_params = inspect.signature(AsyncSandbox.create).parameters
+
+        assert "network_policy" in sync_params, "Sandbox.create missing network_policy"
+        assert "network_policy" in async_params, "AsyncSandbox.create missing network_policy"
+        assert sync_params["network_policy"].default is inspect.Signature.empty
+        assert async_params["network_policy"].default is inspect.Signature.empty
+
+    def test_update_network_policy_exists_on_both_classes(self):
+        """Test that both sandbox classes expose update_network_policy."""
+        from vercel.sandbox import AsyncSandbox, Sandbox
+
+        assert hasattr(Sandbox, "update_network_policy"), "Sandbox missing update_network_policy"
+        assert hasattr(AsyncSandbox, "update_network_policy"), (
+            "AsyncSandbox missing update_network_policy"
+        )
+
     def test_sandbox_methods_exist(self):
         """Test that both sandbox classes have equivalent methods."""
         from vercel.sandbox import AsyncSandbox, Sandbox
