@@ -199,6 +199,7 @@ class BaseSandboxOpsClient:
         timeout: int | None = None,
         resources: dict[str, Any] | None = None,
         runtime: str | None = None,
+        network_policy: dict[str, Any] | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
@@ -213,6 +214,8 @@ class BaseSandboxOpsClient:
             body["resources"] = resources
         if runtime is not None:
             body["runtime"] = runtime
+        if network_policy is not None:
+            body["networkPolicy"] = network_policy
         if interactive:
             body["__interactive"] = True
         if env is not None:
@@ -224,6 +227,19 @@ class BaseSandboxOpsClient:
     async def get_sandbox(self, *, sandbox_id: str) -> SandboxAndRoutesResponse:
         data = await self._request_client.request_json("GET", f"/v1/sandboxes/{sandbox_id}")
         return SandboxAndRoutesResponse.model_validate(data)
+
+    async def update_network_policy(
+        self,
+        *,
+        sandbox_id: str,
+        network_policy: dict[str, Any],
+    ) -> SandboxResponse:
+        data = await self._request_client.request_json(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/network-policy",
+            body=JSONBody({"networkPolicy": network_policy}),
+        )
+        return SandboxResponse.model_validate(data)
 
     async def run_command(
         self,
