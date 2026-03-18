@@ -139,6 +139,20 @@ class SandboxRequestClient:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_mode(mode: object) -> int | None:
+    match mode:
+        case None:
+            return None
+        case bool():
+            raise TypeError("mode must be an integer between 0 and 0o777")
+        case int() if 0 <= mode <= 0o777:
+            return mode
+        case int():
+            raise ValueError("mode must be an integer between 0 and 0o777")
+        case _:
+            raise TypeError("mode must be an integer between 0 and 0o777")
+
+
 def _build_tarball(files: list[WriteFile], cwd: str, extract_dir: str) -> bytes:
     def normalize_path(file_path: str) -> str:
         base_path = (
@@ -155,6 +169,9 @@ def _build_tarball(files: list[WriteFile], cwd: str, extract_dir: str) -> bytes:
             rel = normalize_path(f["path"])
             info = tarfile.TarInfo(name=rel)
             info.size = len(data)
+            mode = _normalize_mode(f.get("mode"))
+            if mode is not None:
+                info.mode = mode
             tar.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
 
@@ -350,7 +367,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
             token=token,
             base_headers={"user-agent": USER_AGENT},
             base_params={"teamId": team_id},
-            timeout=None,
+            timeout=180.0,
             base_url=host,
         )
         self._request_client = SandboxRequestClient(request_client=rc)
@@ -397,7 +414,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             token=token,
             base_headers={"user-agent": USER_AGENT},
             base_params={"teamId": team_id},
-            timeout=None,
+            timeout=180.0,
             base_url=host,
         )
         self._request_client = SandboxRequestClient(request_client=rc)

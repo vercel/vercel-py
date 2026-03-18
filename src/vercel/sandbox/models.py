@@ -145,11 +145,17 @@ class SandboxesResponse(BaseModel):
     pagination: Pagination
 
 
-class WriteFile(TypedDict):
+class _WriteFileRequired(TypedDict):
     """File to write to the sandbox."""
 
     path: str
     content: bytes
+
+
+class WriteFile(_WriteFileRequired, total=False):
+    """File to write to the sandbox."""
+
+    mode: int
 
 
 class Snapshot(BaseModel):
