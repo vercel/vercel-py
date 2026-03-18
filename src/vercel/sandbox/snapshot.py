@@ -5,9 +5,9 @@ from typing import Literal
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox.models import Snapshot as SnapshotModel
 
 from ..oidc import Credentials, get_credentials
-from .models import Snapshot as SnapshotModel
 
 
 @dataclass

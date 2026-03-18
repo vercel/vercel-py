@@ -6,6 +6,13 @@ from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox.models import (
+    CommandResponse,
+    Sandbox as SandboxModel,
+    SandboxAndRoutesResponse,
+    Source,
+    WriteFile,
+)
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -13,13 +20,6 @@ from .command import (
     AsyncCommandFinished,
     Command,
     CommandFinished,
-)
-from .models import (
-    CommandResponse,
-    Sandbox as SandboxModel,
-    SandboxAndRoutesResponse,
-    Source,
-    WriteFile,
 )
 from .pty.shell import start_interactive_shell
 from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
