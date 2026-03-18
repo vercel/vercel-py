@@ -632,7 +632,7 @@ class TestSandboxUpdateNetworkPolicy:
 
         assert route.called
         body = json.loads(route.calls.last.request.content)
-        assert body == {"networkPolicy": expected_api_policy}
+        assert body == expected_api_policy
         assert result == expected_public_policy
         assert sandbox.network_policy == expected_public_policy
 
@@ -766,7 +766,7 @@ class TestSandboxUpdateNetworkPolicy:
 
         assert route.called
         body = json.loads(route.calls.last.request.content)
-        assert body == {"networkPolicy": expected_api_policy}
+        assert body == expected_api_policy
         assert result == expected_public_policy
         assert sandbox.network_policy == expected_public_policy
 

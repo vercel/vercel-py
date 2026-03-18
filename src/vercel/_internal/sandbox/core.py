@@ -241,7 +241,7 @@ class BaseSandboxOpsClient:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/network-policy",
-            body=JSONBody({"networkPolicy": network_policy.to_dict()}),
+            body=JSONBody(network_policy.to_dict()),
         )
         return SandboxResponse.model_validate(data)
 
