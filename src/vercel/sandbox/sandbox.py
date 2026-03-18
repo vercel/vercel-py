@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
@@ -21,8 +22,12 @@ from .command import (
     Command,
     CommandFinished,
 )
+from .network_policy import to_api_network_policy
 from .pty.shell import start_interactive_shell
 from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
+from .types import NetworkPolicy
+
+_NETWORK_POLICY_UNSET = inspect.Signature.empty
 
 
 def _normalize_source(source: Source | None) -> dict[str, Any] | None:
@@ -36,6 +41,14 @@ def _normalize_source(source: Source | None) -> dict[str, Any] | None:
     }
 
     return {key_map.get(k, k): v for k, v in source.items()}
+
+
+def _normalize_network_policy(
+    network_policy: NetworkPolicy | object,
+) -> dict[str, Any] | None:
+    if network_policy is _NETWORK_POLICY_UNSET or network_policy is None:
+        return None
+    return to_api_network_policy(cast(NetworkPolicy, network_policy))
 
 
 @dataclass
@@ -63,6 +76,10 @@ class AsyncSandbox:
         return self.sandbox.timeout
 
     @property
+    def network_policy(self) -> NetworkPolicy | None:
+        return self.sandbox.network_policy
+
+    @property
     def interactive_port(self) -> int | None:
         """Port for interactive PTY connections.
 
@@ -83,6 +100,7 @@ class AsyncSandbox:
         team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | object = _NETWORK_POLICY_UNSET,
     ) -> AsyncSandbox:
         """Create a new sandbox.
 
@@ -114,6 +132,7 @@ class AsyncSandbox:
             runtime=runtime,
             interactive=interactive,
             env=env,
+            network_policy=_normalize_network_policy(network_policy),
         )
         return AsyncSandbox(
             client=client,
@@ -143,6 +162,16 @@ class AsyncSandbox:
         resp = await self.client.get_sandbox(sandbox_id=self.sandbox.id)
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
+
+    async def update_network_policy(self, network_policy: NetworkPolicy) -> NetworkPolicy:
+        response = await self.client.update_network_policy(
+            sandbox_id=self.sandbox.id,
+            network_policy=to_api_network_policy(network_policy),
+        )
+        self.sandbox = response.sandbox
+        updated_network_policy = self.sandbox.network_policy
+        assert updated_network_policy is not None
+        return updated_network_policy
 
     async def wait_for_status(
         self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
@@ -345,6 +374,10 @@ class Sandbox:
         """The timeout of the sandbox in milliseconds."""
         return self.sandbox.timeout
 
+    @property
+    def network_policy(self) -> NetworkPolicy | None:
+        return self.sandbox.network_policy
+
     @staticmethod
     def create(
         *,
@@ -358,6 +391,7 @@ class Sandbox:
         team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | object = _NETWORK_POLICY_UNSET,
     ) -> Sandbox:
         """Create a new sandbox.
 
@@ -391,6 +425,7 @@ class Sandbox:
                 runtime=runtime,
                 interactive=interactive,
                 env=env,
+                network_policy=_normalize_network_policy(network_policy),
             )
         )
         return Sandbox(
@@ -421,6 +456,18 @@ class Sandbox:
         resp = iter_coroutine(self.client.get_sandbox(sandbox_id=self.sandbox.id))
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
+
+    def update_network_policy(self, network_policy: NetworkPolicy) -> NetworkPolicy:
+        response = iter_coroutine(
+            self.client.update_network_policy(
+                sandbox_id=self.sandbox.id,
+                network_policy=to_api_network_policy(network_policy),
+            )
+        )
+        self.sandbox = response.sandbox
+        updated_network_policy = self.sandbox.network_policy
+        assert updated_network_policy is not None
+        return updated_network_policy
 
     def wait_for_status(
         self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
