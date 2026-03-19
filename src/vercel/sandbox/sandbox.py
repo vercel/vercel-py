@@ -5,13 +5,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.models import (
     CommandResponse,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
     Source,
     WriteFile,
+)
+from vercel._internal.sandbox.network_policy import (
+    ApiNetworkPolicy,
+    NetworkPolicy,
 )
 
 from ..oidc import Credentials, get_credentials
@@ -63,6 +67,10 @@ class AsyncSandbox:
         return self.sandbox.timeout
 
     @property
+    def network_policy(self) -> NetworkPolicy | None:
+        return self.sandbox.network_policy
+
+    @property
     def interactive_port(self) -> int | None:
         """Port for interactive PTY connections.
 
@@ -83,6 +91,7 @@ class AsyncSandbox:
         team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
     ) -> AsyncSandbox:
         """Create a new sandbox.
 
@@ -99,6 +108,8 @@ class AsyncSandbox:
                 will have an interactive port for PTY connections.
             env: Default environment variables for the sandbox. These are inherited
                 by all commands unless overridden per-command.
+            network_policy: Sandbox network policy. Accepts ``"allow-all"``,
+                ``"deny-all"``, or ``NetworkPolicyCustom``. Omitted when ``None``.
 
         Returns:
             Created AsyncSandbox instance.
@@ -114,6 +125,7 @@ class AsyncSandbox:
             runtime=runtime,
             interactive=interactive,
             env=env,
+            network_policy=network_policy,
         )
         return AsyncSandbox(
             client=client,
@@ -143,6 +155,17 @@ class AsyncSandbox:
         resp = await self.client.get_sandbox(sandbox_id=self.sandbox.id)
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
+
+    async def update_network_policy(self, network_policy: NetworkPolicy) -> NetworkPolicy:
+        response = await self.client.update_network_policy(
+            sandbox_id=self.sandbox.id,
+            network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
+        )
+        self.sandbox = response.sandbox
+        updated_network_policy = self.sandbox.network_policy
+        if updated_network_policy is None:
+            raise RuntimeError("Sandbox API response did not include network policy")
+        return updated_network_policy
 
     async def wait_for_status(
         self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
@@ -345,6 +368,10 @@ class Sandbox:
         """The timeout of the sandbox in milliseconds."""
         return self.sandbox.timeout
 
+    @property
+    def network_policy(self) -> NetworkPolicy | None:
+        return self.sandbox.network_policy
+
     @staticmethod
     def create(
         *,
@@ -358,6 +385,7 @@ class Sandbox:
         team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
     ) -> Sandbox:
         """Create a new sandbox.
 
@@ -375,6 +403,8 @@ class Sandbox:
                 Note: For interactive shell sessions, use AsyncSandbox instead.
             env: Default environment variables for the sandbox. These are inherited
                 by all commands unless overridden per-command.
+            network_policy: Sandbox network policy. Accepts ``"allow-all"``,
+                ``"deny-all"``, or ``NetworkPolicyCustom``. Omitted when ``None``.
 
         Returns:
             Created Sandbox instance.
@@ -391,6 +421,7 @@ class Sandbox:
                 runtime=runtime,
                 interactive=interactive,
                 env=env,
+                network_policy=network_policy,
             )
         )
         return Sandbox(
@@ -421,6 +452,19 @@ class Sandbox:
         resp = iter_coroutine(self.client.get_sandbox(sandbox_id=self.sandbox.id))
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
+
+    def update_network_policy(self, network_policy: NetworkPolicy) -> NetworkPolicy:
+        response = iter_coroutine(
+            self.client.update_network_policy(
+                sandbox_id=self.sandbox.id,
+                network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
+            )
+        )
+        self.sandbox = response.sandbox
+        updated_network_policy = self.sandbox.network_policy
+        if updated_network_policy is None:
+            raise RuntimeError("Sandbox API response did not include network policy")
+        return updated_network_policy
 
     def wait_for_status(
         self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5

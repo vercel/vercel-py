@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+
+from vercel._internal.sandbox.network_policy import ApiNetworkPolicy, NetworkPolicy
 
 # Source types for Sandbox.create()
 
@@ -63,6 +65,29 @@ class Sandbox(BaseModel):
     cwd: str
     updated_at: int = Field(alias="updatedAt")
     interactive_port: int | None = Field(default=None, alias="interactivePort")
+    network_policy_data: ApiNetworkPolicy | None = Field(default=None, alias="networkPolicy")
+    _network_policy: NetworkPolicy | None = PrivateAttr(default=None)
+
+    @field_validator("network_policy_data", mode="before")
+    @classmethod
+    def _parse_network_policy_data(cls, value: object) -> ApiNetworkPolicy | None:
+        if value is None:
+            return None
+        if isinstance(value, ApiNetworkPolicy):
+            return value
+        if isinstance(value, dict):
+            return ApiNetworkPolicy.from_payload(value)
+        raise TypeError("networkPolicy must be a mapping")
+
+    def model_post_init(self, __context: object) -> None:
+        if self.network_policy_data is None:
+            self._network_policy = None
+            return
+        self._network_policy = self.network_policy_data.to_network_policy()
+
+    @property
+    def network_policy(self) -> NetworkPolicy | None:
+        return self._network_policy
 
 
 class SandboxRoute(BaseModel):

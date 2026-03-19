@@ -31,6 +31,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio",
     "pytest-xdist",
+    "hypothesis>=6.0.0",
     "respx>=0.21.0",
     "mypy",
     "build",

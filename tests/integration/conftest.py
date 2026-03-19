@@ -171,6 +171,69 @@ def mock_sandbox_get_response() -> dict:
 
 
 @pytest.fixture
+def mock_sandbox_get_response_with_mode_network_policy() -> dict:
+    """Mock response for sandbox get operation with a mode network policy."""
+    response = {
+        "id": "sbx_test123456",
+        "memory": 512,
+        "vcpus": 1,
+        "region": "iad1",
+        "runtime": "nodejs20.x",
+        "timeout": 300,
+        "status": "running",
+        "requestedAt": 1705320600000,
+        "startedAt": 1705320601000,
+        "requestedStopAt": None,
+        "stoppedAt": None,
+        "duration": None,
+        "sourceSnapshotId": None,
+        "snapshottedAt": None,
+        "createdAt": 1705320600000,
+        "cwd": "/app",
+        "updatedAt": 1705320601000,
+        "interactivePort": None,
+    }
+    response["networkPolicy"] = {"mode": "allow-all"}
+    return response
+
+
+@pytest.fixture
+def mock_sandbox_get_response_with_custom_network_policy() -> dict:
+    """Mock response for sandbox get operation with a custom network policy."""
+    response = {
+        "id": "sbx_test123456",
+        "memory": 512,
+        "vcpus": 1,
+        "region": "iad1",
+        "runtime": "nodejs20.x",
+        "timeout": 300,
+        "status": "running",
+        "requestedAt": 1705320600000,
+        "startedAt": 1705320601000,
+        "requestedStopAt": None,
+        "stoppedAt": None,
+        "duration": None,
+        "sourceSnapshotId": None,
+        "snapshottedAt": None,
+        "createdAt": 1705320600000,
+        "cwd": "/app",
+        "updatedAt": 1705320601000,
+        "interactivePort": None,
+    }
+    response["networkPolicy"] = {
+        "mode": "custom",
+        "allowedDomains": ["example.com"],
+        "injectionRules": [
+            {
+                "domain": "example.com",
+                "headerNames": ["X-Trace"],
+            }
+        ],
+    }
+    return response
+
+
+@pytest.fixture
 def mock_sandbox_command_response() -> dict:
     """Mock response for sandbox run_command operation."""
     return {
