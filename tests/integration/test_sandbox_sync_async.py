@@ -5,6 +5,7 @@ Tests both sync and async variants (Sandbox and AsyncSandbox).
 
 import json
 import tarfile
+from datetime import datetime, timezone
 from io import BytesIO
 
 import httpx
@@ -20,6 +21,29 @@ from vercel.sandbox import (
 
 # Base URL for Vercel Sandbox API
 SANDBOX_API_BASE = "https://api.vercel.com"
+
+
+def _sandbox_with_id(
+    base_sandbox: dict,
+    sandbox_id: str,
+    *,
+    created_at: int,
+) -> dict:
+    sandbox = dict(base_sandbox)
+    sandbox["id"] = sandbox_id
+    sandbox["createdAt"] = created_at
+    sandbox["requestedAt"] = created_at
+    sandbox["updatedAt"] = created_at
+    sandbox["startedAt"] = created_at + 1000
+    return sandbox
+
+
+async def _collect_async_pages(page) -> list:
+    return [current_page async for current_page in page.iter_pages()]
+
+
+async def _collect_async_items(page) -> list:
+    return [sandbox async for sandbox in page.iter_items()]
 
 
 class TestSandboxCreate:
@@ -463,6 +487,586 @@ class TestSandboxGet:
         assert sandbox.sandbox_id == sandbox_id
 
         await sandbox.client.aclose()
+
+
+class TestSandboxList:
+    """Test sandbox listing pagination behavior."""
+
+    @respx.mock
+    def test_list_sandbox_sync_serializes_datetime_filters_and_typed_pages(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel._internal.sandbox.models import Sandbox as SandboxModel
+        from vercel.sandbox import Sandbox
+
+        project = "sandbox-project"
+        limit = 2
+        since = datetime(2024, 1, 15, 9, 0, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 15, 9, 30, tzinfo=timezone.utc)
+        expected_since = str(int(since.timestamp() * 1000))
+        expected_until = str(int(until.timestamp() * 1000))
+        next_until = "1705310400000"
+
+        first_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_filtered_1",
+                    created_at=1705311000000,
+                ),
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_filtered_2",
+                    created_at=1705310700000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": int(next_until),
+                "prev": None,
+            },
+        }
+        second_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_filtered_3",
+                    created_at=1705310400000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705311000000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until:
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        page = Sandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            project=project,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": expected_until,
+            }
+        ]
+        assert isinstance(page.sandboxes[0], SandboxModel)
+        assert page.sandboxes[0].id == "sbx_filtered_1"
+        assert page.sandboxes[0].created_at == 1705311000000
+        assert page.sandboxes[0].requested_at == 1705311000000
+        assert page.pagination.count == 3
+        assert page.next_page_info() is not None
+        assert page.next_page_info().until == int(next_until)
+
+        assert [sandbox.id for sandbox in page.iter_items()] == [
+            "sbx_filtered_1",
+            "sbx_filtered_2",
+            "sbx_filtered_3",
+        ]
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": expected_until,
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": next_until,
+            },
+        ]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_sandbox_async_serializes_integer_filters_and_typed_pages(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel._internal.sandbox.models import Sandbox as SandboxModel
+        from vercel.sandbox import AsyncSandbox
+
+        project = "sandbox-project"
+        limit = 2
+        since = 1705312800000
+        until = 1705314600000
+        next_until = "1705312500000"
+
+        first_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_filtered_1",
+                    created_at=1705313400000,
+                ),
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_filtered_2",
+                    created_at=1705313100000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": int(next_until),
+                "prev": None,
+            },
+        }
+        second_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_filtered_3",
+                    created_at=1705312500000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705313400000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until:
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        page = await AsyncSandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            project=project,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": str(until),
+            }
+        ]
+        assert isinstance(page.sandboxes[0], SandboxModel)
+        assert page.sandboxes[0].id == "sbx_async_filtered_1"
+        assert page.sandboxes[0].created_at == 1705313400000
+        assert page.sandboxes[0].requested_at == 1705313400000
+        assert page.pagination.count == 3
+        assert page.next_page_info() is not None
+        assert page.next_page_info().until == int(next_until)
+
+        items = await _collect_async_items(page)
+        assert [sandbox.id for sandbox in items] == [
+            "sbx_async_filtered_1",
+            "sbx_async_filtered_2",
+            "sbx_async_filtered_3",
+        ]
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": str(until),
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": next_until,
+            },
+        ]
+
+    @respx.mock
+    def test_list_sandbox_sync_iterates_pages_and_items(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        first_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_page_1",
+                    created_at=1705320600000,
+                ),
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_page_2",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": 1705319400000,
+                "prev": None,
+            },
+        }
+        second_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_page_3",
+                    created_at=1705319400000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == "1705319400000":
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        page = Sandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert route.called
+        assert [sandbox.id for sandbox in page.sandboxes] == ["sbx_page_1", "sbx_page_2"]
+        assert page.pagination.count == 3
+        assert page.pagination.next == 1705319400000
+        assert page.has_next_page() is True
+        assert page.next_page_info() is not None
+        assert page.next_page_info().until == 1705319400000
+
+        pages = list(page.iter_pages())
+        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
+            ["sbx_page_1", "sbx_page_2"],
+            ["sbx_page_3"],
+        ]
+        assert requests == [
+            {"teamId": "team_test123"},
+            {"teamId": "team_test123", "until": "1705319400000"},
+        ]
+
+        requests.clear()
+        items_page = Sandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+        assert [sandbox.id for sandbox in items_page.iter_items()] == [
+            "sbx_page_1",
+            "sbx_page_2",
+            "sbx_page_3",
+        ]
+        assert requests == [
+            {"teamId": "team_test123"},
+            {"teamId": "team_test123", "until": "1705319400000"},
+        ]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_sandbox_async_iterates_pages_and_items(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        first_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_1",
+                    created_at=1705320600000,
+                ),
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_2",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": 1705319400000,
+                "prev": None,
+            },
+        }
+        second_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_3",
+                    created_at=1705319400000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == "1705319400000":
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        page = await AsyncSandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert route.called
+        assert [sandbox.id for sandbox in page.sandboxes] == ["sbx_async_1", "sbx_async_2"]
+        assert page.pagination.count == 3
+        assert page.pagination.next == 1705319400000
+        assert page.has_next_page() is True
+        assert page.next_page_info() is not None
+        assert page.next_page_info().until == 1705319400000
+        assert requests == [{"teamId": "team_test123"}]
+
+        requests.clear()
+        next_page = await page.get_next_page()
+        assert next_page is not None
+        assert [sandbox.id for sandbox in next_page.sandboxes] == ["sbx_async_3"]
+        assert requests == [{"teamId": "team_test123", "until": "1705319400000"}]
+
+        requests.clear()
+        pages = await _collect_async_pages(page)
+        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
+            ["sbx_async_1", "sbx_async_2"],
+            ["sbx_async_3"],
+        ]
+        assert requests == [{"teamId": "team_test123", "until": "1705319400000"}]
+
+        requests.clear()
+        items_page = await AsyncSandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+        items = await _collect_async_items(items_page)
+        assert [sandbox.id for sandbox in items] == [
+            "sbx_async_1",
+            "sbx_async_2",
+            "sbx_async_3",
+        ]
+        assert requests == [
+            {"teamId": "team_test123"},
+            {"teamId": "team_test123", "until": "1705319400000"},
+        ]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_sandbox_async_builder_supports_direct_iteration(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        first_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_builder_1",
+                    created_at=1705320600000,
+                ),
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_builder_2",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": 1705319400000,
+                "prev": None,
+            },
+        }
+        second_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_builder_3",
+                    created_at=1705319400000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == "1705319400000":
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        item_ids = [
+            sandbox.id
+            async for sandbox in AsyncSandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+            )
+        ]
+        assert item_ids == ["sbx_builder_1", "sbx_builder_2", "sbx_builder_3"]
+        assert requests == [
+            {"teamId": "team_test123"},
+            {"teamId": "team_test123", "until": "1705319400000"},
+        ]
+
+        requests.clear()
+        pages = await _collect_async_pages(
+            AsyncSandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+            )
+        )
+        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
+            ["sbx_builder_1", "sbx_builder_2"],
+            ["sbx_builder_3"],
+        ]
+        assert requests == [
+            {"teamId": "team_test123"},
+            {"teamId": "team_test123", "until": "1705319400000"},
+        ]
+
+    @respx.mock
+    def test_list_sandbox_sync_single_page_does_not_fetch_more(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        response = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_single_page",
+                    created_at=1705320600000,
+                ),
+            ],
+            "pagination": {
+                "count": 1,
+                "next": None,
+                "prev": None,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(dict(request.url.params))
+            return httpx.Response(200, json=response)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        page = Sandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert page.has_next_page() is False
+        assert page.next_page_info() is None
+        assert page.get_next_page() is None
+        assert [
+            [sandbox.id for sandbox in current_page.sandboxes] for current_page in page.iter_pages()
+        ] == [
+            ["sbx_single_page"],
+        ]
+        assert [sandbox.id for sandbox in page.iter_items()] == ["sbx_single_page"]
+        assert requests == [{"teamId": "team_test123"}]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_sandbox_async_terminal_page_does_not_fetch_more(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        response = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_terminal",
+                    created_at=1705320600000,
+                ),
+            ],
+            "pagination": {
+                "count": 1,
+                "next": None,
+                "prev": None,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(dict(request.url.params))
+            return httpx.Response(200, json=response)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        page = await AsyncSandbox.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert page.has_next_page() is False
+        assert page.next_page_info() is None
+        assert await page.get_next_page() is None
+        pages = await _collect_async_pages(page)
+        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
+            ["sbx_async_terminal"],
+        ]
+        items = await _collect_async_items(page)
+        assert [sandbox.id for sandbox in items] == ["sbx_async_terminal"]
+        assert requests == [{"teamId": "team_test123"}]
 
     @respx.mock
     def test_get_sandbox_sync_exposes_mode_network_policy(
