@@ -554,8 +554,7 @@ class TestSandboxList:
         page = Sandbox.list(
             token="test_token",
             team_id="team_test123",
-            project_id="prj_test123",
-            project=project,
+            project_id=project,
             limit=limit,
             since=since,
             until=until,
@@ -661,8 +660,7 @@ class TestSandboxList:
         page = await AsyncSandbox.list(
             token="test_token",
             team_id="team_test123",
-            project_id="prj_test123",
-            project=project,
+            project_id=project,
             limit=limit,
             since=since,
             until=until,
@@ -778,8 +776,8 @@ class TestSandboxList:
             ["sbx_page_3"],
         ]
         assert requests == [
-            {"teamId": "team_test123"},
-            {"teamId": "team_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
         ]
 
         requests.clear()
@@ -794,8 +792,8 @@ class TestSandboxList:
             "sbx_page_3",
         ]
         assert requests == [
-            {"teamId": "team_test123"},
-            {"teamId": "team_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
         ]
 
     @respx.mock
@@ -862,13 +860,15 @@ class TestSandboxList:
         assert page.has_next_page() is True
         assert page.next_page_info() is not None
         assert page.next_page_info().until == 1705319400000
-        assert requests == [{"teamId": "team_test123"}]
+        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
 
         requests.clear()
         next_page = await page.get_next_page()
         assert next_page is not None
         assert [sandbox.id for sandbox in next_page.sandboxes] == ["sbx_async_3"]
-        assert requests == [{"teamId": "team_test123", "until": "1705319400000"}]
+        assert requests == [
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"}
+        ]
 
         requests.clear()
         pages = await _collect_async_pages(page)
@@ -876,7 +876,9 @@ class TestSandboxList:
             ["sbx_async_1", "sbx_async_2"],
             ["sbx_async_3"],
         ]
-        assert requests == [{"teamId": "team_test123", "until": "1705319400000"}]
+        assert requests == [
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"}
+        ]
 
         requests.clear()
         items_page = await AsyncSandbox.list(
@@ -891,8 +893,8 @@ class TestSandboxList:
             "sbx_async_3",
         ]
         assert requests == [
-            {"teamId": "team_test123"},
-            {"teamId": "team_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
         ]
 
     @respx.mock
@@ -956,8 +958,8 @@ class TestSandboxList:
         ]
         assert item_ids == ["sbx_builder_1", "sbx_builder_2", "sbx_builder_3"]
         assert requests == [
-            {"teamId": "team_test123"},
-            {"teamId": "team_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
         ]
 
         requests.clear()
@@ -973,8 +975,8 @@ class TestSandboxList:
             ["sbx_builder_3"],
         ]
         assert requests == [
-            {"teamId": "team_test123"},
-            {"teamId": "team_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
         ]
 
     @respx.mock
@@ -1020,7 +1022,7 @@ class TestSandboxList:
             ["sbx_single_page"],
         ]
         assert [sandbox.id for sandbox in page.iter_items()] == ["sbx_single_page"]
-        assert requests == [{"teamId": "team_test123"}]
+        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
 
     @respx.mock
     @pytest.mark.asyncio
@@ -1066,7 +1068,7 @@ class TestSandboxList:
         ]
         items = await _collect_async_items(page)
         assert [sandbox.id for sandbox in items] == ["sbx_async_terminal"]
-        assert requests == [{"teamId": "team_test123"}]
+        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
 
     @respx.mock
     def test_get_sandbox_sync_exposes_mode_network_policy(

@@ -1,6 +1,7 @@
 """Live API tests for Vercel Sandbox.
 
-These tests make real API calls and require VERCEL_TOKEN and VERCEL_TEAM_ID environment variables.
+These tests make real API calls and require VERCEL_TOKEN, VERCEL_TEAM_ID, and
+VERCEL_PROJECT_ID environment variables.
 Run with: pytest tests/live/test_sandbox_live.py -v
 """
 
@@ -219,7 +220,7 @@ class TestSandboxLive:
             original.client.close()
 
     def test_list_sandboxes_includes_created_sandbox(
-        self, vercel_token, vercel_team_id, cleanup_registry
+        self, vercel_token, vercel_team_id, vercel_project_id, cleanup_registry
     ):
         """Test listing sandboxes returns a newly created sandbox."""
         from vercel.sandbox import Sandbox
@@ -239,6 +240,7 @@ class TestSandboxLive:
                 page = Sandbox.list(
                     token=vercel_token,
                     team_id=vercel_team_id,
+                    project_id=vercel_project_id,
                     limit=20,
                     since=since,
                 )

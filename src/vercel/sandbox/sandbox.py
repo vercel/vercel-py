@@ -54,7 +54,7 @@ async def _build_async_sandbox_page(
     client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
     try:
         response = await client.list_sandboxes(
-            project=params.project,
+            project_id=params.project_id,
             limit=params.limit,
             since=params.since,
             until=params.until,
@@ -83,7 +83,7 @@ async def _build_sync_sandbox_page(
     client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
     try:
         response = await client.list_sandboxes(
-            project=params.project,
+            project_id=params.project_id,
             limit=params.limit,
             since=params.since,
             until=params.until,
@@ -227,7 +227,6 @@ class AsyncSandbox:
     @staticmethod
     def list(
         *,
-        project: str | None = None,
         limit: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
@@ -238,14 +237,14 @@ class AsyncSandbox:
         """List sandboxes and return the first page.
 
         Args:
-            project: Filter results to a project name.
             limit: Maximum number of sandboxes to request per page.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             token: API token. Uses configured credentials when omitted.
-            project_id: Project ID used for credential resolution when needed.
+            project_id: Project ID used for credential resolution and as the
+                sandbox list scope. Uses configured credentials when omitted.
             team_id: Team ID scope for the sandbox API.
 
         Returns:
@@ -255,7 +254,7 @@ class AsyncSandbox:
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
-            project=project,
+            project_id=creds.project_id,
             limit=limit,
             since=_normalize_list_timestamp(since),
             until=_normalize_list_timestamp(until),
@@ -564,7 +563,6 @@ class Sandbox:
     @staticmethod
     def list(
         *,
-        project: str | None = None,
         limit: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
@@ -575,14 +573,14 @@ class Sandbox:
         """List sandboxes and return the first page.
 
         Args:
-            project: Filter results to a project name.
             limit: Maximum number of sandboxes to request per page.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             token: API token. Uses configured credentials when omitted.
-            project_id: Project ID used for credential resolution when needed.
+            project_id: Project ID used for credential resolution and as the
+                sandbox list scope. Uses configured credentials when omitted.
             team_id: Team ID scope for the sandbox API.
 
         Returns:
@@ -591,7 +589,7 @@ class Sandbox:
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
-            project=project,
+            project_id=creds.project_id,
             limit=limit,
             since=_normalize_list_timestamp(since),
             until=_normalize_list_timestamp(until),

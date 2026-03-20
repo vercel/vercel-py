@@ -12,14 +12,14 @@ class SandboxPageInfo:
 
 @dataclass(frozen=True, slots=True)
 class SandboxListParams:
-    project: str | None = None
+    project_id: str | None = None
     limit: int | None = None
     since: int | None = None
     until: int | None = None
 
     def with_until(self, until: int) -> SandboxListParams:
         return SandboxListParams(
-            project=self.project,
+            project_id=self.project_id,
             limit=self.limit,
             since=self.since,
             until=until,

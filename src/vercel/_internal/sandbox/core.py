@@ -236,7 +236,7 @@ class BaseSandboxOpsClient:
     async def list_sandboxes(
         self,
         *,
-        project: str | None = None,
+        project_id: str | None = None,
         limit: int | None = None,
         since: int | None = None,
         until: int | None = None,
@@ -245,7 +245,7 @@ class BaseSandboxOpsClient:
             "GET",
             "/v1/sandboxes",
             query={
-                "project": project,
+                "project": project_id,
                 "limit": limit,
                 "since": since,
                 "until": until,

@@ -68,7 +68,11 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
     print(f"Created {len(created_ids)} sandboxes concurrently")
 
     print("\n[1] Await the pager to get the first page")
-    pager = AsyncSandbox.list(project_id=PROJECT_ID, limit=PAGE_SIZE, since=since)
+    pager = AsyncSandbox.list(
+        project_id=PROJECT_ID,
+        limit=PAGE_SIZE,
+        since=since,
+    )
     first_page = await pager
     _print_page_state("async first page:", first_page)
     _print_page("async", 1, [sandbox.id for sandbox in first_page.sandboxes])
@@ -85,7 +89,9 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
     paged_ids: list[str] = []
     page_number = 0
     async for page in AsyncSandbox.list(
-        project_id=PROJECT_ID, limit=PAGE_SIZE, since=since
+        project_id=PROJECT_ID,
+        limit=PAGE_SIZE,
+        since=since,
     ).iter_pages():
         page_number += 1
         page_ids = [sandbox.id for sandbox in page.sandboxes]
@@ -107,7 +113,9 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
     print("\n[5] Iterate items from the pager with pager.iter_items()")
     pager_item_ids: list[str] = []
     async for sandbox in AsyncSandbox.list(
-        project_id=PROJECT_ID, limit=PAGE_SIZE, since=since
+        project_id=PROJECT_ID,
+        limit=PAGE_SIZE,
+        since=since,
     ).iter_items():
         pager_item_ids.append(sandbox.id)
         if len(pager_item_ids) >= MAX_ITEMS:
@@ -117,7 +125,11 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
 
     print("\n[6] Iterate items directly from the pager")
     direct_item_ids: list[str] = []
-    async for sandbox in AsyncSandbox.list(project_id=PROJECT_ID, limit=PAGE_SIZE, since=since):
+    async for sandbox in AsyncSandbox.list(
+        project_id=PROJECT_ID,
+        limit=PAGE_SIZE,
+        since=since,
+    ):
         direct_item_ids.append(sandbox.id)
         if len(direct_item_ids) >= MAX_ITEMS:
             break
@@ -138,7 +150,11 @@ def sync_demo(since: datetime) -> None:
     print("=" * 60)
 
     print("\n[1] Get the first page")
-    first_page = Sandbox.list(project_id=PROJECT_ID, limit=PAGE_SIZE, since=since)
+    first_page = Sandbox.list(
+        project_id=PROJECT_ID,
+        limit=PAGE_SIZE,
+        since=since,
+    )
     _print_page_state("sync first page:", first_page)
     _print_page("sync", 1, [sandbox.id for sandbox in first_page.sandboxes])
 
@@ -153,7 +169,9 @@ def sync_demo(since: datetime) -> None:
     print("\n[3] Iterate pages with iter_pages()")
     page_number = 0
     for current_page in Sandbox.list(
-        project_id=PROJECT_ID, limit=PAGE_SIZE, since=since
+        project_id=PROJECT_ID,
+        limit=PAGE_SIZE,
+        since=since,
     ).iter_pages():
         page_number += 1
         _print_page(
@@ -164,7 +182,11 @@ def sync_demo(since: datetime) -> None:
 
     print("\n[4] Iterate items with iter_items()")
     iter_item_ids: list[str] = []
-    for sandbox in Sandbox.list(project_id=PROJECT_ID, limit=PAGE_SIZE, since=since).iter_items():
+    for sandbox in Sandbox.list(
+        project_id=PROJECT_ID,
+        limit=PAGE_SIZE,
+        since=since,
+    ).iter_items():
         iter_item_ids.append(sandbox.id)
         if len(iter_item_ids) >= MAX_ITEMS:
             break
