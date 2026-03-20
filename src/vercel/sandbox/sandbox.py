@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import builtins
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -17,6 +19,7 @@ from vercel._internal.sandbox.network_policy import (
     ApiNetworkPolicy,
     NetworkPolicy,
 )
+from vercel._internal.sandbox.pagination import SandboxListParams
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -25,6 +28,7 @@ from .command import (
     Command,
     CommandFinished,
 )
+from .page import AsyncSandboxPage, AsyncSandboxPager, SandboxPage
 from .pty.shell import start_interactive_shell
 from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
 
@@ -40,6 +44,76 @@ def _normalize_source(source: Source | None) -> dict[str, Any] | None:
     }
 
     return {key_map.get(k, k): v for k, v in source.items()}
+
+
+async def _build_async_sandbox_page(
+    *,
+    creds: Credentials,
+    params: SandboxListParams,
+) -> AsyncSandboxPage:
+    client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+    try:
+        response = await client.list_sandboxes(
+            project_id=params.project_id,
+            limit=params.limit,
+            since=params.since,
+            until=params.until,
+        )
+    finally:
+        await client.aclose()
+
+    async def fetch_next_page(page_info) -> AsyncSandboxPage:
+        return await _build_async_sandbox_page(
+            creds=creds,
+            params=params.with_until(page_info.until),
+        )
+
+    return AsyncSandboxPage.create(
+        sandboxes=response.sandboxes,
+        pagination=response.pagination,
+        fetch_next_page=fetch_next_page,
+    )
+
+
+async def _build_sync_sandbox_page(
+    *,
+    creds: Credentials,
+    params: SandboxListParams,
+) -> SandboxPage:
+    client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+    try:
+        response = await client.list_sandboxes(
+            project_id=params.project_id,
+            limit=params.limit,
+            since=params.since,
+            until=params.until,
+        )
+    finally:
+        client.close()
+
+    async def fetch_next_page(page_info) -> SandboxPage:
+        return await _build_sync_sandbox_page(
+            creds=creds,
+            params=params.with_until(page_info.until),
+        )
+
+    return SandboxPage.create(
+        sandboxes=response.sandboxes,
+        pagination=response.pagination,
+        fetch_next_page=fetch_next_page,
+    )
+
+
+def _normalize_list_timestamp(value: datetime | int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp() * 1000)
+    raise TypeError("Sandbox list timestamps must be datetime or integer milliseconds")
 
 
 @dataclass
@@ -150,6 +224,45 @@ class AsyncSandbox:
             routes=[r.model_dump() for r in resp.routes],
         )
 
+    @staticmethod
+    def list(
+        *,
+        limit: int | None = None,
+        since: datetime | int | None = None,
+        until: datetime | int | None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+    ) -> AsyncSandboxPager:
+        """List sandboxes and return the first page.
+
+        Args:
+            limit: Maximum number of sandboxes to request per page.
+            since: Lower timestamp bound as a timezone-aware ``datetime`` or
+                integer milliseconds since the Unix epoch.
+            until: Upper timestamp bound as a timezone-aware ``datetime`` or
+                integer milliseconds since the Unix epoch.
+            token: API token. Uses configured credentials when omitted.
+            project_id: Project ID used for credential resolution and as the
+                sandbox list scope. Uses configured credentials when omitted.
+            team_id: Team ID scope for the sandbox API.
+
+        Returns:
+            An awaitable pager whose first awaited value is the first page of
+            typed sandbox results. Continue pagination with ``iter_pages()``
+            or ``iter_items()`` on the page or pager.
+        """
+        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
+        params = SandboxListParams(
+            project_id=creds.project_id,
+            limit=limit,
+            since=_normalize_list_timestamp(since),
+            until=_normalize_list_timestamp(until),
+        )
+        return AsyncSandboxPager(
+            _fetch_first_page=lambda: _build_async_sandbox_page(creds=creds, params=params)
+        )
+
     async def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
         resp = await self.client.get_sandbox(sandbox_id=self.sandbox.id)
@@ -209,7 +322,7 @@ class AsyncSandbox:
     async def run_command(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: builtins.list[str] | None = None,
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -232,7 +345,7 @@ class AsyncSandbox:
     async def run_command_detached(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: builtins.list[str] | None = None,
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -256,7 +369,7 @@ class AsyncSandbox:
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
         return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
 
-    async def write_files(self, files: list[WriteFile]) -> None:
+    async def write_files(self, files: builtins.list[WriteFile]) -> None:
         await self.client.write_files(
             sandbox_id=self.sandbox.id,
             cwd=self.sandbox.cwd,
@@ -293,7 +406,7 @@ class AsyncSandbox:
 
     async def shell(
         self,
-        command: list[str] | None = None,
+        command: builtins.list[str] | None = None,
         *,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
@@ -447,6 +560,42 @@ class Sandbox:
             routes=[r.model_dump() for r in resp.routes],
         )
 
+    @staticmethod
+    def list(
+        *,
+        limit: int | None = None,
+        since: datetime | int | None = None,
+        until: datetime | int | None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+    ) -> SandboxPage:
+        """List sandboxes and return the first page.
+
+        Args:
+            limit: Maximum number of sandboxes to request per page.
+            since: Lower timestamp bound as a timezone-aware ``datetime`` or
+                integer milliseconds since the Unix epoch.
+            until: Upper timestamp bound as a timezone-aware ``datetime`` or
+                integer milliseconds since the Unix epoch.
+            token: API token. Uses configured credentials when omitted.
+            project_id: Project ID used for credential resolution and as the
+                sandbox list scope. Uses configured credentials when omitted.
+            team_id: Team ID scope for the sandbox API.
+
+        Returns:
+            The first page of typed sandbox results. Continue pagination with
+            ``iter_pages()`` or ``iter_items()`` on the returned page.
+        """
+        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
+        params = SandboxListParams(
+            project_id=creds.project_id,
+            limit=limit,
+            since=_normalize_list_timestamp(since),
+            until=_normalize_list_timestamp(until),
+        )
+        return iter_coroutine(_build_sync_sandbox_page(creds=creds, params=params))
+
     def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
         resp = iter_coroutine(self.client.get_sandbox(sandbox_id=self.sandbox.id))
@@ -505,7 +654,7 @@ class Sandbox:
     def run_command(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: builtins.list[str] | None = None,
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -529,7 +678,7 @@ class Sandbox:
     def run_command_detached(
         self,
         cmd: str,
-        args: list[str] | None = None,
+        args: builtins.list[str] | None = None,
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -553,7 +702,7 @@ class Sandbox:
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
         return iter_coroutine(self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
 
-    def write_files(self, files: list[WriteFile]) -> None:
+    def write_files(self, files: builtins.list[WriteFile]) -> None:
         iter_coroutine(
             self.client.write_files(
                 sandbox_id=self.sandbox.id,

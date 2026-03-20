@@ -34,6 +34,7 @@ from vercel._internal.sandbox.models import (
     CreateSnapshotResponse,
     LogLine,
     SandboxAndRoutesResponse,
+    SandboxesResponse,
     SandboxResponse,
     SnapshotResponse,
     WriteFile,
@@ -231,6 +232,26 @@ class BaseSandboxOpsClient:
     async def get_sandbox(self, *, sandbox_id: str) -> SandboxAndRoutesResponse:
         data = await self._request_client.request_json("GET", f"/v1/sandboxes/{sandbox_id}")
         return SandboxAndRoutesResponse.model_validate(data)
+
+    async def list_sandboxes(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> SandboxesResponse:
+        data = await self._request_client.request_json(
+            "GET",
+            "/v1/sandboxes",
+            query={
+                "project": project_id,
+                "limit": limit,
+                "since": since,
+                "until": until,
+            },
+        )
+        return SandboxesResponse.model_validate(data)
 
     async def update_network_policy(
         self,

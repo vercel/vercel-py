@@ -82,7 +82,9 @@ def has_blob_credentials() -> bool:
 
 def has_sandbox_credentials() -> bool:
     """Check if Sandbox credentials are available."""
-    return has_vercel_credentials()
+    return bool(
+        os.getenv("VERCEL_TOKEN") and os.getenv("VERCEL_TEAM_ID") and os.getenv("VERCEL_PROJECT_ID")
+    )
 
 
 # Skip markers for live tests
@@ -98,5 +100,5 @@ requires_blob_credentials = pytest.mark.skipif(
 
 requires_sandbox_credentials = pytest.mark.skipif(
     not has_sandbox_credentials(),
-    reason="Requires VERCEL_TOKEN and VERCEL_TEAM_ID environment variables for sandbox",
+    reason="Requires VERCEL_TOKEN, VERCEL_TEAM_ID, and VERCEL_PROJECT_ID for sandbox",
 )
