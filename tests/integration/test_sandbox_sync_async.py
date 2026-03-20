@@ -1905,13 +1905,12 @@ class TestSandboxStop:
 
     @respx.mock
     def test_stop_sync(self, mock_env_clear, mock_sandbox_get_response):
-        """Test synchronous sandbox stop."""
+        """Test synchronous sandbox stop remains non-blocking by default."""
         from vercel.sandbox import Sandbox
 
         sandbox_id = "sbx_test123456"
 
-        # Mock get sandbox
-        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -1938,19 +1937,20 @@ class TestSandboxStop:
         sandbox.stop()
 
         assert route.called
+        assert sandbox.status == "running"
+        assert get_route.call_count == 1
 
         sandbox.client.close()
 
     @respx.mock
     @pytest.mark.asyncio
     async def test_stop_async(self, mock_env_clear, mock_sandbox_get_response):
-        """Test asynchronous sandbox stop."""
+        """Test asynchronous sandbox stop remains non-blocking by default."""
         from vercel.sandbox import AsyncSandbox
 
         sandbox_id = "sbx_test123456"
 
-        # Mock get sandbox
-        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
             return_value=httpx.Response(
                 200,
                 json={
@@ -1977,6 +1977,247 @@ class TestSandboxStop:
         await sandbox.stop()
 
         assert route.called
+        assert sandbox.status == "running"
+        assert get_route.call_count == 1
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    def test_stop_sync_blocking_polls_until_stopped(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test blocking sync stop polls until the sandbox is stopped."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+        stopped_response = {
+            **mock_sandbox_get_response,
+            "status": "stopped",
+            "stoppedAt": mock_sandbox_get_response["updatedAt"] + 1,
+        }
+
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopped_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.stop(blocking=True, poll_interval=0.01)
+
+        assert stop_route.called
+        assert sandbox.status == "stopped"
+        assert get_route.call_count == 3
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_stop_sync_blocking_timeout(self, mock_env_clear, mock_sandbox_get_response):
+        """Test blocking sync stop raises TimeoutError when stop never completes."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'stopped' status"):
+            sandbox.stop(blocking=True, timeout=0.05, poll_interval=0.01)
+
+        assert stop_route.called
+        assert sandbox.status == "stopping"
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_stop_sync_blocking_stops_after_first_stopped_refresh(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test blocking sync stop exits after the first stopped refresh."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+        stopped_response = {
+            **mock_sandbox_get_response,
+            "status": "stopped",
+            "stoppedAt": mock_sandbox_get_response["updatedAt"] + 1,
+        }
+
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopped_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.stop(blocking=True, poll_interval=0.01)
+
+        assert stop_route.called
+        assert sandbox.status == "stopped"
+        assert get_route.call_count == 2
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_stop_async_blocking_polls_until_stopped(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test blocking async stop polls until the sandbox is stopped."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+        stopped_response = {
+            **mock_sandbox_get_response,
+            "status": "stopped",
+            "stoppedAt": mock_sandbox_get_response["updatedAt"] + 1,
+        }
+
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopped_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        await sandbox.stop(blocking=True, poll_interval=0.01)
+
+        assert stop_route.called
+        assert sandbox.status == "stopped"
+        assert get_route.call_count == 3
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_stop_async_blocking_timeout(self, mock_env_clear, mock_sandbox_get_response):
+        """Test blocking async stop raises TimeoutError when stop never completes."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'stopped' status"):
+            await sandbox.stop(blocking=True, timeout=0.05, poll_interval=0.01)
+
+        assert stop_route.called
+        assert sandbox.status == "stopping"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_stop_async_blocking_stops_after_first_stopped_refresh(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test blocking async stop exits after the first stopped refresh."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+        stopped_response = {
+            **mock_sandbox_get_response,
+            "status": "stopped",
+            "stoppedAt": mock_sandbox_get_response["updatedAt"] + 1,
+        }
+
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopped_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        await sandbox.stop(blocking=True, poll_interval=0.01)
+
+        assert stop_route.called
+        assert sandbox.status == "stopped"
+        assert get_route.call_count == 2
 
         await sandbox.client.aclose()
 
