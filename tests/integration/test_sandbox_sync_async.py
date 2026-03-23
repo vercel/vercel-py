@@ -1989,6 +1989,43 @@ class TestSandboxFileOperations:
         sandbox.client.close()
 
     @respx.mock
+    def test_iter_file_sync(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content
+    ):
+        """Test synchronous streamed file read."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        stream = sandbox.iter_file("/etc/hosts", chunk_size=4)
+
+        assert stream is not None
+        assert b"".join(stream) == mock_sandbox_read_file_content
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_read_file_not_found(self, mock_env_clear, mock_sandbox_get_response):
         """Test file read returns None for non-existent file."""
         from vercel.sandbox import Sandbox
@@ -2023,6 +2060,162 @@ class TestSandboxFileOperations:
         assert content is None
 
         sandbox.client.close()
+
+    @respx.mock
+    def test_iter_file_not_found(self, mock_env_clear, mock_sandbox_get_response):
+        """Test streamed file read returns None for non-existent file."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert sandbox.iter_file("/nonexistent/file") is None
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test synchronous sandbox-to-local file download."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        result = sandbox.download_file("/etc/hosts", destination)
+
+        assert result == str(destination.resolve())
+        assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync_creates_parents(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test sync download can create parent directories."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "nested" / "dir" / "downloaded.txt"
+        result = sandbox.download_file("/etc/hosts", destination, create_parents=True)
+
+        assert result == str(destination.resolve())
+        assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync_not_found(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test sync download returns None for non-existent file."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        assert sandbox.download_file("/nonexistent/file", destination) is None
+        assert not destination.exists()
+
+        sandbox.client.close()
+
+    def test_download_file_sync_validates_paths(self):
+        """Test sync download validates remote and local paths."""
+        from vercel.sandbox import Sandbox
+
+        sandbox = Sandbox(client=None, sandbox=None, routes=[])  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="remote_path is required"):
+            sandbox.download_file("", "out.txt")
+
+        with pytest.raises(ValueError, match="local_path is required"):
+            sandbox.download_file("/tmp/file.txt", "")
 
     @respx.mock
     @pytest.mark.asyncio
@@ -2060,6 +2253,118 @@ class TestSandboxFileOperations:
         content = await sandbox.read_file("/etc/hosts")
 
         assert content is not None
+        assert content == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_iter_file_async(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content
+    ):
+        """Test asynchronous streamed file read."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        stream = await sandbox.iter_file("/etc/hosts", chunk_size=4)
+
+        assert stream is not None
+        chunks = [chunk async for chunk in stream]
+        assert b"".join(chunks) == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_iter_file_async_not_found(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async streamed file read returns None for non-existent file."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert await sandbox.iter_file("/nonexistent/file") is None
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test async sandbox-to-local file download."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        result = await sandbox.download_file("/etc/hosts", destination)
+
+        assert result == str(destination.resolve())
+        assert destination.read_bytes() == mock_sandbox_read_file_content
 
         await sandbox.client.aclose()
 

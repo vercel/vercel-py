@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import platform
 import posixpath
 import sys
 import tarfile
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from contextlib import asynccontextmanager
 from importlib.metadata import version as _pkg_version
 from typing import Any, TypeAlias, cast
 
@@ -393,6 +395,94 @@ class BaseSandboxOpsClient:
             return None
         return resp.content
 
+    async def _open_file_stream(
+        self, *, sandbox_id: str, path: str, cwd: str | None = None
+    ) -> httpx.Response | None:
+        body: dict[str, Any] = {"path": path}
+        if cwd is not None:
+            body["cwd"] = cwd
+        try:
+            return await self._request_client.request(
+                "POST",
+                f"/v1/sandboxes/{sandbox_id}/fs/read",
+                body=JSONBody(body),
+                stream=True,
+            )
+        except APIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        raise NotImplementedError
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        raise NotImplementedError
+
+    @asynccontextmanager
+    async def file_chunk_stream(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[AsyncIterator[bytes] | None]:
+        response = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+        if response is None:
+            yield None
+            return
+
+        try:
+            yield self._stream_file_chunks(response, chunk_size=chunk_size)
+        finally:
+            await self._close_file_response(response)
+
+    async def download_file(
+        self,
+        *,
+        sandbox_id: str,
+        remote_path: str,
+        local_path: str | os.PathLike,
+        cwd: str | None = None,
+        create_parents: bool = False,
+        chunk_size: int = 65536,
+    ) -> str | None:
+        if not remote_path:
+            raise ValueError("remote_path is required")
+        if not local_path:
+            raise ValueError("local_path is required")
+
+        destination = os.path.abspath(os.fspath(local_path))
+        parent_dir = os.path.dirname(destination)
+        if create_parents and parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        temp_path = destination + ".part"
+
+        async with self.file_chunk_stream(
+            sandbox_id=sandbox_id,
+            path=remote_path,
+            cwd=cwd,
+            chunk_size=chunk_size,
+        ) as stream:
+            if stream is None:
+                return None
+
+            try:
+                with open(temp_path, "wb") as f:
+                    async for chunk in stream:
+                        if chunk:
+                            f.write(chunk)
+                os.replace(temp_path, destination)
+            except Exception:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+
+        return destination
+
     async def write_files(
         self,
         *,
@@ -515,6 +605,40 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         finally:
             resp.close()
 
+    def iter_file(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> Generator[bytes, None, None] | None:
+        resp = iter_coroutine(self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd))
+        if resp is None:
+            return None
+
+        def _iterate() -> Generator[bytes, None, None]:
+            try:
+                for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
+            finally:
+                resp.close()
+
+        return _iterate()
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            for chunk in response.iter_bytes(chunk_size=chunk_size):
+                yield chunk
+
+        return _iterate()
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        response.close()
+
     def close(self) -> None:
         self._rc.close()
 
@@ -561,6 +685,40 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             return
         finally:
             await resp.aclose()
+
+    async def iter_file(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncGenerator[bytes, None] | None:
+        resp = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+        if resp is None:
+            return None
+
+        async def _iterate() -> AsyncGenerator[bytes, None]:
+            try:
+                async for chunk in resp.aiter_bytes(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
+            finally:
+                await resp.aclose()
+
+        return _iterate()
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                yield chunk
+
+        return _iterate()
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        await response.aclose()
 
     async def aclose(self) -> None:
         await self._rc.aclose()

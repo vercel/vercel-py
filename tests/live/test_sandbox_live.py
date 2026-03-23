@@ -5,6 +5,7 @@ VERCEL_PROJECT_ID environment variables.
 Run with: pytest tests/live/test_sandbox_live.py -v
 """
 
+import os
 import time
 
 import pytest
@@ -78,7 +79,7 @@ class TestSandboxLive:
 
         # Context manager should have stopped the sandbox
 
-    def test_file_operations(self, vercel_token, vercel_team_id, cleanup_registry):
+    def test_file_operations(self, vercel_token, vercel_team_id, cleanup_registry, tmp_path):
         """Test sandbox file write and read operations."""
         from vercel.sandbox import Sandbox
         from vercel.sandbox.models import WriteFile
@@ -103,6 +104,12 @@ class TestSandboxLive:
             # Read a non-existent file
             missing = sandbox.read_file("/tmp/nonexistent.txt")
             assert missing is None
+
+            # Download the file locally without buffering API callers separately
+            local_path = tmp_path / "sandbox-download.txt"
+            downloaded = sandbox.download_file("/tmp/test.txt", local_path)
+            assert downloaded == os.fspath(local_path.resolve())
+            assert local_path.read_text() == test_content
 
         finally:
             try:
