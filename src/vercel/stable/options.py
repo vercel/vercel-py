@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 
@@ -12,6 +13,9 @@ from typing import Any
 class RootOptions:
     timeout: float | None = None
     env: Mapping[str, str] = field(default_factory=lambda: os.environ)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any
 
@@ -9,6 +10,7 @@ from hypothesis import given, strategies as st
 
 from vercel._internal.stable.options import merge_mapping
 from vercel.stable.client import create_sync_client
+from vercel.stable.options import RootOptions
 
 
 class _TrackingEnv(dict):
@@ -31,6 +33,23 @@ def test_client_creation_defers_env_access() -> None:
     _ = client.get_sandbox(token="sandbox-token")
 
     assert env.get_calls == [], "create_sync_client should not access env at creation time"
+
+
+def test_root_options_snapshot_env_mapping() -> None:
+    env = {"VERCEL_TOKEN": "initial-token"}
+    options = RootOptions(env=env)
+    env["VERCEL_TOKEN"] = "updated-token"
+
+    assert options.env["VERCEL_TOKEN"] == "initial-token"
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("VERCEL_TOKEN", "from-os-environ")
+        os_options = RootOptions(env=os.environ)
+        mp.setenv("VERCEL_TOKEN", "mutated-after-init")
+
+    assert os_options.env["VERCEL_TOKEN"] == "from-os-environ"
+    with pytest.raises(TypeError):
+        os_options.env["OTHER"] = "value"  # type: ignore[index]
 
 
 def test_sync_runtime_initializes_once_under_threaded_access() -> None:
