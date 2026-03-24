@@ -22,6 +22,11 @@ from typing import Any, TypeAlias, cast
 
 import httpx
 
+from vercel._internal.fs import (
+    FilesystemClient,
+    create_async_filesystem_client,
+    create_filesystem_client,
+)
 from vercel._internal.http import (
     BytesBody,
     JSONBody,
@@ -255,6 +260,10 @@ class BaseSandboxOpsClient:
     """
 
     _request_client: SandboxRequestClient
+    _filesystem_client: FilesystemClient[Any]
+
+    def __init__(self, *, filesystem_client: FilesystemClient[Any]) -> None:
+        self._filesystem_client = filesystem_client
 
     async def create_sandbox(
         self,
@@ -441,10 +450,9 @@ class BaseSandboxOpsClient:
         if not local_path:
             raise ValueError("local_path is required")
 
-        destination = os.path.abspath(os.fspath(local_path))
-        parent_dir = os.path.dirname(destination)
-        if create_parents and parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
+        destination = os.path.abspath(await self._filesystem_client.coerce_path(local_path))
+        if create_parents:
+            await self._filesystem_client.create_parent_directories(destination)
         temp_path = destination + ".part"
 
         async with self.file_chunk_stream(
@@ -557,7 +565,15 @@ class BaseSandboxOpsClient:
 
 
 class SyncSandboxOpsClient(BaseSandboxOpsClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "https://api.vercel.com",
+        team_id: str,
+        token: str,
+        filesystem_client: FilesystemClient[Any] | None = None,
+    ) -> None:
+        super().__init__(filesystem_client=filesystem_client or create_filesystem_client())
         rc = create_request_client(
             token=token,
             base_headers={"user-agent": USER_AGENT},
@@ -636,7 +652,15 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
 
 
 class AsyncSandboxOpsClient(BaseSandboxOpsClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "https://api.vercel.com",
+        team_id: str,
+        token: str,
+        filesystem_client: FilesystemClient[Any] | None = None,
+    ) -> None:
+        super().__init__(filesystem_client=filesystem_client or create_async_filesystem_client())
         rc = create_async_request_client(
             token=token,
             base_headers={"user-agent": USER_AGENT},

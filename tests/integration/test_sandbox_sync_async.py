@@ -7,6 +7,8 @@ import json
 import tarfile
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -2171,6 +2173,63 @@ class TestSandboxFileOperations:
         sandbox.client.close()
 
     @respx.mock
+    def test_download_file_sync_uses_filesystem_client_for_local_path_setup(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test sync download uses the injected filesystem client for local setup."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        requested_destination = tmp_path / "ignored.txt"
+        rewritten_destination = tmp_path / "rewritten" / "downloaded.txt"
+        sandbox.client._filesystem_client.coerce_path = AsyncMock(
+            return_value=str(rewritten_destination)
+        )
+
+        async def create_parent_directories(path: str) -> None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        sandbox.client._filesystem_client.create_parent_directories = AsyncMock(
+            side_effect=create_parent_directories
+        )
+
+        result = sandbox.download_file("/etc/hosts", requested_destination, create_parents=True)
+
+        assert result == str(rewritten_destination.resolve())
+        assert rewritten_destination.read_bytes() == mock_sandbox_read_file_content
+        assert not requested_destination.exists()
+        sandbox.client._filesystem_client.coerce_path.assert_awaited_once_with(
+            requested_destination
+        )
+        sandbox.client._filesystem_client.create_parent_directories.assert_awaited_once_with(
+            str(rewritten_destination.resolve())
+        )
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_download_file_sync_not_found(
         self, mock_env_clear, mock_sandbox_get_response, tmp_path
     ):
@@ -2402,6 +2461,66 @@ class TestSandboxFileOperations:
 
         assert result == str(destination.resolve())
         assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_uses_filesystem_client_for_local_path_setup(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test async download uses the injected filesystem client for local setup."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        requested_destination = tmp_path / "ignored.txt"
+        rewritten_destination = tmp_path / "rewritten" / "downloaded.txt"
+        sandbox.client._filesystem_client.coerce_path = AsyncMock(
+            return_value=str(rewritten_destination)
+        )
+
+        async def create_parent_directories(path: str) -> None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        sandbox.client._filesystem_client.create_parent_directories = AsyncMock(
+            side_effect=create_parent_directories
+        )
+
+        result = await sandbox.download_file(
+            "/etc/hosts", requested_destination, create_parents=True
+        )
+
+        assert result == str(rewritten_destination.resolve())
+        assert rewritten_destination.read_bytes() == mock_sandbox_read_file_content
+        assert not requested_destination.exists()
+        sandbox.client._filesystem_client.coerce_path.assert_awaited_once_with(
+            requested_destination
+        )
+        sandbox.client._filesystem_client.create_parent_directories.assert_awaited_once_with(
+            str(rewritten_destination.resolve())
+        )
 
         await sandbox.client.aclose()
 
