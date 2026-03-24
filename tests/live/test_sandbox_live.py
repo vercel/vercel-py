@@ -1,8 +1,11 @@
 """Live API tests for Vercel Sandbox.
 
-These tests make real API calls and require VERCEL_TOKEN and VERCEL_TEAM_ID environment variables.
+These tests make real API calls and require VERCEL_TOKEN, VERCEL_TEAM_ID, and
+VERCEL_PROJECT_ID environment variables.
 Run with: pytest tests/live/test_sandbox_live.py -v
 """
+
+import time
 
 import pytest
 
@@ -215,6 +218,45 @@ class TestSandboxLive:
                 # Sandbox may already be stopped or unreachable
                 pass
             original.client.close()
+
+    def test_list_sandboxes_includes_created_sandbox(
+        self, vercel_token, vercel_team_id, vercel_project_id, cleanup_registry
+    ):
+        """Test listing sandboxes returns a newly created sandbox."""
+        from vercel.sandbox import Sandbox
+
+        sandbox = Sandbox.create(
+            token=vercel_token,
+            team_id=vercel_team_id,
+        )
+        cleanup_registry.register("sandbox", sandbox.sandbox_id)
+
+        try:
+            sandbox.wait_for_status("running")
+            since = max(sandbox.sandbox.created_at - 60_000, 0)
+            found_ids: list[str] = []
+
+            for _ in range(10):
+                page = Sandbox.list(
+                    token=vercel_token,
+                    team_id=vercel_team_id,
+                    project_id=vercel_project_id,
+                    limit=20,
+                    since=since,
+                )
+                found_ids = [item.id for item in page.iter_items()]
+                if sandbox.sandbox_id in found_ids:
+                    break
+                time.sleep(1)
+
+            assert sandbox.sandbox_id in found_ids
+        finally:
+            try:
+                sandbox.stop()
+            except Exception:
+                # Sandbox may already be stopped or unreachable
+                pass
+            sandbox.client.close()
 
     def test_mk_dir(self, vercel_token, vercel_team_id, cleanup_registry):
         """Test creating a directory in the sandbox."""
