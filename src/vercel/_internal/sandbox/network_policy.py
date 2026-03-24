@@ -184,10 +184,7 @@ class ApiNetworkPolicy:
         allow: dict[str, list[NetworkPolicyRule]] = {domain: [] for domain in allowed_domains}
         for rule in injection_rules:
             allow.setdefault(rule.domain, [])
-            header_names = list(rule.header_names or [])
-            if not header_names and rule.headers is not None:
-                header_names = list(rule.headers.keys())
-            headers = _redacted_headers_from_names(header_names)
+            headers = _redacted_headers(rule)
             if not headers:
                 continue
             allow[rule.domain].append(
@@ -200,24 +197,55 @@ class ApiNetworkPolicy:
 def _merge_headers_case_insensitively(
     headers: Sequence[Mapping[str, str] | None],
 ) -> dict[str, str]:
-    merged: dict[str, tuple[str, str]] = {}
+    merged: dict[str, str] = {}
+    lower_to_names: dict[str, set[str]] = {}
     for header_map in headers:
-        for name, value in (header_map or {}).items():
-            merged[name.lower()] = (name, value)
-    return dict(merged.values())
+        if not header_map:
+            continue
+
+        current_lower_to_names: dict[str, set[str]] = {}
+        for name, value in header_map.items():
+            merged[name] = value
+            current_lower_to_names.setdefault(name.lower(), set()).add(name)
+
+        for lower_name, current_names in current_lower_to_names.items():
+            for previous_name in lower_to_names.get(lower_name, set()) - current_names:
+                merged.pop(previous_name, None)
+            lower_to_names[lower_name] = current_names
+
+    return merged
 
 
 def _redacted_headers_from_names(header_names: Sequence[str]) -> dict[str, str]:
-    return dict.fromkeys(
-        _merge_headers_case_insensitively([dict.fromkeys(header_names, "")]),
-        _REDACTED_HEADER_VALUE,
-    )
+    redacted: dict[str, str] = {}
+    lower_to_name: dict[str, str] = {}
+    for name in header_names:
+        lower_name = name.lower()
+        previous_name = lower_to_name.get(lower_name)
+        if previous_name is not None and previous_name != name:
+            redacted.pop(previous_name, None)
+        lower_to_name[lower_name] = name
+        redacted[name] = _REDACTED_HEADER_VALUE
+    return redacted
+
+
+def _redacted_headers(rule: ApiNetworkInjectionRule) -> dict[str, str]:
+    if rule.header_names is not None:
+        return _redacted_headers_from_names(rule.header_names)
+    return dict.fromkeys(rule.headers or {}, _REDACTED_HEADER_VALUE)
 
 
 def _merge_rule_headers(rules: Sequence[NetworkPolicyRule]) -> dict[str, str]:
     return _merge_headers_case_insensitively(
-        [transform.headers for rule in rules for transform in rule.transform or []]
+        [_merge_rule_transform_headers(rule) for rule in rules]
     )
+
+
+def _merge_rule_transform_headers(rule: NetworkPolicyRule) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for transform in rule.transform or []:
+        merged.update(transform.headers or {})
+    return merged
 
 
 def _subnets_from_api(network_policy: ApiNetworkPolicy) -> NetworkPolicySubnets | None:

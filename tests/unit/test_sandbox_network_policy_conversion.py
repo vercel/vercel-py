@@ -34,7 +34,7 @@ def _record_policy_domains(policy: NetworkPolicy) -> dict[str, set[str]]:
 
     domains: dict[str, set[str]] = {}
     for domain, rules in policy.allow.items():
-        domains[domain] = _rule_header_names(rules)
+        domains[domain] = _merged_rule_header_names(rules)
     return domains
 
 
@@ -44,6 +44,28 @@ def _rule_header_names(rules: Iterable[NetworkPolicyRule]) -> set[str]:
         for transform in rule.transform or []:
             header_names.update((transform.headers or {}).keys())
     return header_names
+
+
+def _merged_rule_header_names(rules: Iterable[NetworkPolicyRule]) -> set[str]:
+    merged: dict[str, None] = {}
+    lower_to_names: dict[str, set[str]] = {}
+    for rule in rules:
+        rule_header_names: dict[str, None] = {}
+        for transform in rule.transform or []:
+            for name in (transform.headers or {}).keys():
+                rule_header_names[name] = None
+
+        current_lower_to_names: dict[str, set[str]] = {}
+        for name in rule_header_names:
+            merged[name] = None
+            current_lower_to_names.setdefault(name.lower(), set()).add(name)
+
+        for lower_name, current_names in current_lower_to_names.items():
+            for previous_name in lower_to_names.get(lower_name, set()) - current_names:
+                merged.pop(previous_name, None)
+            lower_to_names[lower_name] = current_names
+
+    return set(merged)
 
 
 def _case_insensitive_headers(items: Iterable[tuple[str, str]]) -> dict[str, str]:
