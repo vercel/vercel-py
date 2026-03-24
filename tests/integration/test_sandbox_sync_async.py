@@ -5,6 +5,7 @@ Tests both sync and async variants (Sandbox and AsyncSandbox).
 
 import json
 import tarfile
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +21,7 @@ from vercel.sandbox import (
     NetworkPolicySubnets,
     NetworkTransformer,
     SandboxNotFoundError,
+    SandboxServerError,
 )
 
 # Base URL for Vercel Sandbox API
@@ -2230,6 +2232,56 @@ class TestSandboxFileOperations:
         sandbox.client.close()
 
     @respx.mock
+    def test_download_file_sync_stream_failure_removes_part_file(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test sync download cleans up the temp file after a stream failure."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=b"ignored")
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        async def fail_after_partial_chunk(
+            response: httpx.Response, *, chunk_size: int
+        ) -> AsyncIterator[bytes]:
+            del response, chunk_size
+            yield b"partial"
+            raise RuntimeError("stream failed")
+
+        sandbox.client._stream_file_chunks = fail_after_partial_chunk  # type: ignore[method-assign]
+
+        destination = tmp_path / "downloaded.txt"
+        temp_path = destination.with_name(destination.name + ".part")
+
+        with pytest.raises(RuntimeError, match="stream failed"):
+            sandbox.download_file("/etc/hosts", destination)
+
+        assert not destination.exists()
+        assert not temp_path.exists()
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_download_file_sync_not_found(
         self, mock_env_clear, mock_sandbox_get_response, tmp_path
     ):
@@ -2277,6 +2329,45 @@ class TestSandboxFileOperations:
 
         with pytest.raises(ValueError, match="local_path is required"):
             sandbox.download_file("/tmp/file.txt", "")
+
+    @respx.mock
+    def test_download_file_sync_server_error_propagates(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test sync download preserves non-404 sandbox API errors."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(500, json={"message": "remote exploded"})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+
+        with pytest.raises(SandboxServerError, match="HTTP 500: remote exploded"):
+            sandbox.download_file("/etc/hosts", destination)
+
+        assert not destination.exists()
+
+        sandbox.client.close()
 
     @respx.mock
     @pytest.mark.asyncio
@@ -2466,6 +2557,46 @@ class TestSandboxFileOperations:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_download_file_async_creates_parents(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test async download can create parent directories."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "nested" / "dir" / "downloaded.txt"
+        result = await sandbox.download_file("/etc/hosts", destination, create_parents=True)
+
+        assert result == str(destination.resolve())
+        assert destination.parent.is_dir()
+        assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_download_file_async_uses_filesystem_client_for_local_path_setup(
         self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
     ):
@@ -2521,6 +2652,82 @@ class TestSandboxFileOperations:
         sandbox.client._filesystem_client.create_parent_directories.assert_awaited_once_with(
             str(rewritten_destination.resolve())
         )
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_uses_filesystem_client_for_file_writes_and_cleanup(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test async download routes writes through the filesystem client and cleans up."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=b"ignored")
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        async def stream_chunks(
+            response: httpx.Response, *, chunk_size: int
+        ) -> AsyncIterator[bytes]:
+            del response, chunk_size
+            yield b"first"
+            yield b"second"
+
+        sandbox.client._stream_file_chunks = stream_chunks  # type: ignore[method-assign]
+
+        destination = tmp_path / "downloaded.txt"
+        resolved_destination = destination.resolve()
+        temp_path = Path(str(resolved_destination) + ".part")
+
+        original_open = sandbox.client._filesystem_client.open_binary_writer
+        original_close = sandbox.client._filesystem_client.close
+        original_remove_if_exists = sandbox.client._filesystem_client.remove_if_exists
+
+        sandbox.client._filesystem_client.open_binary_writer = AsyncMock(side_effect=original_open)
+        sandbox.client._filesystem_client.close = AsyncMock(side_effect=original_close)
+        sandbox.client._filesystem_client.remove_if_exists = AsyncMock(
+            side_effect=original_remove_if_exists
+        )
+
+        original_write = sandbox.client._filesystem_client.write
+
+        async def fail_during_write(handle: object, data: bytes) -> None:
+            await original_write(handle, data)
+            raise RuntimeError("write failed")
+
+        sandbox.client._filesystem_client.write = AsyncMock(side_effect=fail_during_write)
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            await sandbox.download_file("/etc/hosts", destination)
+
+        assert not destination.exists()
+        assert not temp_path.exists()
+        sandbox.client._filesystem_client.open_binary_writer.assert_awaited_once_with(
+            str(temp_path)
+        )
+        sandbox.client._filesystem_client.write.assert_awaited_once()
+        sandbox.client._filesystem_client.close.assert_awaited_once()
+        sandbox.client._filesystem_client.remove_if_exists.assert_awaited_once_with(str(temp_path))
 
         await sandbox.client.aclose()
 

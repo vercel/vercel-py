@@ -23,6 +23,7 @@ from typing import Any, TypeAlias, cast
 import httpx
 
 from vercel._internal.fs import (
+    FileHandle,
     FilesystemClient,
     create_async_filesystem_client,
     create_filesystem_client,
@@ -461,15 +462,20 @@ class BaseSandboxOpsClient:
             cwd=cwd,
             chunk_size=chunk_size,
         ) as stream:
+            handle: FileHandle | None = None
             try:
-                with open(temp_path, "wb") as f:
+                handle = await self._filesystem_client.open_binary_writer(temp_path)
+                try:
                     async for chunk in stream:
                         if chunk:
-                            f.write(chunk)
-                os.replace(temp_path, destination)
+                            await self._filesystem_client.write(handle, chunk)
+                finally:
+                    if handle is not None:
+                        await self._filesystem_client.close(handle)
+                        handle = None
+                await self._filesystem_client.replace(temp_path, destination)
             except Exception:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                await self._filesystem_client.remove_if_exists(temp_path)
                 raise
 
         return destination
