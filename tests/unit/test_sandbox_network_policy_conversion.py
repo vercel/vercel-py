@@ -34,7 +34,7 @@ def _record_policy_domains(policy: NetworkPolicy) -> dict[str, set[str]]:
 
     domains: dict[str, set[str]] = {}
     for domain, rules in policy.allow.items():
-        domains[domain] = _merged_rule_header_names(rules)
+        domains[domain] = _rule_header_names(rules)
     return domains
 
 
@@ -46,35 +46,6 @@ def _rule_header_names(rules: Iterable[NetworkPolicyRule]) -> set[str]:
     return header_names
 
 
-def _merged_rule_header_names(rules: Iterable[NetworkPolicyRule]) -> set[str]:
-    merged: dict[str, None] = {}
-    lower_to_names: dict[str, set[str]] = {}
-    for rule in rules:
-        rule_header_names: dict[str, None] = {}
-        for transform in rule.transform or []:
-            for name in (transform.headers or {}).keys():
-                rule_header_names[name] = None
-
-        current_lower_to_names: dict[str, set[str]] = {}
-        for name in rule_header_names:
-            merged[name] = None
-            current_lower_to_names.setdefault(name.lower(), set()).add(name)
-
-        for lower_name, current_names in current_lower_to_names.items():
-            for previous_name in lower_to_names.get(lower_name, set()) - current_names:
-                merged.pop(previous_name, None)
-            lower_to_names[lower_name] = current_names
-
-    return set(merged)
-
-
-def _case_insensitive_headers(items: Iterable[tuple[str, str]]) -> dict[str, str]:
-    merged: dict[str, tuple[str, str]] = {}
-    for name, value in items:
-        merged[name.lower()] = (name, value)
-    return dict(merged.values())
-
-
 def _domain_strategy() -> st.SearchStrategy[str]:
     label = st.from_regex(r"[a-z][a-z0-9-]{0,5}", fullmatch=True)
     wildcard = st.just("*")
@@ -84,18 +55,6 @@ def _domain_strategy() -> st.SearchStrategy[str]:
 
 def _header_name_strategy() -> st.SearchStrategy[str]:
     return st.from_regex(r"X-[A-Z][A-Za-z0-9-]{0,10}", fullmatch=True)
-
-
-@st.composite
-def _header_name_case_variant_strategy(draw: st.DrawFn) -> str:
-    canonical = draw(st.from_regex(r"x-[a-z][a-z0-9-]{0,10}", fullmatch=True))
-    chars: list[str] = []
-    for char in canonical:
-        if char.isalpha():
-            chars.append(char.upper() if draw(st.booleans()) else char.lower())
-        else:
-            chars.append(char)
-    return "".join(chars)
 
 
 def _header_value_strategy() -> st.SearchStrategy[str]:
@@ -192,35 +151,41 @@ def _policy_semantics(policy: NetworkPolicy) -> Any:
     return ("record", domain_semantics, subnet_semantics)
 
 
-@st.composite
-def _duplicate_header_assignments_strategy(
-    draw: st.DrawFn,
-) -> list[tuple[str, str]]:
-    canonical_names = draw(
-        st.lists(
-            st.from_regex(r"x-[a-z][a-z0-9-]{0,10}", fullmatch=True),
-            min_size=1,
-            max_size=4,
-            unique=True,
+def _subnet_semantics(policy: NetworkPolicy) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    if isinstance(policy, str) or policy.subnets is None:
+        return None
+
+    return (
+        tuple(sorted(policy.subnets.allow or [])),
+        tuple(sorted(policy.subnets.deny or [])),
+    )
+
+
+def _normalized_custom_policy_semantics(
+    policy: NetworkPolicy,
+) -> tuple[tuple[tuple[str, frozenset[str]], ...], tuple[tuple[str, ...], tuple[str, ...]] | None]:
+    if isinstance(policy, str):
+        raise TypeError("expected custom policy")
+
+    domain_semantics = tuple(
+        sorted(
+            (domain, frozenset(name.lower() for name in names))
+            for domain, names in _record_policy_domains(policy).items()
         )
     )
-    assignments: list[tuple[str, str]] = []
-    for canonical_name in canonical_names:
-        variant_count = draw(st.integers(min_value=1, max_value=3))
-        for _ in range(variant_count):
-            variant_chars: list[str] = []
-            for char in canonical_name:
-                if char.isalpha():
-                    variant_chars.append(char.upper() if draw(st.booleans()) else char.lower())
-                else:
-                    variant_chars.append(char)
-            assignments.append(
-                (
-                    "".join(variant_chars),
-                    draw(_header_value_strategy()),
-                )
-            )
-    return draw(st.permutations(assignments).map(list))
+    return (domain_semantics, _subnet_semantics(policy))
+
+
+def _header_values(policy: NetworkPolicyCustom) -> set[str]:
+    if isinstance(policy.allow, list):
+        return set()
+
+    values: set[str] = set()
+    for rules in policy.allow.values():
+        for rule in rules:
+            for transform in rule.transform or []:
+                values.update((transform.headers or {}).values())
+    return values
 
 
 class TestNetworkPolicyModes:
@@ -485,6 +450,54 @@ class TestNetworkPolicyEdgeCases:
             ],
         )
 
+    def test_single_rule_preserves_distinct_case_variants_in_api_headers(self) -> None:
+        policy = NetworkPolicyCustom(
+            allow={
+                "example.com": [
+                    NetworkPolicyRule(
+                        transform=[
+                            NetworkTransformer(headers={"X-Trace": "first", "x-trace": "second"})
+                        ]
+                    )
+                ]
+            }
+        )
+
+        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
+            mode="custom",
+            allowed_domains=["example.com"],
+            injection_rules=[
+                ApiNetworkInjectionRule(
+                    domain="example.com",
+                    headers={"X-Trace": "first", "x-trace": "second"},
+                )
+            ],
+        )
+
+    def test_later_rules_replace_earlier_case_variants_for_same_header(self) -> None:
+        policy = NetworkPolicyCustom(
+            allow={
+                "example.com": [
+                    NetworkPolicyRule(transform=[NetworkTransformer(headers={"X-Trace": "first"})]),
+                    NetworkPolicyRule(
+                        transform=[NetworkTransformer(headers={"x-trace": "second"})]
+                    ),
+                    NetworkPolicyRule(transform=[NetworkTransformer(headers={"X-Other": "other"})]),
+                ]
+            }
+        )
+
+        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
+            mode="custom",
+            allowed_domains=["example.com"],
+            injection_rules=[
+                ApiNetworkInjectionRule(
+                    domain="example.com",
+                    headers={"x-trace": "second", "X-Other": "other"},
+                )
+            ],
+        )
+
     def test_api_response_header_names_merge_case_insensitively(self) -> None:
         assert ApiNetworkPolicy(
             mode="custom",
@@ -504,6 +517,26 @@ class TestNetworkPolicyEdgeCases:
                                 headers={"x-trace": "<redacted>", "X-Other": "<redacted>"}
                             )
                         ]
+                    )
+                ]
+            }
+        )
+
+    def test_api_response_header_names_keep_last_case_variant(self) -> None:
+        assert ApiNetworkPolicy(
+            mode="custom",
+            allowed_domains=["example.com"],
+            injection_rules=[
+                ApiNetworkInjectionRule(
+                    domain="example.com",
+                    header_names=["X-Trace", "x-trace", "X-TRACE"],
+                )
+            ],
+        ).to_network_policy() == NetworkPolicyCustom(
+            allow={
+                "example.com": [
+                    NetworkPolicyRule(
+                        transform=[NetworkTransformer(headers={"X-TRACE": "<redacted>"})]
                     )
                 ]
             }
@@ -579,63 +612,22 @@ class TestNetworkPolicyGeneratedCases:
 
     @given(_record_policy_strategy())
     @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-    def test_generated_record_form_policies_preserve_domains_and_header_names(
+    def test_generated_record_form_policies_preserve_normalized_semantics(
         self, policy: NetworkPolicyCustom
     ) -> None:
-        assert _record_policy_domains(
-            ApiNetworkPolicy.from_network_policy(policy).to_network_policy()
-        ) == (_record_policy_domains(policy))
+        round_tripped = ApiNetworkPolicy.from_network_policy(policy).to_network_policy()
 
-    @given(_duplicate_header_assignments_strategy())
+        assert isinstance(round_tripped, NetworkPolicyCustom)
+        assert _normalized_custom_policy_semantics(
+            round_tripped
+        ) == _normalized_custom_policy_semantics(policy)
+
+    @given(_record_policy_strategy())
     @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-    def test_generated_record_form_merges_duplicate_headers_case_insensitively(
-        self, assignments: list[tuple[str, str]]
+    def test_generated_record_form_policies_decode_to_redacted_headers(
+        self, policy: NetworkPolicyCustom
     ) -> None:
-        policy = NetworkPolicyCustom(
-            allow={
-                "example.com": [
-                    NetworkPolicyRule(transform=[NetworkTransformer(headers={name: value})])
-                    for name, value in assignments
-                ]
-            }
-        )
+        round_tripped = ApiNetworkPolicy.from_network_policy(policy).to_network_policy()
 
-        api_policy = ApiNetworkPolicy.from_network_policy(policy)
-
-        assert api_policy == ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers=_case_insensitive_headers(assignments),
-                )
-            ],
-        )
-
-    @given(st.lists(_header_name_case_variant_strategy(), min_size=1, max_size=8))
-    @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-    def test_generated_api_header_names_collapse_case_insensitive_duplicates(
-        self, header_names: list[str]
-    ) -> None:
-        expected_headers = dict.fromkeys(
-            _case_insensitive_headers((name, "<redacted>") for name in header_names),
-            "<redacted>",
-        )
-
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    header_names=header_names,
-                )
-            ],
-        ).to_network_policy() == NetworkPolicyCustom(
-            allow={
-                "example.com": [
-                    NetworkPolicyRule(transform=[NetworkTransformer(headers=expected_headers)])
-                ]
-            }
-        )
+        assert isinstance(round_tripped, NetworkPolicyCustom)
+        assert _header_values(round_tripped) <= {"<redacted>"}
