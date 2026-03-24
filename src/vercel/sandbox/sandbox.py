@@ -383,11 +383,6 @@ class AsyncSandbox:
         create_parents: bool = False,
         chunk_size: int = 65536,
     ) -> str:
-        if not remote_path:
-            raise ValueError("remote_path is required")
-        if not local_path:
-            raise ValueError("local_path is required")
-
         return await self.client.download_file(
             sandbox_id=self.sandbox.id,
             remote_path=remote_path,
@@ -778,11 +773,6 @@ class Sandbox:
         create_parents: bool = False,
         chunk_size: int = 65536,
     ) -> str:
-        if not remote_path:
-            raise ValueError("remote_path is required")
-        if not local_path:
-            raise ValueError("local_path is required")
-
         return iter_coroutine(
             self.client.download_file(
                 sandbox_id=self.sandbox.id,

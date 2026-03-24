@@ -2318,18 +2318,6 @@ class TestSandboxFileOperations:
 
         sandbox.client.close()
 
-    def test_download_file_sync_validates_paths(self):
-        """Test sync download validates remote and local paths."""
-        from vercel.sandbox import Sandbox
-
-        sandbox = Sandbox(client=None, sandbox=None, routes=[])  # type: ignore[arg-type]
-
-        with pytest.raises(ValueError, match="remote_path is required"):
-            sandbox.download_file("", "out.txt")
-
-        with pytest.raises(ValueError, match="local_path is required"):
-            sandbox.download_file("/tmp/file.txt", "")
-
     @respx.mock
     def test_download_file_sync_server_error_propagates(
         self, mock_env_clear, mock_sandbox_get_response, tmp_path
