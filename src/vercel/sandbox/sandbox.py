@@ -363,7 +363,7 @@ class AsyncSandbox:
 
     async def iter_file(
         self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
-    ) -> AsyncIterator[bytes] | None:
+    ) -> AsyncIterator[bytes]:
         return await self.client.iter_file(
             sandbox_id=self.sandbox.id,
             path=path,
@@ -371,7 +371,7 @@ class AsyncSandbox:
             chunk_size=chunk_size,
         )
 
-    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
+    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
         return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
 
     async def download_file(
@@ -382,7 +382,7 @@ class AsyncSandbox:
         cwd: str | None = None,
         create_parents: bool = False,
         chunk_size: int = 65536,
-    ) -> str | None:
+    ) -> str:
         if not remote_path:
             raise ValueError("remote_path is required")
         if not local_path:
@@ -758,7 +758,7 @@ class Sandbox:
 
     def iter_file(
         self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
-    ) -> Iterator[bytes] | None:
+    ) -> Iterator[bytes]:
         return self.client.iter_file(
             sandbox_id=self.sandbox.id,
             path=path,
@@ -766,7 +766,7 @@ class Sandbox:
             chunk_size=chunk_size,
         )
 
-    def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
+    def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
         return iter_coroutine(self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
 
     def download_file(
@@ -777,7 +777,7 @@ class Sandbox:
         cwd: str | None = None,
         create_parents: bool = False,
         chunk_size: int = 65536,
-    ) -> str | None:
+    ) -> str:
         if not remote_path:
             raise ValueError("remote_path is required")
         if not local_path:

@@ -33,6 +33,7 @@ from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.errors import (
     APIError,
     SandboxAuthError,
+    SandboxNotFoundError,
     SandboxPermissionError,
     SandboxRateLimitError,
     SandboxServerError,
@@ -181,6 +182,8 @@ def _build_sandbox_error(
     data: JSONValue | None = None,
 ) -> APIError:
     status_code = response.status_code
+    if status_code == 404:
+        return SandboxNotFoundError(response, message, data=data)
     if status_code == 401:
         return SandboxAuthError(response, message, data=data)
     if status_code == 403:
@@ -375,43 +378,29 @@ class BaseSandboxOpsClient:
             body=JSONBody(body),
         )
 
-    async def read_file(
-        self, *, sandbox_id: str, path: str, cwd: str | None = None
-    ) -> bytes | None:
+    async def read_file(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> bytes:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
-        try:
-            resp = await self._request_client.request(
-                "POST",
-                f"/v1/sandboxes/{sandbox_id}/fs/read",
-                body=JSONBody(body),
-            )
-        except APIError as e:
-            if e.status_code == 404:
-                return None
-            raise
-        if resp.content is None:
-            return None
+        resp = await self._request_client.request(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/fs/read",
+            body=JSONBody(body),
+        )
         return resp.content
 
     async def _open_file_stream(
         self, *, sandbox_id: str, path: str, cwd: str | None = None
-    ) -> httpx.Response | None:
+    ) -> httpx.Response:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
-        try:
-            return await self._request_client.request(
-                "POST",
-                f"/v1/sandboxes/{sandbox_id}/fs/read",
-                body=JSONBody(body),
-                stream=True,
-            )
-        except APIError as e:
-            if e.status_code == 404:
-                return None
-            raise
+        return await self._request_client.request(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/fs/read",
+            body=JSONBody(body),
+            stream=True,
+        )
 
     def _stream_file_chunks(
         self, response: httpx.Response, *, chunk_size: int
@@ -429,11 +418,8 @@ class BaseSandboxOpsClient:
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
-    ) -> AsyncIterator[AsyncIterator[bytes] | None]:
+    ) -> AsyncIterator[AsyncIterator[bytes]]:
         response = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
-        if response is None:
-            yield None
-            return
 
         try:
             yield self._stream_file_chunks(response, chunk_size=chunk_size)
@@ -449,7 +435,7 @@ class BaseSandboxOpsClient:
         cwd: str | None = None,
         create_parents: bool = False,
         chunk_size: int = 65536,
-    ) -> str | None:
+    ) -> str:
         if not remote_path:
             raise ValueError("remote_path is required")
         if not local_path:
@@ -467,9 +453,6 @@ class BaseSandboxOpsClient:
             cwd=cwd,
             chunk_size=chunk_size,
         ) as stream:
-            if stream is None:
-                return None
-
             try:
                 with open(temp_path, "wb") as f:
                     async for chunk in stream:
@@ -612,10 +595,8 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
-    ) -> Generator[bytes, None, None] | None:
+    ) -> Generator[bytes, None, None]:
         resp = iter_coroutine(self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd))
-        if resp is None:
-            return None
 
         def _iterate() -> Generator[bytes, None, None]:
             try:
@@ -693,10 +674,8 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
-    ) -> AsyncGenerator[bytes, None] | None:
+    ) -> AsyncGenerator[bytes, None]:
         resp = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
-        if resp is None:
-            return None
 
         async def _iterate() -> AsyncGenerator[bytes, None]:
             try:

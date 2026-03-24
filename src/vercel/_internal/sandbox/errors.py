@@ -36,6 +36,10 @@ class SandboxPermissionError(APIError):
     """Authorization failures returned by the sandbox API."""
 
 
+class SandboxNotFoundError(APIError):
+    """Requested sandbox resource was not found."""
+
+
 class SandboxRateLimitError(APIError):
     def __init__(
         self,
@@ -58,6 +62,7 @@ __all__ = [
     "APIError",
     "SandboxAuthError",
     "SandboxPermissionError",
+    "SandboxNotFoundError",
     "SandboxRateLimitError",
     "SandboxServerError",
 ]

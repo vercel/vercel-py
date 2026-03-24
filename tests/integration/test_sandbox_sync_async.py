@@ -17,6 +17,7 @@ from vercel.sandbox import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkTransformer,
+    SandboxNotFoundError,
 )
 
 # Base URL for Vercel Sandbox API
@@ -2027,7 +2028,7 @@ class TestSandboxFileOperations:
 
     @respx.mock
     def test_read_file_not_found(self, mock_env_clear, mock_sandbox_get_response):
-        """Test file read returns None for non-existent file."""
+        """Test file read raises for non-existent file."""
         from vercel.sandbox import Sandbox
 
         sandbox_id = "sbx_test123456"
@@ -2055,15 +2056,14 @@ class TestSandboxFileOperations:
             project_id="prj_test123",
         )
 
-        content = sandbox.read_file("/nonexistent/file")
-
-        assert content is None
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            sandbox.read_file("/nonexistent/file")
 
         sandbox.client.close()
 
     @respx.mock
     def test_iter_file_not_found(self, mock_env_clear, mock_sandbox_get_response):
-        """Test streamed file read returns None for non-existent file."""
+        """Test streamed file read raises for non-existent file."""
         from vercel.sandbox import Sandbox
 
         sandbox_id = "sbx_test123456"
@@ -2089,7 +2089,8 @@ class TestSandboxFileOperations:
             project_id="prj_test123",
         )
 
-        assert sandbox.iter_file("/nonexistent/file") is None
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            sandbox.iter_file("/nonexistent/file")
 
         sandbox.client.close()
 
@@ -2173,7 +2174,7 @@ class TestSandboxFileOperations:
     def test_download_file_sync_not_found(
         self, mock_env_clear, mock_sandbox_get_response, tmp_path
     ):
-        """Test sync download returns None for non-existent file."""
+        """Test sync download raises for non-existent file."""
         from vercel.sandbox import Sandbox
 
         sandbox_id = "sbx_test123456"
@@ -2200,7 +2201,8 @@ class TestSandboxFileOperations:
         )
 
         destination = tmp_path / "downloaded.txt"
-        assert sandbox.download_file("/nonexistent/file", destination) is None
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            sandbox.download_file("/nonexistent/file", destination)
         assert not destination.exists()
 
         sandbox.client.close()
@@ -2298,8 +2300,8 @@ class TestSandboxFileOperations:
 
     @respx.mock
     @pytest.mark.asyncio
-    async def test_iter_file_async_not_found(self, mock_env_clear, mock_sandbox_get_response):
-        """Test async streamed file read returns None for non-existent file."""
+    async def test_read_file_async_not_found(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async file read raises for non-existent file."""
         from vercel.sandbox import AsyncSandbox
 
         sandbox_id = "sbx_test123456"
@@ -2325,7 +2327,42 @@ class TestSandboxFileOperations:
             project_id="prj_test123",
         )
 
-        assert await sandbox.iter_file("/nonexistent/file") is None
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            await sandbox.read_file("/nonexistent/file")
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_iter_file_async_not_found(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async streamed file read raises for non-existent file."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            await sandbox.iter_file("/nonexistent/file")
 
         await sandbox.client.aclose()
 
@@ -2365,6 +2402,44 @@ class TestSandboxFileOperations:
 
         assert result == str(destination.resolve())
         assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_not_found(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test async download raises for non-existent file."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            await sandbox.download_file("/nonexistent/file", destination)
+        assert not destination.exists()
 
         await sandbox.client.aclose()
 

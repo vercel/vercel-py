@@ -81,7 +81,7 @@ class TestSandboxLive:
 
     def test_file_operations(self, vercel_token, vercel_team_id, cleanup_registry, tmp_path):
         """Test sandbox file write and read operations."""
-        from vercel.sandbox import Sandbox
+        from vercel.sandbox import Sandbox, SandboxNotFoundError
         from vercel.sandbox.models import WriteFile
 
         sandbox = Sandbox.create(
@@ -102,8 +102,8 @@ class TestSandboxLive:
             assert test_content in content.decode()
 
             # Read a non-existent file
-            missing = sandbox.read_file("/tmp/nonexistent.txt")
-            assert missing is None
+            with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+                sandbox.read_file("/tmp/nonexistent.txt")
 
             # Download the file locally without buffering API callers separately
             local_path = tmp_path / "sandbox-download.txt"
