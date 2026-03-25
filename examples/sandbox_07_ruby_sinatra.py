@@ -47,6 +47,12 @@ async def main() -> None:
     runtime = (
         os.getenv("SANDBOX_RUNTIME") or "node22"
     )  # note: ruby runtime is not supported so we have to install ruby via dnf
+    bundle_env = (
+        "BUNDLE_APP_CONFIG=.bundle "
+        "BUNDLE_USER_HOME=.bundle-home "
+        "BUNDLE_PATH=vendor/bundle "
+        "BUNDLE_CACHE_PATH=vendor/cache"
+    )
 
     # Sinatra default port is 4567
     port = 4567
@@ -101,8 +107,10 @@ async def main() -> None:
                 "-lc",
                 (
                     f"cd {sandbox.sandbox.cwd} && "
-                    "bundle config set --local path vendor/bundle && "
-                    "bundle config set --local without 'development:test'"
+                    "mkdir -p .bundle-home vendor/cache && "
+                    f"{bundle_env} bundle config set --local path vendor/bundle && "
+                    f"{bundle_env} bundle config set --local cache_path vendor/cache && "
+                    f"{bundle_env} bundle config set --local without 'development:test'"
                 ),
             ],
         )
@@ -118,7 +126,7 @@ async def main() -> None:
             "bash",
             [
                 "-lc",
-                (f"cd {sandbox.sandbox.cwd} && bundle install --jobs 4 --retry 3"),
+                (f"cd {sandbox.sandbox.cwd} && {bundle_env} bundle install --jobs 4 --retry 3"),
             ],
         )
         async for line in bundle_install_cmd.logs():
@@ -135,7 +143,8 @@ async def main() -> None:
                 (
                     f"cd {sandbox.sandbox.cwd} && "
                     # Start via rackup using WEBrick, binding to 0.0.0.0 and selected port
-                    f"RACK_ENV=production bundle exec rackup -s webrick -o 0.0.0.0 -p {port}"
+                    f"RACK_ENV=production {bundle_env} "
+                    f"bundle exec rackup -s webrick -o 0.0.0.0 -p {port}"
                 ),
             ],
         )
