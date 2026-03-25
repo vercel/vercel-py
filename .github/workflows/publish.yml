@@ -45,7 +45,6 @@ jobs:
           python-version: "3.14"
       - uses: astral-sh/setup-uv@v3
       - run: uv venv --python 3.14
-      - run: uv pip install build
       - name: Create tag from version
         run: |
           VERSION=$(python scripts/get-version.py)
@@ -66,6 +65,6 @@ jobs:
           TAG="v$VERSION"
           echo "Verifying tag $TAG matches version $VERSION"
       - name: Build
-        run: uv run python -m build
+        run: uv build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
