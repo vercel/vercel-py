@@ -133,7 +133,7 @@ class AsyncSnapshot:
 
     @property
     def expires_at(self) -> int | None:
-        """Timestamp when the snapshot expires."""
+        """Timestamp when the snapshot expires, or None for no expiration."""
         return self.snapshot.expires_at
 
     @staticmethod
@@ -212,7 +212,7 @@ class Snapshot:
 
     @property
     def expires_at(self) -> int | None:
-        """Timestamp when the snapshot expires."""
+        """Timestamp when the snapshot expires, or None for no expiration."""
         return self.snapshot.expires_at
 
     @staticmethod
