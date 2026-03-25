@@ -83,7 +83,7 @@ async def main() -> None:
             "bash",
             [
                 "-lc",
-                ("gem install --no-document bundler"),
+                ("gem install --no-document bundler -v 4.0.8"),
             ],
             sudo=True,
         )

@@ -74,7 +74,10 @@ async def main() -> None:
             "bash",
             [
                 "-lc",
-                ("gem install --no-document bundler && gem install --no-document rails"),
+                (
+                    "gem install --no-document bundler -v 4.0.8 "
+                    "&& gem install --no-document rails"
+                ),
             ],
             sudo=True,
         )
