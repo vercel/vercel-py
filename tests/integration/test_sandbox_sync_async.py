@@ -18,6 +18,7 @@ from vercel.sandbox import (
     NetworkPolicySubnets,
     NetworkTransformer,
 )
+from vercel.sandbox.snapshot import normalize_snapshot_expiration
 
 # Base URL for Vercel Sandbox API
 SANDBOX_API_BASE = "https://api.vercel.com"
@@ -1086,6 +1087,34 @@ class TestSandboxList:
 
 class TestSnapshotList:
     """Test snapshot listing operations."""
+
+    def test_snapshot_expiration_allows_zero(self):
+        from vercel.sandbox import SnapshotExpiration
+
+        expiration = SnapshotExpiration(0)
+
+        assert expiration == 0
+
+    def test_snapshot_expiration_allows_minimum(self):
+        from vercel.sandbox import MIN_SNAPSHOT_EXPIRATION_MS, SnapshotExpiration
+
+        expiration = SnapshotExpiration(MIN_SNAPSHOT_EXPIRATION_MS)
+
+        assert expiration == MIN_SNAPSHOT_EXPIRATION_MS
+
+    def test_snapshot_expiration_rejects_values_below_minimum(self):
+        from vercel.sandbox import MIN_SNAPSHOT_EXPIRATION_MS, SnapshotExpiration
+
+        with pytest.raises(ValueError, match="0 for no expiration or >= 86400000"):
+            SnapshotExpiration(MIN_SNAPSHOT_EXPIRATION_MS - 1)
+
+    def test_normalize_snapshot_expiration_coerces_int(self):
+        from vercel.sandbox import MIN_SNAPSHOT_EXPIRATION_MS, SnapshotExpiration
+
+        expiration = normalize_snapshot_expiration(MIN_SNAPSHOT_EXPIRATION_MS)
+
+        assert expiration == SnapshotExpiration(MIN_SNAPSHOT_EXPIRATION_MS)
+        assert isinstance(expiration, SnapshotExpiration)
 
     @respx.mock
     def test_list_snapshot_sync_serializes_filters_and_iterates_pages(
@@ -2823,11 +2852,11 @@ class TestSandboxSnapshot:
             project_id="prj_test123",
         )
 
-        snapshot = sandbox.snapshot(expiration=3600)
+        snapshot = sandbox.snapshot(expiration=86_400_000)
 
         assert route.called
         body = json.loads(route.calls.last.request.content)
-        assert body == {"expiration": 3600}
+        assert body == {"expiration": 86_400_000}
         assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
         assert sandbox.status == "stopped"
 
@@ -2878,6 +2907,41 @@ class TestSandboxSnapshot:
         assert body == {"expiration": 0}
         assert sandbox.status == "stopped"
 
+        sandbox.client.close()
+
+    @respx.mock
+    def test_create_snapshot_sync_rejects_invalid_expiration(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test sync snapshot creation validates the minimum expiration."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(ValueError, match="0 for no expiration or >= 86400000"):
+            sandbox.snapshot(expiration=3_600)
+
+        assert not route.called
         sandbox.client.close()
 
     @respx.mock
@@ -2969,11 +3033,11 @@ class TestSandboxSnapshot:
             project_id="prj_test123",
         )
 
-        snapshot = await sandbox.snapshot(expiration=3600)
+        snapshot = await sandbox.snapshot(expiration=86_400_000)
 
         assert route.called
         body = json.loads(route.calls.last.request.content)
-        assert body == {"expiration": 3600}
+        assert body == {"expiration": 86_400_000}
         assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
         assert sandbox.status == "stopped"
 
@@ -3029,6 +3093,42 @@ class TestSandboxSnapshot:
         assert snapshot.expires_at is None
         assert sandbox.status == "stopped"
 
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_snapshot_async_rejects_invalid_expiration(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test async snapshot creation validates the minimum expiration."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(ValueError, match="0 for no expiration or >= 86400000"):
+            await sandbox.snapshot(expiration=3_600)
+
+        assert not route.called
         await sandbox.client.aclose()
 
 

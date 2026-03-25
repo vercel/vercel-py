@@ -30,7 +30,12 @@ from .command import (
 )
 from .page import AsyncSandboxPage, AsyncSandboxPager, SandboxPage
 from .pty.shell import start_interactive_shell
-from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
+from .snapshot import (
+    AsyncSnapshot,
+    Snapshot as SnapshotClass,
+    SnapshotExpiration,
+    normalize_snapshot_expiration,
+)
 
 
 def _normalize_source(source: Source | None) -> dict[str, Any] | None:
@@ -404,16 +409,19 @@ class AsyncSandbox:
         response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
         self.sandbox = response.sandbox
 
-    async def snapshot(self, *, expiration: int | None = None) -> AsyncSnapshot:
+    async def snapshot(
+        self, *, expiration: int | SnapshotExpiration | None = None
+    ) -> AsyncSnapshot:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
+        normalized_expiration = normalize_snapshot_expiration(expiration)
         response = await self.client.create_snapshot(
             sandbox_id=self.sandbox.id,
-            expiration=expiration,
+            expiration=normalized_expiration,
         )
         self.sandbox = response.sandbox
         return AsyncSnapshot(client=self.client, snapshot=response.snapshot)
@@ -767,17 +775,18 @@ class Sandbox:
         )
         self.sandbox = response.sandbox
 
-    def snapshot(self, *, expiration: int | None = None) -> SnapshotClass:
+    def snapshot(self, *, expiration: int | SnapshotExpiration | None = None) -> SnapshotClass:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
+        normalized_expiration = normalize_snapshot_expiration(expiration)
         response = iter_coroutine(
             self.client.create_snapshot(
                 sandbox_id=self.sandbox.id,
-                expiration=expiration,
+                expiration=normalized_expiration,
             )
         )
         self.sandbox = response.sandbox

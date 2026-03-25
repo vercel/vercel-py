@@ -99,7 +99,7 @@ def _build_snapshot_example_fakes():
         if expiration in (None, 0):
             return None
         assert expiration is not None
-        return created_at + expiration * 1000
+        return created_at + expiration
 
     def _make_async_listed_snapshots() -> list[_ListedSnapshot]:
         return [
@@ -375,14 +375,14 @@ def test_snapshot_example_uses_snapshot_listing_and_expiration(monkeypatch: pyte
     asyncio.run(module.async_demo())
     module.sync_demo()
 
-    assert state["async_snapshot_calls"] == [3600, 0]
-    assert state["sync_snapshot_calls"] == [3600, 0]
+    assert state["async_snapshot_calls"] == [86_400_000, 0]
+    assert state["sync_snapshot_calls"] == [86_400_000, 0]
     assert state["async_records"][0]["expires_at"] == state["async_records"][0]["created_at"] + (
-        3600 * 1000
+        86_400_000
     )
     assert state["async_records"][1]["expires_at"] is None
     assert state["sync_records"][0]["expires_at"] == state["sync_records"][0]["created_at"] + (
-        3600 * 1000
+        86_400_000
     )
     assert state["sync_records"][1]["expires_at"] is None
     assert state["async_list_calls"] == [

@@ -49,8 +49,8 @@ async def async_demo() -> None:
         print(f"    Created config.json: {config.decode()}")
 
         # Step 2: Create a snapshot with an explicit expiration (this STOPS the sandbox)
-        print("\n[3] Creating snapshot with expiration=3600...")
-        snapshot = await sandbox1.snapshot(expiration=3600)
+        print("\n[3] Creating snapshot with expiration=86400000...")
+        snapshot = await sandbox1.snapshot(expiration=86400000)
         async_snapshot_ids.append(snapshot.snapshot_id)
         print(f"    Snapshot ID: {snapshot.snapshot_id}")
         print(f"    Status: {snapshot.status}")
@@ -164,8 +164,8 @@ def sync_demo() -> None:
         print(f"    Created config.json: {config.decode()}")
 
         # Step 2: Create a snapshot with an explicit expiration (this STOPS the sandbox)
-        print("\n[3] Creating snapshot with expiration=3600...")
-        snapshot = sandbox1.snapshot(expiration=3600)
+        print("\n[3] Creating snapshot with expiration=86400000...")
+        snapshot = sandbox1.snapshot(expiration=86400000)
         sync_snapshot_ids.append(snapshot.snapshot_id)
         print(f"    Snapshot ID: {snapshot.snapshot_id}")
         print(f"    Status: {snapshot.status}")

@@ -18,7 +18,12 @@ from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinishe
 from .models import GitSource, SnapshotSource, Source, TarballSource
 from .page import AsyncSandboxPage, AsyncSnapshotPage, SandboxPage, SnapshotPage
 from .sandbox import AsyncSandbox, Sandbox
-from .snapshot import AsyncSnapshot, Snapshot
+from .snapshot import (
+    MIN_SNAPSHOT_EXPIRATION_MS,
+    AsyncSnapshot,
+    Snapshot,
+    SnapshotExpiration,
+)
 
 __all__ = [
     "SandboxError",
@@ -35,6 +40,8 @@ __all__ = [
     "SandboxPage",
     "SnapshotPage",
     "Snapshot",
+    "SnapshotExpiration",
+    "MIN_SNAPSHOT_EXPIRATION_MS",
     "AsyncCommand",
     "AsyncCommandFinished",
     "Command",

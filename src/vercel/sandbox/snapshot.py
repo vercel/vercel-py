@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Final, Literal
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
@@ -11,6 +11,34 @@ from vercel._internal.sandbox.pagination import SnapshotListParams, normalize_li
 
 from ..oidc import Credentials, get_credentials
 from .page import AsyncSnapshotPage, AsyncSnapshotPager, SnapshotPage
+
+MIN_SNAPSHOT_EXPIRATION_MS: Final[int] = 86_400_000
+
+
+class SnapshotExpiration(int):
+    """Snapshot expiration in milliseconds.
+
+    Valid values are ``0`` for no expiration or any value greater than or equal
+    to ``86_400_000`` (24 hours).
+    """
+
+    def __new__(cls, value: int) -> SnapshotExpiration:
+        value = int(value)
+        if value != 0 and value < MIN_SNAPSHOT_EXPIRATION_MS:
+            raise ValueError(
+                "Snapshot expiration must be 0 for no expiration or >= 86400000 milliseconds"
+            )
+        return int.__new__(cls, value)
+
+
+def normalize_snapshot_expiration(
+    expiration: int | SnapshotExpiration | None,
+) -> SnapshotExpiration | None:
+    if expiration is None:
+        return None
+    if isinstance(expiration, SnapshotExpiration):
+        return expiration
+    return SnapshotExpiration(expiration)
 
 
 async def _build_async_snapshot_page(
