@@ -38,7 +38,12 @@ class AsyncSnapshot:
         return self.snapshot.size_bytes
 
     @property
-    def expires_at(self) -> int:
+    def created_at(self) -> int:
+        """Timestamp when the snapshot was created."""
+        return self.snapshot.created_at
+
+    @property
+    def expires_at(self) -> int | None:
         """Timestamp when the snapshot expires."""
         return self.snapshot.expires_at
 
@@ -90,7 +95,12 @@ class Snapshot:
         return self.snapshot.size_bytes
 
     @property
-    def expires_at(self) -> int:
+    def created_at(self) -> int:
+        """Timestamp when the snapshot was created."""
+        return self.snapshot.created_at
+
+    @property
+    def expires_at(self) -> int | None:
         """Timestamp when the snapshot expires."""
         return self.snapshot.expires_at
 

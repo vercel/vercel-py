@@ -416,14 +416,17 @@ class AsyncSandbox:
         response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
         self.sandbox = response.sandbox
 
-    async def snapshot(self) -> AsyncSnapshot:
+    async def snapshot(self, *, expiration: int | None = None) -> AsyncSnapshot:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        response = await self.client.create_snapshot(sandbox_id=self.sandbox.id)
+        response = await self.client.create_snapshot(
+            sandbox_id=self.sandbox.id,
+            expiration=expiration,
+        )
         self.sandbox = response.sandbox
         return AsyncSnapshot(client=self.client, snapshot=response.snapshot)
 
@@ -776,14 +779,19 @@ class Sandbox:
         )
         self.sandbox = response.sandbox
 
-    def snapshot(self) -> SnapshotClass:
+    def snapshot(self, *, expiration: int | None = None) -> SnapshotClass:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        response = iter_coroutine(self.client.create_snapshot(sandbox_id=self.sandbox.id))
+        response = iter_coroutine(
+            self.client.create_snapshot(
+                sandbox_id=self.sandbox.id,
+                expiration=expiration,
+            )
+        )
         self.sandbox = response.sandbox
         return SnapshotClass(client=self.client, snapshot=response.snapshot)
 

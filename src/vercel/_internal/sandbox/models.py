@@ -193,7 +193,7 @@ class Snapshot(BaseModel):
     region: str
     status: Literal["created", "deleted", "failed"]
     size_bytes: int = Field(alias="sizeBytes")
-    expires_at: int = Field(alias="expiresAt")
+    expires_at: int | None = Field(default=None, alias="expiresAt")
     created_at: int = Field(alias="createdAt")
     updated_at: int = Field(alias="updatedAt")
 

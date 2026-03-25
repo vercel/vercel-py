@@ -2335,10 +2335,10 @@ class TestSandboxSnapshot:
     """Test sandbox snapshot operations."""
 
     @respx.mock
-    def test_create_snapshot_sync(
+    def test_create_snapshot_sync_without_expiration(
         self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
     ):
-        """Test synchronous snapshot creation."""
+        """Test sync snapshot creation omits the body when expiration is unset."""
         from vercel.sandbox import Sandbox
 
         sandbox_id = "sbx_test123456"
@@ -2377,11 +2377,260 @@ class TestSandboxSnapshot:
         snapshot = sandbox.snapshot()
 
         assert route.called
+        assert route.calls.last.request.content == b""
         assert snapshot.snapshot_id == mock_sandbox_snapshot_response["id"]
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert snapshot.expires_at == mock_sandbox_snapshot_response["expiresAt"]
         # Sandbox should be stopped after snapshot
         assert sandbox.status == "stopped"
 
         sandbox.client.close()
+
+    @respx.mock
+    def test_create_snapshot_sync_with_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test sync snapshot creation forwards a non-zero expiration."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = sandbox.snapshot(expiration=3600)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 3600}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_create_snapshot_sync_with_zero_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test sync snapshot creation preserves explicit zero expiration."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.snapshot(expiration=0)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 0}
+        assert sandbox.status == "stopped"
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_snapshot_async_without_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation omits the body when expiration is unset."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot()
+
+        assert route.called
+        assert route.calls.last.request.content == b""
+        assert snapshot.snapshot_id == mock_sandbox_snapshot_response["id"]
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert snapshot.expires_at == mock_sandbox_snapshot_response["expiresAt"]
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_snapshot_async_with_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation forwards a non-zero expiration."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot(expiration=3600)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 3600}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_snapshot_async_with_zero_expiration_and_optional_expires_at(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation keeps zero expiration and optional expiry metadata."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        snapshot_response = dict(mock_sandbox_snapshot_response)
+        snapshot_response.pop("expiresAt")
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot(expiration=0)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 0}
+        assert snapshot.created_at == snapshot_response["createdAt"]
+        assert snapshot.expires_at is None
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
 
 
 class TestSandboxExtendTimeout:

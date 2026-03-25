@@ -410,9 +410,14 @@ class BaseSandboxOpsClient:
         )
         return SandboxResponse.model_validate(data)
 
-    async def create_snapshot(self, *, sandbox_id: str) -> CreateSnapshotResponse:
+    async def create_snapshot(
+        self, *, sandbox_id: str, expiration: int | None = None
+    ) -> CreateSnapshotResponse:
+        body = None if expiration is None else JSONBody({"expiration": expiration})
         data = await self._request_client.request_json(
-            "POST", f"/v1/sandboxes/{sandbox_id}/snapshot"
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/snapshot",
+            body=body,
         )
         return CreateSnapshotResponse.model_validate(data)
 
