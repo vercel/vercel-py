@@ -28,6 +28,8 @@ async def async_demo() -> None:
     print("ASYNC SNAPSHOT EXAMPLE")
     print("=" * 60)
 
+    async_snapshot_ids: list[str] = []
+
     # Step 1: Create a sandbox and set it up
     print("\n[1] Creating initial sandbox...")
     sandbox1 = await AsyncSandbox.create(timeout=120_000)
@@ -46,11 +48,14 @@ async def async_demo() -> None:
         config = await sandbox1.read_file("config.json")
         print(f"    Created config.json: {config.decode()}")
 
-        # Step 2: Create a snapshot (this STOPS the sandbox)
-        print("\n[3] Creating snapshot...")
-        snapshot = await sandbox1.snapshot()
+        # Step 2: Create a snapshot with an explicit expiration (this STOPS the sandbox)
+        print("\n[3] Creating snapshot with expiration=3600...")
+        snapshot = await sandbox1.snapshot(expiration=3600)
+        async_snapshot_ids.append(snapshot.snapshot_id)
         print(f"    Snapshot ID: {snapshot.snapshot_id}")
         print(f"    Status: {snapshot.status}")
+        print(f"    Created At: {snapshot.created_at}")
+        print(f"    Expires At: {snapshot.expires_at}")
         print(f"    Sandbox status after snapshot: {sandbox1.status}")
 
     finally:
@@ -76,26 +81,69 @@ async def async_demo() -> None:
 
         assert config2 == b'{"version": "1.0", "env": "async"}', "config.json mismatch!"
         assert users2 == b"alice\nbob\ncharlie", "users.txt mismatch!"
-        print("\n✓ Async assertions passed!")
+        print("\n✓ Async restore assertions passed!")
+
+        # Create a second snapshot with expiration=0 to preserve it indefinitely.
+        print("\n[6] Creating second snapshot with expiration=0...")
+        persistent_snapshot = await sandbox2.snapshot(expiration=0)
+        async_snapshot_ids.append(persistent_snapshot.snapshot_id)
+        print(f"    Snapshot ID: {persistent_snapshot.snapshot_id}")
+        print(f"    Created At: {persistent_snapshot.created_at}")
+        print(f"    Expires At: {persistent_snapshot.expires_at}")
 
     finally:
-        await sandbox2.stop()
         await sandbox2.client.aclose()
 
-    # Step 5: Retrieve and delete the snapshot
-    print("\n[6] Retrieving and deleting snapshot...")
-    fetched = await AsyncSnapshot.get(snapshot_id=snapshot.snapshot_id)
-    try:
-        await fetched.delete()
-        print(f"    Deleted snapshot, status: {fetched.status}")
-    finally:
-        await fetched.client.aclose()
+    # Step 5: List snapshots and confirm the new snapshots are discoverable.
+    print("\n[7] Listing recent snapshots...")
+    since = snapshot.created_at - 1
+    pager = AsyncSnapshot.list(limit=10, since=since)
+    first_page = await pager
+    first_page_ids = [listed.id for listed in first_page.snapshots]
+    print(f"    First page snapshot IDs: {first_page_ids}")
+
+    paged_ids: list[list[str]] = []
+    found_ids: set[str] = set()
+    async for page in pager.iter_pages():
+        page_ids = [listed.id for listed in page.snapshots]
+        paged_ids.append(page_ids)
+        found_ids.update(page_ids)
+        if all(snapshot_id in found_ids for snapshot_id in async_snapshot_ids):
+            break
+
+    print(f"    Visited pages: {paged_ids}")
+    assert all(snapshot_id in found_ids for snapshot_id in async_snapshot_ids), (
+        "Did not find all async snapshots in AsyncSnapshot.list() results"
+    )
+
+    item_ids: list[str] = []
+    async for listed in AsyncSnapshot.list(limit=10, since=since):
+        item_ids.append(listed.id)
+        if all(snapshot_id in item_ids for snapshot_id in async_snapshot_ids):
+            break
+
+    print(f"    Iterated snapshot IDs: {item_ids}")
+    assert all(snapshot_id in item_ids for snapshot_id in async_snapshot_ids), (
+        "Did not find all async snapshots while iterating AsyncSnapshot.list() items"
+    )
+
+    # Step 6: Retrieve and delete the snapshots
+    print("\n[8] Retrieving and deleting snapshots...")
+    for snapshot_id in async_snapshot_ids:
+        fetched = await AsyncSnapshot.get(snapshot_id=snapshot_id)
+        try:
+            await fetched.delete()
+            print(f"    Deleted snapshot {snapshot_id}, status: {fetched.status}")
+        finally:
+            await fetched.client.aclose()
 
 
 def sync_demo() -> None:
     print("\n" + "=" * 60)
     print("SYNC SNAPSHOT EXAMPLE")
     print("=" * 60)
+
+    sync_snapshot_ids: list[str] = []
 
     # Step 1: Create a sandbox and set it up
     print("\n[1] Creating initial sandbox...")
@@ -115,11 +163,14 @@ def sync_demo() -> None:
         config = sandbox1.read_file("config.json")
         print(f"    Created config.json: {config.decode()}")
 
-        # Step 2: Create a snapshot (this STOPS the sandbox)
-        print("\n[3] Creating snapshot...")
-        snapshot = sandbox1.snapshot()
+        # Step 2: Create a snapshot with an explicit expiration (this STOPS the sandbox)
+        print("\n[3] Creating snapshot with expiration=3600...")
+        snapshot = sandbox1.snapshot(expiration=3600)
+        sync_snapshot_ids.append(snapshot.snapshot_id)
         print(f"    Snapshot ID: {snapshot.snapshot_id}")
         print(f"    Status: {snapshot.status}")
+        print(f"    Created At: {snapshot.created_at}")
+        print(f"    Expires At: {snapshot.expires_at}")
         print(f"    Sandbox status after snapshot: {sandbox1.status}")
 
     finally:
@@ -145,20 +196,57 @@ def sync_demo() -> None:
 
         assert config2 == b'{"version": "1.0", "env": "sync"}', "config.json mismatch!"
         assert users2 == b"alice\nbob\ncharlie", "users.txt mismatch!"
-        print("\n✓ Sync assertions passed!")
+        print("\n✓ Sync restore assertions passed!")
+
+        print("\n[6] Creating second snapshot with expiration=0...")
+        persistent_snapshot = sandbox2.snapshot(expiration=0)
+        sync_snapshot_ids.append(persistent_snapshot.snapshot_id)
+        print(f"    Snapshot ID: {persistent_snapshot.snapshot_id}")
+        print(f"    Created At: {persistent_snapshot.created_at}")
+        print(f"    Expires At: {persistent_snapshot.expires_at}")
 
     finally:
-        sandbox2.stop()
         sandbox2.client.close()
 
-    # Step 5: Retrieve and delete the snapshot
-    print("\n[6] Retrieving and deleting snapshot...")
-    fetched = Snapshot.get(snapshot_id=snapshot.snapshot_id)
-    try:
-        fetched.delete()
-        print(f"    Deleted snapshot, status: {fetched.status}")
-    finally:
-        fetched.client.close()
+    print("\n[7] Listing recent snapshots...")
+    since = snapshot.created_at - 1
+    first_page = Snapshot.list(limit=10, since=since)
+    first_page_ids = [listed.id for listed in first_page.snapshots]
+    print(f"    First page snapshot IDs: {first_page_ids}")
+
+    paged_ids: list[list[str]] = []
+    found_ids: set[str] = set()
+    for page in first_page.iter_pages():
+        page_ids = [listed.id for listed in page.snapshots]
+        paged_ids.append(page_ids)
+        found_ids.update(page_ids)
+        if all(snapshot_id in found_ids for snapshot_id in sync_snapshot_ids):
+            break
+
+    print(f"    Visited pages: {paged_ids}")
+    assert all(snapshot_id in found_ids for snapshot_id in sync_snapshot_ids), (
+        "Did not find all sync snapshots in Snapshot.list() pages"
+    )
+
+    item_ids: list[str] = []
+    for listed in Snapshot.list(limit=10, since=since).iter_items():
+        item_ids.append(listed.id)
+        if all(snapshot_id in item_ids for snapshot_id in sync_snapshot_ids):
+            break
+
+    print(f"    Iterated snapshot IDs: {item_ids}")
+    assert all(snapshot_id in item_ids for snapshot_id in sync_snapshot_ids), (
+        "Did not find all sync snapshots while iterating Snapshot.list() items"
+    )
+
+    print("\n[8] Retrieving and deleting snapshots...")
+    for snapshot_id in sync_snapshot_ids:
+        fetched = Snapshot.get(snapshot_id=snapshot_id)
+        try:
+            fetched.delete()
+            print(f"    Deleted snapshot {snapshot_id}, status: {fetched.status}")
+        finally:
+            fetched.client.close()
 
 
 if __name__ == "__main__":

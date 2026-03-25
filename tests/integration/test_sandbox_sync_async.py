@@ -1091,7 +1091,6 @@ class TestSnapshotList:
     def test_list_snapshot_sync_serializes_filters_and_iterates_pages(
         self, mock_env_clear, mock_sandbox_snapshot_response
     ):
-        from vercel._internal.sandbox.models import Snapshot as SnapshotModel
         from vercel.sandbox import Snapshot
 
         project = "snapshot-project"
@@ -1164,10 +1163,20 @@ class TestSnapshotList:
                 "until": expected_until,
             }
         ]
-        assert isinstance(page.snapshots[0], SnapshotModel)
-        assert page.snapshots[0].id == "snap_list_1"
-        assert page.snapshots[0].created_at == 1705320600000
-        assert page.snapshots[0].expires_at == mock_sandbox_snapshot_response["expiresAt"]
+        assert [
+            (snapshot.id, snapshot.created_at, snapshot.expires_at) for snapshot in page.snapshots
+        ] == [
+            (
+                "snap_list_1",
+                1705320600000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+            (
+                "snap_list_2",
+                1705320300000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+        ]
         assert page.pagination.count == 3
         assert page.next_page_info() is not None
         assert page.next_page_info().until == int(next_until)
@@ -1231,7 +1240,6 @@ class TestSnapshotList:
     async def test_list_snapshot_async_serializes_integer_filters_and_iterates_pages(
         self, mock_env_clear, mock_sandbox_snapshot_response
     ):
-        from vercel._internal.sandbox.models import Snapshot as SnapshotModel
         from vercel.sandbox import AsyncSnapshot
 
         project = "snapshot-project"
@@ -1302,10 +1310,20 @@ class TestSnapshotList:
                 "until": str(until),
             }
         ]
-        assert isinstance(page.snapshots[0], SnapshotModel)
-        assert page.snapshots[0].id == "snap_async_1"
-        assert page.snapshots[0].created_at == 1705320600000
-        assert page.snapshots[0].expires_at == mock_sandbox_snapshot_response["expiresAt"]
+        assert [
+            (snapshot.id, snapshot.created_at, snapshot.expires_at) for snapshot in page.snapshots
+        ] == [
+            (
+                "snap_async_1",
+                1705320600000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+            (
+                "snap_async_2",
+                1705320000000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+        ]
         assert page.pagination.count == 3
         assert page.next_page_info() is not None
         assert page.next_page_info().until == int(next_until)

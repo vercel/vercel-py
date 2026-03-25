@@ -16,7 +16,7 @@ import sys
 import tarfile
 from collections.abc import AsyncGenerator, Generator
 from importlib.metadata import version as _pkg_version
-from typing import Any
+from typing import Any, TypeAlias, cast
 
 import httpx
 
@@ -62,6 +62,10 @@ USER_AGENT = (
     f"vercel/sandbox/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
 
+JSONScalar: TypeAlias = str | int | float | bool | None
+JSONValue: TypeAlias = JSONScalar | dict[str, "JSONValue"] | list["JSONValue"]
+RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
+
 
 # ---------------------------------------------------------------------------
 # Request client — error handling + request_json convenience
@@ -84,11 +88,11 @@ class SandboxRequestClient:
         path: str,
         *,
         headers: dict[str, str] | None = None,
-        query: dict[str, Any] | None = None,
+        query: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        params: dict[str, Any] | None = None
+        params: RequestQuery | None = None
         if query:
             params = {k: v for k, v in query.items() if v is not None}
 
@@ -114,7 +118,7 @@ class SandboxRequestClient:
                 error_body = None
 
         # Parse a helpful error message
-        parsed: Any | None = None
+        parsed: JSONValue | None = None
         message = f"HTTP {response.status_code}"
         if error_body:
             try:
@@ -149,19 +153,30 @@ class SandboxRequestClient:
         self,
         method: str,
         path: str,
-        **kwargs: Any,
-    ) -> Any:
-        headers = kwargs.pop("headers", None) or {}
+        *,
+        headers: dict[str, str] | None = None,
+        query: RequestQuery | None = None,
+        body: JSONBody | BytesBody | None = None,
+        stream: bool = False,
+    ) -> JSONValue:
+        headers = dict(headers or {})
         headers.setdefault("content-type", "application/json")
-        r = await self.request(method, path, headers=headers, **kwargs)
-        return r.json()
+        r = await self.request(
+            method,
+            path,
+            headers=headers,
+            query=query,
+            body=body,
+            stream=stream,
+        )
+        return cast(JSONValue, r.json())
 
 
 def _build_sandbox_error(
     response: httpx.Response,
     message: str,
     *,
-    data: Any | None = None,
+    data: JSONValue | None = None,
 ) -> APIError:
     status_code = response.status_code
     if status_code == 401:
