@@ -41,12 +41,12 @@ async def main() -> None:
     runtime = (
         os.getenv("SANDBOX_RUNTIME") or "node22"
     )  # note: ruby runtime is not supported so we install ruby via dnf
-    bundle_env = (
-        "BUNDLE_APP_CONFIG=.bundle "
-        "BUNDLE_USER_HOME=.bundle-home "
-        "BUNDLE_PATH=vendor/bundle "
-        "BUNDLE_CACHE_PATH=vendor/cache"
-    )
+    bundle_env = {
+        "BUNDLE_APP_CONFIG": ".bundle",
+        "BUNDLE_USER_HOME": ".bundle-home",
+        "BUNDLE_PATH": "vendor/bundle",
+        "BUNDLE_CACHE_PATH": "vendor/cache",
+    }
 
     # Rails default port is 3000
     port = 3000
@@ -132,10 +132,11 @@ async def main() -> None:
                 (
                     f"cd {app_path} && "
                     "mkdir -p .bundle-home vendor/cache && "
-                    f"{bundle_env} bundle config set --local path vendor/bundle && "
-                    f"{bundle_env} bundle config set --local cache_path vendor/cache"
+                    "bundle config set --local path vendor/bundle && "
+                    "bundle config set --local cache_path vendor/cache"
                 ),
             ],
+            env=bundle_env,
         )
         async for line in bundler_cfg_cmd.logs():
             print(line.data, end="")
@@ -149,8 +150,9 @@ async def main() -> None:
             "bash",
             [
                 "-lc",
-                (f"cd {app_path} && {bundle_env} bundle install --jobs 4 --retry 3"),
+                (f"cd {app_path} && bundle install --jobs 4 --retry 3"),
             ],
+            env=bundle_env,
         )
         async for line in bundle_install_cmd.logs():
             print(line.data, end="")
@@ -166,9 +168,10 @@ async def main() -> None:
                 "-lc",
                 (
                     f"cd {app_path} && "
-                    f"{bundle_env} bundle exec rails generate scaffold Post title:string body:text"
+                    "bundle exec rails generate scaffold Post title:string body:text"
                 ),
             ],
+            env=bundle_env,
         )
         async for line in scaffold_cmd.logs():
             print(line.data, end="")
@@ -195,8 +198,9 @@ async def main() -> None:
             "bash",
             [
                 "-lc",
-                (f"cd {app_path} && {bundle_env} bundle exec rails db:migrate"),
+                (f"cd {app_path} && bundle exec rails db:migrate"),
             ],
+            env=bundle_env,
         )
         async for line in migrate_cmd.logs():
             print(line.data, end="")
@@ -210,8 +214,9 @@ async def main() -> None:
             "bash",
             [
                 "-lc",
-                (f"cd {app_path} && {bundle_env} bundle exec rails db:seed"),
+                (f"cd {app_path} && bundle exec rails db:seed"),
             ],
+            env=bundle_env,
         )
         async for line in seed_cmd.logs():
             print(line.data, end="")
@@ -228,12 +233,9 @@ async def main() -> None:
             "bash",
             [
                 "-lc",
-                (
-                    f"cd {app_path} && "
-                    f"ALLOWED_HOST={allowed_host} {bundle_env} "
-                    f"bundle exec rails server -b 0.0.0.0 -p {port}"
-                ),
+                (f"cd {app_path} && bundle exec rails server -b 0.0.0.0 -p {port}"),
             ],
+            env={**bundle_env, "ALLOWED_HOST": allowed_host},
         )
 
         # Stream logs and open browser once server is ready.
