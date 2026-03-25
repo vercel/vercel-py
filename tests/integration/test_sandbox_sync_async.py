@@ -38,6 +38,19 @@ def _sandbox_with_id(
     return sandbox
 
 
+def _snapshot_with_id(
+    base_snapshot: dict,
+    snapshot_id: str,
+    *,
+    created_at: int,
+) -> dict:
+    snapshot = dict(base_snapshot)
+    snapshot["id"] = snapshot_id
+    snapshot["createdAt"] = created_at
+    snapshot["updatedAt"] = created_at
+    return snapshot
+
+
 async def _collect_async_pages(page) -> list:
     return [current_page async for current_page in page.iter_pages()]
 
@@ -1068,6 +1081,374 @@ class TestSandboxList:
         ]
         items = await _collect_async_items(page)
         assert [sandbox.id for sandbox in items] == ["sbx_async_terminal"]
+        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
+
+
+class TestSnapshotList:
+    """Test snapshot listing operations."""
+
+    @respx.mock
+    def test_list_snapshot_sync_serializes_filters_and_iterates_pages(
+        self, mock_env_clear, mock_sandbox_snapshot_response
+    ):
+        from vercel._internal.sandbox.models import Snapshot as SnapshotModel
+        from vercel.sandbox import Snapshot
+
+        project = "snapshot-project"
+        limit = 2
+        since = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 15, 12, 30, tzinfo=timezone.utc)
+        expected_since = str(int(since.timestamp() * 1000))
+        expected_until = str(int(until.timestamp() * 1000))
+        next_until = "1705320000000"
+
+        first_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_1",
+                    created_at=1705320600000,
+                ),
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_2",
+                    created_at=1705320300000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": int(next_until),
+                "prev": None,
+            },
+        }
+        second_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_3",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until:
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
+
+        page = Snapshot.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id=project,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": expected_until,
+            }
+        ]
+        assert isinstance(page.snapshots[0], SnapshotModel)
+        assert page.snapshots[0].id == "snap_list_1"
+        assert page.snapshots[0].created_at == 1705320600000
+        assert page.snapshots[0].expires_at == mock_sandbox_snapshot_response["expiresAt"]
+        assert page.pagination.count == 3
+        assert page.next_page_info() is not None
+        assert page.next_page_info().until == int(next_until)
+        assert [
+            [snapshot.id for snapshot in current_page.snapshots]
+            for current_page in page.iter_pages()
+        ] == [
+            ["snap_list_1", "snap_list_2"],
+            ["snap_list_3"],
+        ]
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": expected_until,
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": next_until,
+            },
+        ]
+
+        requests.clear()
+        items_page = Snapshot.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id=project,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+        assert [snapshot.id for snapshot in items_page.iter_items()] == [
+            "snap_list_1",
+            "snap_list_2",
+            "snap_list_3",
+        ]
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": expected_until,
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": next_until,
+            },
+        ]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_snapshot_async_serializes_integer_filters_and_iterates_pages(
+        self, mock_env_clear, mock_sandbox_snapshot_response
+    ):
+        from vercel._internal.sandbox.models import Snapshot as SnapshotModel
+        from vercel.sandbox import AsyncSnapshot
+
+        project = "snapshot-project"
+        limit = 2
+        since = 1705321200000
+        until = 1705323000000
+        next_until = "1705319400000"
+
+        first_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_async_1",
+                    created_at=1705320600000,
+                ),
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_async_2",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": int(next_until),
+                "prev": None,
+            },
+        }
+        second_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_async_3",
+                    created_at=1705319400000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until:
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
+
+        page = await AsyncSnapshot.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id=project,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": str(until),
+            }
+        ]
+        assert isinstance(page.snapshots[0], SnapshotModel)
+        assert page.snapshots[0].id == "snap_async_1"
+        assert page.snapshots[0].created_at == 1705320600000
+        assert page.snapshots[0].expires_at == mock_sandbox_snapshot_response["expiresAt"]
+        assert page.pagination.count == 3
+        assert page.next_page_info() is not None
+        assert page.next_page_info().until == int(next_until)
+
+        pages = await _collect_async_pages(page)
+        assert [[snapshot.id for snapshot in current_page.snapshots] for current_page in pages] == [
+            ["snap_async_1", "snap_async_2"],
+            ["snap_async_3"],
+        ]
+
+        items_page = await AsyncSnapshot.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id=project,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+        items = await _collect_async_items(items_page)
+        assert [snapshot.id for snapshot in items] == [
+            "snap_async_1",
+            "snap_async_2",
+            "snap_async_3",
+        ]
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": str(until),
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": next_until,
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": str(until),
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": next_until,
+            },
+        ]
+
+    @respx.mock
+    def test_list_snapshot_sync_single_page_does_not_fetch_more(
+        self, mock_env_clear, mock_sandbox_snapshot_response
+    ):
+        from vercel.sandbox import Snapshot
+
+        response = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_single_page",
+                    created_at=1705320600000,
+                ),
+            ],
+            "pagination": {
+                "count": 1,
+                "next": None,
+                "prev": None,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(dict(request.url.params))
+            return httpx.Response(200, json=response)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
+
+        page = Snapshot.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert page.has_next_page() is False
+        assert page.next_page_info() is None
+        assert page.get_next_page() is None
+        assert [
+            [snapshot.id for snapshot in current_page.snapshots]
+            for current_page in page.iter_pages()
+        ] == [["snap_single_page"]]
+        assert [snapshot.id for snapshot in page.iter_items()] == ["snap_single_page"]
+        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_snapshot_async_single_page_does_not_fetch_more(
+        self, mock_env_clear, mock_sandbox_snapshot_response
+    ):
+        from vercel.sandbox import AsyncSnapshot
+
+        response = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_async_single",
+                    created_at=1705320600000,
+                ),
+            ],
+            "pagination": {
+                "count": 1,
+                "next": None,
+                "prev": None,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(dict(request.url.params))
+            return httpx.Response(200, json=response)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
+
+        page = await AsyncSnapshot.list(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert page.has_next_page() is False
+        assert page.next_page_info() is None
+        assert await page.get_next_page() is None
+        pages = await _collect_async_pages(page)
+        assert [[snapshot.id for snapshot in current_page.snapshots] for current_page in pages] == [
+            ["snap_async_single"],
+        ]
+        items = await _collect_async_items(page)
+        assert [snapshot.id for snapshot in items] == ["snap_async_single"]
         assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
 
     @respx.mock

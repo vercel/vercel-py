@@ -198,6 +198,13 @@ class Snapshot(BaseModel):
     updated_at: int = Field(alias="updatedAt")
 
 
+class SnapshotsResponse(BaseModel):
+    """API response containing a list of snapshots."""
+
+    snapshots: list[Snapshot]
+    pagination: Pagination
+
+
 class SnapshotResponse(BaseModel):
     """API response containing a snapshot."""
 

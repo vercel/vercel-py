@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -19,7 +19,7 @@ from vercel._internal.sandbox.network_policy import (
     ApiNetworkPolicy,
     NetworkPolicy,
 )
-from vercel._internal.sandbox.pagination import SandboxListParams
+from vercel._internal.sandbox.pagination import SandboxListParams, normalize_list_timestamp
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -102,18 +102,6 @@ async def _build_sync_sandbox_page(
         pagination=response.pagination,
         fetch_next_page=fetch_next_page,
     )
-
-
-def _normalize_list_timestamp(value: datetime | int | None) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return int(value.timestamp() * 1000)
-    raise TypeError("Sandbox list timestamps must be datetime or integer milliseconds")
 
 
 @dataclass
@@ -256,8 +244,8 @@ class AsyncSandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=_normalize_list_timestamp(since),
-            until=_normalize_list_timestamp(until),
+            since=normalize_list_timestamp(since),
+            until=normalize_list_timestamp(until),
         )
         return AsyncSandboxPager(
             _fetch_first_page=lambda: _build_async_sandbox_page(creds=creds, params=params)
@@ -617,8 +605,8 @@ class Sandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=_normalize_list_timestamp(since),
-            until=_normalize_list_timestamp(until),
+            since=normalize_list_timestamp(since),
+            until=normalize_list_timestamp(until),
         )
         return iter_coroutine(_build_sync_sandbox_page(creds=creds, params=params))
 

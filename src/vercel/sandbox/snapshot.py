@@ -1,13 +1,74 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
+from vercel._internal.sandbox.pagination import SnapshotListParams, normalize_list_timestamp
 
 from ..oidc import Credentials, get_credentials
+from .page import AsyncSnapshotPage, AsyncSnapshotPager, SnapshotPage
+
+
+async def _build_async_snapshot_page(
+    *,
+    creds: Credentials,
+    params: SnapshotListParams,
+) -> AsyncSnapshotPage:
+    client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+    try:
+        response = await client.list_snapshots(
+            project_id=params.project_id,
+            limit=params.limit,
+            since=params.since,
+            until=params.until,
+        )
+    finally:
+        await client.aclose()
+
+    async def fetch_next_page(page_info) -> AsyncSnapshotPage:
+        return await _build_async_snapshot_page(
+            creds=creds,
+            params=params.with_until(page_info.until),
+        )
+
+    return AsyncSnapshotPage.create(
+        snapshots=response.snapshots,
+        pagination=response.pagination,
+        fetch_next_page=fetch_next_page,
+    )
+
+
+async def _build_sync_snapshot_page(
+    *,
+    creds: Credentials,
+    params: SnapshotListParams,
+) -> SnapshotPage:
+    client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+    try:
+        response = await client.list_snapshots(
+            project_id=params.project_id,
+            limit=params.limit,
+            since=params.since,
+            until=params.until,
+        )
+    finally:
+        client.close()
+
+    async def fetch_next_page(page_info) -> SnapshotPage:
+        return await _build_sync_snapshot_page(
+            creds=creds,
+            params=params.with_until(page_info.until),
+        )
+
+    return SnapshotPage.create(
+        snapshots=response.snapshots,
+        pagination=response.pagination,
+        fetch_next_page=fetch_next_page,
+    )
 
 
 @dataclass
@@ -60,6 +121,28 @@ class AsyncSnapshot:
         client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp = await client.get_snapshot(snapshot_id=snapshot_id)
         return AsyncSnapshot(client=client, snapshot=resp.snapshot)
+
+    @staticmethod
+    def list(
+        *,
+        limit: int | None = None,
+        since: datetime | int | None = None,
+        until: datetime | int | None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+    ) -> AsyncSnapshotPager:
+        """List snapshots and return the first page."""
+        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
+        params = SnapshotListParams(
+            project_id=creds.project_id,
+            limit=limit,
+            since=normalize_list_timestamp(since),
+            until=normalize_list_timestamp(until),
+        )
+        return AsyncSnapshotPager(
+            _fetch_first_page=lambda: _build_async_snapshot_page(creds=creds, params=params)
+        )
 
     async def delete(self) -> None:
         """Delete this snapshot."""
@@ -117,6 +200,26 @@ class Snapshot:
         client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp = iter_coroutine(client.get_snapshot(snapshot_id=snapshot_id))
         return Snapshot(client=client, snapshot=resp.snapshot)
+
+    @staticmethod
+    def list(
+        *,
+        limit: int | None = None,
+        since: datetime | int | None = None,
+        until: datetime | int | None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+    ) -> SnapshotPage:
+        """List snapshots and return the first page."""
+        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
+        params = SnapshotListParams(
+            project_id=creds.project_id,
+            limit=limit,
+            since=normalize_list_timestamp(since),
+            until=normalize_list_timestamp(until),
+        )
+        return iter_coroutine(_build_sync_snapshot_page(creds=creds, params=params))
 
     def delete(self) -> None:
         """Delete this snapshot."""

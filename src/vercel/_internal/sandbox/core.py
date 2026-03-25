@@ -44,6 +44,7 @@ from vercel._internal.sandbox.models import (
     SandboxesResponse,
     SandboxResponse,
     SnapshotResponse,
+    SnapshotsResponse,
     WriteFile,
 )
 from vercel._internal.sandbox.network_policy import (
@@ -426,6 +427,26 @@ class BaseSandboxOpsClient:
             "GET", f"/v1/sandboxes/snapshots/{snapshot_id}"
         )
         return SnapshotResponse.model_validate(data)
+
+    async def list_snapshots(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> SnapshotsResponse:
+        data = await self._request_client.request_json(
+            "GET",
+            "/v1/sandboxes/snapshots",
+            query={
+                "project": project_id,
+                "limit": limit,
+                "since": since,
+                "until": until,
+            },
+        )
+        return SnapshotsResponse.model_validate(data)
 
     async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
         data = await self._request_client.request_json(
