@@ -69,6 +69,20 @@ class ApiNetworkInjectionRule:
             payload["headerNames"] = self.header_names
         return payload
 
+    def to_redacted_headers(self) -> dict[str, str]:
+        if self.header_names:
+            redacted: dict[str, str] = {}
+            lower_to_name: dict[str, str] = {}
+            for name in self.header_names:
+                lower_name = name.lower()
+                previous_name = lower_to_name.get(lower_name)
+                if previous_name is not None and previous_name != name:
+                    redacted.pop(previous_name, None)
+                lower_to_name[lower_name] = name
+                redacted[name] = _REDACTED_HEADER_VALUE
+            return redacted
+        return dict.fromkeys(self.headers or {}, _REDACTED_HEADER_VALUE)
+
 
 @dataclass(frozen=True, slots=True)
 class ApiNetworkPolicy:
@@ -184,7 +198,7 @@ class ApiNetworkPolicy:
         allow: dict[str, list[NetworkPolicyRule]] = {domain: [] for domain in allowed_domains}
         for rule in injection_rules:
             allow.setdefault(rule.domain, [])
-            headers = _redacted_headers(rule)
+            headers = rule.to_redacted_headers()
             if not headers:
                 continue
             allow[rule.domain].append(
@@ -214,25 +228,6 @@ def _merge_headers_case_insensitively(
             lower_to_names[lower_name] = current_names
 
     return merged
-
-
-def _redacted_headers_from_names(header_names: Sequence[str]) -> dict[str, str]:
-    redacted: dict[str, str] = {}
-    lower_to_name: dict[str, str] = {}
-    for name in header_names:
-        lower_name = name.lower()
-        previous_name = lower_to_name.get(lower_name)
-        if previous_name is not None and previous_name != name:
-            redacted.pop(previous_name, None)
-        lower_to_name[lower_name] = name
-        redacted[name] = _REDACTED_HEADER_VALUE
-    return redacted
-
-
-def _redacted_headers(rule: ApiNetworkInjectionRule) -> dict[str, str]:
-    if rule.header_names is not None:
-        return _redacted_headers_from_names(rule.header_names)
-    return dict.fromkeys(rule.headers or {}, _REDACTED_HEADER_VALUE)
 
 
 def _merge_rule_headers(rules: Sequence[NetworkPolicyRule]) -> dict[str, str]:

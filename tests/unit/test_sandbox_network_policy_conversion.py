@@ -542,6 +542,27 @@ class TestNetworkPolicyEdgeCases:
             }
         )
 
+    def test_empty_api_header_names_fall_back_to_headers(self) -> None:
+        assert ApiNetworkPolicy(
+            mode="custom",
+            allowed_domains=["example.com"],
+            injection_rules=[
+                ApiNetworkInjectionRule(
+                    domain="example.com",
+                    headers={"X-Trace": "trace-value"},
+                    header_names=[],
+                )
+            ],
+        ).to_network_policy() == NetworkPolicyCustom(
+            allow={
+                "example.com": [
+                    NetworkPolicyRule(
+                        transform=[NetworkTransformer(headers={"X-Trace": "<redacted>"})]
+                    )
+                ]
+            }
+        )
+
     def test_api_network_policy_to_dict_uses_wire_keys(self) -> None:
         policy = ApiNetworkPolicy(
             mode="custom",
