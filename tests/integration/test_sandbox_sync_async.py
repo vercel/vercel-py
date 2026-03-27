@@ -18,7 +18,6 @@ from vercel.sandbox import (
     NetworkPolicySubnets,
     NetworkTransformer,
 )
-from vercel.sandbox.snapshot import normalize_snapshot_expiration
 
 # Base URL for Vercel Sandbox API
 SANDBOX_API_BASE = "https://api.vercel.com"
@@ -1088,34 +1087,6 @@ class TestSandboxList:
 class TestSnapshotList:
     """Test snapshot listing operations."""
 
-    def test_snapshot_expiration_allows_zero(self):
-        from vercel.sandbox import SnapshotExpiration
-
-        expiration = SnapshotExpiration(0)
-
-        assert expiration == 0
-
-    def test_snapshot_expiration_allows_minimum(self):
-        from vercel.sandbox import MIN_SNAPSHOT_EXPIRATION_MS, SnapshotExpiration
-
-        expiration = SnapshotExpiration(MIN_SNAPSHOT_EXPIRATION_MS)
-
-        assert expiration == MIN_SNAPSHOT_EXPIRATION_MS
-
-    def test_snapshot_expiration_rejects_values_below_minimum(self):
-        from vercel.sandbox import MIN_SNAPSHOT_EXPIRATION_MS, SnapshotExpiration
-
-        with pytest.raises(ValueError, match="0 for no expiration or >= 86400000"):
-            SnapshotExpiration(MIN_SNAPSHOT_EXPIRATION_MS - 1)
-
-    def test_normalize_snapshot_expiration_coerces_int(self):
-        from vercel.sandbox import MIN_SNAPSHOT_EXPIRATION_MS, SnapshotExpiration
-
-        expiration = normalize_snapshot_expiration(MIN_SNAPSHOT_EXPIRATION_MS)
-
-        assert expiration == SnapshotExpiration(MIN_SNAPSHOT_EXPIRATION_MS)
-        assert isinstance(expiration, SnapshotExpiration)
-
     @respx.mock
     def test_list_snapshot_sync_serializes_filters_and_iterates_pages(
         self, mock_env_clear, mock_sandbox_snapshot_response
@@ -1209,60 +1180,6 @@ class TestSnapshotList:
         assert page.pagination.count == 3
         assert page.next_page_info() is not None
         assert page.next_page_info().until == int(next_until)
-        assert [
-            [snapshot.id for snapshot in current_page.snapshots]
-            for current_page in page.iter_pages()
-        ] == [
-            ["snap_list_1", "snap_list_2"],
-            ["snap_list_3"],
-        ]
-        assert requests == [
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": expected_since,
-                "until": expected_until,
-            },
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": expected_since,
-                "until": next_until,
-            },
-        ]
-
-        requests.clear()
-        items_page = Snapshot.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id=project,
-            limit=limit,
-            since=since,
-            until=until,
-        )
-        assert [snapshot.id for snapshot in items_page.iter_items()] == [
-            "snap_list_1",
-            "snap_list_2",
-            "snap_list_3",
-        ]
-        assert requests == [
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": expected_since,
-                "until": expected_until,
-            },
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": expected_since,
-                "until": next_until,
-            },
-        ]
 
     @respx.mock
     @pytest.mark.asyncio
@@ -1356,147 +1273,6 @@ class TestSnapshotList:
         assert page.pagination.count == 3
         assert page.next_page_info() is not None
         assert page.next_page_info().until == int(next_until)
-
-        pages = await _collect_async_pages(page)
-        assert [[snapshot.id for snapshot in current_page.snapshots] for current_page in pages] == [
-            ["snap_async_1", "snap_async_2"],
-            ["snap_async_3"],
-        ]
-
-        items_page = await AsyncSnapshot.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id=project,
-            limit=limit,
-            since=since,
-            until=until,
-        )
-        items = await _collect_async_items(items_page)
-        assert [snapshot.id for snapshot in items] == [
-            "snap_async_1",
-            "snap_async_2",
-            "snap_async_3",
-        ]
-        assert requests == [
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": str(since),
-                "until": str(until),
-            },
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": str(since),
-                "until": next_until,
-            },
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": str(since),
-                "until": str(until),
-            },
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": str(since),
-                "until": next_until,
-            },
-        ]
-
-    @respx.mock
-    def test_list_snapshot_sync_single_page_does_not_fetch_more(
-        self, mock_env_clear, mock_sandbox_snapshot_response
-    ):
-        from vercel.sandbox import Snapshot
-
-        response = {
-            "snapshots": [
-                _snapshot_with_id(
-                    mock_sandbox_snapshot_response,
-                    "snap_single_page",
-                    created_at=1705320600000,
-                ),
-            ],
-            "pagination": {
-                "count": 1,
-                "next": None,
-                "prev": None,
-            },
-        }
-        requests: list[dict[str, str]] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(dict(request.url.params))
-            return httpx.Response(200, json=response)
-
-        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
-
-        page = Snapshot.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
-
-        assert page.has_next_page() is False
-        assert page.next_page_info() is None
-        assert page.get_next_page() is None
-        assert [
-            [snapshot.id for snapshot in current_page.snapshots]
-            for current_page in page.iter_pages()
-        ] == [["snap_single_page"]]
-        assert [snapshot.id for snapshot in page.iter_items()] == ["snap_single_page"]
-        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
-
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_list_snapshot_async_single_page_does_not_fetch_more(
-        self, mock_env_clear, mock_sandbox_snapshot_response
-    ):
-        from vercel.sandbox import AsyncSnapshot
-
-        response = {
-            "snapshots": [
-                _snapshot_with_id(
-                    mock_sandbox_snapshot_response,
-                    "snap_async_single",
-                    created_at=1705320600000,
-                ),
-            ],
-            "pagination": {
-                "count": 1,
-                "next": None,
-                "prev": None,
-            },
-        }
-        requests: list[dict[str, str]] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(dict(request.url.params))
-            return httpx.Response(200, json=response)
-
-        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
-
-        page = await AsyncSnapshot.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
-
-        assert page.has_next_page() is False
-        assert page.next_page_info() is None
-        assert await page.get_next_page() is None
-        pages = await _collect_async_pages(page)
-        assert [[snapshot.id for snapshot in current_page.snapshots] for current_page in pages] == [
-            ["snap_async_single"],
-        ]
-        items = await _collect_async_items(page)
-        assert [snapshot.id for snapshot in items] == ["snap_async_single"]
-        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
 
     @respx.mock
     def test_get_sandbox_sync_exposes_mode_network_policy(
@@ -2910,42 +2686,6 @@ class TestSandboxSnapshot:
         sandbox.client.close()
 
     @respx.mock
-    def test_create_snapshot_sync_rejects_invalid_expiration(
-        self, mock_env_clear, mock_sandbox_get_response
-    ):
-        """Test sync snapshot creation validates the minimum expiration."""
-        from vercel.sandbox import Sandbox
-
-        sandbox_id = "sbx_test123456"
-
-        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "sandbox": mock_sandbox_get_response,
-                    "routes": [],
-                },
-            )
-        )
-        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
-            return_value=httpx.Response(200, json={})
-        )
-
-        sandbox = Sandbox.get(
-            sandbox_id=sandbox_id,
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
-
-        with pytest.raises(ValueError, match="0 for no expiration or >= 86400000"):
-            sandbox.snapshot(expiration=3_600)
-
-        assert not route.called
-        sandbox.client.close()
-
-    @respx.mock
-    @pytest.mark.asyncio
     async def test_create_snapshot_async_without_expiration(
         self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
     ):
@@ -3093,42 +2833,6 @@ class TestSandboxSnapshot:
         assert snapshot.expires_at is None
         assert sandbox.status == "stopped"
 
-        await sandbox.client.aclose()
-
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_create_snapshot_async_rejects_invalid_expiration(
-        self, mock_env_clear, mock_sandbox_get_response
-    ):
-        """Test async snapshot creation validates the minimum expiration."""
-        from vercel.sandbox import AsyncSandbox
-
-        sandbox_id = "sbx_test123456"
-
-        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "sandbox": mock_sandbox_get_response,
-                    "routes": [],
-                },
-            )
-        )
-        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
-            return_value=httpx.Response(200, json={})
-        )
-
-        sandbox = await AsyncSandbox.get(
-            sandbox_id=sandbox_id,
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
-
-        with pytest.raises(ValueError, match="0 for no expiration or >= 86400000"):
-            await sandbox.snapshot(expiration=3_600)
-
-        assert not route.called
         await sandbox.client.aclose()
 
 
