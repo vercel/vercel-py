@@ -70,6 +70,18 @@ class LocalWorld(w.World):
         self.monotonic_ulid = monotonic_factory()
         self.data_dir = pathlib.Path(os.getenv("WORKFLOW_LOCAL_DATA_DIR", ".workflow-data"))
 
+    def delete_all_hooks_for_run(self, run_id: str) -> None:
+        hooks_dir = self.data_dir / "hooks"
+        for hook_path in hooks_dir.iterdir():
+            if hook_path.suffix != ".json":
+                continue
+            hook = read_json(hook_path, w.Hook)
+            if hook is not None and hook.run_id == run_id:
+                hashed_token = hashlib.sha256(hook.token.encode()).hexdigest()
+                constraint_path = hooks_dir / "tokens" / f"${hashed_token}.json"
+                constraint_path.unlink(missing_ok=True)
+                hook_path.unlink(missing_ok=True)
+
     async def get_deployment_id(self) -> str:
         return ""
 
@@ -207,6 +219,8 @@ class LocalWorld(w.World):
         hooks_dir = self.data_dir / "hooks"
         if hooks_dir.exists():
             for hook_path in hooks_dir.iterdir():
+                if hook_path.suffix != ".json":
+                    continue
                 hook = read_json(hook_path, w.Hook)
                 if hook is not None and hook.token == token:
                     return hook
@@ -350,6 +364,7 @@ class LocalWorld(w.World):
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
+                self.delete_all_hooks_for_run(effective_run_id)
 
         elif data.event_type == "run_failed" and hasattr(data, "event_data"):
             failed_data = data.event_data
@@ -389,6 +404,7 @@ class LocalWorld(w.World):
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
+                self.delete_all_hooks_for_run(effective_run_id)
 
         elif data.event_type == "run_cancelled":
             if current_run:
@@ -408,6 +424,7 @@ class LocalWorld(w.World):
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
+                self.delete_all_hooks_for_run(effective_run_id)
 
         elif data.event_type == "step_created" and hasattr(data, "event_data"):
             step_data = data.event_data
