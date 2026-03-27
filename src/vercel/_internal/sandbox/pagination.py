@@ -11,13 +11,28 @@ class SandboxPageInfo:
     until: int
 
 
-@dataclass(frozen=True, slots=True)
-class SandboxListParams:
-    project_id: str | None = None
-    limit: int | None = None
-    since: int | None = None
-    until: int | None = None
+@dataclass(frozen=True, slots=True, init=False)
+class _BaseListParams:
+    project_id: str | None
+    limit: int | None
+    since: int | None
+    until: int | None
 
+    def __init__(
+        self,
+        project_id: str | None = None,
+        limit: int | None = None,
+        since: datetime | int | None = None,
+        until: datetime | int | None = None,
+    ) -> None:
+        object.__setattr__(self, "project_id", project_id)
+        object.__setattr__(self, "limit", limit)
+        object.__setattr__(self, "since", normalize_list_timestamp(since))
+        object.__setattr__(self, "until", normalize_list_timestamp(until))
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class SandboxListParams(_BaseListParams):
     def with_until(self, until: int) -> SandboxListParams:
         return SandboxListParams(
             project_id=self.project_id,
@@ -38,13 +53,8 @@ class SnapshotPageInfo:
     until: int
 
 
-@dataclass(frozen=True, slots=True)
-class SnapshotListParams:
-    project_id: str | None = None
-    limit: int | None = None
-    since: int | None = None
-    until: int | None = None
-
+@dataclass(frozen=True, slots=True, init=False)
+class SnapshotListParams(_BaseListParams):
     def with_until(self, until: int) -> SnapshotListParams:
         return SnapshotListParams(
             project_id=self.project_id,

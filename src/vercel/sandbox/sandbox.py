@@ -19,7 +19,7 @@ from vercel._internal.sandbox.network_policy import (
     ApiNetworkPolicy,
     NetworkPolicy,
 )
-from vercel._internal.sandbox.pagination import SandboxListParams, normalize_list_timestamp
+from vercel._internal.sandbox.pagination import SandboxListParams
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -249,8 +249,8 @@ class AsyncSandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=normalize_list_timestamp(since),
-            until=normalize_list_timestamp(until),
+            since=since,
+            until=until,
         )
         return AsyncSandboxPager(
             _fetch_first_page=lambda: _build_async_sandbox_page(creds=creds, params=params)
@@ -613,8 +613,8 @@ class Sandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=normalize_list_timestamp(since),
-            until=normalize_list_timestamp(until),
+            since=since,
+            until=until,
         )
         return iter_coroutine(_build_sync_sandbox_page(creds=creds, params=params))
 

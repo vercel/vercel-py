@@ -7,7 +7,7 @@ from typing import Final, Literal
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
-from vercel._internal.sandbox.pagination import SnapshotListParams, normalize_list_timestamp
+from vercel._internal.sandbox.pagination import SnapshotListParams
 
 from ..oidc import Credentials, get_credentials
 from .page import AsyncSnapshotPage, AsyncSnapshotPager, SnapshotPage
@@ -165,8 +165,8 @@ class AsyncSnapshot:
         params = SnapshotListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=normalize_list_timestamp(since),
-            until=normalize_list_timestamp(until),
+            since=since,
+            until=until,
         )
         return AsyncSnapshotPager(
             _fetch_first_page=lambda: _build_async_snapshot_page(creds=creds, params=params)
@@ -244,8 +244,8 @@ class Snapshot:
         params = SnapshotListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=normalize_list_timestamp(since),
-            until=normalize_list_timestamp(until),
+            since=since,
+            until=until,
         )
         return iter_coroutine(_build_sync_snapshot_page(creds=creds, params=params))
 
