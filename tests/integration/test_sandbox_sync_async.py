@@ -2060,8 +2060,7 @@ class TestSandboxFileOperations:
             project_id="prj_test123",
         )
 
-        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
-            sandbox.read_file("/nonexistent/file")
+        assert sandbox.read_file("/nonexistent/file") is None
 
         sandbox.client.close()
 
@@ -2465,8 +2464,7 @@ class TestSandboxFileOperations:
             project_id="prj_test123",
         )
 
-        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
-            await sandbox.read_file("/nonexistent/file")
+        assert await sandbox.read_file("/nonexistent/file") is None
 
         await sandbox.client.aclose()
 

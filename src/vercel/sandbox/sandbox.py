@@ -10,6 +10,7 @@ from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
     CommandResponse,
     Sandbox as SandboxModel,
@@ -371,8 +372,11 @@ class AsyncSandbox:
             chunk_size=chunk_size,
         )
 
-    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
+        try:
+            return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        except SandboxNotFoundError:
+            return None
 
     async def download_file(
         self,
@@ -761,8 +765,13 @@ class Sandbox:
             chunk_size=chunk_size,
         )
 
-    def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return iter_coroutine(self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
+    def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
+        try:
+            return iter_coroutine(
+                self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+            )
+        except SandboxNotFoundError:
+            return None
 
     def download_file(
         self,
