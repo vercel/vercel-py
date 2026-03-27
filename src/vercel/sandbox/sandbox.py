@@ -377,8 +377,31 @@ class AsyncSandbox:
             files=files,
         )
 
-    async def stop(self) -> None:
-        await self.client.stop_sandbox(sandbox_id=self.sandbox.id)
+    async def stop(
+        self,
+        *,
+        blocking: bool = False,
+        timeout: float = 30.0,
+        poll_interval: float = 0.5,
+    ) -> None:
+        """Stop this sandbox.
+
+        Args:
+            blocking: When ``True``, wait until the sandbox reaches
+                ``"stopped"`` before returning.
+            timeout: Maximum time to wait in seconds when ``blocking=True``.
+            poll_interval: Time between refreshes in seconds when
+                ``blocking=True``.
+
+        Raises:
+            TimeoutError: If ``blocking=True`` and the sandbox does not reach
+                ``"stopped"`` within *timeout*.
+        """
+        response = await self.client.stop_sandbox(sandbox_id=self.sandbox.id)
+        self.sandbox = response.sandbox
+        if not blocking:
+            return
+        await self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
     async def extend_timeout(self, duration: int) -> None:
         """
@@ -712,8 +735,31 @@ class Sandbox:
             )
         )
 
-    def stop(self) -> None:
-        iter_coroutine(self.client.stop_sandbox(sandbox_id=self.sandbox.id))
+    def stop(
+        self,
+        *,
+        blocking: bool = False,
+        timeout: float = 30.0,
+        poll_interval: float = 0.5,
+    ) -> None:
+        """Stop this sandbox.
+
+        Args:
+            blocking: When ``True``, wait until the sandbox reaches
+                ``"stopped"`` before returning.
+            timeout: Maximum time to wait in seconds when ``blocking=True``.
+            poll_interval: Time between refreshes in seconds when
+                ``blocking=True``.
+
+        Raises:
+            TimeoutError: If ``blocking=True`` and the sandbox does not reach
+                ``"stopped"`` within *timeout*.
+        """
+        response = iter_coroutine(self.client.stop_sandbox(sandbox_id=self.sandbox.id))
+        self.sandbox = response.sandbox
+        if not blocking:
+            return
+        self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
     def extend_timeout(self, duration: int) -> None:
         """

@@ -283,3 +283,37 @@ class TestSandboxLive:
                 # Sandbox may already be stopped or unreachable
                 pass
             sandbox.client.close()
+
+    def test_blocking_stop_lifecycle(self, vercel_token, vercel_team_id, cleanup_registry):
+        """Test stop(blocking=True) waits until a real sandbox is stopped."""
+        from vercel.sandbox import Sandbox
+
+        sandbox = Sandbox.create(
+            token=vercel_token,
+            team_id=vercel_team_id,
+        )
+        cleanup_registry.register("sandbox", sandbox.sandbox_id)
+
+        try:
+            sandbox.wait_for_status("running")
+
+            sandbox.stop(blocking=True)
+
+            assert sandbox.status == "stopped"
+
+            refreshed = Sandbox.get(
+                sandbox_id=sandbox.sandbox_id,
+                token=vercel_token,
+                team_id=vercel_team_id,
+            )
+            try:
+                assert refreshed.status == "stopped"
+            finally:
+                refreshed.client.close()
+        finally:
+            try:
+                sandbox.stop()
+            except Exception:
+                # Sandbox may already be stopped or unreachable
+                pass
+            sandbox.client.close()
