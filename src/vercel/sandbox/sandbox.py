@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -30,7 +30,12 @@ from .command import (
 )
 from .page import AsyncSandboxPage, AsyncSandboxPager, SandboxPage
 from .pty.shell import start_interactive_shell
-from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
+from .snapshot import (
+    AsyncSnapshot,
+    Snapshot as SnapshotClass,
+    SnapshotExpiration,
+    normalize_snapshot_expiration,
+)
 
 
 def _normalize_source(source: Source | None) -> dict[str, Any] | None:
@@ -102,18 +107,6 @@ async def _build_sync_sandbox_page(
         pagination=response.pagination,
         fetch_next_page=fetch_next_page,
     )
-
-
-def _normalize_list_timestamp(value: datetime | int | None) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return int(value.timestamp() * 1000)
-    raise TypeError("Sandbox list timestamps must be datetime or integer milliseconds")
 
 
 @dataclass
@@ -256,8 +249,8 @@ class AsyncSandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=_normalize_list_timestamp(since),
-            until=_normalize_list_timestamp(until),
+            since=since,
+            until=until,
         )
         return AsyncSandboxPager(
             _fetch_first_page=lambda: _build_async_sandbox_page(creds=creds, params=params)
@@ -416,14 +409,20 @@ class AsyncSandbox:
         response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
         self.sandbox = response.sandbox
 
-    async def snapshot(self) -> AsyncSnapshot:
+    async def snapshot(
+        self, *, expiration: int | SnapshotExpiration | None = None
+    ) -> AsyncSnapshot:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        response = await self.client.create_snapshot(sandbox_id=self.sandbox.id)
+        normalized_expiration = normalize_snapshot_expiration(expiration)
+        response = await self.client.create_snapshot(
+            sandbox_id=self.sandbox.id,
+            expiration=normalized_expiration,
+        )
         self.sandbox = response.sandbox
         return AsyncSnapshot(client=self.client, snapshot=response.snapshot)
 
@@ -614,8 +613,8 @@ class Sandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=_normalize_list_timestamp(since),
-            until=_normalize_list_timestamp(until),
+            since=since,
+            until=until,
         )
         return iter_coroutine(_build_sync_sandbox_page(creds=creds, params=params))
 
@@ -776,14 +775,20 @@ class Sandbox:
         )
         self.sandbox = response.sandbox
 
-    def snapshot(self) -> SnapshotClass:
+    def snapshot(self, *, expiration: int | SnapshotExpiration | None = None) -> SnapshotClass:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        response = iter_coroutine(self.client.create_snapshot(sandbox_id=self.sandbox.id))
+        normalized_expiration = normalize_snapshot_expiration(expiration)
+        response = iter_coroutine(
+            self.client.create_snapshot(
+                sandbox_id=self.sandbox.id,
+                expiration=normalized_expiration,
+            )
+        )
         self.sandbox = response.sandbox
         return SnapshotClass(client=self.client, snapshot=response.snapshot)
 

@@ -1,13 +1,102 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from datetime import datetime
+from typing import Final, Literal
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
+from vercel._internal.sandbox.pagination import SnapshotListParams
 
 from ..oidc import Credentials, get_credentials
+from .page import AsyncSnapshotPage, AsyncSnapshotPager, SnapshotPage
+
+MIN_SNAPSHOT_EXPIRATION_MS: Final[int] = 86_400_000
+
+
+class SnapshotExpiration(int):
+    """Snapshot expiration in milliseconds.
+
+    Valid values are ``0`` for no expiration or any value greater than or equal
+    to ``86_400_000`` (24 hours).
+    """
+
+    def __new__(cls, value: int) -> SnapshotExpiration:
+        value = int(value)
+        if value != 0 and value < MIN_SNAPSHOT_EXPIRATION_MS:
+            raise ValueError(
+                "Snapshot expiration must be 0 for no expiration or >= 86400000 milliseconds"
+            )
+        return int.__new__(cls, value)
+
+
+def normalize_snapshot_expiration(
+    expiration: int | SnapshotExpiration | None,
+) -> SnapshotExpiration | None:
+    if expiration is None:
+        return None
+    if isinstance(expiration, SnapshotExpiration):
+        return expiration
+    return SnapshotExpiration(expiration)
+
+
+async def _build_async_snapshot_page(
+    *,
+    creds: Credentials,
+    params: SnapshotListParams,
+) -> AsyncSnapshotPage:
+    client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+    try:
+        response = await client.list_snapshots(
+            project_id=params.project_id,
+            limit=params.limit,
+            since=params.since,
+            until=params.until,
+        )
+    finally:
+        await client.aclose()
+
+    async def fetch_next_page(page_info) -> AsyncSnapshotPage:
+        return await _build_async_snapshot_page(
+            creds=creds,
+            params=params.with_until(page_info.until),
+        )
+
+    return AsyncSnapshotPage.create(
+        snapshots=response.snapshots,
+        pagination=response.pagination,
+        fetch_next_page=fetch_next_page,
+    )
+
+
+async def _build_sync_snapshot_page(
+    *,
+    creds: Credentials,
+    params: SnapshotListParams,
+) -> SnapshotPage:
+    client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+    try:
+        response = await client.list_snapshots(
+            project_id=params.project_id,
+            limit=params.limit,
+            since=params.since,
+            until=params.until,
+        )
+    finally:
+        client.close()
+
+    async def fetch_next_page(page_info) -> SnapshotPage:
+        return await _build_sync_snapshot_page(
+            creds=creds,
+            params=params.with_until(page_info.until),
+        )
+
+    return SnapshotPage.create(
+        snapshots=response.snapshots,
+        pagination=response.pagination,
+        fetch_next_page=fetch_next_page,
+    )
 
 
 @dataclass
@@ -38,8 +127,13 @@ class AsyncSnapshot:
         return self.snapshot.size_bytes
 
     @property
-    def expires_at(self) -> int:
-        """Timestamp when the snapshot expires."""
+    def created_at(self) -> int:
+        """Timestamp when the snapshot was created."""
+        return self.snapshot.created_at
+
+    @property
+    def expires_at(self) -> int | None:
+        """Timestamp when the snapshot expires, or None for no expiration."""
         return self.snapshot.expires_at
 
     @staticmethod
@@ -55,6 +149,28 @@ class AsyncSnapshot:
         client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp = await client.get_snapshot(snapshot_id=snapshot_id)
         return AsyncSnapshot(client=client, snapshot=resp.snapshot)
+
+    @staticmethod
+    def list(
+        *,
+        limit: int | None = None,
+        since: datetime | int | None = None,
+        until: datetime | int | None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+    ) -> AsyncSnapshotPager:
+        """List snapshots and return the first page."""
+        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
+        params = SnapshotListParams(
+            project_id=creds.project_id,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+        return AsyncSnapshotPager(
+            _fetch_first_page=lambda: _build_async_snapshot_page(creds=creds, params=params)
+        )
 
     async def delete(self) -> None:
         """Delete this snapshot."""
@@ -90,8 +206,13 @@ class Snapshot:
         return self.snapshot.size_bytes
 
     @property
-    def expires_at(self) -> int:
-        """Timestamp when the snapshot expires."""
+    def created_at(self) -> int:
+        """Timestamp when the snapshot was created."""
+        return self.snapshot.created_at
+
+    @property
+    def expires_at(self) -> int | None:
+        """Timestamp when the snapshot expires, or None for no expiration."""
         return self.snapshot.expires_at
 
     @staticmethod
@@ -107,6 +228,26 @@ class Snapshot:
         client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp = iter_coroutine(client.get_snapshot(snapshot_id=snapshot_id))
         return Snapshot(client=client, snapshot=resp.snapshot)
+
+    @staticmethod
+    def list(
+        *,
+        limit: int | None = None,
+        since: datetime | int | None = None,
+        until: datetime | int | None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+    ) -> SnapshotPage:
+        """List snapshots and return the first page."""
+        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
+        params = SnapshotListParams(
+            project_id=creds.project_id,
+            limit=limit,
+            since=since,
+            until=until,
+        )
+        return iter_coroutine(_build_sync_snapshot_page(creds=creds, params=params))
 
     def delete(self) -> None:
         """Delete this snapshot."""

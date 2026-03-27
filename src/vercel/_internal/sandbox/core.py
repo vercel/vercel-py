@@ -16,7 +16,7 @@ import sys
 import tarfile
 from collections.abc import AsyncGenerator, Generator
 from importlib.metadata import version as _pkg_version
-from typing import Any
+from typing import Any, TypeAlias, cast
 
 import httpx
 
@@ -44,6 +44,7 @@ from vercel._internal.sandbox.models import (
     SandboxesResponse,
     SandboxResponse,
     SnapshotResponse,
+    SnapshotsResponse,
     WriteFile,
 )
 from vercel._internal.sandbox.network_policy import (
@@ -60,6 +61,10 @@ PLATFORM = platform.uname()
 USER_AGENT = (
     f"vercel/sandbox/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
+
+JSONScalar: TypeAlias = str | int | float | bool | None
+JSONValue: TypeAlias = JSONScalar | dict[str, "JSONValue"] | list["JSONValue"]
+RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
 
 
 # ---------------------------------------------------------------------------
@@ -83,11 +88,11 @@ class SandboxRequestClient:
         path: str,
         *,
         headers: dict[str, str] | None = None,
-        query: dict[str, Any] | None = None,
+        query: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        params: dict[str, Any] | None = None
+        params: RequestQuery | None = None
         if query:
             params = {k: v for k, v in query.items() if v is not None}
 
@@ -113,7 +118,7 @@ class SandboxRequestClient:
                 error_body = None
 
         # Parse a helpful error message
-        parsed: Any | None = None
+        parsed: JSONValue | None = None
         message = f"HTTP {response.status_code}"
         if error_body:
             try:
@@ -148,19 +153,30 @@ class SandboxRequestClient:
         self,
         method: str,
         path: str,
-        **kwargs: Any,
-    ) -> Any:
-        headers = kwargs.pop("headers", None) or {}
+        *,
+        headers: dict[str, str] | None = None,
+        query: RequestQuery | None = None,
+        body: JSONBody | BytesBody | None = None,
+        stream: bool = False,
+    ) -> JSONValue:
+        headers = dict(headers or {})
         headers.setdefault("content-type", "application/json")
-        r = await self.request(method, path, headers=headers, **kwargs)
-        return r.json()
+        r = await self.request(
+            method,
+            path,
+            headers=headers,
+            query=query,
+            body=body,
+            stream=stream,
+        )
+        return cast(JSONValue, r.json())
 
 
 def _build_sandbox_error(
     response: httpx.Response,
     message: str,
     *,
-    data: Any | None = None,
+    data: JSONValue | None = None,
 ) -> APIError:
     status_code = response.status_code
     if status_code == 401:
@@ -410,9 +426,14 @@ class BaseSandboxOpsClient:
         )
         return SandboxResponse.model_validate(data)
 
-    async def create_snapshot(self, *, sandbox_id: str) -> CreateSnapshotResponse:
+    async def create_snapshot(
+        self, *, sandbox_id: str, expiration: int | None = None
+    ) -> CreateSnapshotResponse:
+        body = None if expiration is None else JSONBody({"expiration": expiration})
         data = await self._request_client.request_json(
-            "POST", f"/v1/sandboxes/{sandbox_id}/snapshot"
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/snapshot",
+            body=body,
         )
         return CreateSnapshotResponse.model_validate(data)
 
@@ -421,6 +442,26 @@ class BaseSandboxOpsClient:
             "GET", f"/v1/sandboxes/snapshots/{snapshot_id}"
         )
         return SnapshotResponse.model_validate(data)
+
+    async def list_snapshots(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> SnapshotsResponse:
+        data = await self._request_client.request_json(
+            "GET",
+            "/v1/sandboxes/snapshots",
+            query={
+                "project": project_id,
+                "limit": limit,
+                "since": since,
+                "until": until,
+            },
+        )
+        return SnapshotsResponse.model_validate(data)
 
     async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
         data = await self._request_client.request_json(

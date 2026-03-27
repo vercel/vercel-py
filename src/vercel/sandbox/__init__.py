@@ -16,9 +16,14 @@ from vercel._internal.sandbox.network_policy import (
 
 from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
 from .models import GitSource, SnapshotSource, Source, TarballSource
-from .page import AsyncSandboxPage, SandboxPage
+from .page import AsyncSandboxPage, AsyncSnapshotPage, SandboxPage, SnapshotPage
 from .sandbox import AsyncSandbox, Sandbox
-from .snapshot import AsyncSnapshot, Snapshot
+from .snapshot import (
+    MIN_SNAPSHOT_EXPIRATION_MS,
+    AsyncSnapshot,
+    Snapshot,
+    SnapshotExpiration,
+)
 
 __all__ = [
     "SandboxError",
@@ -29,10 +34,14 @@ __all__ = [
     "SandboxServerError",
     "AsyncSandbox",
     "AsyncSandboxPage",
+    "AsyncSnapshotPage",
     "AsyncSnapshot",
     "Sandbox",
     "SandboxPage",
+    "SnapshotPage",
     "Snapshot",
+    "SnapshotExpiration",
+    "MIN_SNAPSHOT_EXPIRATION_MS",
     "AsyncCommand",
     "AsyncCommandFinished",
     "Command",
