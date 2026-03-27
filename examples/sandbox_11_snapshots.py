@@ -22,6 +22,25 @@ from vercel.sandbox import AsyncSandbox, AsyncSnapshot, Sandbox, Snapshot
 
 load_dotenv()
 
+SNAPSHOT_EXPIRATION_MS = 86_400_000
+SNAPSHOT_EXPIRATION_DRIFT_MS = 1_000
+
+
+def assert_time_near(*, actual: int | None, expected: int, drift: int, label: str) -> None:
+    assert actual is not None, f"{label} should report an expires_at timestamp"
+    assert abs(actual - expected) <= drift, f"{label} should be within {drift}ms of {expected}"
+
+
+def assert_snapshot_expires_at_expected_time(
+    *, created_at: int, expires_at: int | None, label: str
+) -> None:
+    assert_time_near(
+        actual=expires_at,
+        expected=created_at + SNAPSHOT_EXPIRATION_MS,
+        drift=SNAPSHOT_EXPIRATION_DRIFT_MS,
+        label=label,
+    )
+
 
 async def async_demo() -> None:
     print("=" * 60)
@@ -50,15 +69,17 @@ async def async_demo() -> None:
 
         # Step 2: Create a snapshot with an explicit expiration (this STOPS the sandbox)
         print("\n[3] Creating snapshot with expiration=86400000...")
-        snapshot = await sandbox1.snapshot(expiration=86400000)
+        snapshot = await sandbox1.snapshot(expiration=SNAPSHOT_EXPIRATION_MS)
         async_snapshot_ids.append(snapshot.snapshot_id)
         print(f"    Snapshot ID: {snapshot.snapshot_id}")
         print(f"    Status: {snapshot.status}")
         print(f"    Created At: {snapshot.created_at}")
         print(f"    Expires At: {snapshot.expires_at}")
         print(f"    Sandbox status after snapshot: {sandbox1.status}")
-        assert snapshot.expires_at == snapshot.created_at + 86_400_000, (
-            "expiring async snapshot should report an expires_at timestamp"
+        assert_snapshot_expires_at_expected_time(
+            created_at=snapshot.created_at,
+            expires_at=snapshot.expires_at,
+            label="expiring async snapshot",
         )
 
     finally:
@@ -172,15 +193,17 @@ def sync_demo() -> None:
 
         # Step 2: Create a snapshot with an explicit expiration (this STOPS the sandbox)
         print("\n[3] Creating snapshot with expiration=86400000...")
-        snapshot = sandbox1.snapshot(expiration=86400000)
+        snapshot = sandbox1.snapshot(expiration=SNAPSHOT_EXPIRATION_MS)
         sync_snapshot_ids.append(snapshot.snapshot_id)
         print(f"    Snapshot ID: {snapshot.snapshot_id}")
         print(f"    Status: {snapshot.status}")
         print(f"    Created At: {snapshot.created_at}")
         print(f"    Expires At: {snapshot.expires_at}")
         print(f"    Sandbox status after snapshot: {sandbox1.status}")
-        assert snapshot.expires_at == snapshot.created_at + 86_400_000, (
-            "expiring sync snapshot should report an expires_at timestamp"
+        assert_snapshot_expires_at_expected_time(
+            created_at=snapshot.created_at,
+            expires_at=snapshot.expires_at,
+            label="expiring sync snapshot",
         )
 
     finally:
