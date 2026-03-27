@@ -398,9 +398,9 @@ class AsyncSandbox:
                 ``"stopped"`` within *timeout*.
         """
         response = await self.client.stop_sandbox(sandbox_id=self.sandbox.id)
+        self.sandbox = response.sandbox
         if not blocking:
             return
-        self.sandbox = response.sandbox
         await self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
     async def extend_timeout(self, duration: int) -> None:
@@ -756,9 +756,9 @@ class Sandbox:
                 ``"stopped"`` within *timeout*.
         """
         response = iter_coroutine(self.client.stop_sandbox(sandbox_id=self.sandbox.id))
+        self.sandbox = response.sandbox
         if not blocking:
             return
-        self.sandbox = response.sandbox
         self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
     def extend_timeout(self, duration: int) -> None:
