@@ -270,6 +270,13 @@ class VercelWorld(w.World):
             schema=w.WorkflowStepAdaptor,
         )
 
+    async def hooks_get_by_token(self, token: str) -> w.Hook:
+        return await self._cbor_request(
+            "GET",
+            f"/v2/hooks/by-token?token={token}",
+            schema=w.Hook,
+        )
+
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         run_id_path = "null" if run_id is None else run_id
         remote_ref_behavior = (

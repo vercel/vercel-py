@@ -191,6 +191,14 @@ class LocalWorld(w.World):
             raise RuntimeError(f"Step {step_id} not found in run {run_id}")
         return step
 
+    async def hooks_get_by_token(self, token: str) -> w.Hook:
+        hooks_dir = self.data_dir / "hooks"
+        for hook_path in hooks_dir.iterdir():
+            hook = read_json(hook_path, w.Hook)
+            if hook is not None and hook.token == token:
+                return hook
+        raise RuntimeError(f"Hook with token {token!r} not found")
+
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         event_id = f"evnt_{self.monotonic_ulid(None)}"
         now = datetime.now(UTC)
