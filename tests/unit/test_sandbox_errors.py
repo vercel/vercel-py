@@ -15,6 +15,7 @@ from vercel._internal.sandbox.errors import (
     APIError,
     SandboxAuthError,
     SandboxError,
+    SandboxNotFoundError,
     SandboxPermissionError,
     SandboxRateLimitError,
     SandboxServerError,
@@ -23,6 +24,7 @@ from vercel.sandbox import (
     APIError as PublicAPIError,
     SandboxAuthError as PublicSandboxAuthError,
     SandboxError as PublicSandboxError,
+    SandboxNotFoundError as PublicSandboxNotFoundError,
     SandboxPermissionError as PublicSandboxPermissionError,
     SandboxRateLimitError as PublicSandboxRateLimitError,
     SandboxServerError as PublicSandboxServerError,
@@ -72,8 +74,10 @@ def _make_request_client(response: httpx.Response) -> SandboxRequestClient:
 
 
 def test_public_error_hierarchy_is_exposed() -> None:
+    assert issubclass(SandboxNotFoundError, APIError)
     assert issubclass(PublicAPIError, PublicSandboxError)
     assert issubclass(PublicSandboxAuthError, PublicAPIError)
+    assert issubclass(PublicSandboxNotFoundError, PublicAPIError)
     assert issubclass(PublicSandboxPermissionError, PublicAPIError)
     assert issubclass(PublicSandboxRateLimitError, PublicAPIError)
     assert issubclass(PublicSandboxServerError, PublicAPIError)
@@ -86,7 +90,7 @@ def test_public_error_hierarchy_is_exposed() -> None:
         (403, SandboxPermissionError, "forbidden", "Access denied.", None, None),
         (429, SandboxRateLimitError, "rate_limited", "Slow down.", {"retry-after": "120"}, 120),
         (500, SandboxServerError, "internal_server_error", "Something broke.", None, None),
-        (404, APIError, "not_found", "Missing file.", None, None),
+        (404, SandboxNotFoundError, "not_found", "Missing file.", None, None),
     ],
 )
 def test_request_classifies_sandbox_http_errors(

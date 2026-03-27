@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import builtins
 import time
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import datetime
+from os import PathLike
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
     CommandResponse,
     Sandbox as SandboxModel,
@@ -359,8 +362,39 @@ class AsyncSandbox:
     async def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
         await self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
 
+    async def iter_file(
+        self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
+    ) -> AsyncIterator[bytes]:
+        return await self.client.iter_file(
+            sandbox_id=self.sandbox.id,
+            path=path,
+            cwd=cwd,
+            chunk_size=chunk_size,
+        )
+
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
-        return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        try:
+            return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        except SandboxNotFoundError:
+            return None
+
+    async def download_file(
+        self,
+        remote_path: str,
+        local_path: str | PathLike,
+        *,
+        cwd: str | None = None,
+        create_parents: bool = False,
+        chunk_size: int = 65536,
+    ) -> str:
+        return await self.client.download_file(
+            sandbox_id=self.sandbox.id,
+            remote_path=remote_path,
+            local_path=local_path,
+            cwd=cwd,
+            create_parents=create_parents,
+            chunk_size=chunk_size,
+        )
 
     async def write_files(self, files: builtins.list[WriteFile]) -> None:
         await self.client.write_files(
@@ -721,8 +755,43 @@ class Sandbox:
     def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
         iter_coroutine(self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
 
+    def iter_file(
+        self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
+    ) -> Iterator[bytes]:
+        return self.client.iter_file(
+            sandbox_id=self.sandbox.id,
+            path=path,
+            cwd=cwd,
+            chunk_size=chunk_size,
+        )
+
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
-        return iter_coroutine(self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
+        try:
+            return iter_coroutine(
+                self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+            )
+        except SandboxNotFoundError:
+            return None
+
+    def download_file(
+        self,
+        remote_path: str,
+        local_path: str | PathLike,
+        *,
+        cwd: str | None = None,
+        create_parents: bool = False,
+        chunk_size: int = 65536,
+    ) -> str:
+        return iter_coroutine(
+            self.client.download_file(
+                sandbox_id=self.sandbox.id,
+                remote_path=remote_path,
+                local_path=local_path,
+                cwd=cwd,
+                create_parents=create_parents,
+                chunk_size=chunk_size,
+            )
+        )
 
     def write_files(self, files: builtins.list[WriteFile]) -> None:
         iter_coroutine(

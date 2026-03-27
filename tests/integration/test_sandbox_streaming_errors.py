@@ -8,6 +8,7 @@ from vercel.sandbox import (
     APIError,
     SandboxAuthError,
     SandboxError,
+    SandboxNotFoundError,
     SandboxPermissionError,
     SandboxRateLimitError,
     SandboxServerError,
@@ -45,6 +46,7 @@ def _make_error_response(
 
 
 SYNC_CASES = [
+    (404, SandboxNotFoundError, "not_found", "Missing command.", None, None),
     (401, SandboxAuthError, "unauthorized", "Authentication required.", None, None),
     (403, SandboxPermissionError, "forbidden", "Access denied.", None, None),
     (429, SandboxRateLimitError, "rate_limited", "Slow down.", {"retry-after": "120"}, 120),

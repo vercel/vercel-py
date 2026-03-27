@@ -10,16 +10,24 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import platform
 import posixpath
 import sys
 import tarfile
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from contextlib import asynccontextmanager
 from importlib.metadata import version as _pkg_version
 from typing import Any, TypeAlias, cast
 
 import httpx
 
+from vercel._internal.fs import (
+    FileHandle,
+    FilesystemClient,
+    create_async_filesystem_client,
+    create_filesystem_client,
+)
 from vercel._internal.http import (
     BytesBody,
     JSONBody,
@@ -31,6 +39,7 @@ from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.errors import (
     APIError,
     SandboxAuthError,
+    SandboxNotFoundError,
     SandboxPermissionError,
     SandboxRateLimitError,
     SandboxServerError,
@@ -179,6 +188,8 @@ def _build_sandbox_error(
     data: JSONValue | None = None,
 ) -> APIError:
     status_code = response.status_code
+    if status_code == 404:
+        return SandboxNotFoundError(response, message, data=data)
     if status_code == 401:
         return SandboxAuthError(response, message, data=data)
     if status_code == 403:
@@ -250,6 +261,10 @@ class BaseSandboxOpsClient:
     """
 
     _request_client: SandboxRequestClient
+    _filesystem_client: FilesystemClient[Any]
+
+    def __init__(self, *, filesystem_client: FilesystemClient[Any]) -> None:
+        self._filesystem_client = filesystem_client
 
     async def create_sandbox(
         self,
@@ -373,25 +388,97 @@ class BaseSandboxOpsClient:
             body=JSONBody(body),
         )
 
-    async def read_file(
-        self, *, sandbox_id: str, path: str, cwd: str | None = None
-    ) -> bytes | None:
+    async def read_file(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> bytes:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
-        try:
-            resp = await self._request_client.request(
-                "POST",
-                f"/v1/sandboxes/{sandbox_id}/fs/read",
-                body=JSONBody(body),
-            )
-        except APIError as e:
-            if e.status_code == 404:
-                return None
-            raise
-        if resp.content is None:
-            return None
+        resp = await self._request_client.request(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/fs/read",
+            body=JSONBody(body),
+        )
         return resp.content
+
+    async def _open_file_stream(
+        self, *, sandbox_id: str, path: str, cwd: str | None = None
+    ) -> httpx.Response:
+        body: dict[str, Any] = {"path": path}
+        if cwd is not None:
+            body["cwd"] = cwd
+        return await self._request_client.request(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/fs/read",
+            body=JSONBody(body),
+            stream=True,
+        )
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        raise NotImplementedError
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        raise NotImplementedError
+
+    @asynccontextmanager
+    async def file_chunk_stream(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[AsyncIterator[bytes]]:
+        response = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+
+        try:
+            yield self._stream_file_chunks(response, chunk_size=chunk_size)
+        finally:
+            await self._close_file_response(response)
+
+    async def download_file(
+        self,
+        *,
+        sandbox_id: str,
+        remote_path: str,
+        local_path: str | os.PathLike,
+        cwd: str | None = None,
+        create_parents: bool = False,
+        chunk_size: int = 65536,
+    ) -> str:
+        if not remote_path:
+            raise ValueError("remote_path is required")
+        if not local_path:
+            raise ValueError("local_path is required")
+
+        destination = os.path.abspath(await self._filesystem_client.coerce_path(local_path))
+        if create_parents:
+            await self._filesystem_client.create_parent_directories(destination)
+        temp_path = destination + ".part"
+
+        async with self.file_chunk_stream(
+            sandbox_id=sandbox_id,
+            path=remote_path,
+            cwd=cwd,
+            chunk_size=chunk_size,
+        ) as stream:
+            handle: FileHandle | None = None
+            try:
+                handle = await self._filesystem_client.open_binary_writer(temp_path)
+                try:
+                    async for chunk in stream:
+                        if chunk:
+                            await self._filesystem_client.write(handle, chunk)
+                finally:
+                    if handle is not None:
+                        await self._filesystem_client.close(handle)
+                        handle = None
+                await self._filesystem_client.replace(temp_path, destination)
+            except Exception:
+                await self._filesystem_client.remove_if_exists(temp_path)
+                raise
+
+        return destination
 
     async def write_files(
         self,
@@ -484,7 +571,15 @@ class BaseSandboxOpsClient:
 
 
 class SyncSandboxOpsClient(BaseSandboxOpsClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "https://api.vercel.com",
+        team_id: str,
+        token: str,
+        filesystem_client: FilesystemClient[Any] | None = None,
+    ) -> None:
+        super().__init__(filesystem_client=filesystem_client or create_filesystem_client())
         rc = create_request_client(
             token=token,
             base_headers={"user-agent": USER_AGENT},
@@ -515,6 +610,38 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         finally:
             resp.close()
 
+    def iter_file(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> Generator[bytes, None, None]:
+        resp = iter_coroutine(self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd))
+
+        def _iterate() -> Generator[bytes, None, None]:
+            try:
+                for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
+            finally:
+                resp.close()
+
+        return _iterate()
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            for chunk in response.iter_bytes(chunk_size=chunk_size):
+                yield chunk
+
+        return _iterate()
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        response.close()
+
     def close(self) -> None:
         self._rc.close()
 
@@ -531,7 +658,15 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
 
 
 class AsyncSandboxOpsClient(BaseSandboxOpsClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "https://api.vercel.com",
+        team_id: str,
+        token: str,
+        filesystem_client: FilesystemClient[Any] | None = None,
+    ) -> None:
+        super().__init__(filesystem_client=filesystem_client or create_async_filesystem_client())
         rc = create_async_request_client(
             token=token,
             base_headers={"user-agent": USER_AGENT},
@@ -561,6 +696,38 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             return
         finally:
             await resp.aclose()
+
+    async def iter_file(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncGenerator[bytes, None]:
+        resp = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+
+        async def _iterate() -> AsyncGenerator[bytes, None]:
+            try:
+                async for chunk in resp.aiter_bytes(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
+            finally:
+                await resp.aclose()
+
+        return _iterate()
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                yield chunk
+
+        return _iterate()
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        await response.aclose()
 
     async def aclose(self) -> None:
         await self._rc.aclose()

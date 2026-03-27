@@ -4,7 +4,11 @@ from collections.abc import AsyncGenerator, Generator
 from dataclasses import dataclass
 
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.sandbox import APIError, AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox import (
+    AsyncSandboxOpsClient,
+    SandboxNotFoundError,
+    SyncSandboxOpsClient,
+)
 from vercel._internal.sandbox.models import (
     Command as CommandModel,
     CommandFinishedResponse,
@@ -64,11 +68,9 @@ class AsyncCommand:
             await self.client.kill_command(
                 sandbox_id=self.sandbox_id, command_id=self.cmd.id, signal=signal
             )
-        except APIError as e:
+        except SandboxNotFoundError:
             # Command may already have exited; ignore 404s
-            if e.status_code == 404:
-                return
-            raise
+            return
 
 
 @dataclass
@@ -135,10 +137,8 @@ class Command:
                     sandbox_id=self.sandbox_id, command_id=self.cmd.id, signal=signal
                 )
             )
-        except APIError as e:
-            if e.status_code == 404:
-                return
-            raise
+        except SandboxNotFoundError:
+            return
 
 
 @dataclass
