@@ -1,4 +1,11 @@
-from vercel._internal.sandbox.errors import APIError
+from vercel._internal.sandbox import (
+    APIError,
+    SandboxAuthError,
+    SandboxError,
+    SandboxPermissionError,
+    SandboxRateLimitError,
+    SandboxServerError,
+)
 from vercel._internal.sandbox.network_policy import (
     NetworkPolicy,
     NetworkPolicyCustom,
@@ -14,7 +21,12 @@ from .sandbox import AsyncSandbox, Sandbox
 from .snapshot import AsyncSnapshot, Snapshot
 
 __all__ = [
+    "SandboxError",
     "APIError",
+    "SandboxAuthError",
+    "SandboxPermissionError",
+    "SandboxRateLimitError",
+    "SandboxServerError",
     "AsyncSandbox",
     "AsyncSandboxPage",
     "AsyncSnapshot",

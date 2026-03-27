@@ -9,6 +9,7 @@ loop, while ``AsyncSandboxOpsClient`` uses a real ``AsyncTransport``.
 from __future__ import annotations
 
 import io
+import json
 import platform
 import posixpath
 import sys
@@ -27,7 +28,13 @@ from vercel._internal.http import (
     create_request_client,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.sandbox.errors import APIError
+from vercel._internal.sandbox.errors import (
+    APIError,
+    SandboxAuthError,
+    SandboxPermissionError,
+    SandboxRateLimitError,
+    SandboxServerError,
+)
 from vercel._internal.sandbox.models import (
     CommandFinishedResponse,
     CommandResponse,
@@ -63,8 +70,8 @@ USER_AGENT = (
 class SandboxRequestClient:
     """Low-level request layer wrapping a :class:`RequestClient`.
 
-    Translates non-2xx responses into :class:`APIError` and provides
-    a ``request_json`` convenience method.
+    Translates non-2xx responses into sandbox-specific :class:`APIError`
+    subclasses and provides a ``request_json`` convenience method.
     """
 
     def __init__(self, *, request_client: RequestClient) -> None:
@@ -96,36 +103,46 @@ class SandboxRequestClient:
         if 200 <= response.status_code < 300:
             return response
 
+        error_body: bytes | None = None
+        try:
+            error_body = await response.aread()
+        except Exception:
+            try:
+                error_body = response.read()
+            except Exception:
+                error_body = None
+
         # Parse a helpful error message
         parsed: Any | None = None
         message = f"HTTP {response.status_code}"
-        try:
-            parsed = response.json()
-            if isinstance(parsed, dict):
-                if "message" in parsed and isinstance(parsed["message"], str):
-                    message = f"{message}: {parsed['message']}"
-                elif "error" in parsed:
-                    err = parsed["error"]
-                    if isinstance(err, dict):
-                        code = err.get("code")
-                        msg = err.get("message") or err.get("msg")
-                        if msg:
-                            message = f"{message}: {msg}"
-                        if code:
-                            message = f"{message} (code={code})"
-        except Exception:
-            parsed = None
+        if error_body:
+            try:
+                parsed = json.loads(error_body)
+                if isinstance(parsed, dict):
+                    if "message" in parsed and isinstance(parsed["message"], str):
+                        message = f"{message}: {parsed['message']}"
+                    elif "error" in parsed:
+                        err = parsed["error"]
+                        if isinstance(err, dict):
+                            code = err.get("code")
+                            msg = err.get("message") or err.get("msg")
+                            if msg:
+                                message = f"{message}: {msg}"
+                            if code:
+                                message = f"{message} (code={code})"
+            except Exception:
+                parsed = None
 
         if parsed is None:
             try:
-                text = response.text
+                text = error_body.decode() if error_body is not None else response.text
                 if text:
                     snippet = text if len(text) <= 500 else text[:500] + "\u2026"
                     message = f"{message}: {snippet}"
             except Exception:
                 pass
 
-        raise APIError(response, message, data=parsed)
+        raise _build_sandbox_error(response, message, data=parsed)
 
     async def request_json(
         self,
@@ -137,6 +154,29 @@ class SandboxRequestClient:
         headers.setdefault("content-type", "application/json")
         r = await self.request(method, path, headers=headers, **kwargs)
         return r.json()
+
+
+def _build_sandbox_error(
+    response: httpx.Response,
+    message: str,
+    *,
+    data: Any | None = None,
+) -> APIError:
+    status_code = response.status_code
+    if status_code == 401:
+        return SandboxAuthError(response, message, data=data)
+    if status_code == 403:
+        return SandboxPermissionError(response, message, data=data)
+    if status_code == 429:
+        return SandboxRateLimitError(
+            response,
+            message,
+            data=data,
+            retry_after=response.headers.get("retry-after"),
+        )
+    if 500 <= status_code < 600:
+        return SandboxServerError(response, message, data=data)
+    return APIError(response, message, data=data)
 
 
 # ---------------------------------------------------------------------------
