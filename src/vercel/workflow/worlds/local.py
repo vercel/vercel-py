@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import pathlib
@@ -51,6 +52,17 @@ def write_json(path: pathlib.Path, data: w.BaseModel | dict, *, overwrite: bool 
         data = data.model_dump()
     with path.open("wb") as f:
         cbor2.dump(data, f)
+
+
+def write_exclusive(path: pathlib.Path, data: str) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x") as f:
+            f.write(data)
+    except FileExistsError:
+        return False
+    else:
+        return True
 
 
 class LocalWorld(w.World):
@@ -193,10 +205,11 @@ class LocalWorld(w.World):
 
     async def hooks_get_by_token(self, token: str) -> w.Hook:
         hooks_dir = self.data_dir / "hooks"
-        for hook_path in hooks_dir.iterdir():
-            hook = read_json(hook_path, w.Hook)
-            if hook is not None and hook.token == token:
-                return hook
+        if hooks_dir.exists():
+            for hook_path in hooks_dir.iterdir():
+                hook = read_json(hook_path, w.Hook)
+                if hook is not None and hook.token == token:
+                    return hook
         raise RuntimeError(f"Hook with token {token!r} not found")
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
@@ -264,6 +277,13 @@ class LocalWorld(w.World):
                         f"Cannot modify non-running step on run in terminal state "
                         f'"{current_run.status}"'
                     )
+
+        hook_events_requiring_existance = ["hook_disposed", "hook_received"]
+        if data.event_type in hook_events_requiring_existance and data.correlation_id:
+            hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
+            existing_hook = read_json(hook_path, w.Hook)
+            if existing_hook is None:
+                raise RuntimeError(f"Hook {data.correlation_id!r} not found")
 
         event = w.EventAdaptor.validate_python(
             data.model_dump()
@@ -479,6 +499,69 @@ class LocalWorld(w.World):
                     }
                 )
                 write_json(step_path, step, overwrite=True)
+
+        elif data.event_type == "hook_created" and hasattr(data, "event_data"):
+            hook_data = data.event_data
+            hashed_token = hashlib.sha256(hook_data.token.encode()).hexdigest()
+            constraint_path = self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
+            token_claimed = write_exclusive(
+                constraint_path,
+                json.dumps(
+                    {
+                        "token": hook_data.token,
+                        "hookId": data.correlation_id,
+                        "runId": effective_run_id,
+                    }
+                ),
+            )
+            if not token_claimed:
+                conflict_event = w.HookConflictEvent(
+                    correlationId=data.correlation_id,
+                    eventData=w.HookConflictEventData(token=hook_data.token),
+                    server_props=w.ServerProps(
+                        runId=effective_run_id,
+                        eventId=event_id,
+                        createdAt=now,
+                    ),
+                )
+                assert conflict_event.server_props is not None
+                composite_key = f"{effective_run_id}-{event_id}"
+                event_path = self.data_dir / "events" / f"{composite_key}.json"
+                write_json(
+                    event_path,
+                    conflict_event.model_dump() | conflict_event.server_props.model_dump(),
+                )
+                return w.EventResult(
+                    event=conflict_event,
+                    run=run,
+                    step=step,
+                    hook=None,
+                )
+            hook = w.Hook(
+                runId=effective_run_id,
+                hookId=data.correlation_id,
+                token=hook_data.token,
+                metadata=hook_data.metadata,
+                ownerId="local-owner",
+                projectId="local-project",
+                environment="local",
+                createdAt=now,
+                specVersion=2,
+                isWebhook=False,
+            )
+            hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
+            write_json(hook_path, hook)
+
+        elif data.event_type == "hook_disposed":
+            hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
+            existing_hook = read_json(hook_path, w.Hook)
+            if existing_hook is not None:
+                hashed_token = hashlib.sha256(existing_hook.token.encode()).hexdigest()
+                disposed_constraint_path = (
+                    self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
+                )
+                disposed_constraint_path.unlink(missing_ok=True)
+            hook_path.unlink(missing_ok=True)
 
         composite_key = f"{effective_run_id}-{event_id}"
         event_path = self.data_dir / "events" / f"{composite_key}.json"
