@@ -57,6 +57,9 @@ async def async_demo() -> None:
         print(f"    Created At: {snapshot.created_at}")
         print(f"    Expires At: {snapshot.expires_at}")
         print(f"    Sandbox status after snapshot: {sandbox1.status}")
+        assert snapshot.expires_at == snapshot.created_at + 86_400_000, (
+            "expiring async snapshot should report an expires_at timestamp"
+        )
 
     finally:
         await sandbox1.client.aclose()
@@ -90,6 +93,9 @@ async def async_demo() -> None:
         print(f"    Snapshot ID: {persistent_snapshot.snapshot_id}")
         print(f"    Created At: {persistent_snapshot.created_at}")
         print(f"    Expires At: {persistent_snapshot.expires_at}")
+        assert persistent_snapshot.expires_at is None, (
+            "persistent async snapshot should not have an expires_at timestamp"
+        )
 
     finally:
         await sandbox2.client.aclose()
@@ -117,7 +123,7 @@ async def async_demo() -> None:
     )
 
     item_ids: list[str] = []
-    async for listed in AsyncSnapshot.list(limit=10, since=since):
+    async for listed in AsyncSnapshot.list(limit=10, since=since).iter_items():
         item_ids.append(listed.id)
         if all(snapshot_id in item_ids for snapshot_id in async_snapshot_ids):
             break
@@ -134,6 +140,7 @@ async def async_demo() -> None:
         try:
             await fetched.delete()
             print(f"    Deleted snapshot {snapshot_id}, status: {fetched.status}")
+            assert fetched.status == "deleted", "async snapshot should be deleted"
         finally:
             await fetched.client.aclose()
 
@@ -172,6 +179,9 @@ def sync_demo() -> None:
         print(f"    Created At: {snapshot.created_at}")
         print(f"    Expires At: {snapshot.expires_at}")
         print(f"    Sandbox status after snapshot: {sandbox1.status}")
+        assert snapshot.expires_at == snapshot.created_at + 86_400_000, (
+            "expiring sync snapshot should report an expires_at timestamp"
+        )
 
     finally:
         sandbox1.client.close()
@@ -204,6 +214,9 @@ def sync_demo() -> None:
         print(f"    Snapshot ID: {persistent_snapshot.snapshot_id}")
         print(f"    Created At: {persistent_snapshot.created_at}")
         print(f"    Expires At: {persistent_snapshot.expires_at}")
+        assert persistent_snapshot.expires_at is None, (
+            "persistent sync snapshot should not have an expires_at timestamp"
+        )
 
     finally:
         sandbox2.client.close()
@@ -245,6 +258,7 @@ def sync_demo() -> None:
         try:
             fetched.delete()
             print(f"    Deleted snapshot {snapshot_id}, status: {fetched.status}")
+            assert fetched.status == "deleted", "sync snapshot should be deleted"
         finally:
             fetched.client.close()
 
