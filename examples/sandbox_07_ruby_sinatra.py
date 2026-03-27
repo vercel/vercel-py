@@ -47,6 +47,12 @@ async def main() -> None:
     runtime = (
         os.getenv("SANDBOX_RUNTIME") or "node22"
     )  # note: ruby runtime is not supported so we have to install ruby via dnf
+    bundle_env = {
+        "BUNDLE_APP_CONFIG": ".bundle",
+        "BUNDLE_USER_HOME": ".bundle-home",
+        "BUNDLE_PATH": "vendor/bundle",
+        "BUNDLE_CACHE_PATH": "vendor/cache",
+    }
 
     # Sinatra default port is 4567
     port = 4567
@@ -101,10 +107,13 @@ async def main() -> None:
                 "-lc",
                 (
                     f"cd {sandbox.sandbox.cwd} && "
+                    "mkdir -p .bundle-home vendor/cache && "
                     "bundle config set --local path vendor/bundle && "
+                    "bundle config set --local cache_path vendor/cache && "
                     "bundle config set --local without 'development:test'"
                 ),
             ],
+            env=bundle_env,
         )
         async for line in bundler_cfg_cmd.logs():
             print(line.data, end="")
@@ -120,6 +129,7 @@ async def main() -> None:
                 "-lc",
                 (f"cd {sandbox.sandbox.cwd} && bundle install --jobs 4 --retry 3"),
             ],
+            env=bundle_env,
         )
         async for line in bundle_install_cmd.logs():
             print(line.data, end="")
@@ -135,9 +145,10 @@ async def main() -> None:
                 (
                     f"cd {sandbox.sandbox.cwd} && "
                     # Start via rackup using WEBrick, binding to 0.0.0.0 and selected port
-                    f"RACK_ENV=production bundle exec rackup -s webrick -o 0.0.0.0 -p {port}"
+                    f"bundle exec rackup -s webrick -o 0.0.0.0 -p {port}"
                 ),
             ],
+            env={**bundle_env, "RACK_ENV": "production"},
         )
 
         # Stream logs and open browser once server is ready.
