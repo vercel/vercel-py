@@ -5,34 +5,61 @@ import functools
 import json
 import random
 import re
+import sys
 import traceback
-from datetime import UTC, datetime, timedelta
-from typing import Any, Generic, Literal, ParamSpec, Self, TypeVar
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from typing import Any, Generic, Literal, ParamSpec, TypeVar
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 import anyio
+import pydantic
 
-from . import core, ulid, world as w
+from . import core, nanoid, ulid, world as w
 
 P = ParamSpec("P")
 T = TypeVar("T")
 SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 
 
-@dataclasses.dataclass
-class Suspension(Generic[T]):
+@dataclasses.dataclass(kw_only=True)
+class BaseSuspension:
     correlation_id: str
+    has_created_event: bool = False
+
+
+@dataclasses.dataclass(kw_only=True)
+class Suspension(BaseSuspension, Generic[T]):
     step: core.Step[Any, T]
     input: bytes
     future: asyncio.Future[T] = dataclasses.field(default_factory=asyncio.Future)
-    has_created_event: bool = False
 
 
-@dataclasses.dataclass
-class Wait:
-    correlation_id: str
+@dataclasses.dataclass(kw_only=True)
+class Wait(BaseSuspension):
     resume_at: datetime
     future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
-    has_created_event: bool = False
+
+
+@dataclasses.dataclass(kw_only=True)
+class Hook(BaseSuspension, Generic[T]):
+    token: str
+    disposed: bool = False
+    futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
+    hook_cls: type[T]
+
+    def set_result(self, raw_data: Any) -> None:
+        if dataclasses.is_dataclass(self.hook_cls):
+            res = self.hook_cls(**raw_data)
+        elif issubclass(self.hook_cls, pydantic.BaseModel):
+            res = self.hook_cls.model_validate(raw_data)
+        else:
+            raise RuntimeError(f"Invalid hook type for {self.hook_cls}")
+        self.futures.popleft().set_result(res)
 
 
 class WorkflowOrchestratorContext:
@@ -43,8 +70,10 @@ class WorkflowOrchestratorContext:
         self.replay_index = 0
         prng = random.Random(seed)
         self.generate_ulid = functools.partial(ulid.monotonic_factory(prng.random), started_at)
+        self.generate_nanoid = nanoid.custom_random(nanoid.URL_ALPHABET, 21, prng.random)
         self._fut: asyncio.Future[Any] | None = None
-        self.suspensions: dict[str, Wait | Suspension[Any]] = {}
+        self.suspensions: dict[str, BaseSuspension] = {}
+        self.hooks: dict[str, Hook] = {}
         self.resume_handle: asyncio.Handle | None = None
 
     @classmethod
@@ -83,6 +112,32 @@ class WorkflowOrchestratorContext:
             self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         await wait.future
 
+    def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
+        hook = Hook(
+            correlation_id=f"hook_{self.generate_ulid()}",
+            token=token or self.generate_nanoid(),
+            hook_cls=hook_cls,
+        )
+        self.hooks[hook.correlation_id] = hook
+        return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
+
+    async def run_hook(self, *, correlation_id: str) -> T:
+        hook = self.hooks[correlation_id]
+        if hook.disposed:
+            raise StopAsyncIteration
+        self.suspensions[hook.correlation_id] = hook
+        fut = asyncio.Future[T]()
+        hook.futures.append(fut)
+        if self.resume_handle is None:
+            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
+        return await fut
+
+    def dispose_hook(self, *, correlation_id: str) -> None:
+        hook = self.hooks[correlation_id]
+        hook.disposed = True
+        while hook.futures:
+            hook.futures.popleft().set_exception(StopAsyncIteration)
+
     def resume(self) -> None:
         self.resume_handle = None
 
@@ -94,11 +149,12 @@ class WorkflowOrchestratorContext:
             self.replay_index += 1
 
             match event:
-                case w.StepCreatedEvent() | w.WaitCreatedEvent():
+                case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
                     self.suspensions[event.correlation_id].has_created_event = True
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
+                    assert isinstance(sus, Suspension)
                     if data[0].startswith(b"json"):
                         result = json.loads(data[0][len(b"json") :].decode())
                     else:
@@ -111,11 +167,43 @@ class WorkflowOrchestratorContext:
 
                 case w.WaitCompletedEvent():
                     wait = self.suspensions.pop(event.correlation_id)
+                    assert isinstance(wait, Wait)
                     wait.future.set_result(None)
 
                 case w.StepFailedEvent(event_data=w.StepFailedEventData(error=e)):
                     sus = self.suspensions.pop(event.correlation_id)
+                    assert isinstance(sus, Suspension)
                     sus.future.set_exception(RuntimeError(e))
+
+                case w.HookConflictEvent(event_data=w.HookConflictEventData(token=token)):
+                    hook = self.suspensions.pop(event.correlation_id, None)
+                    if hook is not None:
+                        assert isinstance(hook, Hook)
+                        while hook.futures:
+                            hook.futures.popleft().set_exception(
+                                RuntimeError(
+                                    f'Hook token "{token}" is already in use by another workflow'
+                                )
+                            )
+
+                case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
+                    hook = self.suspensions[event.correlation_id]
+                    assert isinstance(hook, Hook)
+                    if data[0].startswith(b"json"):
+                        result = json.loads(data[0][len(b"json") :].decode())
+                    else:
+                        self._fut.cancel(
+                            f"Unsupported step result encoding for "
+                            f"correlation ID {event.correlation_id}"
+                        )
+                        return
+                    hook.set_result(result)
+                    if not hook.futures:
+                        self.suspensions.pop(event.correlation_id)
+
+                case w.HookDisposedEvent():
+                    self.suspensions.pop(event.correlation_id, None)
+                    self.hooks.pop(event.correlation_id)
 
         if self.suspensions:
             self._fut.cancel(SUSPENDED_MESSAGE)
@@ -152,7 +240,7 @@ async def workflow_handler(
     events = await get_all_workflow_run_events(run_id)
 
     # Check for any elapsed waits and create wait_completed events
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
 
     # Pre-compute completed correlation IDs for O(n) lookup instead of O(n²)
     completed_wait_ids = {e.correlation_id for e in events if e.event_type == "wait_completed"}
@@ -214,14 +302,25 @@ async def workflow_handler(
                         workflowRunId=run_id,
                         workflowStartedAt=workflow_started_at,
                         stepId=sus.correlation_id,
-                        requestedAt=datetime.now(UTC),
+                        requestedAt=datetime.now(timezone.utc),
                     ),
                 )
             elif isinstance(sus, Wait):
                 wait_data = w.WaitCreatedEventData(resumeAt=sus.resume_at)
                 tg.start_soon(world.events_create, run_id, wait_data.into_event(sus.correlation_id))
+            elif isinstance(sus, Hook):
+                hook_data = w.HookCreatedEventData(token=sus.token)
+                tg.start_soon(world.events_create, run_id, hook_data.into_event(sus.correlation_id))
 
-    now = datetime.now(UTC)
+        for hook in context.hooks.values():
+            if hook.disposed:
+                tg.start_soon(
+                    world.events_create,
+                    run_id,
+                    w.HookDisposedEvent(correlationId=hook.correlation_id),
+                )
+
+    now = datetime.now(timezone.utc)
     min_timeout_seconds = -1.0
     for sus in context.suspensions.values():
         if isinstance(sus, Wait):
@@ -248,7 +347,7 @@ async def step_handler(
     step = core.get_step(step_run.step_name)
 
     # Check if retry_after timestamp hasn't been reached yet
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     if step_run.retry_after and step_run.retry_after > now:
         timeout_seconds = max(1, int((step_run.retry_after - now).total_seconds()))
         return timeout_seconds
@@ -275,7 +374,10 @@ async def step_handler(
         # Re-invoke the workflow to handle the failed step
         await world.queue(
             f"__wkf_workflow_{req.workflow_name}",
-            w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
+            w.WorkflowInvokePayload(
+                runId=req.workflow_run_id,
+                requestedAt=datetime.now(timezone.utc),
+            ),
         )
         return None
 
@@ -383,7 +485,7 @@ async def step_handler(
     # Re-invoke the workflow to continue execution
     await world.queue(
         f"__wkf_workflow_{req.workflow_name}",
-        w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
+        w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(timezone.utc)),
     )
     return None
 
@@ -454,12 +556,12 @@ def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
         ms = sum(items)
         if ms < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=ms)
+        return datetime.now(timezone.utc) + timedelta(milliseconds=ms)
 
     elif isinstance(param, (int, float)):
         if param < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=param)
+        return datetime.now(timezone.utc) + timedelta(milliseconds=param)
 
     elif isinstance(param, datetime):
         if param.tzinfo is None:
@@ -524,3 +626,20 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     )
 
     return Run(run_id)
+
+
+async def resume_hook(token_or_hook: str | w.Hook, payload_json: str) -> w.Hook:
+    world = w.get_world()
+    if isinstance(token_or_hook, str):
+        hook = await world.hooks_get_by_token(token_or_hook)
+    else:
+        hook = token_or_hook
+    run = await world.runs_get(hook.run_id)
+    payload = b"json" + payload_json.encode()
+    data = w.HookReceivedEventData(payload=[payload])
+    await world.events_create(hook.run_id, data.into_event(hook.hook_id))
+    await world.queue(
+        f"__wkf_workflow_{run.workflow_name}",
+        w.WorkflowInvokePayload(runId=hook.run_id),
+    )
+    return hook

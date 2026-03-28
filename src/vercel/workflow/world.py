@@ -2,6 +2,7 @@ import abc
 import dataclasses
 import json
 import os
+import sys
 from datetime import datetime
 from typing import (
     Annotated,
@@ -9,11 +10,15 @@ from typing import (
     Generic,
     Literal,
     Protocol,
-    Self,
     TypeAlias,
     TypeVar,
     overload,
 )
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 import pydantic
 
@@ -122,34 +127,6 @@ class BaseWorkflowRun(BaseModel):
     completed_at: datetime | None = pydantic.Field(default=None, alias="completedAt")
     created_at: datetime = pydantic.Field(alias="createdAt")
     updated_at: datetime = pydantic.Field(alias="updatedAt")
-
-    # @pydantic.model_validator(mode="wrap")
-    # @classmethod
-    # def discriminate(
-    #     cls,
-    #     data: Any,
-    #     handler: pydantic.ModelWrapValidatorHandler[Self],
-    #     info: pydantic.ValidationInfo,
-    # ) -> Self:
-    #     if isinstance(info.context, _ContextWrapper):
-    #         return handler(data)
-    #
-    #     config = info.config or {}
-    #     args = {"context": _ContextWrapper(info.context)}
-    #     if "strict" in config:
-    #         args["strict"] = config["strict"]
-    #     if "extra_fields_behavior" in config:
-    #         args["extra"] = config["extra_fields_behavior"]
-    #     if "validate_by_alias" in config:
-    #         args["by_alias"] = config["validate_by_alias"]
-    #     if "validate_by_name" in config:
-    #         args["by_name"] = config["validate_by_name"]
-    #     if info.mode == "python":
-    #         if "from_attributes" in config:
-    #             args["from_attributes"] = config["from_attributes"]
-    #         return WorkflowRunAdaptor.validate_python(data, **args)
-    #     else:
-    #         return WorkflowRunAdaptor.validate_json(data, **args)
 
 
 class NonFinalWorkflowRun(BaseWorkflowRun):
@@ -451,6 +428,87 @@ class StepFailedEvent(BaseEvent):
     event_data: StepFailedEventData = pydantic.Field(alias="eventData")
 
 
+class Hook(BaseModel):
+    run_id: str = pydantic.Field(alias="runId")
+    hook_id: str = pydantic.Field(alias="hookId")
+    token: str
+    owner_id: str = pydantic.Field(alias="ownerId")
+    project_id: str = pydantic.Field(alias="projectId")
+    environment: str
+    metadata: list[bytes] | None = None
+    created_at: datetime = pydantic.Field(alias="createdAt")
+    spec_version: int | None = pydantic.Field(default=None, alias="specVersion")
+    is_webhook: bool | None = pydantic.Field(default=None, alias="isWebhook")
+
+
+class HookCreatedEventData(BaseModel):
+    token: str
+    metadata: list[bytes] | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+
+    def into_event(self, correlation_id: str) -> "HookCreatedEvent":
+        return HookCreatedEvent(correlationId=correlation_id, eventData=self)
+
+
+class HookCreatedEvent(BaseEvent):
+    """
+    Event created when a hook is first invoked. The World implementation
+    atomically creates both the event and the hook entity.
+    """
+
+    event_type: Literal["hook_created"] = pydantic.Field(
+        default="hook_created",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: HookCreatedEventData = pydantic.Field(alias="eventData")
+
+
+class HookReceivedEventData(BaseModel):
+    payload: list[bytes]
+
+    def into_event(self, correlation_id: str) -> "HookReceivedEvent":
+        return HookReceivedEvent(correlationId=correlation_id, eventData=self)
+
+
+class HookReceivedEvent(BaseEvent):
+    event_type: Literal["hook_received"] = pydantic.Field(
+        default="hook_received",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: HookReceivedEventData = pydantic.Field(alias="eventData")
+
+
+class HookDisposedEvent(BaseEvent):
+    event_type: Literal["hook_disposed"] = pydantic.Field(
+        default="hook_disposed",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+
+
+class HookConflictEventData(BaseModel):
+    token: str
+
+
+class HookConflictEvent(BaseEvent):
+    """
+    Event created by World implementations when a hook_created request
+    conflicts with an existing hook token. This event is NOT user-creatable -
+    it is only returned by the World when a token conflict is detected.
+
+    When the hook consumer sees this event, it should reject any awaited
+    promises with a HookTokenConflictError.
+    """
+
+    event_type: Literal["hook_conflict"] = pydantic.Field(
+        default="hook_conflict",
+        alias="eventType",
+    )
+    correlation_id: str = pydantic.Field(alias="correlationId")
+    event_data: HookConflictEventData = pydantic.Field(alias="eventData")
+
+
 class WaitCreatedEventData(BaseModel):
     resume_at: datetime = pydantic.Field(alias="resumeAt")
 
@@ -484,6 +542,9 @@ CreateEventRequest: TypeAlias = (
     | StepRetryingEvent
     | StepCompletedEvent
     | StepFailedEvent
+    | HookCreatedEvent
+    | HookReceivedEvent
+    | HookDisposedEvent
     | WaitCreatedEvent
     | WaitCompletedEvent
 )
@@ -498,6 +559,10 @@ Event: TypeAlias = Annotated[
         | StepRetryingEvent
         | StepCompletedEvent
         | StepFailedEvent
+        | HookCreatedEvent
+        | HookReceivedEvent
+        | HookDisposedEvent
+        | HookConflictEvent
         | WaitCreatedEvent
         | WaitCompletedEvent
     ),
@@ -615,6 +680,9 @@ class World(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     async def steps_get(self, run_id: str, step_id: str) -> WorkflowStep: ...
+
+    @abc.abstractmethod
+    async def hooks_get_by_token(self, token: str) -> Hook: ...
 
     @overload
     async def events_create(self, run_id: None, data: RunCreatedEvent) -> EventResult:

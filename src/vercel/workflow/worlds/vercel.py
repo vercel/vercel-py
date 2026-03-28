@@ -105,7 +105,7 @@ class VercelWorld(w.World):
         headers["Accept"] = "application/cbor"
         # NOTE: Add a unique header to bypass RSC request memoization.
         # See: https://github.com/vercel/workflow/issues/618
-        headers["X-Request-Time"] = datetime.datetime.now(datetime.UTC).isoformat() + "Z"
+        headers["X-Request-Time"] = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
 
         # Encode body as CBOR if data is provided
         body: bytes | None = None
@@ -268,6 +268,13 @@ class VercelWorld(w.World):
             "GET",
             f"/v2/runs/{run_id}/steps/{step_id}?remoteRefBehavior=resolve",
             schema=w.WorkflowStepAdaptor,
+        )
+
+    async def hooks_get_by_token(self, token: str) -> w.Hook:
+        return await self._cbor_request(
+            "GET",
+            f"/v2/hooks/by-token?token={token}",
+            schema=w.Hook,
         )
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
