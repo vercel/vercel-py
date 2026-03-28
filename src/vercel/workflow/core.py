@@ -127,7 +127,7 @@ class HookMixin:
         except LookupError:
             raise RuntimeError("cannot call wait() outside workflow") from None
         else:
-            return ctx.create_hook(token)
+            return ctx.create_hook(token, cls)
 
     async def resume(self, token_or_hook: str | w.Hook, **kwargs) -> w.Hook:
         from . import runtime

@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, Self, TypeVar
 
 import anyio
+import pydantic
 
 from . import core, nanoid, ulid, world as w
 
@@ -43,6 +44,16 @@ class Hook(BaseSuspension, Generic[T]):
     token: str
     disposed: bool = False
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
+    hook_cls: type[T]
+
+    def set_result(self, raw_data: Any) -> None:
+        if dataclasses.is_dataclass(self.hook_cls):
+            res = self.hook_cls(**raw_data)
+        elif issubclass(self.hook_cls, pydantic.BaseModel):
+            res = self.hook_cls.model_validate(raw_data)
+        else:
+            raise RuntimeError(f"Invalid hook type for {self.hook_cls}")
+        self.futures.popleft().set_result(res)
 
 
 class WorkflowOrchestratorContext:
@@ -95,10 +106,11 @@ class WorkflowOrchestratorContext:
             self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         await wait.future
 
-    def create_hook(self, token: str | None) -> core.HookEvent[T]:
-        hook = Hook[T](
+    def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
+        hook = Hook(
             correlation_id=f"hook_{self.generate_ulid()}",
             token=token or self.generate_nanoid(),
+            hook_cls=hook_cls,
         )
         self.hooks[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
@@ -179,7 +191,7 @@ class WorkflowOrchestratorContext:
                             f"correlation ID {event.correlation_id}"
                         )
                         return
-                    hook.futures.popleft().set_result(result)
+                    hook.set_result(result)
                     if not hook.futures:
                         self.suspensions.pop(event.correlation_id)
 
