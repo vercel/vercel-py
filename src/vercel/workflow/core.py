@@ -1,9 +1,16 @@
 from __future__ import annotations
+
 import dataclasses
 import datetime
 import json
+import sys
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
-from typing import TYPE_CHECKING, Any, Generic, ParamSpec, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 import pydantic
 
@@ -12,8 +19,8 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 T = TypeVar("T")
-_workflows: dict[str, "Workflow[Any, Any]"] = {}
-_steps: dict[str, "Step[Any, Any]"] = {}
+_workflows: dict[str, Workflow[Any, Any]] = {}
+_steps: dict[str, Step[Any, Any]] = {}
 
 
 class Workflow(Generic[P, T]):

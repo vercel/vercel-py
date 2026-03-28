@@ -142,7 +142,7 @@ def test_distribution():
     # Generate many short IDs and check distribution
     alphabet = "0123456789"
     generator = nanoid.custom_alphabet(alphabet, 10)
-    counts = {c: 0 for c in alphabet}
+    counts = dict.fromkeys(alphabet, 0)
 
     for _ in range(1000):
         id_str = generator()

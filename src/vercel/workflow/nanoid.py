@@ -80,9 +80,8 @@ def _custom_alphabet_generator(
 
     def generate_id(size: int = default_size) -> str:
         """Generate a nano ID of the specified size."""
-        # Matches JS: if (!size) return ''
-        if not size:
-            return ""
+        if size <= 0:
+            raise ValueError("Size must be positive")
 
         id_str = ""
         while True:

@@ -5,10 +5,16 @@ import functools
 import json
 import random
 import re
+import sys
 import traceback
 from collections import deque
-from datetime import UTC, datetime, timedelta
-from typing import Any, Generic, Literal, ParamSpec, Self, TypeVar
+from datetime import datetime, timedelta, timezone
+from typing import Any, Generic, Literal, ParamSpec, TypeVar
+
+if sys.version_info >= (3, 11):
+    from typing import Self
+else:
+    from typing_extensions import Self
 
 import anyio
 import pydantic
@@ -234,7 +240,7 @@ async def workflow_handler(
     events = await get_all_workflow_run_events(run_id)
 
     # Check for any elapsed waits and create wait_completed events
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
 
     # Pre-compute completed correlation IDs for O(n) lookup instead of O(n²)
     completed_wait_ids = {e.correlation_id for e in events if e.event_type == "wait_completed"}
@@ -296,7 +302,7 @@ async def workflow_handler(
                         workflowRunId=run_id,
                         workflowStartedAt=workflow_started_at,
                         stepId=sus.correlation_id,
-                        requestedAt=datetime.now(UTC),
+                        requestedAt=datetime.now(timezone.utc),
                     ),
                 )
             elif isinstance(sus, Wait):
@@ -314,7 +320,7 @@ async def workflow_handler(
                     w.HookDisposedEvent(correlationId=hook.correlation_id),
                 )
 
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     min_timeout_seconds = -1.0
     for sus in context.suspensions.values():
         if isinstance(sus, Wait):
@@ -341,7 +347,7 @@ async def step_handler(
     step = core.get_step(step_run.step_name)
 
     # Check if retry_after timestamp hasn't been reached yet
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     if step_run.retry_after and step_run.retry_after > now:
         timeout_seconds = max(1, int((step_run.retry_after - now).total_seconds()))
         return timeout_seconds
@@ -368,7 +374,10 @@ async def step_handler(
         # Re-invoke the workflow to handle the failed step
         await world.queue(
             f"__wkf_workflow_{req.workflow_name}",
-            w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
+            w.WorkflowInvokePayload(
+                runId=req.workflow_run_id,
+                requestedAt=datetime.now(timezone.utc),
+            ),
         )
         return None
 
@@ -476,7 +485,7 @@ async def step_handler(
     # Re-invoke the workflow to continue execution
     await world.queue(
         f"__wkf_workflow_{req.workflow_name}",
-        w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
+        w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(timezone.utc)),
     )
     return None
 
@@ -547,12 +556,12 @@ def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
         ms = sum(items)
         if ms < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=ms)
+        return datetime.now(timezone.utc) + timedelta(milliseconds=ms)
 
     elif isinstance(param, (int, float)):
         if param < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=param)
+        return datetime.now(timezone.utc) + timedelta(milliseconds=param)
 
     elif isinstance(param, datetime):
         if param.tzinfo is None:
