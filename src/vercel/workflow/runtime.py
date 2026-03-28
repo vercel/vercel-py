@@ -619,14 +619,14 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     return Run(run_id)
 
 
-async def resume_hook(token_or_hook: str | w.Hook, payload: Any) -> w.Hook:
+async def resume_hook(token_or_hook: str | w.Hook, payload_json: str) -> w.Hook:
     world = w.get_world()
     if isinstance(token_or_hook, str):
         hook = await world.hooks_get_by_token(token_or_hook)
     else:
         hook = token_or_hook
     run = await world.runs_get(hook.run_id)
-    payload = b"json" + json.dumps(payload, sort_keys=True).encode()
+    payload = b"json" + payload_json.encode()
     data = w.HookReceivedEventData(payload=[payload])
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     await world.queue(
