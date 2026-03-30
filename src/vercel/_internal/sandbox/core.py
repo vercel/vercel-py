@@ -17,6 +17,7 @@ import sys
 import tarfile
 from collections.abc import AsyncGenerator, AsyncIterator, Generator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, TypeAlias, cast
 
@@ -60,6 +61,8 @@ from vercel._internal.sandbox.network_policy import (
     ApiNetworkPolicy,
     NetworkPolicy,
 )
+from vercel._internal.sandbox.snapshot import SnapshotExpiration
+from vercel._internal.sandbox.time import normalize_duration_ms
 
 try:
     VERSION = _pkg_version("vercel")
@@ -272,7 +275,7 @@ class BaseSandboxOpsClient:
         project_id: str,
         ports: list[int] | None = None,
         source: dict[str, Any] | None = None,
-        timeout: int | None = None,
+        timeout: int | timedelta | None = None,
         resources: dict[str, Any] | None = None,
         runtime: str | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -285,7 +288,7 @@ class BaseSandboxOpsClient:
         if source is not None:
             body["source"] = source
         if timeout is not None:
-            body["timeout"] = timeout
+            body["timeout"] = normalize_duration_ms(timeout)
         if resources is not None:
             body["resources"] = resources
         if runtime is not None:
@@ -505,18 +508,20 @@ class BaseSandboxOpsClient:
             body=JSONBody({"signal": signal}),
         )
 
-    async def extend_timeout(self, *, sandbox_id: str, duration: int) -> SandboxResponse:
+    async def extend_timeout(
+        self, *, sandbox_id: str, duration: int | timedelta
+    ) -> SandboxResponse:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/extend-timeout",
-            body=JSONBody({"duration": duration}),
+            body=JSONBody({"duration": normalize_duration_ms(duration)}),
         )
         return SandboxResponse.model_validate(data)
 
     async def create_snapshot(
-        self, *, sandbox_id: str, expiration: int | None = None
+        self, *, sandbox_id: str, expiration: SnapshotExpiration | None = None
     ) -> CreateSnapshotResponse:
-        body = None if expiration is None else JSONBody({"expiration": expiration})
+        body = None if expiration is None else JSONBody({"expiration": int(expiration)})
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/snapshot",
