@@ -31,6 +31,10 @@ async def _collect_async_items(page: AsyncSnapshotPage) -> list:
     return [snapshot async for snapshot in page.iter_items()]
 
 
+async def _collect_async_current_page_items(page: AsyncSnapshotPage) -> list:
+    return [snapshot async for snapshot in page]
+
+
 class TestSnapshotPage:
     def test_iterates_pages_and_items(self) -> None:
         second_page = SnapshotPage.create(
@@ -58,6 +62,7 @@ class TestSnapshotPage:
             ["snap_1"],
             ["snap_2"],
         ]
+        assert [snapshot.id for snapshot in first_page] == ["snap_1"]
         assert [snapshot.id for snapshot in first_page.iter_items()] == ["snap_1", "snap_2"]
 
     def test_terminal_page_does_not_fetch_more(self) -> None:
@@ -75,6 +80,7 @@ class TestSnapshotPage:
         ] == [
             ["snap_terminal"],
         ]
+        assert [snapshot.id for snapshot in page] == ["snap_terminal"]
         assert [snapshot.id for snapshot in page.iter_items()] == ["snap_terminal"]
 
     @staticmethod
@@ -109,6 +115,8 @@ class TestAsyncSnapshotPage:
             ["snap_async_1"],
             ["snap_async_2"],
         ]
+        current_page_items = await _collect_async_current_page_items(first_page)
+        assert [snapshot.id for snapshot in current_page_items] == ["snap_async_1"]
         items = await _collect_async_items(first_page)
         assert [snapshot.id for snapshot in items] == ["snap_async_1", "snap_async_2"]
 
@@ -127,6 +135,8 @@ class TestAsyncSnapshotPage:
         assert [[snapshot.id for snapshot in current.snapshots] for current in pages] == [
             ["snap_async_terminal"],
         ]
+        current_page_items = await _collect_async_current_page_items(page)
+        assert [snapshot.id for snapshot in current_page_items] == ["snap_async_terminal"]
         items = await _collect_async_items(page)
         assert [snapshot.id for snapshot in items] == ["snap_async_terminal"]
 

@@ -58,6 +58,9 @@ class SandboxPage:
     def iter_items(self) -> Iterator[SandboxModel]:
         return self._controller.iter_items_sync(self)
 
+    def __iter__(self) -> Iterator[SandboxModel]:
+        return iter(self.sandboxes)
+
 
 @dataclass(slots=True)
 class AsyncSandboxPage:
@@ -98,6 +101,10 @@ class AsyncSandboxPage:
 
     def iter_items(self) -> AsyncIterator[SandboxModel]:
         return self._controller.iter_items(self)
+
+    async def __aiter__(self) -> AsyncIterator[SandboxModel]:
+        for sandbox in self.sandboxes:
+            yield sandbox
 
 
 @dataclass(slots=True)
@@ -169,6 +176,9 @@ class SnapshotPage:
     def iter_items(self) -> Iterator[SnapshotModel]:
         return self._controller.iter_items_sync(self)
 
+    def __iter__(self) -> Iterator[SnapshotModel]:
+        return iter(self.snapshots)
+
 
 @dataclass(slots=True)
 class AsyncSnapshotPage:
@@ -211,6 +221,10 @@ class AsyncSnapshotPage:
 
     def iter_items(self) -> AsyncIterator[SnapshotModel]:
         return self._controller.iter_items(self)
+
+    async def __aiter__(self) -> AsyncIterator[SnapshotModel]:
+        for snapshot in self.snapshots:
+            yield snapshot
 
 
 @dataclass(slots=True)

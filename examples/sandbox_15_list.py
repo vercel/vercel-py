@@ -110,7 +110,14 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
     print(f"async iter_items: {iter_item_ids}")
     _summarize_created("async iter_items", iter_item_ids, created_ids)
 
-    print("\n[5] Iterate items from the pager with pager.iter_items()")
+    print("\n[5] Iterate items directly from the first page")
+    current_page_ids: list[str] = []
+    async for sandbox in first_page:
+        current_page_ids.append(sandbox.id)
+    print(f"async current page iteration: {current_page_ids}")
+    _summarize_created("async current page iteration", current_page_ids, created_ids)
+
+    print("\n[6] Iterate items from the pager with pager.iter_items()")
     pager_item_ids: list[str] = []
     async for sandbox in AsyncSandbox.list(
         project_id=PROJECT_ID,
@@ -123,7 +130,7 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
     print(f"async pager.iter_items: {pager_item_ids}")
     _summarize_created("async pager.iter_items", pager_item_ids, created_ids)
 
-    print("\n[6] Iterate items directly from the pager")
+    print("\n[7] Iterate items directly from the pager")
     direct_item_ids: list[str] = []
     async for sandbox in AsyncSandbox.list(
         project_id=PROJECT_ID,
