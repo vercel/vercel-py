@@ -3,11 +3,11 @@ Example: List sandboxes after concurrent creation.
 
 This example demonstrates how to:
 1. Create several sandboxes concurrently with ``AsyncSandbox.create()``
-2. Exercise the async pager APIs, including direct async iteration
-3. Exercise the sync page APIs
+2. Fetch sandbox pages explicitly with ``list()`` and ``get_next_page()``
+3. Iterate directly over the sandboxes owned by each page
 
 The list API returns typed pages. Use a small ``limit`` to paginate through
-the recent results and inspect only the first few pages.
+the recent results one page at a time.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ SANDBOX_COUNT = 5
 PAGE_SIZE = 2
 MAX_PAGES = 3
 TIMEOUT_MS = 120_000
-MAX_ITEMS = PAGE_SIZE * MAX_PAGES
 PROJECT_ID = os.environ["VERCEL_PROJECT_ID"]
 
 
@@ -35,12 +34,7 @@ def _print_page(prefix: str, page_number: int, sandbox_ids: list[str]) -> None:
 
 
 def _print_page_state(prefix: str, page) -> None:
-    next_page_info = page.next_page_info()
-    next_until = None if next_page_info is None else next_page_info.until
-    print(
-        f"{prefix} has_next={page.has_next_page()} "
-        f"count={page.pagination.count} next_until={next_until}"
-    )
+    print(f"{prefix} count={page.pagination.count} next_until={page.pagination.next}")
 
 
 def _summarize_created(prefix: str, sandbox_ids: list[str], created_ids: set[str]) -> None:
@@ -67,81 +61,36 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
     created_ids = {sandbox.sandbox_id for sandbox in sandboxes}
     print(f"Created {len(created_ids)} sandboxes concurrently")
 
-    print("\n[1] Await the pager to get the first page")
-    pager = AsyncSandbox.list(
+    print("\n[1] Await the first page")
+    first_page = await AsyncSandbox.list(
         project_id=PROJECT_ID,
         limit=PAGE_SIZE,
         since=since,
     )
-    first_page = await pager
     _print_page_state("async first page:", first_page)
     _print_page("async", 1, [sandbox.id for sandbox in first_page.sandboxes])
 
-    print("\n[2] Fetch the next page explicitly with get_next_page()")
-    next_page = await first_page.get_next_page()
-    if next_page is None:
-        print("async next page: none")
-    else:
-        _print_page_state("async next page:", next_page)
-        _print_page("async", 2, [sandbox.id for sandbox in next_page.sandboxes])
-
-    print("\n[3] Iterate pages from the pager with iter_pages()")
-    paged_ids: list[str] = []
-    page_number = 0
-    async for page in AsyncSandbox.list(
-        project_id=PROJECT_ID,
-        limit=PAGE_SIZE,
-        since=since,
-    ).iter_pages():
-        page_number += 1
-        page_ids = [sandbox.id for sandbox in page.sandboxes]
-        _print_page("async iter_pages", page_number, page_ids)
-        paged_ids.extend(page_ids)
-        if page_number >= MAX_PAGES:
-            break
-    _summarize_created("async iter_pages", paged_ids, created_ids)
-
-    print("\n[4] Iterate items from the first page with page.iter_items()")
-    iter_item_ids: list[str] = []
-    async for sandbox in first_page.iter_items():
-        iter_item_ids.append(sandbox.id)
-        if len(iter_item_ids) >= MAX_ITEMS:
-            break
-    print(f"async iter_items: {iter_item_ids}")
-    _summarize_created("async iter_items", iter_item_ids, created_ids)
-
-    print("\n[5] Iterate items directly from the first page")
-    current_page_ids: list[str] = []
-    async for sandbox in first_page:
-        current_page_ids.append(sandbox.id)
+    print("\n[2] Iterate the sandboxes in the first page")
+    current_page_ids = [sandbox.id for sandbox in first_page]
     print(f"async current page iteration: {current_page_ids}")
     _summarize_created("async current page iteration", current_page_ids, created_ids)
 
-    print("\n[6] Iterate items from the pager with pager.iter_items()")
-    pager_item_ids: list[str] = []
-    async for sandbox in AsyncSandbox.list(
-        project_id=PROJECT_ID,
-        limit=PAGE_SIZE,
-        since=since,
-    ).iter_items():
-        pager_item_ids.append(sandbox.id)
-        if len(pager_item_ids) >= MAX_ITEMS:
+    print("\n[3] Walk forward with get_next_page()")
+    paged_ids: list[str] = []
+    page_number = 1
+    page = first_page
+    while True:
+        page_ids = [sandbox.id for sandbox in page]
+        _print_page("async paged", page_number, page_ids)
+        paged_ids.extend(page_ids)
+        if page_number >= MAX_PAGES:
             break
-    print(f"async pager.iter_items: {pager_item_ids}")
-    _summarize_created("async pager.iter_items", pager_item_ids, created_ids)
-
-    print("\n[7] Iterate items directly from the pager")
-    direct_item_ids: list[str] = []
-    async for sandbox in AsyncSandbox.list(
-        project_id=PROJECT_ID,
-        limit=PAGE_SIZE,
-        since=since,
-    ):
-        direct_item_ids.append(sandbox.id)
-        if len(direct_item_ids) >= MAX_ITEMS:
+        next_page = await page.get_next_page()
+        if next_page is None:
             break
-    print(f"async direct iteration: {direct_item_ids}")
-    _summarize_created("async direct iteration", direct_item_ids, created_ids)
+        page_number += 1
+        page = next_page
+    _summarize_created("async paged", paged_ids, created_ids)
 
     return sandboxes
 
@@ -165,39 +114,22 @@ def sync_demo(since: datetime) -> None:
     _print_page_state("sync first page:", first_page)
     _print_page("sync", 1, [sandbox.id for sandbox in first_page.sandboxes])
 
-    print("\n[2] Fetch the next page explicitly with get_next_page()")
-    next_page = first_page.get_next_page()
-    if next_page is None:
-        print("sync next page: none")
-    else:
-        _print_page_state("sync next page:", next_page)
-        _print_page("sync", 2, [sandbox.id for sandbox in next_page.sandboxes])
+    print("\n[2] Iterate the sandboxes in the first page")
+    current_page_ids = [sandbox.id for sandbox in first_page]
+    print(f"sync current page iteration: {current_page_ids}")
 
-    print("\n[3] Iterate pages with iter_pages()")
-    page_number = 0
-    for current_page in Sandbox.list(
-        project_id=PROJECT_ID,
-        limit=PAGE_SIZE,
-        since=since,
-    ).iter_pages():
-        page_number += 1
-        _print_page(
-            "sync iter_pages", page_number, [sandbox.id for sandbox in current_page.sandboxes]
-        )
+    print("\n[3] Walk forward with get_next_page()")
+    page_number = 1
+    page = first_page
+    while True:
+        _print_page("sync paged", page_number, [sandbox.id for sandbox in page])
         if page_number >= MAX_PAGES:
             break
-
-    print("\n[4] Iterate items with iter_items()")
-    iter_item_ids: list[str] = []
-    for sandbox in Sandbox.list(
-        project_id=PROJECT_ID,
-        limit=PAGE_SIZE,
-        since=since,
-    ).iter_items():
-        iter_item_ids.append(sandbox.id)
-        if len(iter_item_ids) >= MAX_ITEMS:
+        next_page = page.get_next_page()
+        if next_page is None:
             break
-    print(f"sync iter_items: {iter_item_ids}")
+        page_number += 1
+        page = next_page
 
 
 if __name__ == "__main__":

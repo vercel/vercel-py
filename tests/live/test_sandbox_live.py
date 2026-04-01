@@ -250,7 +250,13 @@ class TestSandboxLive:
                     limit=20,
                     since=since,
                 )
-                found_ids = [item.id for item in page.iter_items()]
+                found_ids = []
+                current_page = page
+                while current_page is not None:
+                    found_ids.extend(item.id for item in current_page)
+                    if sandbox.sandbox_id in found_ids:
+                        break
+                    current_page = current_page.get_next_page()
                 if sandbox.sandbox_id in found_ids:
                     break
                 time.sleep(1)

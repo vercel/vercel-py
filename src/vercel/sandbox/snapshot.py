@@ -10,7 +10,7 @@ from vercel._internal.sandbox.models import Snapshot as SnapshotModel
 from vercel._internal.sandbox.pagination import SnapshotListParams
 
 from ..oidc import Credentials, get_credentials
-from .page import AsyncSnapshotPage, AsyncSnapshotPager, SnapshotPage
+from .page import AsyncSnapshotPage, SnapshotPage
 
 MIN_SNAPSHOT_EXPIRATION_MS: Final[int] = 86_400_000
 
@@ -57,16 +57,16 @@ async def _build_async_snapshot_page(
     finally:
         await client.aclose()
 
-    async def fetch_next_page(page_info) -> AsyncSnapshotPage:
+    async def fetch_next_page(next_until: int) -> AsyncSnapshotPage:
         return await _build_async_snapshot_page(
             creds=creds,
-            params=params.with_until(page_info.until),
+            params=params.with_until(next_until),
         )
 
-    return AsyncSnapshotPage.create(
-        snapshots=response.snapshots,
+    return AsyncSnapshotPage(
+        items=list(response.snapshots),
         pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
+        _fetch_next_page=fetch_next_page,
     )
 
 
@@ -86,16 +86,16 @@ async def _build_sync_snapshot_page(
     finally:
         client.close()
 
-    async def fetch_next_page(page_info) -> SnapshotPage:
+    async def fetch_next_page(next_until: int) -> SnapshotPage:
         return await _build_sync_snapshot_page(
             creds=creds,
-            params=params.with_until(page_info.until),
+            params=params.with_until(next_until),
         )
 
-    return SnapshotPage.create(
-        snapshots=response.snapshots,
+    return SnapshotPage(
+        items=list(response.snapshots),
         pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
+        _fetch_next_page=fetch_next_page,
     )
 
 
@@ -151,7 +151,7 @@ class AsyncSnapshot:
         return AsyncSnapshot(client=client, snapshot=resp.snapshot)
 
     @staticmethod
-    def list(
+    async def list(
         *,
         limit: int | None = None,
         since: datetime | int | None = None,
@@ -159,7 +159,7 @@ class AsyncSnapshot:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> AsyncSnapshotPager:
+    ) -> AsyncSnapshotPage:
         """List snapshots and return the first page."""
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SnapshotListParams(
@@ -168,9 +168,7 @@ class AsyncSnapshot:
             since=since,
             until=until,
         )
-        return AsyncSnapshotPager(
-            _fetch_first_page=lambda: _build_async_snapshot_page(creds=creds, params=params)
-        )
+        return await _build_async_snapshot_page(creds=creds, params=params)
 
     async def delete(self) -> None:
         """Delete this snapshot."""

@@ -131,12 +131,14 @@ async def async_demo() -> None:
 
     paged_ids: list[list[str]] = []
     found_ids: set[str] = set()
-    async for page in pager.iter_pages():
+    page = first_page
+    while page is not None:
         page_ids = [listed.id for listed in page.snapshots]
         paged_ids.append(page_ids)
         found_ids.update(page_ids)
         if all(snapshot_id in found_ids for snapshot_id in async_snapshot_ids):
             break
+        page = await page.get_next_page()
 
     print(f"    Visited pages: {paged_ids}")
     assert all(snapshot_id in found_ids for snapshot_id in async_snapshot_ids), (
@@ -144,10 +146,12 @@ async def async_demo() -> None:
     )
 
     item_ids: list[str] = []
-    async for listed in AsyncSnapshot.list(limit=10, since=since).iter_items():
-        item_ids.append(listed.id)
+    page = await AsyncSnapshot.list(limit=10, since=since)
+    while page is not None:
+        item_ids.extend(listed.id for listed in page)
         if all(snapshot_id in item_ids for snapshot_id in async_snapshot_ids):
             break
+        page = await page.get_next_page()
 
     print(f"    Iterated snapshot IDs: {item_ids}")
     assert all(snapshot_id in item_ids for snapshot_id in async_snapshot_ids), (
@@ -252,12 +256,14 @@ def sync_demo() -> None:
 
     paged_ids: list[list[str]] = []
     found_ids: set[str] = set()
-    for page in first_page.iter_pages():
+    page = first_page
+    while page is not None:
         page_ids = [listed.id for listed in page.snapshots]
         paged_ids.append(page_ids)
         found_ids.update(page_ids)
         if all(snapshot_id in found_ids for snapshot_id in sync_snapshot_ids):
             break
+        page = page.get_next_page()
 
     print(f"    Visited pages: {paged_ids}")
     assert all(snapshot_id in found_ids for snapshot_id in sync_snapshot_ids), (
@@ -265,10 +271,12 @@ def sync_demo() -> None:
     )
 
     item_ids: list[str] = []
-    for listed in Snapshot.list(limit=10, since=since).iter_items():
-        item_ids.append(listed.id)
+    page = Snapshot.list(limit=10, since=since)
+    while page is not None:
+        item_ids.extend(listed.id for listed in page)
         if all(snapshot_id in item_ids for snapshot_id in sync_snapshot_ids):
             break
+        page = page.get_next_page()
 
     print(f"    Iterated snapshot IDs: {item_ids}")
     assert all(snapshot_id in item_ids for snapshot_id in sync_snapshot_ids), (

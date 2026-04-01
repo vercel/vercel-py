@@ -1,266 +1,103 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterator
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any
 
-from vercel._internal.pagination import PageController
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.pagination import Page
 from vercel._internal.sandbox.models import (
-    Pagination,
     Sandbox as SandboxModel,
     Snapshot as SnapshotModel,
 )
-from vercel._internal.sandbox.pagination import (
-    SandboxPageInfo,
-    SnapshotPageInfo,
-    next_sandbox_page_info,
-    next_snapshot_page_info,
-)
 
 
 @dataclass(slots=True)
-class SandboxPage:
-    sandboxes: list[SandboxModel]
-    pagination: Pagination
-    _controller: PageController[SandboxPage, SandboxModel, SandboxPageInfo] = field(
-        init=False,
+class SandboxPage(Page[SandboxModel]):
+    _fetch_next_page: Callable[[int], Coroutine[None, None, SandboxPage]] | None = field(
         repr=False,
+        default=None,
     )
 
-    @classmethod
-    def create(
-        cls,
-        *,
-        sandboxes: list[SandboxModel],
-        pagination: Pagination,
-        fetch_next_page: Callable[[SandboxPageInfo], Awaitable[SandboxPage]],
-    ) -> SandboxPage:
-        page = cls(sandboxes=list(sandboxes), pagination=pagination)
-        page._controller = PageController(
-            get_items=lambda current_page: current_page.sandboxes,
-            get_next_page_info=lambda current_page: next_sandbox_page_info(current_page.pagination),
-            fetch_next_page=fetch_next_page,
-        )
-        return page
-
-    def has_next_page(self) -> bool:
-        return self._controller.has_next_page(self)
-
-    def next_page_info(self) -> SandboxPageInfo | None:
-        return self._controller.next_page_info(self)
+    @property
+    def sandboxes(self) -> list[SandboxModel]:
+        return self.items
 
     def get_next_page(self) -> SandboxPage | None:
-        return self._controller.get_next_page_sync(self)
-
-    def iter_pages(self) -> Iterator[SandboxPage]:
-        return self._controller.iter_pages_sync(self)
-
-    def iter_items(self) -> Iterator[SandboxModel]:
-        return self._controller.iter_items_sync(self)
-
-    def __iter__(self) -> Iterator[SandboxModel]:
-        return iter(self.sandboxes)
+        next_until = self.pagination.next
+        if next_until is None:
+            return None
+        fetch_next_page = self._fetch_next_page
+        if fetch_next_page is None:
+            return None
+        return iter_coroutine(fetch_next_page(next_until))
 
 
 @dataclass(slots=True)
-class AsyncSandboxPage:
-    sandboxes: list[SandboxModel]
-    pagination: Pagination
-    _controller: PageController[AsyncSandboxPage, SandboxModel, SandboxPageInfo] = field(
-        init=False,
+class AsyncSandboxPage(Page[SandboxModel]):
+    _fetch_next_page: Callable[[int], Awaitable[AsyncSandboxPage]] | None = field(
         repr=False,
+        default=None,
     )
 
-    @classmethod
-    def create(
-        cls,
-        *,
-        sandboxes: list[SandboxModel],
-        pagination: Pagination,
-        fetch_next_page: Callable[[SandboxPageInfo], Awaitable[AsyncSandboxPage]],
-    ) -> AsyncSandboxPage:
-        page = cls(sandboxes=list(sandboxes), pagination=pagination)
-        page._controller = PageController(
-            get_items=lambda current_page: current_page.sandboxes,
-            get_next_page_info=lambda current_page: next_sandbox_page_info(current_page.pagination),
-            fetch_next_page=fetch_next_page,
-        )
-        return page
-
-    def has_next_page(self) -> bool:
-        return self._controller.has_next_page(self)
-
-    def next_page_info(self) -> SandboxPageInfo | None:
-        return self._controller.next_page_info(self)
+    @property
+    def sandboxes(self) -> list[SandboxModel]:
+        return self.items
 
     async def get_next_page(self) -> AsyncSandboxPage | None:
-        return await self._controller.get_next_page(self)
-
-    def iter_pages(self) -> AsyncIterator[AsyncSandboxPage]:
-        return self._controller.iter_pages(self)
-
-    def iter_items(self) -> AsyncIterator[SandboxModel]:
-        return self._controller.iter_items(self)
-
-    async def __aiter__(self) -> AsyncIterator[SandboxModel]:
-        for sandbox in self.sandboxes:
-            yield sandbox
+        next_until = self.pagination.next
+        if next_until is None:
+            return None
+        fetch_next_page = self._fetch_next_page
+        if fetch_next_page is None:
+            return None
+        return await fetch_next_page(next_until)
 
 
 @dataclass(slots=True)
-class AsyncSandboxPager:
-    _fetch_first_page: Callable[[], Awaitable[AsyncSandboxPage]]
-    _first_page: AsyncSandboxPage | None = field(init=False, default=None, repr=False)
-
-    async def _get_first_page(self) -> AsyncSandboxPage:
-        if self._first_page is None:
-            self._first_page = await self._fetch_first_page()
-        return self._first_page
-
-    def __await__(self) -> Generator[Any, None, AsyncSandboxPage]:
-        return self._get_first_page().__await__()
-
-    def __aiter__(self) -> AsyncIterator[SandboxModel]:
-        return self.iter_items()
-
-    async def iter_pages(self) -> AsyncIterator[AsyncSandboxPage]:
-        first_page = await self._get_first_page()
-        async for page in first_page.iter_pages():
-            yield page
-
-    async def iter_items(self) -> AsyncIterator[SandboxModel]:
-        first_page = await self._get_first_page()
-        async for item in first_page.iter_items():
-            yield item
-
-
-@dataclass(slots=True)
-class SnapshotPage:
-    snapshots: list[SnapshotModel]
-    pagination: Pagination
-    _controller: PageController[SnapshotPage, SnapshotModel, SnapshotPageInfo] = field(
-        init=False,
+class SnapshotPage(Page[SnapshotModel]):
+    _fetch_next_page: Callable[[int], Coroutine[None, None, SnapshotPage]] | None = field(
         repr=False,
+        default=None,
     )
 
-    @classmethod
-    def create(
-        cls,
-        *,
-        snapshots: list[SnapshotModel],
-        pagination: Pagination,
-        fetch_next_page: Callable[[SnapshotPageInfo], Awaitable[SnapshotPage]],
-    ) -> SnapshotPage:
-        page = cls(snapshots=list(snapshots), pagination=pagination)
-        page._controller = PageController(
-            get_items=lambda current_page: current_page.snapshots,
-            get_next_page_info=lambda current_page: next_snapshot_page_info(
-                current_page.pagination
-            ),
-            fetch_next_page=fetch_next_page,
-        )
-        return page
-
-    def has_next_page(self) -> bool:
-        return self._controller.has_next_page(self)
-
-    def next_page_info(self) -> SnapshotPageInfo | None:
-        return self._controller.next_page_info(self)
+    @property
+    def snapshots(self) -> list[SnapshotModel]:
+        return self.items
 
     def get_next_page(self) -> SnapshotPage | None:
-        return self._controller.get_next_page_sync(self)
-
-    def iter_pages(self) -> Iterator[SnapshotPage]:
-        return self._controller.iter_pages_sync(self)
-
-    def iter_items(self) -> Iterator[SnapshotModel]:
-        return self._controller.iter_items_sync(self)
-
-    def __iter__(self) -> Iterator[SnapshotModel]:
-        return iter(self.snapshots)
+        next_until = self.pagination.next
+        if next_until is None:
+            return None
+        fetch_next_page = self._fetch_next_page
+        if fetch_next_page is None:
+            return None
+        return iter_coroutine(fetch_next_page(next_until))
 
 
 @dataclass(slots=True)
-class AsyncSnapshotPage:
-    snapshots: list[SnapshotModel]
-    pagination: Pagination
-    _controller: PageController[AsyncSnapshotPage, SnapshotModel, SnapshotPageInfo] = field(
-        init=False,
+class AsyncSnapshotPage(Page[SnapshotModel]):
+    _fetch_next_page: Callable[[int], Awaitable[AsyncSnapshotPage]] | None = field(
         repr=False,
+        default=None,
     )
 
-    @classmethod
-    def create(
-        cls,
-        *,
-        snapshots: list[SnapshotModel],
-        pagination: Pagination,
-        fetch_next_page: Callable[[SnapshotPageInfo], Awaitable[AsyncSnapshotPage]],
-    ) -> AsyncSnapshotPage:
-        page = cls(snapshots=list(snapshots), pagination=pagination)
-        page._controller = PageController(
-            get_items=lambda current_page: current_page.snapshots,
-            get_next_page_info=lambda current_page: next_snapshot_page_info(
-                current_page.pagination
-            ),
-            fetch_next_page=fetch_next_page,
-        )
-        return page
-
-    def has_next_page(self) -> bool:
-        return self._controller.has_next_page(self)
-
-    def next_page_info(self) -> SnapshotPageInfo | None:
-        return self._controller.next_page_info(self)
+    @property
+    def snapshots(self) -> list[SnapshotModel]:
+        return self.items
 
     async def get_next_page(self) -> AsyncSnapshotPage | None:
-        return await self._controller.get_next_page(self)
-
-    def iter_pages(self) -> AsyncIterator[AsyncSnapshotPage]:
-        return self._controller.iter_pages(self)
-
-    def iter_items(self) -> AsyncIterator[SnapshotModel]:
-        return self._controller.iter_items(self)
-
-    async def __aiter__(self) -> AsyncIterator[SnapshotModel]:
-        for snapshot in self.snapshots:
-            yield snapshot
-
-
-@dataclass(slots=True)
-class AsyncSnapshotPager:
-    _fetch_first_page: Callable[[], Awaitable[AsyncSnapshotPage]]
-    _first_page: AsyncSnapshotPage | None = field(init=False, default=None, repr=False)
-
-    async def _get_first_page(self) -> AsyncSnapshotPage:
-        if self._first_page is None:
-            self._first_page = await self._fetch_first_page()
-        return self._first_page
-
-    def __await__(self) -> Generator[Any, None, AsyncSnapshotPage]:
-        return self._get_first_page().__await__()
-
-    def __aiter__(self) -> AsyncIterator[SnapshotModel]:
-        return self.iter_items()
-
-    async def iter_pages(self) -> AsyncIterator[AsyncSnapshotPage]:
-        first_page = await self._get_first_page()
-        async for page in first_page.iter_pages():
-            yield page
-
-    async def iter_items(self) -> AsyncIterator[SnapshotModel]:
-        first_page = await self._get_first_page()
-        async for item in first_page.iter_items():
-            yield item
+        next_until = self.pagination.next
+        if next_until is None:
+            return None
+        fetch_next_page = self._fetch_next_page
+        if fetch_next_page is None:
+            return None
+        return await fetch_next_page(next_until)
 
 
 __all__ = [
-    "AsyncSnapshotPager",
     "AsyncSnapshotPage",
-    "AsyncSandboxPager",
     "AsyncSandboxPage",
     "SandboxPage",
     "SnapshotPage",
-    "SandboxPageInfo",
-    "SnapshotPageInfo",
 ]

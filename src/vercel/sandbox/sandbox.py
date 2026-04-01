@@ -31,7 +31,7 @@ from .command import (
     Command,
     CommandFinished,
 )
-from .page import AsyncSandboxPage, AsyncSandboxPager, SandboxPage
+from .page import AsyncSandboxPage, SandboxPage
 from .pty.shell import start_interactive_shell
 from .snapshot import (
     AsyncSnapshot,
@@ -70,16 +70,16 @@ async def _build_async_sandbox_page(
     finally:
         await client.aclose()
 
-    async def fetch_next_page(page_info) -> AsyncSandboxPage:
+    async def fetch_next_page(next_until: int) -> AsyncSandboxPage:
         return await _build_async_sandbox_page(
             creds=creds,
-            params=params.with_until(page_info.until),
+            params=params.with_until(next_until),
         )
 
-    return AsyncSandboxPage.create(
-        sandboxes=response.sandboxes,
+    return AsyncSandboxPage(
+        items=list(response.sandboxes),
         pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
+        _fetch_next_page=fetch_next_page,
     )
 
 
@@ -99,16 +99,16 @@ async def _build_sync_sandbox_page(
     finally:
         client.close()
 
-    async def fetch_next_page(page_info) -> SandboxPage:
+    async def fetch_next_page(next_until: int) -> SandboxPage:
         return await _build_sync_sandbox_page(
             creds=creds,
-            params=params.with_until(page_info.until),
+            params=params.with_until(next_until),
         )
 
-    return SandboxPage.create(
-        sandboxes=response.sandboxes,
+    return SandboxPage(
+        items=list(response.sandboxes),
         pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
+        _fetch_next_page=fetch_next_page,
     )
 
 
@@ -221,7 +221,7 @@ class AsyncSandbox:
         )
 
     @staticmethod
-    def list(
+    async def list(
         *,
         limit: int | None = None,
         since: datetime | int | None = None,
@@ -229,7 +229,7 @@ class AsyncSandbox:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> AsyncSandboxPager:
+    ) -> AsyncSandboxPage:
         """List sandboxes and return the first page.
 
         Args:
@@ -244,9 +244,9 @@ class AsyncSandbox:
             team_id: Team ID scope for the sandbox API.
 
         Returns:
-            An awaitable pager whose first awaited value is the first page of
-            typed sandbox results. Continue pagination with ``iter_pages()``
-            or ``iter_items()`` on the page or pager.
+            The first page of typed sandbox results. Iterate the returned page
+            directly for its sandboxes. Call ``get_next_page()`` to fetch the
+            next page when ``page.pagination.next`` is present.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
@@ -255,9 +255,7 @@ class AsyncSandbox:
             since=since,
             until=until,
         )
-        return AsyncSandboxPager(
-            _fetch_first_page=lambda: _build_async_sandbox_page(creds=creds, params=params)
-        )
+        return await _build_async_sandbox_page(creds=creds, params=params)
 
     async def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
@@ -640,8 +638,9 @@ class Sandbox:
             team_id: Team ID scope for the sandbox API.
 
         Returns:
-            The first page of typed sandbox results. Continue pagination with
-            ``iter_pages()`` or ``iter_items()`` on the returned page.
+            The first page of typed sandbox results. Iterate the returned page
+            directly for its sandboxes. Call ``get_next_page()`` to fetch the
+            next page when ``page.pagination.next`` is present.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
