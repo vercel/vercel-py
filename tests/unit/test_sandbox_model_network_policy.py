@@ -6,6 +6,7 @@ from vercel.sandbox import (
     NetworkPolicyCustom,
     NetworkPolicyRule,
     NetworkTransformer,
+    SandboxStatus,
 )
 from vercel.sandbox.models import Sandbox as SandboxModel
 
@@ -49,6 +50,7 @@ class TestSandboxModelNetworkPolicy:
                 ]
             }
         )
+        assert sandbox.status is SandboxStatus.RUNNING
 
     def test_model_accepts_missing_network_policy(self) -> None:
         sandbox = SandboxModel.model_validate(
@@ -75,3 +77,31 @@ class TestSandboxModelNetworkPolicy:
         )
 
         assert sandbox.network_policy is None
+        assert sandbox.status is SandboxStatus.RUNNING
+
+    def test_model_rejects_unknown_status(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="status"):
+            SandboxModel.model_validate(
+                {
+                    "id": "sbx_test123456",
+                    "memory": 512,
+                    "vcpus": 1,
+                    "region": "iad1",
+                    "runtime": "nodejs20.x",
+                    "timeout": 300,
+                    "status": "unknown",
+                    "requestedAt": 1705320600000,
+                    "startedAt": 1705320601000,
+                    "requestedStopAt": None,
+                    "stoppedAt": None,
+                    "duration": None,
+                    "sourceSnapshotId": None,
+                    "snapshottedAt": None,
+                    "createdAt": 1705320600000,
+                    "cwd": "/app",
+                    "updatedAt": 1705320601000,
+                    "interactivePort": None,
+                }
+            )

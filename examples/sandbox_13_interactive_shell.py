@@ -169,7 +169,7 @@ async def test():
                     # Check if we got our test string
                     if b"PTY_TEST_OUTPUT" in output:
                         break
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         await client.close()

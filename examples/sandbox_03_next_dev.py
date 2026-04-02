@@ -41,7 +41,7 @@ async def main() -> None:
         logs_task = asyncio.create_task(logs_and_detect_ready())
         try:
             await asyncio.wait_for(ready.wait(), timeout=60)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         url = sandbox.domain(3000)

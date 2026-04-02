@@ -152,7 +152,7 @@ async def _read_connection_info(cmd: AsyncCommand, timeout: float = 30.0) -> dic
         result = await asyncio.wait_for(read_logs(), timeout=timeout)
         if result:
             return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
     raise RuntimeError(

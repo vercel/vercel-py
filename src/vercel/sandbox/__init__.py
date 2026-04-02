@@ -16,7 +16,7 @@ from vercel._internal.sandbox.network_policy import (
 )
 
 from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
-from .models import GitSource, SnapshotSource, Source, TarballSource
+from .models import GitSource, SandboxStatus, SnapshotSource, Source, TarballSource
 from .page import AsyncSandboxPage, AsyncSnapshotPage, SandboxPage, SnapshotPage
 from .sandbox import AsyncSandbox, Sandbox
 from .snapshot import (
@@ -53,6 +53,7 @@ __all__ = [
     "GitSource",
     "TarballSource",
     "SnapshotSource",
+    "SandboxStatus",
     # Network policy types
     "NetworkTransformer",
     "NetworkPolicyRule",
