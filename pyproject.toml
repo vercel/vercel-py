@@ -7,7 +7,7 @@ name = "vercel"
 version = "0.5.3"
 description = "Python SDK for Vercel"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
@@ -68,7 +68,7 @@ mypy_path = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = [
