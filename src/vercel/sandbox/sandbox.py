@@ -278,7 +278,11 @@ class AsyncSandbox:
         return updated_network_policy
 
     async def wait_for_status(
-        self, status: SandboxStatus, *, timeout: float = 30.0, poll_interval: float = 0.5
+        self,
+        status: SandboxStatus | str,
+        *,
+        timeout: float = 30.0,
+        poll_interval: float = 0.5,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
@@ -292,16 +296,17 @@ class AsyncSandbox:
         """
         import asyncio
 
+        target_status = SandboxStatus(status)
         start = time.monotonic()
         while time.monotonic() - start < timeout:
-            if self.status == status:
+            if self.status == target_status:
                 return
             await asyncio.sleep(poll_interval)
             await self.refresh()
-        if self.status == status:
+        if self.status == target_status:
             return
         raise TimeoutError(
-            f"Sandbox {self.sandbox_id} did not reach '{status}' status within {timeout}s"
+            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within {timeout}s"
         )
 
     def domain(self, port: int) -> str:
@@ -673,7 +678,11 @@ class Sandbox:
         return updated_network_policy
 
     def wait_for_status(
-        self, status: SandboxStatus, *, timeout: float = 30.0, poll_interval: float = 0.5
+        self,
+        status: SandboxStatus | str,
+        *,
+        timeout: float = 30.0,
+        poll_interval: float = 0.5,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
@@ -685,16 +694,17 @@ class Sandbox:
         Raises:
             TimeoutError: If the sandbox does not reach *status* within *timeout*.
         """
+        target_status = SandboxStatus(status)
         start = time.monotonic()
         while time.monotonic() - start < timeout:
-            if self.status == status:
+            if self.status == target_status:
                 return
             time.sleep(poll_interval)
             self.refresh()
-        if self.status == status:
+        if self.status == target_status:
             return
         raise TimeoutError(
-            f"Sandbox {self.sandbox_id} did not reach '{status}' status within {timeout}s"
+            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within {timeout}s"
         )
 
     def domain(self, port: int) -> str:

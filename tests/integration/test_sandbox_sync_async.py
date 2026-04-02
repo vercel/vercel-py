@@ -6,7 +6,7 @@ Tests both sync and async variants (Sandbox and AsyncSandbox).
 import json
 import tarfile
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -519,8 +519,8 @@ class TestSandboxList:
 
         project = "sandbox-project"
         limit = 2
-        since = datetime(2024, 1, 15, 9, 0, tzinfo=timezone.utc)
-        until = datetime(2024, 1, 15, 9, 30, tzinfo=timezone.utc)
+        since = datetime(2024, 1, 15, 9, 0, tzinfo=UTC)
+        until = datetime(2024, 1, 15, 9, 30, tzinfo=UTC)
         expected_since = str(int(since.timestamp() * 1000))
         expected_until = str(int(until.timestamp() * 1000))
         next_until = "1705310400000"
@@ -1100,8 +1100,8 @@ class TestSnapshotList:
 
         project = "snapshot-project"
         limit = 2
-        since = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
-        until = datetime(2024, 1, 15, 12, 30, tzinfo=timezone.utc)
+        since = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
+        until = datetime(2024, 1, 15, 12, 30, tzinfo=UTC)
         expected_since = str(int(since.timestamp() * 1000))
         expected_until = str(int(until.timestamp() * 1000))
         next_until = "1705320000000"
@@ -3729,7 +3729,7 @@ class TestSandboxWaitForStatus:
     @respx.mock
     def test_wait_for_status_already_matched(self, mock_env_clear, mock_sandbox_get_response):
         """Test wait_for_status returns immediately if already at target status."""
-        from vercel.sandbox import Sandbox
+        from vercel.sandbox import Sandbox, SandboxStatus
 
         sandbox_id = "sbx_test123456"
 
@@ -3750,16 +3750,16 @@ class TestSandboxWaitForStatus:
             project_id="prj_test123",
         )
 
-        assert sandbox.status == "running"
+        assert sandbox.status is SandboxStatus.RUNNING
         # Should return immediately without making additional API calls
-        sandbox.wait_for_status("running")
+        sandbox.wait_for_status(SandboxStatus.RUNNING)
 
         sandbox.client.close()
 
     @respx.mock
     def test_wait_for_status_polls(self, mock_env_clear, mock_sandbox_get_response):
         """Test wait_for_status polls until status matches."""
-        from vercel.sandbox import Sandbox
+        from vercel.sandbox import Sandbox, SandboxStatus
 
         sandbox_id = "sbx_test123456"
         pending_response = {**mock_sandbox_get_response, "status": "pending"}
@@ -3791,9 +3791,9 @@ class TestSandboxWaitForStatus:
             project_id="prj_test123",
         )
 
-        assert sandbox.status == "pending"
+        assert sandbox.status is SandboxStatus.PENDING
         sandbox.wait_for_status("running", poll_interval=0.01)
-        assert sandbox.status == "running"
+        assert sandbox.status is SandboxStatus.RUNNING
 
         sandbox.client.close()
 
@@ -3825,10 +3825,41 @@ class TestSandboxWaitForStatus:
         sandbox.client.close()
 
     @respx.mock
+    def test_wait_for_status_rejects_unknown_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test wait_for_status validates requested statuses."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(ValueError, match="'invalid' is not a valid SandboxStatus"):
+            sandbox.wait_for_status("invalid")
+
+        sandbox.client.close()
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_wait_for_status_async_polls(self, mock_env_clear, mock_sandbox_get_response):
         """Test async wait_for_status polls until status matches."""
-        from vercel.sandbox import AsyncSandbox
+        from vercel.sandbox import AsyncSandbox, SandboxStatus
 
         sandbox_id = "sbx_test123456"
         pending_response = {**mock_sandbox_get_response, "status": "pending"}
@@ -3857,9 +3888,9 @@ class TestSandboxWaitForStatus:
             project_id="prj_test123",
         )
 
-        assert sandbox.status == "pending"
-        await sandbox.wait_for_status("running", poll_interval=0.01)
-        assert sandbox.status == "running"
+        assert sandbox.status is SandboxStatus.PENDING
+        await sandbox.wait_for_status(SandboxStatus.RUNNING, poll_interval=0.01)
+        assert sandbox.status is SandboxStatus.RUNNING
 
         await sandbox.client.aclose()
 
@@ -3888,5 +3919,37 @@ class TestSandboxWaitForStatus:
 
         with pytest.raises(TimeoutError, match="did not reach 'running' status"):
             await sandbox.wait_for_status("running", timeout=0.05, poll_interval=0.01)
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_async_rejects_unknown_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test async wait_for_status validates requested statuses."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(ValueError, match="'invalid' is not a valid SandboxStatus"):
+            await sandbox.wait_for_status("invalid")
 
         await sandbox.client.aclose()
