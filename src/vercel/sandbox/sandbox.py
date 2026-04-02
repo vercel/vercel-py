@@ -15,6 +15,7 @@ from vercel._internal.sandbox.models import (
     CommandResponse,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
+    SandboxStatus,
     Source,
     WriteFile,
 )
@@ -123,7 +124,7 @@ class AsyncSandbox:
         return self.sandbox.id
 
     @property
-    def status(self) -> str:
+    def status(self) -> SandboxStatus:
         return self.sandbox.status
 
     @property
@@ -277,7 +278,7 @@ class AsyncSandbox:
         return updated_network_policy
 
     async def wait_for_status(
-        self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
+        self, status: SandboxStatus, *, timeout: float = 30.0, poll_interval: float = 0.5
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
@@ -514,7 +515,7 @@ class Sandbox:
         return self.sandbox.id
 
     @property
-    def status(self) -> str:
+    def status(self) -> SandboxStatus:
         return self.sandbox.status
 
     @property
@@ -672,7 +673,7 @@ class Sandbox:
         return updated_network_policy
 
     def wait_for_status(
-        self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
+        self, status: SandboxStatus, *, timeout: float = 30.0, poll_interval: float = 0.5
     ) -> None:
         """Wait for this sandbox to reach the given status.
 

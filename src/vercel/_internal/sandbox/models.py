@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from vercel._internal.sandbox.network_policy import ApiNetworkPolicy, NetworkPolicy
 
 # Source types for Sandbox.create()
+
+SandboxStatus: TypeAlias = Literal[
+    "pending",
+    "running",
+    "stopping",
+    "stopped",
+    "failed",
+    "aborted",
+    "snapshotting",
+]
 
 
 class _GitSourceRequired(TypedDict):
@@ -53,7 +63,7 @@ class Sandbox(BaseModel):
     region: str
     runtime: str
     timeout: int
-    status: Literal["pending", "running", "stopping", "stopped", "failed", "snapshotting"]
+    status: SandboxStatus
     requested_at: int = Field(alias="requestedAt")
     started_at: int | None = Field(default=None, alias="startedAt")
     requested_stop_at: int | None = Field(default=None, alias="requestedStopAt")
