@@ -21,8 +21,10 @@ def _raw_payload_strategy() -> st.SearchStrategy[RawPayload]:
     raw_leaf = st.none() | st.booleans() | st.integers() | st.text()
     raw_value = st.recursive(
         raw_leaf,
-        lambda children: st.lists(children, max_size=3)
-        | st.dictionaries(_snake_key_strategy(), children, max_size=3),
+        lambda children: (
+            st.lists(children, max_size=3)
+            | st.dictionaries(_snake_key_strategy(), children, max_size=3)
+        ),
         max_leaves=8,
     )
     return raw_value.map(RawPayload)
@@ -32,8 +34,10 @@ def _payload_strategy() -> st.SearchStrategy[object]:
     leaf = st.none() | st.booleans() | st.integers() | st.text()
     return st.recursive(
         leaf | _raw_payload_strategy(),
-        lambda children: st.lists(children, max_size=3)
-        | st.dictionaries(_snake_key_strategy(), children, max_size=3),
+        lambda children: (
+            st.lists(children, max_size=3)
+            | st.dictionaries(_snake_key_strategy(), children, max_size=3)
+        ),
         max_leaves=12,
     )
 
