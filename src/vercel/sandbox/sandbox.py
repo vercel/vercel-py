@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import builtins
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from os import PathLike
@@ -15,9 +15,12 @@ from vercel._internal.sandbox.models import (
     CommandResponse,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
+    SandboxResources,
     SandboxStatus,
     Source,
     WriteFile,
+    parse_resources,
+    parse_source,
 )
 from vercel._internal.sandbox.network_policy import (
     ApiNetworkPolicy,
@@ -42,17 +45,12 @@ from .snapshot import (
 )
 
 
-def _normalize_source(source: Source | None) -> dict[str, Any] | None:
-    """Convert snake_case keys in source dict to camelCase for the API."""
-    if source is None:
-        return None
-
-    # Map of snake_case -> camelCase for source dict keys
-    key_map = {
-        "snapshot_id": "snapshotId",
-    }
-
-    return {key_map.get(k, k): v for k, v in source.items()}
+def _parse_create_inputs(
+    *,
+    source: Source | Mapping[str, Any] | None,
+    resources: SandboxResources | Mapping[str, Any] | None,
+) -> tuple[Source | None, SandboxResources | None]:
+    return parse_source(source), parse_resources(resources)
 
 
 async def _build_async_sandbox_page(
@@ -152,10 +150,10 @@ class AsyncSandbox:
     @staticmethod
     async def create(
         *,
-        source: Source | None = None,
+        source: Source | Mapping[str, Any] | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: dict[str, Any] | None = None,
+        resources: SandboxResources | Mapping[str, Any] | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -185,14 +183,15 @@ class AsyncSandbox:
         Returns:
             Created AsyncSandbox instance.
         """
+        parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=creds.project_id,
-            source=_normalize_source(source),
+            source=parsed_source,
             ports=ports,
-            timeout=normalize_duration_ms(timeout),
-            resources=resources,
+            timeout=timeout,
+            resources=parsed_resources,
             runtime=runtime,
             interactive=interactive,
             env=env,
@@ -551,10 +550,10 @@ class Sandbox:
     @staticmethod
     def create(
         *,
-        source: Source | None = None,
+        source: Source | Mapping[str, Any] | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: dict[str, Any] | None = None,
+        resources: SandboxResources | Mapping[str, Any] | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -585,15 +584,16 @@ class Sandbox:
         Returns:
             Created Sandbox instance.
         """
+        parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
                 project_id=creds.project_id,
-                source=_normalize_source(source),
+                source=parsed_source,
                 ports=ports,
-                timeout=normalize_duration_ms(timeout),
-                resources=resources,
+                timeout=timeout,
+                resources=parsed_resources,
                 runtime=runtime,
                 interactive=interactive,
                 env=env,

@@ -37,6 +37,7 @@ from vercel._internal.http import (
     create_request_client,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.payload import JSONValue, RawPayload, marshal_payload
 from vercel._internal.sandbox.errors import (
     APIError,
     SandboxAuthError,
@@ -52,9 +53,11 @@ from vercel._internal.sandbox.models import (
     LogLine,
     SandboxAndRoutesResponse,
     SandboxesResponse,
+    SandboxResources,
     SandboxResponse,
     SnapshotResponse,
     SnapshotsResponse,
+    Source,
     WriteFile,
 )
 from vercel._internal.sandbox.network_policy import (
@@ -75,7 +78,6 @@ USER_AGENT = (
 )
 
 JSONScalar: TypeAlias = str | int | float | bool | None
-JSONValue: TypeAlias = JSONScalar | dict[str, "JSONValue"] | list["JSONValue"]
 RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
 
 
@@ -209,6 +211,40 @@ def _build_sandbox_error(
     return APIError(response, message, data=data)
 
 
+def _build_create_sandbox_payload(
+    *,
+    project_id: str,
+    ports: list[int] | None = None,
+    source: Source | None = None,
+    timeout: int | timedelta | None = None,
+    resources: SandboxResources | None = None,
+    runtime: str | None = None,
+    network_policy: NetworkPolicy | None = None,
+    interactive: bool = False,
+    env: dict[str, str] | None = None,
+) -> dict[str, JSONValue]:
+    body: dict[str, Any] = {"project_id": project_id}
+    if ports:
+        body["ports"] = ports
+    if source is not None:
+        body["source"] = source
+    if timeout is not None:
+        body["timeout"] = normalize_duration_ms(timeout)
+    if resources is not None:
+        body["resources"] = resources
+    if runtime is not None:
+        body["runtime"] = runtime
+    if network_policy is not None:
+        body["network_policy"] = ApiNetworkPolicy.from_network_policy(network_policy).to_dict()
+    if interactive:
+        body["__interactive"] = True
+    if env is not None:
+        body["env"] = RawPayload(env)
+    marshaled = marshal_payload(body)
+    assert isinstance(marshaled, dict)
+    return marshaled
+
+
 # ---------------------------------------------------------------------------
 # Tarball builder (pure Python, no I/O)
 # ---------------------------------------------------------------------------
@@ -274,32 +310,25 @@ class BaseSandboxOpsClient:
         *,
         project_id: str,
         ports: list[int] | None = None,
-        source: dict[str, Any] | None = None,
+        source: Source | None = None,
         timeout: int | timedelta | None = None,
-        resources: dict[str, Any] | None = None,
+        resources: SandboxResources | None = None,
         runtime: str | None = None,
         network_policy: NetworkPolicy | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
-        body: dict[str, Any] = {"projectId": project_id}
-        if ports:
-            body["ports"] = ports
-        if source is not None:
-            body["source"] = source
-        if timeout is not None:
-            body["timeout"] = normalize_duration_ms(timeout)
-        if resources is not None:
-            body["resources"] = resources
-        if runtime is not None:
-            body["runtime"] = runtime
-        if network_policy is not None:
-            body["networkPolicy"] = ApiNetworkPolicy.from_network_policy(network_policy).to_dict()
-        if interactive:
-            body["__interactive"] = True
-        if env is not None:
-            body["env"] = env
-
+        body = _build_create_sandbox_payload(
+            project_id=project_id,
+            ports=ports,
+            source=source,
+            timeout=timeout,
+            resources=resources,
+            runtime=runtime,
+            network_policy=network_policy,
+            interactive=interactive,
+            env=env,
+        )
         data = await self._request_client.request_json("POST", "/v1/sandboxes", body=JSONBody(body))
         return SandboxAndRoutesResponse.model_validate(data)
 

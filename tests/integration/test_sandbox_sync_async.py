@@ -16,11 +16,15 @@ import pytest
 import respx
 
 from vercel.sandbox import (
+    AsyncSandbox,
+    GitSource,
     NetworkPolicyCustom,
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkTransformer,
+    Sandbox,
     SandboxNotFoundError,
+    SandboxResources,
     SandboxServerError,
 )
 
@@ -137,6 +141,110 @@ class TestSandboxCreate:
 
         # Cleanup
         await sandbox.client.aclose()
+
+    @respx.mock
+    def test_create_sandbox_accepts_dataclass_inputs(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source=GitSource(
+                url="https://github.com/vercel/vercel-py",
+                revision="main",
+            ),
+            resources=SandboxResources(vcpus=2, memory=4096),
+        )
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["source"] == {
+            "type": "git",
+            "url": "https://github.com/vercel/vercel-py",
+            "revision": "main",
+        }
+        assert body["resources"] == {"vcpus": 2, "memory": 4096}
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_dict_and_dataclass_inputs_match_on_wire(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sync_sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source={"type": "git", "url": "https://github.com/vercel/vercel-py"},
+            resources={"vcpus": 2, "memory": 4096},
+        )
+        async_sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source=GitSource(url="https://github.com/vercel/vercel-py"),
+            resources=SandboxResources(vcpus=2, memory=4096),
+        )
+
+        first_body = json.loads(route.calls[0].request.content)
+        second_body = json.loads(route.calls[1].request.content)
+
+        assert first_body == second_body
+        assert first_body["source"] == {
+            "type": "git",
+            "url": "https://github.com/vercel/vercel-py",
+        }
+        assert first_body["resources"] == {"vcpus": 2, "memory": 4096}
+
+        sync_sandbox.client.close()
+        await async_sandbox.client.aclose()
+
+    @respx.mock
+    def test_create_sandbox_accepts_camel_case_snapshot_dict(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source={"type": "snapshot", "snapshotId": "snap_123"},
+        )
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["source"] == {"type": "snapshot", "snapshotId": "snap_123"}
+
+        sandbox.client.close()
 
     @respx.mock
     def test_create_sandbox_with_options(self, mock_env_clear, mock_sandbox_create_response):

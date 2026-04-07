@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from vercel._internal.sandbox.errors import SandboxError
 from vercel._internal.sandbox.network_policy import ApiNetworkPolicy, NetworkPolicy
 
 # Source types for Sandbox.create()
@@ -20,37 +23,276 @@ class SandboxStatus(StrEnum):
     SNAPSHOTTING = "snapshotting"
 
 
-class _GitSourceRequired(TypedDict):
-    """Required fields for GitSource."""
+@dataclass(frozen=True, slots=True)
+class SandboxValidationIssue:
+    """One local validation issue for sandbox create inputs."""
 
-    type: Literal["git"]
-    url: str
+    path: str
+    message: str
 
 
-class GitSource(_GitSourceRequired, total=False):
+class SandboxValidationError(SandboxError):
+    """Local sandbox input validation failed before the API request was sent."""
+
+    def __init__(self, issues: list[SandboxValidationIssue]) -> None:
+        self.issues = tuple(issues)
+        message = "; ".join(f"{issue.path}: {issue.message}" for issue in self.issues)
+        super().__init__(message or "Sandbox validation failed")
+
+
+@dataclass(frozen=True, slots=True)
+class GitSource:
     """Git repository source for creating a sandbox."""
 
-    depth: int
-    revision: str
-    username: str
-    password: str
+    url: str
+    depth: int | None = None
+    revision: str | None = None
+    username: str | None = None
+    password: str | None = None
+    type: Literal["git"] = field(default="git", init=False)
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"type": self.type, "url": self.url}
+        if self.depth is not None:
+            payload["depth"] = self.depth
+        if self.revision is not None:
+            payload["revision"] = self.revision
+        if self.username is not None:
+            payload["username"] = self.username
+        if self.password is not None:
+            payload["password"] = self.password
+        return payload
 
 
-class TarballSource(TypedDict):
+@dataclass(frozen=True, slots=True)
+class TarballSource:
     """Tarball URL source for creating a sandbox."""
 
-    type: Literal["tarball"]
     url: str
+    type: Literal["tarball"] = field(default="tarball", init=False)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"type": self.type, "url": self.url}
 
 
-class SnapshotSource(TypedDict):
+@dataclass(frozen=True, slots=True)
+class SnapshotSource:
     """Snapshot source for creating a sandbox."""
 
-    type: Literal["snapshot"]
     snapshot_id: str
+    type: Literal["snapshot"] = field(default="snapshot", init=False)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"type": self.type, "snapshot_id": self.snapshot_id}
 
 
 Source = GitSource | TarballSource | SnapshotSource
+SourceInput: TypeAlias = Source | Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxResources:
+    """Optional sandbox resource requests."""
+
+    vcpus: int | None = None
+    memory: int | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.vcpus is not None:
+            payload["vcpus"] = self.vcpus
+        if self.memory is not None:
+            payload["memory"] = self.memory
+        return payload
+
+
+SandboxResourcesInput: TypeAlias = SandboxResources | Mapping[str, Any]
+
+
+def parse_source(value: SourceInput | None) -> Source | None:
+    if value is None:
+        return None
+    if isinstance(value, (GitSource, TarballSource, SnapshotSource)):
+        _raise_on_issues(_validate_source(value))
+        return value
+    if not isinstance(value, Mapping):
+        raise SandboxValidationError(
+            [SandboxValidationIssue(path="source", message="must be a mapping or source dataclass")]
+        )
+
+    raw = _normalize_mapping_keys(value, {"snapshotId": "snapshot_id"})
+    issues: list[SandboxValidationIssue] = []
+    source: Source | None
+    source_type = raw.get("type")
+    if not isinstance(source_type, str):
+        issues.append(SandboxValidationIssue(path="source.type", message="is required"))
+        _raise_on_issues(issues)
+    if source_type == "git":
+        source = _parse_git_source(raw, issues)
+    elif source_type == "tarball":
+        source = _parse_tarball_source(raw, issues)
+    elif source_type == "snapshot":
+        source = _parse_snapshot_source(raw, issues)
+    else:
+        issues.append(
+            SandboxValidationIssue(
+                path="source.type",
+                message="must be one of 'git', 'tarball', or 'snapshot'",
+            )
+        )
+        source = None
+    _raise_on_issues(issues)
+    assert source is not None
+    return source
+
+
+def parse_resources(value: SandboxResourcesInput | None) -> SandboxResources | None:
+    if value is None:
+        return None
+    if isinstance(value, SandboxResources):
+        _raise_on_issues(_validate_resources(value))
+        return value
+    if not isinstance(value, Mapping):
+        raise SandboxValidationError(
+            [
+                SandboxValidationIssue(
+                    path="resources",
+                    message="must be a mapping or SandboxResources dataclass",
+                )
+            ]
+        )
+
+    raw = dict(value)
+    issues: list[SandboxValidationIssue] = []
+    resources = SandboxResources(vcpus=raw.get("vcpus"), memory=raw.get("memory"))
+    issues.extend(_validate_resources(resources))
+    _raise_on_issues(issues)
+    return resources
+
+
+def _parse_git_source(
+    raw: Mapping[str, Any], issues: list[SandboxValidationIssue]
+) -> GitSource | None:
+    url = raw.get("url")
+    source = GitSource(
+        url=url if isinstance(url, str) else "",
+        depth=raw.get("depth"),
+        revision=raw.get("revision"),
+        username=raw.get("username"),
+        password=raw.get("password"),
+    )
+    issues.extend(_validate_source(source))
+    return source if isinstance(url, str) and bool(url) else None
+
+
+def _parse_tarball_source(
+    raw: Mapping[str, Any], issues: list[SandboxValidationIssue]
+) -> TarballSource | None:
+    url = raw.get("url")
+    if not isinstance(url, str) or not url:
+        issues.append(SandboxValidationIssue(path="source.url", message="is required"))
+        return None
+    return TarballSource(url=url)
+
+
+def _parse_snapshot_source(
+    raw: Mapping[str, Any], issues: list[SandboxValidationIssue]
+) -> SnapshotSource | None:
+    snapshot_id = raw.get("snapshot_id")
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        issues.append(SandboxValidationIssue(path="source.snapshot_id", message="is required"))
+        return None
+    return SnapshotSource(snapshot_id=snapshot_id)
+
+
+def _validate_source(source: Source) -> list[SandboxValidationIssue]:
+    issues: list[SandboxValidationIssue] = []
+    if isinstance(source, GitSource):
+        if not source.url:
+            issues.append(SandboxValidationIssue(path="source.url", message="is required"))
+        if source.depth is not None and (
+            isinstance(source.depth, bool) or not isinstance(source.depth, int)
+        ):
+            issues.append(SandboxValidationIssue(path="source.depth", message="must be an integer"))
+        if (source.username is None) != (source.password is None):
+            issues.append(
+                SandboxValidationIssue(
+                    path="source",
+                    message="git username and password must be provided together",
+                )
+            )
+        if source.username is not None and not isinstance(source.username, str):
+            issues.append(
+                SandboxValidationIssue(path="source.username", message="must be a string")
+            )
+        if source.password is not None and not isinstance(source.password, str):
+            issues.append(
+                SandboxValidationIssue(path="source.password", message="must be a string")
+            )
+        if source.revision is not None and not isinstance(source.revision, str):
+            issues.append(
+                SandboxValidationIssue(path="source.revision", message="must be a string")
+            )
+        if source.depth is not None and source.depth <= 0:
+            issues.append(
+                SandboxValidationIssue(
+                    path="source.depth",
+                    message="must be a positive integer",
+                )
+            )
+    if isinstance(source, TarballSource) and not source.url:
+        issues.append(SandboxValidationIssue(path="source.url", message="is required"))
+    if isinstance(source, SnapshotSource) and not source.snapshot_id:
+        issues.append(SandboxValidationIssue(path="source.snapshot_id", message="is required"))
+    return issues
+
+
+def _validate_resources(resources: SandboxResources) -> list[SandboxValidationIssue]:
+    issues: list[SandboxValidationIssue] = []
+    if resources.vcpus is not None and (
+        isinstance(resources.vcpus, bool) or not isinstance(resources.vcpus, int)
+    ):
+        issues.append(SandboxValidationIssue(path="resources.vcpus", message="must be an integer"))
+    if resources.memory is not None and (
+        isinstance(resources.memory, bool) or not isinstance(resources.memory, int)
+    ):
+        issues.append(SandboxValidationIssue(path="resources.memory", message="must be an integer"))
+    if (
+        isinstance(resources.vcpus, int)
+        and not isinstance(resources.vcpus, bool)
+        and resources.vcpus != 1
+        and resources.vcpus % 2 != 0
+    ):
+        issues.append(SandboxValidationIssue(path="resources.vcpus", message="must be even"))
+    if (
+        isinstance(resources.memory, int)
+        and not isinstance(resources.memory, bool)
+        and isinstance(resources.vcpus, int)
+        and not isinstance(resources.vcpus, bool)
+    ):
+        expected_memory = resources.vcpus * 2048
+        if resources.memory != expected_memory:
+            issues.append(
+                SandboxValidationIssue(
+                    path="resources.memory",
+                    message=f"must equal resources.vcpus * 2048 ({expected_memory})",
+                )
+            )
+    return issues
+
+
+def _normalize_mapping_keys(
+    mapping: Mapping[str, Any], aliases: Mapping[str, str]
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in mapping.items():
+        normalized[aliases.get(str(key), str(key))] = value
+    return normalized
+
+
+def _raise_on_issues(issues: list[SandboxValidationIssue]) -> None:
+    if issues:
+        raise SandboxValidationError(issues)
 
 
 class Sandbox(BaseModel):
