@@ -18,7 +18,7 @@ from vercel._internal.sandbox.network_policy import (
 from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
 from .models import (
     GitSource,
-    SandboxResources,
+    Resources,
     SandboxStatus,
     SandboxValidationError,
     SandboxValidationIssue,
@@ -62,7 +62,7 @@ __all__ = [
     "GitSource",
     "TarballSource",
     "SnapshotSource",
-    "SandboxResources",
+    "Resources",
     "SandboxValidationError",
     "SandboxValidationIssue",
     "SandboxStatus",

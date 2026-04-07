@@ -22,9 +22,9 @@ from vercel.sandbox import (
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkTransformer,
+    Resources,
     Sandbox,
     SandboxNotFoundError,
-    SandboxResources,
     SandboxServerError,
 )
 
@@ -164,7 +164,7 @@ class TestSandboxCreate:
                 url="https://github.com/vercel/vercel-py",
                 revision="main",
             ),
-            resources=SandboxResources(vcpus=2, memory=4096),
+            resources=Resources(vcpus=2, memory=4096),
         )
 
         body = json.loads(route.calls.last.request.content)
@@ -204,7 +204,7 @@ class TestSandboxCreate:
             team_id="team_test123",
             project_id="prj_test123",
             source=GitSource(url="https://github.com/vercel/vercel-py"),
-            resources=SandboxResources(vcpus=2, memory=4096),
+            resources=Resources(vcpus=2, memory=4096),
         )
 
         first_body = json.loads(route.calls[0].request.content)

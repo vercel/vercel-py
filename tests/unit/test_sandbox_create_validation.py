@@ -1,7 +1,7 @@
 import pytest
 
 from vercel._internal.sandbox.models import GitSource, parse_resources, parse_source
-from vercel.sandbox import SandboxResources, SandboxValidationError
+from vercel.sandbox import Resources, SandboxValidationError
 
 
 def test_parse_source_accumulates_issues() -> None:
@@ -64,11 +64,11 @@ def test_parse_resources_accumulates_issues() -> None:
 
 
 def test_parse_resources_accepts_dataclass() -> None:
-    resources = parse_resources(SandboxResources(vcpus=2, memory=4096))
-    assert resources == SandboxResources(vcpus=2, memory=4096)
+    resources = parse_resources(Resources(vcpus=2, memory=4096))
+    assert resources == Resources(vcpus=2, memory=4096)
 
 
 def test_parse_resources_drops_unknown_keys() -> None:
     resources = parse_resources({"vcpus": 2, "memory": 4096, "extra": "nope"})
 
-    assert resources == SandboxResources(vcpus=2, memory=4096)
+    assert resources == Resources(vcpus=2, memory=4096)

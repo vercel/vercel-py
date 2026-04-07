@@ -1,6 +1,6 @@
 from vercel._internal.payload import RawPayload, marshal_payload
 from vercel._internal.sandbox.core import _build_create_sandbox_payload
-from vercel.sandbox import GitSource, SandboxResources
+from vercel.sandbox import GitSource, Resources
 
 
 def test_marshal_payload_recursively_camel_cases_without_mutating() -> None:
@@ -44,7 +44,7 @@ def test_build_create_payload_uses_dataclass_to_payload() -> None:
             url="https://github.com/vercel/vercel-py",
             revision="main",
         ),
-        resources=SandboxResources(vcpus=2, memory=4096),
+        resources=Resources(vcpus=2, memory=4096),
         env={"NODE_ENV": "test"},
         interactive=True,
     )

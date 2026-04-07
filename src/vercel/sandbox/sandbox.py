@@ -13,9 +13,9 @@ from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsC
 from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
     CommandResponse,
+    Resources,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
-    SandboxResources,
     SandboxStatus,
     Source,
     WriteFile,
@@ -48,8 +48,8 @@ from .snapshot import (
 def _parse_create_inputs(
     *,
     source: Source | Mapping[str, Any] | None,
-    resources: SandboxResources | Mapping[str, Any] | None,
-) -> tuple[Source | None, SandboxResources | None]:
+    resources: Resources | Mapping[str, Any] | None,
+) -> tuple[Source | None, Resources | None]:
     return parse_source(source), parse_resources(resources)
 
 
@@ -153,7 +153,7 @@ class AsyncSandbox:
         source: Source | Mapping[str, Any] | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: SandboxResources | Mapping[str, Any] | None = None,
+        resources: Resources | Mapping[str, Any] | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -553,7 +553,7 @@ class Sandbox:
         source: Source | Mapping[str, Any] | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: SandboxResources | Mapping[str, Any] | None = None,
+        resources: Resources | Mapping[str, Any] | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,

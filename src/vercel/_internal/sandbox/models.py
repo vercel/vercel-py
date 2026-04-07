@@ -91,7 +91,7 @@ SourceInput: TypeAlias = Source | Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
-class SandboxResources:
+class Resources:
     """Optional sandbox resource requests."""
 
     vcpus: int | None = None
@@ -106,7 +106,7 @@ class SandboxResources:
         return payload
 
 
-SandboxResourcesInput: TypeAlias = SandboxResources | Mapping[str, Any]
+ResourcesInput: TypeAlias = Resources | Mapping[str, Any]
 
 
 def parse_source(value: SourceInput | None) -> Source | None:
@@ -146,10 +146,10 @@ def parse_source(value: SourceInput | None) -> Source | None:
     return source
 
 
-def parse_resources(value: SandboxResourcesInput | None) -> SandboxResources | None:
+def parse_resources(value: ResourcesInput | None) -> Resources | None:
     if value is None:
         return None
-    if isinstance(value, SandboxResources):
+    if isinstance(value, Resources):
         _raise_on_issues(_validate_resources(value))
         return value
     if not isinstance(value, Mapping):
@@ -157,14 +157,14 @@ def parse_resources(value: SandboxResourcesInput | None) -> SandboxResources | N
             [
                 SandboxValidationIssue(
                     path="resources",
-                    message="must be a mapping or SandboxResources dataclass",
+                    message="must be a mapping or Resources dataclass",
                 )
             ]
         )
 
     raw = dict(value)
     issues: list[SandboxValidationIssue] = []
-    resources = SandboxResources(vcpus=raw.get("vcpus"), memory=raw.get("memory"))
+    resources = Resources(vcpus=raw.get("vcpus"), memory=raw.get("memory"))
     issues.extend(_validate_resources(resources))
     _raise_on_issues(issues)
     return resources
@@ -247,7 +247,7 @@ def _validate_source(source: Source) -> list[SandboxValidationIssue]:
     return issues
 
 
-def _validate_resources(resources: SandboxResources) -> list[SandboxValidationIssue]:
+def _validate_resources(resources: Resources) -> list[SandboxValidationIssue]:
     issues: list[SandboxValidationIssue] = []
     if resources.vcpus is not None and (
         isinstance(resources.vcpus, bool) or not isinstance(resources.vcpus, int)
