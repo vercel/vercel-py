@@ -143,41 +143,6 @@ class TestSandboxCreate:
         await sandbox.client.aclose()
 
     @respx.mock
-    def test_create_sandbox_accepts_dataclass_inputs(
-        self, mock_env_clear, mock_sandbox_create_response
-    ):
-        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "sandbox": mock_sandbox_create_response,
-                    "routes": [],
-                },
-            )
-        )
-
-        sandbox = Sandbox.create(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-            source=GitSource(
-                url="https://github.com/vercel/vercel-py",
-                revision="main",
-            ),
-            resources=Resources(vcpus=2, memory=4096),
-        )
-
-        body = json.loads(route.calls.last.request.content)
-        assert body["source"] == {
-            "type": "git",
-            "url": "https://github.com/vercel/vercel-py",
-            "revision": "main",
-        }
-        assert body["resources"] == {"vcpus": 2, "memory": 4096}
-
-        sandbox.client.close()
-
-    @respx.mock
     @pytest.mark.asyncio
     async def test_create_sandbox_dict_and_dataclass_inputs_match_on_wire(
         self, mock_env_clear, mock_sandbox_create_response
