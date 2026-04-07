@@ -34,6 +34,7 @@ dev = [
     "pytest-xdist",
     "hypothesis>=6.0.0",
     "respx>=0.21.0",
+    "uvloop",
     "mypy",
     "build",
     "twine",

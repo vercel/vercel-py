@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import dataclasses
 import functools
+import importlib
 import json
 import random
 import re
@@ -16,6 +17,7 @@ import pydantic
 from vercel._internal.polyfills import UTC, Self
 
 from . import core, nanoid, ulid, world as w
+from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -77,18 +79,25 @@ class WorkflowOrchestratorContext:
         return cls._ctx.get()
 
     async def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
-        workflow = core.get_workflow(workflow_run.workflow_name)
+        mod_name = core.get_workflow(workflow_run.workflow_name).module
         if not workflow_run.input or not isinstance(workflow_run.input, list):
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
         if not workflow_run.input[0].startswith(b"json"):
             raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
         args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
-        token = self._ctx.set(self)
-        try:
-            self._fut = asyncio.ensure_future(workflow.func(*args, **kwargs))
-        finally:
-            self._ctx.reset(token)
-        return await self._fut
+
+        with core.clean_registry(), workflow_sandbox(random_seed=workflow_run.run_id):
+            # Re-import the user module inside the sandbox so @workflow
+            # registers into the sandbox-local _cv_workflows dict.
+            importlib.import_module(mod_name)
+
+            workflow = core.get_workflow(workflow_run.workflow_name)
+            token = self._ctx.set(self)
+            try:
+                self._fut = asyncio.ensure_future(workflow.func(*args, **kwargs))
+            finally:
+                self._ctx.reset(token)
+            return await self._fut
 
     async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         input_data = b"json" + json.dumps((args, kwargs), sort_keys=True).encode()
