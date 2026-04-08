@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -14,68 +15,9 @@ from vercel._internal.sandbox.snapshot import (
 )
 
 from ..oidc import Credentials, get_credentials
-from .page import AsyncSnapshotPage, AsyncSnapshotPager, SnapshotPage
 
 MIN_SNAPSHOT_EXPIRATION_MS = _MIN_SNAPSHOT_EXPIRATION_MS
 SnapshotExpiration = _SnapshotExpiration
-
-
-async def _build_async_snapshot_page(
-    *,
-    creds: Credentials,
-    params: SnapshotListParams,
-) -> AsyncSnapshotPage:
-    client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-    try:
-        response = await client.list_snapshots(
-            project_id=params.project_id,
-            limit=params.limit,
-            since=params.since,
-            until=params.until,
-        )
-    finally:
-        await client.aclose()
-
-    async def fetch_next_page(page_info) -> AsyncSnapshotPage:
-        return await _build_async_snapshot_page(
-            creds=creds,
-            params=params.with_until(page_info.until),
-        )
-
-    return AsyncSnapshotPage.create(
-        snapshots=response.snapshots,
-        pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
-    )
-
-
-async def _build_sync_snapshot_page(
-    *,
-    creds: Credentials,
-    params: SnapshotListParams,
-) -> SnapshotPage:
-    client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-    try:
-        response = await client.list_snapshots(
-            project_id=params.project_id,
-            limit=params.limit,
-            since=params.since,
-            until=params.until,
-        )
-    finally:
-        client.close()
-
-    async def fetch_next_page(page_info) -> SnapshotPage:
-        return await _build_sync_snapshot_page(
-            creds=creds,
-            params=params.with_until(page_info.until),
-        )
-
-    return SnapshotPage.create(
-        snapshots=response.snapshots,
-        pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
-    )
 
 
 @dataclass
@@ -138,8 +80,8 @@ class AsyncSnapshot:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> AsyncSnapshotPager:
-        """List snapshots and return the first page."""
+    ) -> AsyncIterator[SnapshotModel]:
+        """List snapshots as an async iterable of snapshot models."""
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SnapshotListParams(
             project_id=creds.project_id,
@@ -147,9 +89,36 @@ class AsyncSnapshot:
             since=since,
             until=until,
         )
-        return AsyncSnapshotPager(
-            _fetch_first_page=lambda: _build_async_snapshot_page(creds=creds, params=params)
-        )
+
+        async def iter_snapshots() -> AsyncIterator[SnapshotModel]:
+            current_params = params
+            while True:
+                client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+                try:
+                    response = await client.list_snapshots(
+                        project_id=current_params.project_id,
+                        limit=current_params.request_limit,
+                        since=current_params.since,
+                        until=current_params.until,
+                    )
+                finally:
+                    await client.aclose()
+                snapshots = response.snapshots[: current_params.remaining]
+                for snapshot in snapshots:
+                    yield snapshot
+                if response.pagination.next is None:
+                    return
+                if (
+                    current_params.remaining is not None
+                    and len(snapshots) >= current_params.remaining
+                ):
+                    return
+                current_params = current_params.with_until(
+                    response.pagination.next,
+                    yielded_count=len(snapshots),
+                )
+
+        return iter_snapshots()
 
     async def delete(self) -> None:
         """Delete this snapshot."""
@@ -217,8 +186,8 @@ class Snapshot:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> SnapshotPage:
-        """List snapshots and return the first page."""
+    ) -> Iterator[SnapshotModel]:
+        """List snapshots as an iterable of snapshot models."""
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SnapshotListParams(
             project_id=creds.project_id,
@@ -226,7 +195,37 @@ class Snapshot:
             since=since,
             until=until,
         )
-        return iter_coroutine(_build_sync_snapshot_page(creds=creds, params=params))
+
+        def iter_snapshots() -> Iterator[SnapshotModel]:
+            current_params = params
+            while True:
+                client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+                try:
+                    response = iter_coroutine(
+                        client.list_snapshots(
+                            project_id=current_params.project_id,
+                            limit=current_params.request_limit,
+                            since=current_params.since,
+                            until=current_params.until,
+                        )
+                    )
+                finally:
+                    client.close()
+                snapshots = response.snapshots[: current_params.remaining]
+                yield from snapshots
+                if response.pagination.next is None:
+                    return
+                if (
+                    current_params.remaining is not None
+                    and len(snapshots) >= current_params.remaining
+                ):
+                    return
+                current_params = current_params.with_until(
+                    response.pagination.next,
+                    yielded_count=len(snapshots),
+                )
+
+        return iter_snapshots()
 
     def delete(self) -> None:
         """Delete this snapshot."""

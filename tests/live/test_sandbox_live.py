@@ -243,14 +243,14 @@ class TestSandboxLive:
             found_ids: list[str] = []
 
             for _ in range(10):
-                page = Sandbox.list(
+                sandboxes = Sandbox.list(
                     token=vercel_token,
                     team_id=vercel_team_id,
                     project_id=vercel_project_id,
                     limit=20,
                     since=since,
                 )
-                found_ids = [item.id for item in page.iter_items()]
+                found_ids = [item.id for item in sandboxes]
                 if sandbox.sandbox_id in found_ids:
                     break
                 time.sleep(1)

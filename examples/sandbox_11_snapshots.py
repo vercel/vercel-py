@@ -124,34 +124,15 @@ async def async_demo() -> None:
     # Step 5: List snapshots and confirm the new snapshots are discoverable.
     print("\n[7] Listing recent snapshots...")
     since = snapshot.created_at - 1
-    pager = AsyncSnapshot.list(limit=10, since=since)
-    first_page = await pager
-    first_page_ids = [listed.id for listed in first_page.snapshots]
-    print(f"    First page snapshot IDs: {first_page_ids}")
-
-    paged_ids: list[list[str]] = []
-    found_ids: set[str] = set()
-    async for page in pager.iter_pages():
-        page_ids = [listed.id for listed in page.snapshots]
-        paged_ids.append(page_ids)
-        found_ids.update(page_ids)
+    found_ids: list[str] = []
+    async for listed in AsyncSnapshot.list(limit=10, since=since):
+        found_ids.append(listed.id)
         if all(snapshot_id in found_ids for snapshot_id in async_snapshot_ids):
             break
 
-    print(f"    Visited pages: {paged_ids}")
+    print(f"    Async list() yielded snapshot IDs: {found_ids}")
     assert all(snapshot_id in found_ids for snapshot_id in async_snapshot_ids), (
-        "Did not find all async snapshots in AsyncSnapshot.list() results"
-    )
-
-    item_ids: list[str] = []
-    async for listed in AsyncSnapshot.list(limit=10, since=since).iter_items():
-        item_ids.append(listed.id)
-        if all(snapshot_id in item_ids for snapshot_id in async_snapshot_ids):
-            break
-
-    print(f"    Iterated snapshot IDs: {item_ids}")
-    assert all(snapshot_id in item_ids for snapshot_id in async_snapshot_ids), (
-        "Did not find all async snapshots while iterating AsyncSnapshot.list() items"
+        "Did not find all async snapshots while iterating AsyncSnapshot.list()"
     )
 
     # Step 6: Retrieve and delete the snapshots
@@ -246,33 +227,15 @@ def sync_demo() -> None:
 
     print("\n[7] Listing recent snapshots...")
     since = snapshot.created_at - 1
-    first_page = Snapshot.list(limit=10, since=since)
-    first_page_ids = [listed.id for listed in first_page.snapshots]
-    print(f"    First page snapshot IDs: {first_page_ids}")
-
-    paged_ids: list[list[str]] = []
-    found_ids: set[str] = set()
-    for page in first_page.iter_pages():
-        page_ids = [listed.id for listed in page.snapshots]
-        paged_ids.append(page_ids)
-        found_ids.update(page_ids)
+    found_ids: list[str] = []
+    for listed in Snapshot.list(limit=10, since=since):
+        found_ids.append(listed.id)
         if all(snapshot_id in found_ids for snapshot_id in sync_snapshot_ids):
             break
 
-    print(f"    Visited pages: {paged_ids}")
+    print(f"    Sync list() yielded snapshot IDs: {found_ids}")
     assert all(snapshot_id in found_ids for snapshot_id in sync_snapshot_ids), (
-        "Did not find all sync snapshots in Snapshot.list() pages"
-    )
-
-    item_ids: list[str] = []
-    for listed in Snapshot.list(limit=10, since=since).iter_items():
-        item_ids.append(listed.id)
-        if all(snapshot_id in item_ids for snapshot_id in sync_snapshot_ids):
-            break
-
-    print(f"    Iterated snapshot IDs: {item_ids}")
-    assert all(snapshot_id in item_ids for snapshot_id in sync_snapshot_ids), (
-        "Did not find all sync snapshots while iterating Snapshot.list() items"
+        "Did not find all sync snapshots while iterating Snapshot.list()"
     )
 
     print("\n[8] Retrieving and deleting snapshots...")
