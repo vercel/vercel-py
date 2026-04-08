@@ -230,31 +230,28 @@ class AsyncSandbox:
 
         async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
             current_params = params
-            while True:
-                client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-                try:
+            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
                     response = await client.list_sandboxes(
                         project_id=current_params.project_id,
                         limit=current_params.request_limit,
                         since=current_params.since,
                         until=current_params.until,
                     )
-                finally:
-                    await client.aclose()
-                sandboxes = response.sandboxes[: current_params.remaining]
-                for sandbox in sandboxes:
-                    yield sandbox
-                if response.pagination.next is None:
-                    return
-                if (
-                    current_params.remaining is not None
-                    and len(sandboxes) >= current_params.remaining
-                ):
-                    return
-                current_params = current_params.with_until(
-                    response.pagination.next,
-                    yielded_count=len(sandboxes),
-                )
+                    sandboxes = response.sandboxes[: current_params.remaining]
+                    for sandbox in sandboxes:
+                        yield sandbox
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(sandboxes) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(sandboxes),
+                    )
 
         return iter_sandboxes()
 
@@ -659,9 +656,8 @@ class Sandbox:
 
         def iter_sandboxes() -> Iterator[SandboxModel]:
             current_params = params
-            while True:
-                client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-                try:
+            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
                     response = iter_coroutine(
                         client.list_sandboxes(
                             project_id=current_params.project_id,
@@ -670,21 +666,19 @@ class Sandbox:
                             until=current_params.until,
                         )
                     )
-                finally:
-                    client.close()
-                sandboxes = response.sandboxes[: current_params.remaining]
-                yield from sandboxes
-                if response.pagination.next is None:
-                    return
-                if (
-                    current_params.remaining is not None
-                    and len(sandboxes) >= current_params.remaining
-                ):
-                    return
-                current_params = current_params.with_until(
-                    response.pagination.next,
-                    yielded_count=len(sandboxes),
-                )
+                    sandboxes = response.sandboxes[: current_params.remaining]
+                    yield from sandboxes
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(sandboxes) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(sandboxes),
+                    )
 
         return iter_sandboxes()
 

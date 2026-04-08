@@ -92,31 +92,28 @@ class AsyncSnapshot:
 
         async def iter_snapshots() -> AsyncIterator[SnapshotModel]:
             current_params = params
-            while True:
-                client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-                try:
+            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
                     response = await client.list_snapshots(
                         project_id=current_params.project_id,
                         limit=current_params.request_limit,
                         since=current_params.since,
                         until=current_params.until,
                     )
-                finally:
-                    await client.aclose()
-                snapshots = response.snapshots[: current_params.remaining]
-                for snapshot in snapshots:
-                    yield snapshot
-                if response.pagination.next is None:
-                    return
-                if (
-                    current_params.remaining is not None
-                    and len(snapshots) >= current_params.remaining
-                ):
-                    return
-                current_params = current_params.with_until(
-                    response.pagination.next,
-                    yielded_count=len(snapshots),
-                )
+                    snapshots = response.snapshots[: current_params.remaining]
+                    for snapshot in snapshots:
+                        yield snapshot
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(snapshots) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(snapshots),
+                    )
 
         return iter_snapshots()
 
@@ -198,9 +195,8 @@ class Snapshot:
 
         def iter_snapshots() -> Iterator[SnapshotModel]:
             current_params = params
-            while True:
-                client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-                try:
+            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
                     response = iter_coroutine(
                         client.list_snapshots(
                             project_id=current_params.project_id,
@@ -209,21 +205,19 @@ class Snapshot:
                             until=current_params.until,
                         )
                     )
-                finally:
-                    client.close()
-                snapshots = response.snapshots[: current_params.remaining]
-                yield from snapshots
-                if response.pagination.next is None:
-                    return
-                if (
-                    current_params.remaining is not None
-                    and len(snapshots) >= current_params.remaining
-                ):
-                    return
-                current_params = current_params.with_until(
-                    response.pagination.next,
-                    yielded_count=len(snapshots),
-                )
+                    snapshots = response.snapshots[: current_params.remaining]
+                    yield from snapshots
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(snapshots) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(snapshots),
+                    )
 
         return iter_snapshots()
 
