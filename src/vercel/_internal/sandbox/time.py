@@ -7,7 +7,9 @@ def normalize_duration_ms(value: int | timedelta | None) -> int | None:
     match value:
         case None:
             return None
+        case int():
+            return value
         case timedelta():
-            return int(value.total_seconds() * 1000)
+            return value // timedelta(milliseconds=1)
         case _:
-            return int(value)
+            raise TypeError("duration must be an int, timedelta, or None")
