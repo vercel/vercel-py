@@ -197,6 +197,7 @@ class AsyncSandbox:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
@@ -208,6 +209,9 @@ class AsyncSandbox:
         Args:
             limit: Maximum number of sandboxes to yield across the full
                 traversal.
+            _internal_page_size: Private override for the backend request size
+                used while traversing pages internally. This is intended only
+                for internal debugging and examples.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
@@ -224,6 +228,7 @@ class AsyncSandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
+            internal_page_size=_internal_page_size,
             since=since,
             until=until,
         )
@@ -623,6 +628,7 @@ class Sandbox:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
@@ -634,6 +640,9 @@ class Sandbox:
         Args:
             limit: Maximum number of sandboxes to yield across the full
                 traversal.
+            _internal_page_size: Private override for the backend request size
+                used while traversing pages internally. This is intended only
+                for internal debugging and examples.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
@@ -650,6 +659,7 @@ class Sandbox:
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
+            internal_page_size=_internal_page_size,
             since=since,
             until=until,
         )

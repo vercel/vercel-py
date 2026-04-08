@@ -75,17 +75,24 @@ class AsyncSnapshot:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> AsyncIterator[SnapshotModel]:
-        """List snapshots as an async iterable of snapshot models."""
+        """List snapshots as an async iterable of snapshot models.
+
+        `_internal_page_size` is a private override for the backend request
+        size used during internal pagination. It exists for internal debugging
+        and examples and is not part of the supported public contract.
+        """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SnapshotListParams(
             project_id=creds.project_id,
             limit=limit,
+            internal_page_size=_internal_page_size,
             since=since,
             until=until,
         )
@@ -178,17 +185,24 @@ class Snapshot:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> Iterator[SnapshotModel]:
-        """List snapshots as an iterable of snapshot models."""
+        """List snapshots as an iterable of snapshot models.
+
+        `_internal_page_size` is a private override for the backend request
+        size used during internal pagination. It exists for internal debugging
+        and examples and is not part of the supported public contract.
+        """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SnapshotListParams(
             project_id=creds.project_id,
             limit=limit,
+            internal_page_size=_internal_page_size,
             since=since,
             until=until,
         )
