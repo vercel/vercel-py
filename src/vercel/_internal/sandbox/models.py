@@ -52,7 +52,7 @@ class SandboxValidationError(SandboxError):
 
     def __init__(self, issues: list[SandboxValidationIssue]) -> None:
         self.issues = tuple(issues)
-        message = "; ".join(f"{issue.path}: {issue.message}" for issue in self.issues)
+        message = ";\n\n".join(f"{issue.path}: {issue.message}" for issue in self.issues)
         super().__init__(message or "Sandbox validation failed")
 
 
