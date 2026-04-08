@@ -1,6 +1,14 @@
+from typing import Any, cast
+
 import pytest
 
-from vercel._internal.sandbox.models import parse_resources, parse_source
+from vercel._internal.sandbox.models import (
+    GitSource,
+    SnapshotSource,
+    TarballSource,
+    parse_resources,
+    parse_source,
+)
 from vercel.sandbox import Resources, SandboxValidationError
 
 
@@ -43,6 +51,36 @@ def test_parse_source_accepts_camel_case_snapshot_id() -> None:
     source = parse_source({"type": "snapshot", "snapshotId": "snap_123"})
     assert source is not None
     assert source.to_payload() == {"type": "snapshot", "snapshot_id": "snap_123"}
+
+
+def test_parse_source_validates_direct_git_dataclass_types() -> None:
+    with pytest.raises(SandboxValidationError) as exc_info:
+        parse_source(
+            GitSource(
+                url=cast(Any, 123),
+                depth=cast(Any, "1"),
+            )
+        )
+
+    issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
+    assert ("source.url", "is required") in issues
+    assert ("source.depth", "must be an integer") in issues
+
+
+def test_parse_source_validates_direct_non_git_dataclass_types() -> None:
+    with pytest.raises(SandboxValidationError) as exc_info:
+        parse_source(TarballSource(url=cast(Any, 123)))
+
+    assert {(issue.path, issue.message) for issue in exc_info.value.issues} == {
+        ("source.url", "is required")
+    }
+
+    with pytest.raises(SandboxValidationError) as exc_info:
+        parse_source(SnapshotSource(snapshot_id=cast(Any, 123)))
+
+    assert {(issue.path, issue.message) for issue in exc_info.value.issues} == {
+        ("source.snapshot_id", "is required")
+    }
 
 
 def test_parse_resources_accumulates_issues() -> None:

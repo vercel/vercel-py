@@ -208,7 +208,7 @@ def _parse_snapshot_source(
 def _validate_source(source: Source) -> list[SandboxValidationIssue]:
     issues: list[SandboxValidationIssue] = []
     if isinstance(source, GitSource):
-        if not source.url:
+        if not isinstance(source.url, str) or not source.url:
             issues.append(SandboxValidationIssue(path="source.url", message="is required"))
         if source.depth is not None and (
             isinstance(source.depth, bool) or not isinstance(source.depth, int)
@@ -233,16 +233,22 @@ def _validate_source(source: Source) -> list[SandboxValidationIssue]:
             issues.append(
                 SandboxValidationIssue(path="source.revision", message="must be a string")
             )
-        if source.depth is not None and source.depth <= 0:
+        if (
+            isinstance(source.depth, int)
+            and not isinstance(source.depth, bool)
+            and source.depth <= 0
+        ):
             issues.append(
                 SandboxValidationIssue(
                     path="source.depth",
                     message="must be a positive integer",
                 )
             )
-    if isinstance(source, TarballSource) and not source.url:
+    if isinstance(source, TarballSource) and (not isinstance(source.url, str) or not source.url):
         issues.append(SandboxValidationIssue(path="source.url", message="is required"))
-    if isinstance(source, SnapshotSource) and not source.snapshot_id:
+    if isinstance(source, SnapshotSource) and (
+        not isinstance(source.snapshot_id, str) or not source.snapshot_id
+    ):
         issues.append(SandboxValidationIssue(path="source.snapshot_id", message="is required"))
     return issues
 
