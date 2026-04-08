@@ -4,7 +4,7 @@ import builtins
 import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from os import PathLike
 from typing import Any
 
@@ -24,6 +24,7 @@ from vercel._internal.sandbox.network_policy import (
     NetworkPolicy,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
+from vercel._internal.sandbox.time import normalize_duration_ms
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -38,7 +39,6 @@ from .snapshot import (
     AsyncSnapshot,
     Snapshot as SnapshotClass,
     SnapshotExpiration,
-    normalize_snapshot_expiration,
 )
 
 
@@ -154,7 +154,7 @@ class AsyncSandbox:
         *,
         source: Source | None = None,
         ports: list[int] | None = None,
-        timeout: int | None = None,
+        timeout: int | timedelta | None = None,
         resources: dict[str, Any] | None = None,
         runtime: str | None = None,
         token: str | None = None,
@@ -169,7 +169,7 @@ class AsyncSandbox:
         Args:
             source: Source to initialize the sandbox from (git, tarball, or snapshot).
             ports: List of ports to expose.
-            timeout: Sandbox timeout in milliseconds.
+            timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
             token: API token (uses OIDC if not provided).
@@ -191,7 +191,7 @@ class AsyncSandbox:
             project_id=creds.project_id,
             source=_normalize_source(source),
             ports=ports,
-            timeout=timeout,
+            timeout=normalize_duration_ms(timeout),
             resources=resources,
             runtime=runtime,
             interactive=interactive,
@@ -436,7 +436,7 @@ class AsyncSandbox:
             return
         await self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
-    async def extend_timeout(self, duration: int) -> None:
+    async def extend_timeout(self, duration: int | timedelta) -> None:
         """
         Extend the timeout of the sandbox by the specified duration.
 
@@ -444,13 +444,14 @@ class AsyncSandbox:
         execution timeout for your plan.
 
         Args:
-            duration: The duration in milliseconds to extend the timeout by.
+            duration: The duration in milliseconds or as a ``timedelta`` to
+                extend the timeout by.
         """
         response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
         self.sandbox = response.sandbox
 
     async def snapshot(
-        self, *, expiration: int | SnapshotExpiration | None = None
+        self, *, expiration: int | timedelta | SnapshotExpiration | None = None
     ) -> AsyncSnapshot:
         """
         Create a snapshot from this currently running sandbox.
@@ -458,7 +459,7 @@ class AsyncSandbox:
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        normalized_expiration = normalize_snapshot_expiration(expiration)
+        normalized_expiration = None if expiration is None else SnapshotExpiration(expiration)
         response = await self.client.create_snapshot(
             sandbox_id=self.sandbox.id,
             expiration=normalized_expiration,
@@ -552,7 +553,7 @@ class Sandbox:
         *,
         source: Source | None = None,
         ports: list[int] | None = None,
-        timeout: int | None = None,
+        timeout: int | timedelta | None = None,
         resources: dict[str, Any] | None = None,
         runtime: str | None = None,
         token: str | None = None,
@@ -567,7 +568,7 @@ class Sandbox:
         Args:
             source: Source to initialize the sandbox from (git, tarball, or snapshot).
             ports: List of ports to expose.
-            timeout: Sandbox timeout in milliseconds.
+            timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
             token: API token (uses OIDC if not provided).
@@ -591,7 +592,7 @@ class Sandbox:
                 project_id=creds.project_id,
                 source=_normalize_source(source),
                 ports=ports,
-                timeout=timeout,
+                timeout=normalize_duration_ms(timeout),
                 resources=resources,
                 runtime=runtime,
                 interactive=interactive,
@@ -840,7 +841,7 @@ class Sandbox:
             return
         self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
-    def extend_timeout(self, duration: int) -> None:
+    def extend_timeout(self, duration: int | timedelta) -> None:
         """
         Extend the timeout of the sandbox by the specified duration.
 
@@ -848,21 +849,24 @@ class Sandbox:
         execution timeout for your plan.
 
         Args:
-            duration: The duration in milliseconds to extend the timeout by.
+            duration: The duration in milliseconds or as a ``timedelta`` to
+                extend the timeout by.
         """
         response = iter_coroutine(
             self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
         )
         self.sandbox = response.sandbox
 
-    def snapshot(self, *, expiration: int | SnapshotExpiration | None = None) -> SnapshotClass:
+    def snapshot(
+        self, *, expiration: int | timedelta | SnapshotExpiration | None = None
+    ) -> SnapshotClass:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        normalized_expiration = normalize_snapshot_expiration(expiration)
+        normalized_expiration = None if expiration is None else SnapshotExpiration(expiration)
         response = iter_coroutine(
             self.client.create_snapshot(
                 sandbox_id=self.sandbox.id,

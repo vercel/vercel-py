@@ -6,7 +6,7 @@ Tests both sync and async variants (Sandbox and AsyncSandbox).
 import json
 import tarfile
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -174,6 +174,35 @@ class TestSandboxCreate:
         sandbox.client.close()
 
     @respx.mock
+    def test_create_sandbox_sync_serializes_timedelta_timeout(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            timeout=timedelta(minutes=10),
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["timeout"] == 600000
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_create_sandbox_with_env_sync(self, mock_env_clear, mock_sandbox_create_response):
         """Test sandbox creation with env dict."""
         from vercel.sandbox import Sandbox
@@ -233,6 +262,36 @@ class TestSandboxCreate:
 
         body = json.loads(route.calls.last.request.content)
         assert body["env"] == {"NODE_ENV": "production"}
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_async_serializes_timedelta_timeout(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            timeout=timedelta(minutes=10),
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["timeout"] == 600000
 
         await sandbox.client.aclose()
 
@@ -3331,6 +3390,54 @@ class TestSandboxSnapshot:
         sandbox.client.close()
 
     @respx.mock
+    def test_create_snapshot_sync_with_timedelta_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test sync snapshot creation serializes timedelta expiration to milliseconds."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = sandbox.snapshot(expiration=timedelta(days=1))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 86_400_000}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_create_snapshot_sync_with_zero_expiration(
         self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
     ):
@@ -3477,6 +3584,55 @@ class TestSandboxSnapshot:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_create_snapshot_async_with_timedelta_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation serializes timedelta expiration to milliseconds."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot(expiration=timedelta(days=1))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 86_400_000}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_create_snapshot_async_with_zero_expiration_and_optional_expires_at(
         self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
     ):
@@ -3573,6 +3729,87 @@ class TestSandboxExtendTimeout:
         assert sandbox.timeout == 600
 
         sandbox.client.close()
+
+    @respx.mock
+    def test_extend_timeout_sync_serializes_timedelta(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        extended_response = dict(mock_sandbox_get_response)
+        extended_response["timeout"] = 600
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/extend-timeout").mock(
+            return_value=httpx.Response(200, json={"sandbox": extended_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.extend_timeout(timedelta(minutes=5))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["duration"] == 300000
+        assert sandbox.timeout == 600
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_extend_timeout_async_serializes_timedelta(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        extended_response = dict(mock_sandbox_get_response)
+        extended_response["timeout"] = 600
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/extend-timeout").mock(
+            return_value=httpx.Response(200, json={"sandbox": extended_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        await sandbox.extend_timeout(timedelta(minutes=5))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["duration"] == 300000
+        assert sandbox.timeout == 600
+
+        await sandbox.client.aclose()
 
 
 class TestSandboxDomain:
