@@ -6,6 +6,10 @@ from datetime import UTC, datetime
 from vercel._internal.sandbox.models import Pagination
 
 
+def _exclusive_until_cursor(value: int) -> int:
+    return max(value - 1, 0)
+
+
 @dataclass(frozen=True, slots=True)
 class SandboxPageInfo:
     until: int
@@ -15,6 +19,8 @@ class SandboxPageInfo:
 class _BaseListParams:
     project_id: str | None
     limit: int | None
+    remaining: int | None
+    internal_page_size: int | None
     since: int | None
     until: int | None
 
@@ -22,23 +28,38 @@ class _BaseListParams:
         self,
         project_id: str | None = None,
         limit: int | None = None,
+        remaining: int | None = None,
+        internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
     ) -> None:
         object.__setattr__(self, "project_id", project_id)
         object.__setattr__(self, "limit", limit)
+        object.__setattr__(self, "remaining", limit if remaining is None else remaining)
+        object.__setattr__(self, "internal_page_size", internal_page_size)
         object.__setattr__(self, "since", normalize_list_timestamp(since))
         object.__setattr__(self, "until", normalize_list_timestamp(until))
+
+    @property
+    def request_limit(self) -> int | None:
+        if self.remaining is None:
+            return self.internal_page_size
+        if self.internal_page_size is None:
+            return self.remaining
+        return min(self.remaining, self.internal_page_size)
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class SandboxListParams(_BaseListParams):
-    def with_until(self, until: int) -> SandboxListParams:
+    def with_until(self, until: int, *, yielded_count: int = 0) -> SandboxListParams:
+        remaining = None if self.remaining is None else max(self.remaining - yielded_count, 0)
         return SandboxListParams(
             project_id=self.project_id,
             limit=self.limit,
+            remaining=remaining,
+            internal_page_size=self.internal_page_size,
             since=self.since,
-            until=until,
+            until=_exclusive_until_cursor(until),
         )
 
 
@@ -55,12 +76,15 @@ class SnapshotPageInfo:
 
 @dataclass(frozen=True, slots=True, init=False)
 class SnapshotListParams(_BaseListParams):
-    def with_until(self, until: int) -> SnapshotListParams:
+    def with_until(self, until: int, *, yielded_count: int = 0) -> SnapshotListParams:
+        remaining = None if self.remaining is None else max(self.remaining - yielded_count, 0)
         return SnapshotListParams(
             project_id=self.project_id,
             limit=self.limit,
+            remaining=remaining,
+            internal_page_size=self.internal_page_size,
             since=self.since,
-            until=until,
+            until=_exclusive_until_cursor(until),
         )
 
 

@@ -39,7 +39,6 @@ from .command import (
     Command,
     CommandFinished,
 )
-from .page import AsyncSandboxPage, AsyncSandboxPager, SandboxPage
 from .pty.shell import start_interactive_shell
 from .snapshot import (
     AsyncSnapshot,
@@ -83,64 +82,6 @@ def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) 
             return "SnapshotSource"
         return "Source"
     return name
-
-
-async def _build_async_sandbox_page(
-    *,
-    creds: Credentials,
-    params: SandboxListParams,
-) -> AsyncSandboxPage:
-    client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-    try:
-        response = await client.list_sandboxes(
-            project_id=params.project_id,
-            limit=params.limit,
-            since=params.since,
-            until=params.until,
-        )
-    finally:
-        await client.aclose()
-
-    async def fetch_next_page(page_info) -> AsyncSandboxPage:
-        return await _build_async_sandbox_page(
-            creds=creds,
-            params=params.with_until(page_info.until),
-        )
-
-    return AsyncSandboxPage.create(
-        sandboxes=response.sandboxes,
-        pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
-    )
-
-
-async def _build_sync_sandbox_page(
-    *,
-    creds: Credentials,
-    params: SandboxListParams,
-) -> SandboxPage:
-    client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-    try:
-        response = await client.list_sandboxes(
-            project_id=params.project_id,
-            limit=params.limit,
-            since=params.since,
-            until=params.until,
-        )
-    finally:
-        client.close()
-
-    async def fetch_next_page(page_info) -> SandboxPage:
-        return await _build_sync_sandbox_page(
-            creds=creds,
-            params=params.with_until(page_info.until),
-        )
-
-    return SandboxPage.create(
-        sandboxes=response.sandboxes,
-        pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
-    )
 
 
 @dataclass
@@ -256,16 +197,21 @@ class AsyncSandbox:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> AsyncSandboxPager:
-        """List sandboxes and return the first page.
+    ) -> AsyncIterator[SandboxModel]:
+        """List sandboxes as an async iterable of sandbox models.
 
         Args:
-            limit: Maximum number of sandboxes to request per page.
+            limit: Maximum number of sandboxes to yield across the full
+                traversal.
+            _internal_page_size: Private override for the backend request size
+                used while traversing pages internally. This is intended only
+                for internal debugging and examples.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
@@ -276,20 +222,43 @@ class AsyncSandbox:
             team_id: Team ID scope for the sandbox API.
 
         Returns:
-            An awaitable pager whose first awaited value is the first page of
-            typed sandbox results. Continue pagination with ``iter_pages()``
-            or ``iter_items()`` on the page or pager.
+            An async iterable of typed sandbox results.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
+            internal_page_size=_internal_page_size,
             since=since,
             until=until,
         )
-        return AsyncSandboxPager(
-            _fetch_first_page=lambda: _build_async_sandbox_page(creds=creds, params=params)
-        )
+
+        async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
+            current_params = params
+            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
+                    response = await client.list_sandboxes(
+                        project_id=current_params.project_id,
+                        limit=current_params.request_limit,
+                        since=current_params.since,
+                        until=current_params.until,
+                    )
+                    sandboxes = response.sandboxes[: current_params.remaining]
+                    for sandbox in sandboxes:
+                        yield sandbox
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(sandboxes) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(sandboxes),
+                    )
+
+        return iter_sandboxes()
 
     async def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
@@ -659,16 +628,21 @@ class Sandbox:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> SandboxPage:
-        """List sandboxes and return the first page.
+    ) -> Iterator[SandboxModel]:
+        """List sandboxes as an iterable of sandbox models.
 
         Args:
-            limit: Maximum number of sandboxes to request per page.
+            limit: Maximum number of sandboxes to yield across the full
+                traversal.
+            _internal_page_size: Private override for the backend request size
+                used while traversing pages internally. This is intended only
+                for internal debugging and examples.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
@@ -679,17 +653,44 @@ class Sandbox:
             team_id: Team ID scope for the sandbox API.
 
         Returns:
-            The first page of typed sandbox results. Continue pagination with
-            ``iter_pages()`` or ``iter_items()`` on the returned page.
+            An iterable of typed sandbox results.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
+            internal_page_size=_internal_page_size,
             since=since,
             until=until,
         )
-        return iter_coroutine(_build_sync_sandbox_page(creds=creds, params=params))
+
+        def iter_sandboxes() -> Iterator[SandboxModel]:
+            current_params = params
+            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
+                    response = iter_coroutine(
+                        client.list_sandboxes(
+                            project_id=current_params.project_id,
+                            limit=current_params.request_limit,
+                            since=current_params.since,
+                            until=current_params.until,
+                        )
+                    )
+                    sandboxes = response.sandboxes[: current_params.remaining]
+                    yield from sandboxes
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(sandboxes) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(sandboxes),
+                    )
+
+        return iter_sandboxes()
 
     def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
