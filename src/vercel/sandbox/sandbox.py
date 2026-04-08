@@ -25,7 +25,6 @@ from vercel._internal.sandbox.models import (
     parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
-from vercel._internal.sandbox.time import normalize_duration_ms
 
 from ..oidc import Credentials, get_credentials
 from .command import (
