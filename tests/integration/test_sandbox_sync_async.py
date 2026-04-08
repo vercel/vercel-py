@@ -16,12 +16,17 @@ import pytest
 import respx
 
 from vercel.sandbox import (
+    AsyncSandbox,
+    GitSource,
     NetworkPolicyCustom,
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkTransformer,
+    Resources,
+    Sandbox,
     SandboxNotFoundError,
     SandboxServerError,
+    SandboxValidationError,
 )
 
 # Base URL for Vercel Sandbox API
@@ -137,6 +142,115 @@ class TestSandboxCreate:
 
         # Cleanup
         await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_dict_and_dataclass_inputs_match_on_wire(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sync_sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source={"type": "git", "url": "https://github.com/vercel/vercel-py"},
+            resources={"vcpus": 2, "memory": 4096},
+        )
+        async_sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source=GitSource(url="https://github.com/vercel/vercel-py"),
+            resources=Resources(vcpus=2, memory=4096),
+        )
+
+        first_body = json.loads(route.calls[0].request.content)
+        second_body = json.loads(route.calls[1].request.content)
+
+        assert first_body == second_body
+        assert first_body["source"] == {
+            "type": "git",
+            "url": "https://github.com/vercel/vercel-py",
+        }
+        assert first_body["resources"] == {"vcpus": 2, "memory": 4096}
+
+        sync_sandbox.client.close()
+        await async_sandbox.client.aclose()
+
+    @respx.mock
+    def test_create_sandbox_accepts_camel_case_snapshot_dict(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source={"type": "snapshot", "snapshotId": "snap_123"},
+        )
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["source"] == {"type": "snapshot", "snapshotId": "snap_123"}
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_create_sandbox_rejects_invalid_inputs_before_request(self, mock_env_clear):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(200, json={"sandbox": {}, "routes": []})
+        )
+
+        with pytest.raises(SandboxValidationError) as exc_info:
+            Sandbox.create(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+                source={"type": "git", "depth": 0, "username": "scott"},
+                resources={"vcpus": 3, "memory": 4096},
+            )
+
+        issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
+        assert ("source.url", "is required") in issues
+        assert ("source.depth", "must be a positive integer") in issues
+        assert ("source", "git username and password must be provided together") in issues
+        assert route.called is False
+
+    @respx.mock
+    def test_create_sandbox_rejects_invalid_resources_before_request(self, mock_env_clear):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(200, json={"sandbox": {}, "routes": []})
+        )
+
+        with pytest.raises(SandboxValidationError) as exc_info:
+            Sandbox.create(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+                resources={"vcpus": 3, "memory": 4096},
+            )
+
+        issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
+        assert ("resources.vcpus", "must be even") in issues
+        assert ("resources.memory", "must equal resources.vcpus * 2048 (6144)") in issues
+        assert route.called is False
 
     @respx.mock
     def test_create_sandbox_with_options(self, mock_env_clear, mock_sandbox_create_response):

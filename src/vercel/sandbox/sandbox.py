@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import builtins
 import time
-from collections.abc import AsyncIterator, Iterator
+import warnings
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from os import PathLike
@@ -12,19 +13,24 @@ from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
+    ApiNetworkPolicy,
     CommandResponse,
+    GitSource,
+    NetworkPolicy,
+    Resources,
+    ResourcesInput,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
     SandboxStatus,
+    SnapshotSource,
     Source,
+    SourceInput,
+    TarballSource,
     WriteFile,
-)
-from vercel._internal.sandbox.network_policy import (
-    ApiNetworkPolicy,
-    NetworkPolicy,
+    parse_resources,
+    parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
-from vercel._internal.sandbox.time import normalize_duration_ms
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -42,17 +48,41 @@ from .snapshot import (
 )
 
 
-def _normalize_source(source: Source | None) -> dict[str, Any] | None:
-    """Convert snake_case keys in source dict to camelCase for the API."""
-    if source is None:
-        return None
+def _parse_create_inputs(
+    *,
+    source: SourceInput | None,
+    resources: ResourcesInput | None,
+) -> tuple[Source | None, Resources | None]:
+    _warn_deprecated_create_mapping("source", source)
+    _warn_deprecated_create_mapping("resources", resources)
+    return parse_source(source), parse_resources(resources)
 
-    # Map of snake_case -> camelCase for source dict keys
-    key_map = {
-        "snapshot_id": "snapshotId",
-    }
 
-    return {key_map.get(k, k): v for k, v in source.items()}
+def _warn_deprecated_create_mapping(name: str, value: object | None) -> None:
+    deprecated_models = (GitSource, TarballSource, SnapshotSource, Resources)
+    if isinstance(value, Mapping) and not isinstance(value, deprecated_models):
+        replacement = _deprecated_create_mapping_replacement(name, value)
+        warnings.warn(
+            f"Passing a raw mapping for Sandbox.create(..., {name}=...) is deprecated; "
+            f"pass a typed {replacement} model instead.",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
+
+def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) -> str:
+    if name == "resources":
+        return "Resources"
+    if name == "source":
+        source_type = value.get("type")
+        if source_type == "git":
+            return "GitSource"
+        if source_type == "tarball":
+            return "TarballSource"
+        if source_type == "snapshot":
+            return "SnapshotSource"
+        return "Source"
+    return name
 
 
 async def _build_async_sandbox_page(
@@ -155,7 +185,7 @@ class AsyncSandbox:
         source: Source | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: dict[str, Any] | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -185,14 +215,15 @@ class AsyncSandbox:
         Returns:
             Created AsyncSandbox instance.
         """
+        parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=creds.project_id,
-            source=_normalize_source(source),
+            source=parsed_source,
             ports=ports,
-            timeout=normalize_duration_ms(timeout),
-            resources=resources,
+            timeout=timeout,
+            resources=parsed_resources,
             runtime=runtime,
             interactive=interactive,
             env=env,
@@ -554,7 +585,7 @@ class Sandbox:
         source: Source | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: dict[str, Any] | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -585,15 +616,16 @@ class Sandbox:
         Returns:
             Created Sandbox instance.
         """
+        parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
                 project_id=creds.project_id,
-                source=_normalize_source(source),
+                source=parsed_source,
                 ports=ports,
-                timeout=normalize_duration_ms(timeout),
-                resources=resources,
+                timeout=timeout,
+                resources=parsed_resources,
                 runtime=runtime,
                 interactive=interactive,
                 env=env,

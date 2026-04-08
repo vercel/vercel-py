@@ -46,20 +46,21 @@ from vercel._internal.sandbox.errors import (
     SandboxServerError,
 )
 from vercel._internal.sandbox.models import (
+    ApiNetworkPolicy,
     CommandFinishedResponse,
     CommandResponse,
+    CreateSandboxRequest,
     CreateSnapshotResponse,
     LogLine,
+    NetworkPolicy,
+    Resources,
     SandboxAndRoutesResponse,
     SandboxesResponse,
     SandboxResponse,
     SnapshotResponse,
     SnapshotsResponse,
+    Source,
     WriteFile,
-)
-from vercel._internal.sandbox.network_policy import (
-    ApiNetworkPolicy,
-    NetworkPolicy,
 )
 from vercel._internal.sandbox.snapshot import SnapshotExpiration
 from vercel._internal.sandbox.time import normalize_duration_ms
@@ -274,32 +275,25 @@ class BaseSandboxOpsClient:
         *,
         project_id: str,
         ports: list[int] | None = None,
-        source: dict[str, Any] | None = None,
+        source: Source | None = None,
         timeout: int | timedelta | None = None,
-        resources: dict[str, Any] | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         network_policy: NetworkPolicy | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
-        body: dict[str, Any] = {"projectId": project_id}
-        if ports:
-            body["ports"] = ports
-        if source is not None:
-            body["source"] = source
-        if timeout is not None:
-            body["timeout"] = normalize_duration_ms(timeout)
-        if resources is not None:
-            body["resources"] = resources
-        if runtime is not None:
-            body["runtime"] = runtime
-        if network_policy is not None:
-            body["networkPolicy"] = ApiNetworkPolicy.from_network_policy(network_policy).to_dict()
-        if interactive:
-            body["__interactive"] = True
-        if env is not None:
-            body["env"] = env
-
+        body = CreateSandboxRequest(
+            project_id=project_id,
+            ports=ports if ports else None,
+            source=source,
+            timeout=timeout,
+            resources=resources,
+            runtime=runtime,
+            network_policy=network_policy,
+            interactive=True if interactive else None,
+            env=env,
+        ).model_dump(by_alias=True, exclude_none=True)
         data = await self._request_client.request_json("POST", "/v1/sandboxes", body=JSONBody(body))
         return SandboxAndRoutesResponse.model_validate(data)
 
@@ -336,7 +330,7 @@ class BaseSandboxOpsClient:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/network-policy",
-            body=JSONBody(network_policy.to_dict()),
+            body=JSONBody(network_policy.model_dump(by_alias=True, exclude_none=True)),
         )
         return SandboxResponse.model_validate(data)
 
