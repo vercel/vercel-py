@@ -12,7 +12,9 @@ from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
+    ApiNetworkPolicy,
     CommandResponse,
+    NetworkPolicy,
     Resources,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
@@ -21,10 +23,6 @@ from vercel._internal.sandbox.models import (
     WriteFile,
     parse_resources,
     parse_source,
-)
-from vercel._internal.sandbox.network_policy import (
-    ApiNetworkPolicy,
-    NetworkPolicy,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
 from vercel._internal.sandbox.time import normalize_duration_ms

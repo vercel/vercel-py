@@ -1,11 +1,6 @@
-from typing import Any, cast
-
 import pytest
 
 from vercel._internal.sandbox.models import (
-    GitSource,
-    SnapshotSource,
-    TarballSource,
     parse_resources,
     parse_source,
 )
@@ -40,7 +35,7 @@ def test_parse_source_drops_unknown_keys() -> None:
     )
 
     assert source is not None
-    assert source.to_payload() == {
+    assert source.model_dump(by_alias=True, exclude_none=True) == {
         "type": "git",
         "url": "https://github.com/vercel/vercel-py",
         "revision": "main",
@@ -50,36 +45,40 @@ def test_parse_source_drops_unknown_keys() -> None:
 def test_parse_source_accepts_camel_case_snapshot_id() -> None:
     source = parse_source({"type": "snapshot", "snapshotId": "snap_123"})
     assert source is not None
-    assert source.to_payload() == {"type": "snapshot", "snapshot_id": "snap_123"}
+    assert source.model_dump(by_alias=True, exclude_none=True) == {
+        "type": "snapshot",
+        "snapshotId": "snap_123",
+    }
 
 
-def test_parse_source_validates_direct_git_dataclass_types() -> None:
+def test_parse_source_validates_mapping_field_types() -> None:
     with pytest.raises(SandboxValidationError) as exc_info:
         parse_source(
-            GitSource(
-                url=cast(Any, 123),
-                depth=cast(Any, "1"),
-            )
+            {
+                "type": "git",
+                "url": 123,
+                "depth": "1",
+            }
         )
 
     issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
-    assert ("source.url", "is required") in issues
+    assert ("source.url", "must be a string") in issues
     assert ("source.depth", "must be an integer") in issues
 
 
-def test_parse_source_validates_direct_non_git_dataclass_types() -> None:
+def test_parse_source_validates_non_git_mapping_field_types() -> None:
     with pytest.raises(SandboxValidationError) as exc_info:
-        parse_source(TarballSource(url=cast(Any, 123)))
+        parse_source({"type": "tarball", "url": 123})
 
     assert {(issue.path, issue.message) for issue in exc_info.value.issues} == {
-        ("source.url", "is required")
+        ("source.url", "must be a string")
     }
 
     with pytest.raises(SandboxValidationError) as exc_info:
-        parse_source(SnapshotSource(snapshot_id=cast(Any, 123)))
+        parse_source({"type": "snapshot", "snapshot_id": 123})
 
     assert {(issue.path, issue.message) for issue in exc_info.value.issues} == {
-        ("source.snapshot_id", "is required")
+        ("source.snapshot_id", "must be a string")
     }
 
 

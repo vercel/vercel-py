@@ -7,17 +7,15 @@ from vercel._internal.sandbox import (
     SandboxRateLimitError,
     SandboxServerError,
 )
-from vercel._internal.sandbox.network_policy import (
+
+from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
+from .models import (
+    GitSource,
     NetworkPolicy,
     NetworkPolicyCustom,
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkTransformer,
-)
-
-from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
-from .models import (
-    GitSource,
     Resources,
     SandboxStatus,
     SandboxValidationError,

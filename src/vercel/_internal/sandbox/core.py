@@ -37,7 +37,6 @@ from vercel._internal.http import (
     create_request_client,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.payload import JSONValue, RawPayload, marshal_payload
 from vercel._internal.sandbox.errors import (
     APIError,
     SandboxAuthError,
@@ -47,10 +46,13 @@ from vercel._internal.sandbox.errors import (
     SandboxServerError,
 )
 from vercel._internal.sandbox.models import (
+    ApiNetworkPolicy,
     CommandFinishedResponse,
     CommandResponse,
+    CreateSandboxRequest,
     CreateSnapshotResponse,
     LogLine,
+    NetworkPolicy,
     Resources,
     SandboxAndRoutesResponse,
     SandboxesResponse,
@@ -60,12 +62,7 @@ from vercel._internal.sandbox.models import (
     Source,
     WriteFile,
 )
-from vercel._internal.sandbox.network_policy import (
-    ApiNetworkPolicy,
-    NetworkPolicy,
-)
 from vercel._internal.sandbox.snapshot import SnapshotExpiration
-from vercel._internal.sandbox.time import normalize_duration_ms
 
 try:
     VERSION = _pkg_version("vercel")
@@ -78,6 +75,7 @@ USER_AGENT = (
 )
 
 JSONScalar: TypeAlias = str | int | float | bool | None
+JSONValue: TypeAlias = JSONScalar | dict[str, "JSONValue"] | list["JSONValue"]
 RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
 
 
@@ -211,40 +209,6 @@ def _build_sandbox_error(
     return APIError(response, message, data=data)
 
 
-def _build_create_sandbox_payload(
-    *,
-    project_id: str,
-    ports: list[int] | None = None,
-    source: Source | None = None,
-    timeout: int | timedelta | None = None,
-    resources: Resources | None = None,
-    runtime: str | None = None,
-    network_policy: NetworkPolicy | None = None,
-    interactive: bool = False,
-    env: dict[str, str] | None = None,
-) -> dict[str, JSONValue]:
-    body: dict[str, Any] = {"project_id": project_id}
-    if ports:
-        body["ports"] = ports
-    if source is not None:
-        body["source"] = source
-    if timeout is not None:
-        body["timeout"] = normalize_duration_ms(timeout)
-    if resources is not None:
-        body["resources"] = resources
-    if runtime is not None:
-        body["runtime"] = runtime
-    if network_policy is not None:
-        body["network_policy"] = ApiNetworkPolicy.from_network_policy(network_policy).to_dict()
-    if interactive:
-        body["__interactive"] = True
-    if env is not None:
-        body["env"] = RawPayload(env)
-    marshaled = marshal_payload(body)
-    assert isinstance(marshaled, dict)
-    return marshaled
-
-
 # ---------------------------------------------------------------------------
 # Tarball builder (pure Python, no I/O)
 # ---------------------------------------------------------------------------
@@ -318,17 +282,17 @@ class BaseSandboxOpsClient:
         interactive: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
-        body = _build_create_sandbox_payload(
+        body = CreateSandboxRequest(
             project_id=project_id,
-            ports=ports,
+            ports=ports if ports else None,
             source=source,
             timeout=timeout,
             resources=resources,
             runtime=runtime,
             network_policy=network_policy,
-            interactive=interactive,
+            interactive=True if interactive else None,
             env=env,
-        )
+        ).model_dump(by_alias=True, exclude_none=True)
         data = await self._request_client.request_json("POST", "/v1/sandboxes", body=JSONBody(body))
         return SandboxAndRoutesResponse.model_validate(data)
 
@@ -365,7 +329,7 @@ class BaseSandboxOpsClient:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/network-policy",
-            body=JSONBody(network_policy.to_dict()),
+            body=JSONBody(network_policy.model_dump(by_alias=True, exclude_none=True)),
         )
         return SandboxResponse.model_validate(data)
 

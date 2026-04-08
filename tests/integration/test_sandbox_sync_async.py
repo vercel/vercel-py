@@ -26,6 +26,7 @@ from vercel.sandbox import (
     Sandbox,
     SandboxNotFoundError,
     SandboxServerError,
+    SandboxValidationError,
 )
 
 # Base URL for Vercel Sandbox API
@@ -210,6 +211,46 @@ class TestSandboxCreate:
         assert body["source"] == {"type": "snapshot", "snapshotId": "snap_123"}
 
         sandbox.client.close()
+
+    @respx.mock
+    def test_create_sandbox_rejects_invalid_inputs_before_request(self, mock_env_clear):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(200, json={"sandbox": {}, "routes": []})
+        )
+
+        with pytest.raises(SandboxValidationError) as exc_info:
+            Sandbox.create(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+                source={"type": "git", "depth": 0, "username": "scott"},
+                resources={"vcpus": 3, "memory": 4096},
+            )
+
+        issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
+        assert ("source.url", "is required") in issues
+        assert ("source.depth", "must be a positive integer") in issues
+        assert ("source", "git username and password must be provided together") in issues
+        assert route.called is False
+
+    @respx.mock
+    def test_create_sandbox_rejects_invalid_resources_before_request(self, mock_env_clear):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(200, json={"sandbox": {}, "routes": []})
+        )
+
+        with pytest.raises(SandboxValidationError) as exc_info:
+            Sandbox.create(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+                resources={"vcpus": 3, "memory": 4096},
+            )
+
+        issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
+        assert ("resources.vcpus", "must be even") in issues
+        assert ("resources.memory", "must equal resources.vcpus * 2048 (6144)") in issues
+        assert route.called is False
 
     @respx.mock
     def test_create_sandbox_with_options(self, mock_env_clear, mock_sandbox_create_response):
