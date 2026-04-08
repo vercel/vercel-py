@@ -6,6 +6,10 @@ from datetime import UTC, datetime
 from vercel._internal.sandbox.models import Pagination
 
 
+def _exclusive_until_cursor(value: int) -> int:
+    return max(value - 1, 0)
+
+
 @dataclass(frozen=True, slots=True)
 class SandboxPageInfo:
     until: int
@@ -55,7 +59,7 @@ class SandboxListParams(_BaseListParams):
             remaining=remaining,
             internal_page_size=self.internal_page_size,
             since=self.since,
-            until=until,
+            until=_exclusive_until_cursor(until),
         )
 
 
@@ -80,7 +84,7 @@ class SnapshotListParams(_BaseListParams):
             remaining=remaining,
             internal_page_size=self.internal_page_size,
             since=self.since,
-            until=until,
+            until=_exclusive_until_cursor(until),
         )
 
 

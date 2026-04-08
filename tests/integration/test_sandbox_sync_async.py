@@ -775,7 +775,8 @@ class TestSandboxList:
         limit = 3
         since = 1705312800000
         until = 1705314600000
-        next_until = "1705312500000"
+        next_cursor = 1705312500000
+        next_until = str(next_cursor - 1)
 
         first_page = {
             "sandboxes": [
@@ -792,7 +793,7 @@ class TestSandboxList:
             ],
             "pagination": {
                 "count": 3,
-                "next": int(next_until),
+                "next": next_cursor,
                 "prev": None,
             },
         }
@@ -864,8 +865,10 @@ class TestSandboxList:
         limit = 3
         internal_page_size = 1
         since = 1705312800000
-        next_until_1 = "1705313100000"
-        next_until_2 = "1705312500000"
+        next_cursor_1 = 1705313100000
+        next_cursor_2 = 1705312500000
+        next_until_1 = str(next_cursor_1 - 1)
+        next_until_2 = str(next_cursor_2 - 1)
 
         first_page = {
             "sandboxes": [
@@ -877,7 +880,7 @@ class TestSandboxList:
             ],
             "pagination": {
                 "count": 3,
-                "next": int(next_until_1),
+                "next": next_cursor_1,
                 "prev": None,
             },
         }
@@ -891,7 +894,7 @@ class TestSandboxList:
             ],
             "pagination": {
                 "count": 3,
-                "next": int(next_until_2),
+                "next": next_cursor_2,
                 "prev": 1705313400000,
             },
         }
@@ -1005,7 +1008,7 @@ class TestSandboxList:
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
             requests.append(params)
-            if params.get("until") == "1705319400000":
+            if params.get("until") == "1705319399999":
                 return httpx.Response(200, json=second_page)
             return httpx.Response(200, json=first_page)
 
@@ -1023,7 +1026,7 @@ class TestSandboxList:
         assert [sandbox.id for sandbox in sandboxes] == ["sbx_page_1", "sbx_page_2", "sbx_page_3"]
         assert requests == [
             {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319399999"},
         ]
 
     @respx.mock
@@ -1071,7 +1074,7 @@ class TestSandboxList:
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
             requests.append(params)
-            if params.get("until") == "1705319400000":
+            if params.get("until") == "1705319399999":
                 return httpx.Response(200, json=second_page)
             return httpx.Response(200, json=first_page)
 
@@ -1090,7 +1093,7 @@ class TestSandboxList:
         assert item_ids == ["sbx_async_1", "sbx_async_2", "sbx_async_3"]
         assert requests == [
             {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319399999"},
         ]
 
     @respx.mock
@@ -1188,7 +1191,8 @@ class TestSnapshotList:
         until = datetime(2024, 1, 15, 12, 30, tzinfo=UTC)
         expected_since = str(int(since.timestamp() * 1000))
         expected_until = str(int(until.timestamp() * 1000))
-        next_until = "1705320000000"
+        next_cursor = 1705320000000
+        next_until = str(next_cursor - 1)
 
         first_page = {
             "snapshots": [
@@ -1205,7 +1209,7 @@ class TestSnapshotList:
             ],
             "pagination": {
                 "count": 3,
-                "next": int(next_until),
+                "next": next_cursor,
                 "prev": None,
             },
         }
@@ -1279,7 +1283,8 @@ class TestSnapshotList:
         limit = 3
         since = 1705321200000
         until = 1705323000000
-        next_until = "1705319400000"
+        next_cursor = 1705319400000
+        next_until = str(next_cursor - 1)
 
         first_page = {
             "snapshots": [
@@ -1296,7 +1301,7 @@ class TestSnapshotList:
             ],
             "pagination": {
                 "count": 3,
-                "next": int(next_until),
+                "next": next_cursor,
                 "prev": None,
             },
         }
@@ -1382,7 +1387,8 @@ class TestSnapshotList:
         limit = 2
         internal_page_size = 1
         since = 1705321200000
-        next_until = "1705320000000"
+        next_cursor = 1705320000000
+        next_until = str(next_cursor - 1)
 
         first_page = {
             "snapshots": [
@@ -1394,7 +1400,7 @@ class TestSnapshotList:
             ],
             "pagination": {
                 "count": 2,
-                "next": int(next_until),
+                "next": next_cursor,
                 "prev": None,
             },
         }
