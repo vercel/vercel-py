@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import time
+import warnings
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,12 +15,17 @@ from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
     ApiNetworkPolicy,
     CommandResponse,
+    GitSource,
     NetworkPolicy,
     Resources,
+    ResourcesInput,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
     SandboxStatus,
+    SnapshotSource,
     Source,
+    SourceInput,
+    TarballSource,
     WriteFile,
     parse_resources,
     parse_source,
@@ -44,10 +50,39 @@ from .snapshot import (
 
 def _parse_create_inputs(
     *,
-    source: Source | Mapping[str, Any] | None,
-    resources: Resources | Mapping[str, Any] | None,
+    source: SourceInput | None,
+    resources: ResourcesInput | None,
 ) -> tuple[Source | None, Resources | None]:
+    _warn_deprecated_create_mapping("source", source)
+    _warn_deprecated_create_mapping("resources", resources)
     return parse_source(source), parse_resources(resources)
+
+
+def _warn_deprecated_create_mapping(name: str, value: object | None) -> None:
+    deprecated_models = (GitSource, TarballSource, SnapshotSource, Resources)
+    if isinstance(value, Mapping) and not isinstance(value, deprecated_models):
+        replacement = _deprecated_create_mapping_replacement(name, value)
+        warnings.warn(
+            f"Passing a raw mapping for Sandbox.create(..., {name}=...) is deprecated; "
+            f"pass a typed {replacement} model instead.",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
+
+def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) -> str:
+    if name == "resources":
+        return "Resources"
+    if name == "source":
+        source_type = value.get("type")
+        if source_type == "git":
+            return "GitSource"
+        if source_type == "tarball":
+            return "TarballSource"
+        if source_type == "snapshot":
+            return "SnapshotSource"
+        return "Source"
+    return name
 
 
 async def _build_async_sandbox_page(
@@ -147,10 +182,10 @@ class AsyncSandbox:
     @staticmethod
     async def create(
         *,
-        source: Source | Mapping[str, Any] | None = None,
+        source: Source | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: Resources | Mapping[str, Any] | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -547,10 +582,10 @@ class Sandbox:
     @staticmethod
     def create(
         *,
-        source: Source | Mapping[str, Any] | None = None,
+        source: Source | None = None,
         ports: list[int] | None = None,
         timeout: int | timedelta | None = None,
-        resources: Resources | Mapping[str, Any] | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
