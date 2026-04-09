@@ -23,8 +23,10 @@ from vercel.sandbox import (
     NetworkPolicySubnets,
     NetworkTransformer,
     Resources,
+    RetryPolicy,
     Sandbox,
     SandboxNotFoundError,
+    SandboxRequestConfig,
     SandboxServerError,
     SandboxValidationError,
 )
@@ -1801,6 +1803,99 @@ class TestSandboxUpdateNetworkPolicy:
 
 class TestSandboxRunCommand:
     """Test sandbox command execution."""
+
+    @staticmethod
+    def _assert_request_timeout(route: respx.Route, expected_timeout: float) -> None:
+        for call in route.calls:
+            assert call.request.extensions["timeout"] == {
+                "connect": expected_timeout,
+                "read": expected_timeout,
+                "write": expected_timeout,
+                "pool": expected_timeout,
+            }
+
+    @respx.mock
+    def test_create_request_config_applies_to_command_workflow_and_logs(
+        self, mock_env_clear, mock_sandbox_create_response, mock_sandbox_command_response
+    ):
+        """Configured request defaults stay in use for downstream sync command flows."""
+        sandbox_id = mock_sandbox_create_response["id"]
+        cmd_id = mock_sandbox_command_response["commandId"]
+        request_config = SandboxRequestConfig(
+            timeout=12.5,
+            retry=RetryPolicy(retries=2),
+        )
+
+        create_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+        run_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/cmd").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "command": {
+                        "id": cmd_id,
+                        "name": "echo",
+                        "args": ["Hello, World!"],
+                        "cwd": "/app",
+                        "sandboxId": sandbox_id,
+                        "exitCode": None,
+                        "startedAt": 1705320600000,
+                    }
+                },
+            )
+        )
+        wait_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "command": {
+                        "id": cmd_id,
+                        "name": "echo",
+                        "args": ["Hello, World!"],
+                        "cwd": "/app",
+                        "sandboxId": sandbox_id,
+                        "exitCode": 0,
+                        "startedAt": 1705320600000,
+                        "stdout": "Hello, World!\n",
+                        "stderr": "",
+                    }
+                },
+            )
+        )
+        logs_route = respx.get(
+            f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}/logs"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                text='{"time":1705320600000,"stream":"stdout","data":"Hello, World!\\n"}\n',
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            request_config=request_config,
+        )
+
+        command = sandbox.run_command("echo", ["Hello, World!"])
+
+        assert command.exit_code == 0
+        assert command.stdout() == "Hello, World!\n"
+        assert sandbox.client._rc._retry is request_config.retry
+        self._assert_request_timeout(create_route, 12.5)
+        self._assert_request_timeout(run_route, 12.5)
+        self._assert_request_timeout(wait_route, 12.5)
+        self._assert_request_timeout(logs_route, 12.5)
+
+        sandbox.client.close()
 
     @respx.mock
     def test_run_command_sync(
@@ -4081,6 +4176,60 @@ class TestSandboxRefresh:
 
 class TestSandboxWaitForStatus:
     """Test sandbox wait_for_status operations."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_keeps_request_config_separate_from_wait_timeout(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Async wait loops reuse request defaults while keeping semantic timeout separate."""
+        from vercel.sandbox import SandboxStatus
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+        request_config = SandboxRequestConfig(
+            timeout=9.0,
+            retry=RetryPolicy(retries=1),
+        )
+
+        route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": mock_sandbox_get_response, "routes": []},
+                ),
+            ]
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            request_config=request_config,
+        )
+
+        await sandbox.wait_for_status("running", timeout=0.05, poll_interval=0.01)
+
+        assert sandbox.status is SandboxStatus.RUNNING
+        assert sandbox.client._rc._retry is request_config.retry
+        for call in route.calls:
+            assert call.request.extensions["timeout"] == {
+                "connect": 9.0,
+                "read": 9.0,
+                "write": 9.0,
+                "pool": 9.0,
+            }
+
+        await sandbox.client.aclose()
 
     @respx.mock
     def test_wait_for_status_already_matched(self, mock_env_clear, mock_sandbox_get_response):

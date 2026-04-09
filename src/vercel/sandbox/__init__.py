@@ -1,3 +1,4 @@
+from vercel._internal.http import RetryPolicy
 from vercel._internal.sandbox import (
     APIError,
     SandboxAuthError,
@@ -24,6 +25,7 @@ from .models import (
     Source,
     TarballSource,
 )
+from .request_config import SandboxRequestConfig
 from .sandbox import AsyncSandbox, Sandbox
 from .snapshot import (
     MIN_SNAPSHOT_EXPIRATION_MS,
@@ -43,6 +45,7 @@ __all__ = [
     "AsyncSandbox",
     "AsyncSnapshot",
     "Sandbox",
+    "SandboxRequestConfig",
     "Snapshot",
     "SnapshotExpiration",
     "MIN_SNAPSHOT_EXPIRATION_MS",
@@ -65,4 +68,5 @@ __all__ = [
     "NetworkPolicySubnets",
     "NetworkPolicyCustom",
     "NetworkPolicy",
+    "RetryPolicy",
 ]

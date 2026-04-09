@@ -40,6 +40,7 @@ from .command import (
     CommandFinished,
 )
 from .pty.shell import start_interactive_shell
+from .request_config import SandboxRequestConfig
 from .snapshot import (
     AsyncSnapshot,
     Snapshot as SnapshotClass,
@@ -131,6 +132,7 @@ class AsyncSandbox:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
+        request_config: SandboxRequestConfig | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -146,6 +148,9 @@ class AsyncSandbox:
             token: API token (uses OIDC if not provided).
             project_id: Project ID (uses OIDC if not provided).
             team_id: Team ID (uses OIDC if not provided).
+            request_config: Default HTTP timeout and retry policy for sandbox API
+                requests. This does not affect workflow-level wait or poll
+                settings on methods like ``wait_for_status()``.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
             env: Default environment variables for the sandbox. These are inherited
@@ -158,7 +163,11 @@ class AsyncSandbox:
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = AsyncSandboxOpsClient(
+            team_id=creds.team_id,
+            token=creds.token,
+            request_config=request_config,
+        )
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=creds.project_id,
             source=parsed_source,
@@ -183,9 +192,14 @@ class AsyncSandbox:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
+        request_config: SandboxRequestConfig | None = None,
     ) -> AsyncSandbox:
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = AsyncSandboxOpsClient(
+            team_id=creds.team_id,
+            token=creds.token,
+            request_config=request_config,
+        )
         resp: SandboxAndRoutesResponse = await client.get_sandbox(sandbox_id=sandbox_id)
         return AsyncSandbox(
             client=client,
@@ -203,6 +217,7 @@ class AsyncSandbox:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
+        request_config: SandboxRequestConfig | None = None,
     ) -> AsyncIterator[SandboxModel]:
         """List sandboxes as an async iterable of sandbox models.
 
@@ -220,6 +235,8 @@ class AsyncSandbox:
             project_id: Project ID used for credential resolution and as the
                 sandbox list scope. Uses configured credentials when omitted.
             team_id: Team ID scope for the sandbox API.
+            request_config: Default HTTP timeout and retry policy for sandbox API
+                requests made while traversing the iterator.
 
         Returns:
             An async iterable of typed sandbox results.
@@ -235,7 +252,11 @@ class AsyncSandbox:
 
         async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
             current_params = params
-            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            async with AsyncSandboxOpsClient(
+                team_id=creds.team_id,
+                token=creds.token,
+                request_config=request_config,
+            ) as client:
                 while True:
                     response = await client.list_sandboxes(
                         project_id=current_params.project_id,
@@ -559,6 +580,7 @@ class Sandbox:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
+        request_config: SandboxRequestConfig | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -574,6 +596,9 @@ class Sandbox:
             token: API token (uses OIDC if not provided).
             project_id: Project ID (uses OIDC if not provided).
             team_id: Team ID (uses OIDC if not provided).
+            request_config: Default HTTP timeout and retry policy for sandbox API
+                requests. This does not affect workflow-level wait or poll
+                settings on methods like ``wait_for_status()``.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
                 Note: For interactive shell sessions, use AsyncSandbox instead.
@@ -587,7 +612,11 @@ class Sandbox:
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = SyncSandboxOpsClient(
+            team_id=creds.team_id,
+            token=creds.token,
+            request_config=request_config,
+        )
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
                 project_id=creds.project_id,
@@ -614,9 +643,14 @@ class Sandbox:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
+        request_config: SandboxRequestConfig | None = None,
     ) -> Sandbox:
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = SyncSandboxOpsClient(
+            team_id=creds.team_id,
+            token=creds.token,
+            request_config=request_config,
+        )
         resp: SandboxAndRoutesResponse = iter_coroutine(client.get_sandbox(sandbox_id=sandbox_id))
         return Sandbox(
             client=client,
@@ -634,6 +668,7 @@ class Sandbox:
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
+        request_config: SandboxRequestConfig | None = None,
     ) -> Iterator[SandboxModel]:
         """List sandboxes as an iterable of sandbox models.
 
@@ -651,6 +686,8 @@ class Sandbox:
             project_id: Project ID used for credential resolution and as the
                 sandbox list scope. Uses configured credentials when omitted.
             team_id: Team ID scope for the sandbox API.
+            request_config: Default HTTP timeout and retry policy for sandbox API
+                requests made while traversing the iterator.
 
         Returns:
             An iterable of typed sandbox results.
@@ -666,7 +703,11 @@ class Sandbox:
 
         def iter_sandboxes() -> Iterator[SandboxModel]:
             current_params = params
-            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            with SyncSandboxOpsClient(
+                team_id=creds.team_id,
+                token=creds.token,
+                request_config=request_config,
+            ) as client:
                 while True:
                     response = iter_coroutine(
                         client.list_sandboxes(

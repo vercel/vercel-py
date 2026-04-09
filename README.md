@@ -15,6 +15,33 @@ pip install vercel
 
 This package provides both synchronous and asynchronous clients to interact with the Vercel API.
 
+### Sandbox Request Configuration
+
+`Sandbox.create()`, `Sandbox.get()`, `Sandbox.list()`, `AsyncSandbox.create()`,
+`AsyncSandbox.get()`, and `AsyncSandbox.list()` accept
+`request_config=SandboxRequestConfig(...)` for transport-level defaults such as
+HTTP timeout and retry policy.
+
+```python
+from vercel.sandbox import RetryPolicy, Sandbox, SandboxRequestConfig
+
+request_config = SandboxRequestConfig(
+    timeout=30.0,
+    retry=RetryPolicy(retries=2),
+)
+
+sandbox = Sandbox.get(
+    sandbox_id="sbx_123",
+    request_config=request_config,
+)
+
+result = sandbox.run_command("python", ["-V"])
+```
+
+Use workflow-level controls such as `wait_for_status(timeout=...)` and
+`stop(blocking=True, timeout=...)` separately. They do not override the
+default HTTP timeout in `SandboxRequestConfig`.
+
 <br/>
 
 ---

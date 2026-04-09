@@ -8,6 +8,10 @@ This example demonstrates how to:
 
 The list API is item-first. Use ``limit`` as the maximum number of sandboxes
 you want the iterator to yield across all internally fetched pages.
+
+This example also shows ``request_config=SandboxRequestConfig(...)`` for
+transport-level request defaults. Workflow-level controls such as
+``wait_for_status(timeout=...)`` stay separate.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 
 from dotenv import load_dotenv
 
-from vercel.sandbox import AsyncSandbox, Sandbox
+from vercel.sandbox import AsyncSandbox, RetryPolicy, Sandbox, SandboxRequestConfig
 
 load_dotenv()
 
@@ -26,6 +30,10 @@ SANDBOX_COUNT = 5
 LIST_LIMIT = 4
 TIMEOUT_MS = 120_000
 PROJECT_ID = os.environ["VERCEL_PROJECT_ID"]
+REQUEST_CONFIG = SandboxRequestConfig(
+    timeout=30.0,
+    retry=RetryPolicy(retries=2),
+)
 
 
 def _summarize_created(prefix: str, sandbox_ids: list[str], created_ids: set[str]) -> None:
@@ -58,6 +66,7 @@ async def async_demo(since: datetime) -> list[AsyncSandbox]:
         project_id=PROJECT_ID,
         limit=LIST_LIMIT,
         since=since,
+        request_config=REQUEST_CONFIG,
     ):
         async_ids.append(sandbox.id)
         print(f"async sandbox: {sandbox.id}")
@@ -83,6 +92,7 @@ def sync_demo(since: datetime) -> None:
         project_id=PROJECT_ID,
         limit=LIST_LIMIT,
         since=since,
+        request_config=REQUEST_CONFIG,
     ):
         sync_ids.append(sandbox.id)
         print(f"sync sandbox: {sandbox.id}")

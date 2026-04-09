@@ -64,6 +64,7 @@ from vercel._internal.sandbox.models import (
 )
 from vercel._internal.sandbox.snapshot import SnapshotExpiration
 from vercel._internal.sandbox.time import normalize_duration_ms
+from vercel.sandbox.request_config import SandboxRequestConfig, resolve_sandbox_request_timeout
 
 try:
     VERSION = _pkg_version("vercel")
@@ -576,6 +577,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         host: str = "https://api.vercel.com",
         team_id: str,
         token: str,
+        request_config: SandboxRequestConfig | None = None,
         filesystem_client: FilesystemClient[Any] | None = None,
     ) -> None:
         super().__init__(filesystem_client=filesystem_client or create_filesystem_client())
@@ -583,7 +585,8 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
             token=token,
             base_headers={"user-agent": USER_AGENT},
             base_params={"teamId": team_id},
-            timeout=180.0,
+            retry=request_config.retry if request_config is not None else None,
+            timeout=resolve_sandbox_request_timeout(request_config),
             base_url=host,
         )
         self._request_client = SandboxRequestClient(request_client=rc)
@@ -663,6 +666,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         host: str = "https://api.vercel.com",
         team_id: str,
         token: str,
+        request_config: SandboxRequestConfig | None = None,
         filesystem_client: FilesystemClient[Any] | None = None,
     ) -> None:
         super().__init__(filesystem_client=filesystem_client or create_async_filesystem_client())
@@ -670,7 +674,8 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             token=token,
             base_headers={"user-agent": USER_AGENT},
             base_params={"teamId": team_id},
-            timeout=180.0,
+            retry=request_config.retry if request_config is not None else None,
+            timeout=resolve_sandbox_request_timeout(request_config),
             base_url=host,
         )
         self._request_client = SandboxRequestClient(request_client=rc)
