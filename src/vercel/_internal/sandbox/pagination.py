@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from vercel._internal.sandbox.models import Pagination
 
@@ -101,7 +101,7 @@ def normalize_list_timestamp(value: datetime | int | None) -> int | None:
         return value
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
+            value = value.replace(tzinfo=timezone.utc)
         return int(value.timestamp() * 1000)
     raise TypeError("List timestamps must be datetime or integer milliseconds")
 

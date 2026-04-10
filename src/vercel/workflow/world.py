@@ -9,13 +9,17 @@ from typing import (
     Generic,
     Literal,
     Protocol,
-    Self,
     TypeAlias,
     TypeVar,
     overload,
 )
 
 import pydantic
+
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 T = TypeVar("T")
 QueuePrefix: TypeAlias = Literal["__wkf_step_", "__wkf_workflow_"]

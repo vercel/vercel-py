@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,7 +13,7 @@ from vercel.blob.types import HeadBlobResult, ListBlobResult
 def _head_result() -> HeadBlobResult:
     return HeadBlobResult(
         size=1,
-        uploaded_at=datetime.now(UTC),
+        uploaded_at=datetime.now(timezone.utc),
         pathname="file.txt",
         content_type="text/plain",
         content_disposition="inline",
