@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import sys
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from enum import Enum
 from typing import Annotated, Any, Literal, TypeAlias, TypedDict, cast
 
 from pydantic import (
@@ -21,24 +19,15 @@ from pydantic import (
 )
 from pydantic_core import InitErrorDetails
 
+from vercel._internal.polyfills import StrEnum
 from vercel._internal.sandbox.errors import SandboxError
 from vercel._internal.sandbox.time import normalize_duration_ms
 
 # Source types for Sandbox.create()
 _REDACTED_HEADER_VALUE = "<redacted>"
 
-if sys.version_info >= (3, 11):
-    from enum import StrEnum as _StrEnum
-else:
 
-    class _StrEnum(str, Enum):  # noqa: UP042
-        """Python 3.10-compatible subset of enum.StrEnum."""
-
-        def __str__(self) -> str:
-            return str(self.value)
-
-
-class SandboxStatus(_StrEnum):
+class SandboxStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     STOPPING = "stopping"

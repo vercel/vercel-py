@@ -16,10 +16,7 @@ from typing import (
 
 import pydantic
 
-try:
-    from typing import Self
-except ImportError:
-    from typing_extensions import Self
+from vercel._internal.polyfills import Self
 
 T = TypeVar("T")
 QueuePrefix: TypeAlias = Literal["__wkf_step_", "__wkf_workflow_"]

@@ -10,6 +10,7 @@ import cbor2
 import httpx
 import pydantic
 
+from vercel._internal.polyfills import UTC
 from vercel.workers import client as vqs_client
 
 from .. import world as w
@@ -105,7 +106,7 @@ class VercelWorld(w.World):
         headers["Accept"] = "application/cbor"
         # NOTE: Add a unique header to bypass RSC request memoization.
         # See: https://github.com/vercel/workflow/issues/618
-        headers["X-Request-Time"] = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
+        headers["X-Request-Time"] = datetime.datetime.now(UTC).isoformat() + "Z"
 
         # Encode body as CBOR if data is provided
         body: bytes | None = None

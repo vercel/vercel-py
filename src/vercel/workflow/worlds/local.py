@@ -2,12 +2,13 @@ import json
 import os
 import pathlib
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, TypeVar
 
 import cbor2
 import pydantic
 
+from vercel._internal.polyfills import UTC
 from vercel.workers import client as vqs_client
 
 from .. import world as w
@@ -193,7 +194,7 @@ class LocalWorld(w.World):
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         event_id = f"evnt_{self.monotonic_ulid(None)}"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         if data.event_type == "run_created" and not run_id:
             effective_run_id = f"wrun_{self.monotonic_ulid(None)}"

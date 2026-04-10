@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from datetime import datetime, timezone
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -77,6 +77,7 @@ from vercel._internal.http import (
 )
 from vercel._internal.http.request_client import RetryPolicy
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.polyfills import UTC
 from vercel._internal.telemetry.tracker import track
 
 BlobProgressCallback = (
@@ -390,7 +391,7 @@ def _build_cache_bypass_url(blob_url: str) -> str:
 
 def parse_last_modified(value: str | None) -> datetime:
     if not value:
-        return datetime.now(tz=timezone.utc)
+        return datetime.now(tz=UTC)
     try:
         return parsedate_to_datetime(value)
     except (ValueError, TypeError):
@@ -398,7 +399,7 @@ def parse_last_modified(value: str | None) -> datetime:
     try:
         return parse_datetime(value)
     except (ValueError, TypeError):
-        return datetime.now(tz=timezone.utc)
+        return datetime.now(tz=UTC)
 
 
 class BlobRequestClient:
