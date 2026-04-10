@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Final
 
-from vercel._internal.sandbox.time import normalize_duration_ms
+from vercel._internal.sandbox.time import MILLISECOND, coerce_duration
 
 MIN_SNAPSHOT_EXPIRATION_MS: Final[int] = 86_400_000
 
@@ -16,9 +16,8 @@ class SnapshotExpiration(int):
     """
 
     def __new__(cls, value: int | timedelta) -> SnapshotExpiration:
-        normalized_value = normalize_duration_ms(value)
-        if normalized_value is None:
-            raise TypeError("Snapshot expiration cannot be None")
+        normalized_delta = coerce_duration(value, MILLISECOND)
+        normalized_value = normalized_delta // MILLISECOND
         if normalized_value != 0 and normalized_value < MIN_SNAPSHOT_EXPIRATION_MS:
             raise ValueError(
                 "Snapshot expiration must be 0 for no expiration or >= 86400000 milliseconds"

@@ -31,6 +31,7 @@ from vercel._internal.sandbox.models import (
     parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
+from vercel._internal.sandbox.time import SECOND, coerce_duration
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -281,15 +282,16 @@ class AsyncSandbox:
         self,
         status: SandboxStatus | str,
         *,
-        timeout: float = 30.0,
-        poll_interval: float = 0.5,
+        timeout: float | timedelta = 30.0,
+        poll_interval: float | timedelta = 0.5,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
         Args:
             status: The target status to wait for (e.g. ``"running"``).
-            timeout: Maximum time to wait in seconds.
-            poll_interval: Time between status checks in seconds.
+            timeout: Maximum time to wait in seconds or as a ``timedelta``.
+            poll_interval: Time between status checks in seconds or as a
+                ``timedelta``.
 
         Raises:
             TimeoutError: If the sandbox does not reach *status* within *timeout*.
@@ -297,16 +299,19 @@ class AsyncSandbox:
         import asyncio
 
         target_status = SandboxStatus(status)
+        normalized_timeout = coerce_duration(timeout, SECOND) / SECOND
+        normalized_poll_interval = coerce_duration(poll_interval, SECOND) / SECOND
         start = time.monotonic()
-        while time.monotonic() - start < timeout:
+        while time.monotonic() - start < normalized_timeout:
             if self.status == target_status:
                 return
-            await asyncio.sleep(poll_interval)
+            await asyncio.sleep(normalized_poll_interval)
             await self.refresh()
         if self.status == target_status:
             return
         raise TimeoutError(
-            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within {timeout}s"
+            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within "
+            f"{normalized_timeout}s"
         )
 
     def domain(self, port: int) -> str:
@@ -414,17 +419,18 @@ class AsyncSandbox:
         self,
         *,
         blocking: bool = False,
-        timeout: float = 30.0,
-        poll_interval: float = 0.5,
+        timeout: float | timedelta = 30.0,
+        poll_interval: float | timedelta = 0.5,
     ) -> None:
         """Stop this sandbox.
 
         Args:
             blocking: When ``True``, wait until the sandbox reaches
                 ``"stopped"`` before returning.
-            timeout: Maximum time to wait in seconds when ``blocking=True``.
-            poll_interval: Time between refreshes in seconds when
+            timeout: Maximum time to wait in seconds or as a ``timedelta`` when
                 ``blocking=True``.
+            poll_interval: Time between refreshes in seconds or as a
+                ``timedelta`` when ``blocking=True``.
 
         Raises:
             TimeoutError: If ``blocking=True`` and the sandbox does not reach
@@ -715,30 +721,34 @@ class Sandbox:
         self,
         status: SandboxStatus | str,
         *,
-        timeout: float = 30.0,
-        poll_interval: float = 0.5,
+        timeout: float | timedelta = 30.0,
+        poll_interval: float | timedelta = 0.5,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
         Args:
             status: The target status to wait for (e.g. ``"running"``).
-            timeout: Maximum time to wait in seconds.
-            poll_interval: Time between status checks in seconds.
+            timeout: Maximum time to wait in seconds or as a ``timedelta``.
+            poll_interval: Time between status checks in seconds or as a
+                ``timedelta``.
 
         Raises:
             TimeoutError: If the sandbox does not reach *status* within *timeout*.
         """
         target_status = SandboxStatus(status)
+        normalized_timeout = coerce_duration(timeout, SECOND) / SECOND
+        normalized_poll_interval = coerce_duration(poll_interval, SECOND) / SECOND
         start = time.monotonic()
-        while time.monotonic() - start < timeout:
+        while time.monotonic() - start < normalized_timeout:
             if self.status == target_status:
                 return
-            time.sleep(poll_interval)
+            time.sleep(normalized_poll_interval)
             self.refresh()
         if self.status == target_status:
             return
         raise TimeoutError(
-            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within {timeout}s"
+            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within "
+            f"{normalized_timeout}s"
         )
 
     def domain(self, port: int) -> str:
@@ -852,17 +862,18 @@ class Sandbox:
         self,
         *,
         blocking: bool = False,
-        timeout: float = 30.0,
-        poll_interval: float = 0.5,
+        timeout: float | timedelta = 30.0,
+        poll_interval: float | timedelta = 0.5,
     ) -> None:
         """Stop this sandbox.
 
         Args:
             blocking: When ``True``, wait until the sandbox reaches
                 ``"stopped"`` before returning.
-            timeout: Maximum time to wait in seconds when ``blocking=True``.
-            poll_interval: Time between refreshes in seconds when
+            timeout: Maximum time to wait in seconds or as a ``timedelta`` when
                 ``blocking=True``.
+            poll_interval: Time between refreshes in seconds or as a
+                ``timedelta`` when ``blocking=True``.
 
         Raises:
             TimeoutError: If ``blocking=True`` and the sandbox does not reach

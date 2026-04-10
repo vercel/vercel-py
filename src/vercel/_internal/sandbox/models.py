@@ -21,7 +21,7 @@ from pydantic_core import InitErrorDetails
 
 from vercel._internal.polyfills import StrEnum
 from vercel._internal.sandbox.errors import SandboxError
-from vercel._internal.sandbox.time import normalize_duration_ms
+from vercel._internal.sandbox.time import MILLISECOND, parse_duration
 
 # Source types for Sandbox.create()
 _REDACTED_HEADER_VALUE = "<redacted>"
@@ -480,11 +480,10 @@ class CreateSandboxRequest(_CreateModel):
     @field_validator("timeout", mode="before")
     @classmethod
     def _coerce_timeout(cls, value: object) -> int | None:
-        if value is None:
+        normalized_delta = parse_duration(value, MILLISECOND)
+        if normalized_delta is None:
             return None
-        if isinstance(value, bool) or not isinstance(value, (int, timedelta)):
-            raise TypeError("timeout must be an integer milliseconds value or timedelta")
-        return normalize_duration_ms(value)
+        return normalized_delta // MILLISECOND
 
 
 def parse_source(value: SourceInput | None) -> Source | None:
