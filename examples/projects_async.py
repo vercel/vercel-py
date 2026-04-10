@@ -15,7 +15,7 @@ Usage:
 
 import asyncio
 import os
-from datetime import datetime
+import uuid
 
 from dotenv import load_dotenv
 
@@ -59,7 +59,7 @@ async def main() -> None:
 
         # 2. Create a new test project
         print("\n2️⃣ Creating a new test project...")
-        test_project_name = f"vercel-py-async-test-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        test_project_name = f"vercel-py-async-test-{uuid.uuid4().hex}"
 
         create_response = await create_project(
             body={

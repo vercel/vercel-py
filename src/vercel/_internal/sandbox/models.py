@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from enum import StrEnum
 from typing import Annotated, Any, Literal, TypeAlias, TypedDict, cast
 
 from pydantic import (
@@ -20,6 +19,7 @@ from pydantic import (
 )
 from pydantic_core import InitErrorDetails
 
+from vercel._internal.polyfills import StrEnum
 from vercel._internal.sandbox.errors import SandboxError
 from vercel._internal.sandbox.time import normalize_duration_ms
 

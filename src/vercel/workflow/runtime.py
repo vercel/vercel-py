@@ -6,10 +6,12 @@ import json
 import random
 import re
 import traceback
-from datetime import UTC, datetime, timedelta
-from typing import Any, Generic, Literal, ParamSpec, Self, TypeVar
+from datetime import datetime, timedelta
+from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
 import anyio
+
+from vercel._internal.polyfills import UTC, Self
 
 from . import core, ulid, world as w
 
@@ -275,7 +277,10 @@ async def step_handler(
         # Re-invoke the workflow to handle the failed step
         await world.queue(
             f"__wkf_workflow_{req.workflow_name}",
-            w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
+            w.WorkflowInvokePayload(
+                runId=req.workflow_run_id,
+                requestedAt=datetime.now(UTC),
+            ),
         )
         return None
 
@@ -383,7 +388,10 @@ async def step_handler(
     # Re-invoke the workflow to continue execution
     await world.queue(
         f"__wkf_workflow_{req.workflow_name}",
-        w.WorkflowInvokePayload(runId=req.workflow_run_id, requestedAt=datetime.now(UTC)),
+        w.WorkflowInvokePayload(
+            runId=req.workflow_run_id,
+            requestedAt=datetime.now(UTC),
+        ),
     )
     return None
 

@@ -8,9 +8,13 @@ on:
 
 jobs:
   lint-test-and-build:
-    name: lint-test-and-build
+    name: test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     environment: ci
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     env:
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -24,9 +28,9 @@ jobs:
         uses: astral-sh/setup-uv@v3
 
       - name: Sync dependencies
-        run: uv sync --python 3.12
+        run: uv sync --python ${{ matrix.python-version }}
 
-      - name: Run tests
+      - name: Run tests, including lint and typecheck
         run: ./scripts/test.sh
 
       - name: Run example tests

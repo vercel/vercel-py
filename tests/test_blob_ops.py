@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,7 +29,7 @@ STORE_ID = "storeid123"
 class TestParseLastModified:
     def test_rfc7231_date(self):
         dt = parse_last_modified("Tue, 15 Nov 1994 08:12:31 GMT")
-        assert dt == datetime(1994, 11, 15, 8, 12, 31, tzinfo=UTC)
+        assert dt == datetime(1994, 11, 15, 8, 12, 31, tzinfo=timezone.utc)
 
     def test_iso8601_date(self):
         dt = parse_last_modified("2024-01-15T10:30:00+00:00")
@@ -40,15 +40,15 @@ class TestParseLastModified:
         assert dt.minute == 30
 
     def test_none_returns_approx_now(self):
-        before = datetime.now(tz=UTC)
+        before = datetime.now(tz=timezone.utc)
         dt = parse_last_modified(None)
-        after = datetime.now(tz=UTC)
+        after = datetime.now(tz=timezone.utc)
         assert before <= dt <= after
 
     def test_invalid_string_returns_approx_now(self):
-        before = datetime.now(tz=UTC)
+        before = datetime.now(tz=timezone.utc)
         dt = parse_last_modified("not-a-date")
-        after = datetime.now(tz=UTC)
+        after = datetime.now(tz=timezone.utc)
         assert before <= dt <= after
 
 

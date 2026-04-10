@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
-from datetime import UTC, datetime
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -77,6 +77,7 @@ from vercel._internal.http import (
 )
 from vercel._internal.http.request_client import RetryPolicy
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.polyfills import UTC
 from vercel._internal.telemetry.tracker import track
 
 BlobProgressCallback = (

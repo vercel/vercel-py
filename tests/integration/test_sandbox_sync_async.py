@@ -6,7 +6,7 @@ Tests both sync and async variants (Sandbox and AsyncSandbox).
 import json
 import tarfile
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -687,8 +687,8 @@ class TestSandboxList:
 
         project = "sandbox-project"
         limit = 2
-        since = datetime(2024, 1, 15, 9, 0, tzinfo=UTC)
-        until = datetime(2024, 1, 15, 9, 30, tzinfo=UTC)
+        since = datetime(2024, 1, 15, 9, 0, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 15, 9, 30, tzinfo=timezone.utc)
         expected_since = str(int(since.timestamp() * 1000))
         expected_until = str(int(until.timestamp() * 1000))
         next_until = "1705310400000"
@@ -1187,8 +1187,8 @@ class TestSnapshotList:
 
         project = "snapshot-project"
         limit = 2
-        since = datetime(2024, 1, 15, 12, 0, tzinfo=UTC)
-        until = datetime(2024, 1, 15, 12, 30, tzinfo=UTC)
+        since = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 15, 12, 30, tzinfo=timezone.utc)
         expected_since = str(int(since.timestamp() * 1000))
         expected_until = str(int(until.timestamp() * 1000))
         next_cursor = 1705320000000
@@ -4113,6 +4113,37 @@ class TestSandboxWaitForStatus:
         sandbox.client.close()
 
     @respx.mock
+    def test_wait_for_status_timeout_formats_string_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test timeout formatting preserves raw status strings."""
+        from vercel.sandbox import Sandbox, SandboxStatus
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": pending_response, "routes": []},
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'running' status") as exc_info:
+            sandbox.wait_for_status(SandboxStatus.RUNNING, timeout=0.05, poll_interval=0.01)
+
+        assert "'SandboxStatus.RUNNING'" not in str(exc_info.value)
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_wait_for_status_polls(self, mock_env_clear, mock_sandbox_get_response):
         """Test wait_for_status polls until status matches."""
         from vercel.sandbox import Sandbox, SandboxStatus
@@ -4247,6 +4278,38 @@ class TestSandboxWaitForStatus:
         assert sandbox.status is SandboxStatus.PENDING
         await sandbox.wait_for_status(SandboxStatus.RUNNING, poll_interval=0.01)
         assert sandbox.status is SandboxStatus.RUNNING
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_async_timeout_formats_string_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test async timeout formatting preserves raw status strings."""
+        from vercel.sandbox import AsyncSandbox, SandboxStatus
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": pending_response, "routes": []},
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'running' status") as exc_info:
+            await sandbox.wait_for_status(SandboxStatus.RUNNING, timeout=0.05, poll_interval=0.01)
+
+        assert "'SandboxStatus.RUNNING'" not in str(exc_info.value)
 
         await sandbox.client.aclose()
 

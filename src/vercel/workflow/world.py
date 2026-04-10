@@ -9,13 +9,14 @@ from typing import (
     Generic,
     Literal,
     Protocol,
-    Self,
     TypeAlias,
     TypeVar,
     overload,
 )
 
 import pydantic
+
+from vercel._internal.polyfills import Self
 
 T = TypeVar("T")
 QueuePrefix: TypeAlias = Literal["__wkf_step_", "__wkf_workflow_"]

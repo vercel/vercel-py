@@ -7,7 +7,6 @@ These tests require real API credentials set via environment variables:
 """
 
 import os
-import time
 import uuid
 from collections.abc import Generator
 from typing import Any
@@ -87,24 +86,20 @@ def blob_token() -> str:
 
 @pytest.fixture
 def unique_test_name() -> str:
-    """Generate a unique test resource name with timestamp.
+    """Generate a collision-resistant test resource name.
 
-    Format: vercel-py-test-{timestamp}-{uuid}
+    Format: vercel-py-test-{uuid}
     """
-    timestamp = int(time.time())
-    unique_id = uuid.uuid4().hex[:8]
-    return f"vercel-py-test-{timestamp}-{unique_id}"
+    return f"vercel-py-test-{uuid.uuid4().hex}"
 
 
 @pytest.fixture
 def unique_blob_path() -> str:
-    """Generate a unique blob path for testing.
+    """Generate a collision-resistant blob path for testing.
 
-    Format: test/{timestamp}-{uuid}/file.txt
+    Format: test/{uuid}/file.txt
     """
-    timestamp = int(time.time())
-    unique_id = uuid.uuid4().hex[:8]
-    return f"test/{timestamp}-{unique_id}/file.txt"
+    return f"test/{uuid.uuid4().hex}/file.txt"
 
 
 class CleanupRegistry:

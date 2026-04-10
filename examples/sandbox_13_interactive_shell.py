@@ -160,17 +160,19 @@ async def test():
         await client.send_ready()
         await client.send_resize(80, 24)
 
-        # Collect output with timeout
-        output = b""
+        # Collect output with timeout. asyncio.timeout() is only available in 3.11+.
+        async def collect_output() -> bytes:
+            output = b""
+            async for data in client.raw_messages():
+                output += data
+                if b"PTY_TEST_OUTPUT" in output:
+                    break
+            return output
+
         try:
-            async with asyncio.timeout(5):
-                async for data in client.raw_messages():
-                    output += data
-                    # Check if we got our test string
-                    if b"PTY_TEST_OUTPUT" in output:
-                        break
-        except TimeoutError:
-            pass
+            output = await asyncio.wait_for(collect_output(), timeout=5)
+        except asyncio.TimeoutError:
+            output = b""
 
         await client.close()
 

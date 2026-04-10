@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from vercel.sandbox import (
     NetworkPolicyCustom,
     NetworkPolicyRule,
@@ -80,8 +82,6 @@ class TestSandboxModelNetworkPolicy:
         assert sandbox.status is SandboxStatus.RUNNING
 
     def test_model_rejects_unknown_status(self) -> None:
-        import pytest
-
         with pytest.raises(ValueError, match="status"):
             SandboxModel.model_validate(
                 {
@@ -105,3 +105,9 @@ class TestSandboxModelNetworkPolicy:
                     "interactivePort": None,
                 }
             )
+
+    def test_sandbox_status_preserves_string_contract(self) -> None:
+        assert SandboxStatus("running") is SandboxStatus.RUNNING
+        assert SandboxStatus.RUNNING == "running"
+        assert isinstance(SandboxStatus.RUNNING, str)
+        assert str(SandboxStatus.RUNNING) == "running"
