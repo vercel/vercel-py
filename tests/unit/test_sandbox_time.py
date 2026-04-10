@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from hypothesis import given, strategies as st
 
+from vercel._internal.sandbox.models import CreateSandboxRequest
 from vercel._internal.sandbox.time import MILLISECOND, SECOND, coerce_duration, parse_duration
 
 MAX_DURATION_MS = timedelta.max // MILLISECOND
@@ -127,3 +128,10 @@ def test_parse_duration_rejects_unsupported_values(value: object) -> None:
 def test_parse_duration_rejects_bool_values(value: bool) -> None:
     with pytest.raises(TypeError, match="duration must be an int, float, timedelta, or None"):
         parse_duration(value, SECOND)
+
+
+def test_create_sandbox_request_preserves_timedelta_until_serialization() -> None:
+    request = CreateSandboxRequest(project_id="prj_test123", timeout=timedelta(minutes=10))
+
+    assert request.timeout == timedelta(minutes=10)
+    assert request.model_dump(by_alias=True, exclude_none=True)["timeout"] == 600_000

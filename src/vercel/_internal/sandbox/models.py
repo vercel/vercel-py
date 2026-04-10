@@ -14,6 +14,7 @@ from pydantic import (
     StrictStr,
     TypeAdapter,
     ValidationError,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -479,11 +480,14 @@ class CreateSandboxRequest(_CreateModel):
 
     @field_validator("timeout", mode="before")
     @classmethod
-    def _coerce_timeout(cls, value: object) -> int | None:
-        normalized_delta = parse_duration(value, MILLISECOND)
-        if normalized_delta is None:
+    def _coerce_timeout(cls, value: object) -> timedelta | None:
+        return parse_duration(value, MILLISECOND)
+
+    @field_serializer("timeout")
+    def _serialize_timeout(self, value: timedelta | None) -> int | None:
+        if value is None:
             return None
-        return normalized_delta // MILLISECOND
+        return value // MILLISECOND
 
 
 def parse_source(value: SourceInput | None) -> Source | None:
