@@ -59,7 +59,7 @@ async def main() -> None:
 
         # 2. Create a new test project
         print("\n2️⃣ Creating a new test project...")
-        test_project_name = f"vercel-py-async-test-{str(uuid.uuid4())}"
+        test_project_name = f"vercel-py-async-test-{uuid.uuid4().hex}"
 
         create_response = await create_project(
             body={
