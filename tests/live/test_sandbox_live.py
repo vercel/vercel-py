@@ -81,8 +81,7 @@ class TestSandboxLive:
 
     def test_file_operations(self, vercel_token, vercel_team_id, cleanup_registry, tmp_path):
         """Test sandbox file write and read operations."""
-        from vercel.sandbox import Sandbox
-        from vercel.sandbox.models import WriteFile
+        from vercel.sandbox import Sandbox, WriteFile
 
         sandbox = Sandbox.create(
             token=vercel_token,

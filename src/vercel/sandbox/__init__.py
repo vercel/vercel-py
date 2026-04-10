@@ -11,6 +11,7 @@ from vercel._internal.sandbox import (
 from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
 from .models import (
     GitSource,
+    LogLine,
     NetworkPolicy,
     NetworkPolicyCustom,
     NetworkPolicyRule,
@@ -23,6 +24,7 @@ from .models import (
     SnapshotSource,
     Source,
     TarballSource,
+    WriteFile,
 )
 from .sandbox import AsyncSandbox, Sandbox
 from .snapshot import (
@@ -50,11 +52,13 @@ __all__ = [
     "AsyncCommandFinished",
     "Command",
     "CommandFinished",
+    "LogLine",
     # Source types
     "Source",
     "GitSource",
     "TarballSource",
     "SnapshotSource",
+    "WriteFile",
     "Resources",
     "SandboxValidationError",
     "SandboxValidationIssue",
