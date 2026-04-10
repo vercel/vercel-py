@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -90,7 +90,7 @@ def sync_demo(since: datetime) -> None:
 
 
 if __name__ == "__main__":
-    since = datetime.now(UTC) - timedelta(seconds=5)
+    since = datetime.now(timezone.utc) - timedelta(seconds=5)
     sandboxes = asyncio.run(async_demo(since))
     try:
         sync_demo(since)
