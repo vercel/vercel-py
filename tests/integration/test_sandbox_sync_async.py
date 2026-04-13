@@ -5,18 +5,28 @@ Tests both sync and async variants (Sandbox and AsyncSandbox).
 
 import json
 import tarfile
-from datetime import datetime, timezone
+from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 import respx
 
 from vercel.sandbox import (
+    AsyncSandbox,
+    GitSource,
     NetworkPolicyCustom,
     NetworkPolicyRule,
     NetworkPolicySubnets,
     NetworkTransformer,
+    Resources,
+    Sandbox,
+    SandboxNotFoundError,
+    SandboxServerError,
+    SandboxValidationError,
 )
 
 # Base URL for Vercel Sandbox API
@@ -38,12 +48,21 @@ def _sandbox_with_id(
     return sandbox
 
 
-async def _collect_async_pages(page) -> list:
-    return [current_page async for current_page in page.iter_pages()]
+def _snapshot_with_id(
+    base_snapshot: dict,
+    snapshot_id: str,
+    *,
+    created_at: int,
+) -> dict:
+    snapshot = dict(base_snapshot)
+    snapshot["id"] = snapshot_id
+    snapshot["createdAt"] = created_at
+    snapshot["updatedAt"] = created_at
+    return snapshot
 
 
-async def _collect_async_items(page) -> list:
-    return [sandbox async for sandbox in page.iter_items()]
+async def _collect_async_items(iterator: AsyncIterator) -> list:
+    return [item async for item in iterator]
 
 
 class TestSandboxCreate:
@@ -121,6 +140,115 @@ class TestSandboxCreate:
         await sandbox.client.aclose()
 
     @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_dict_and_dataclass_inputs_match_on_wire(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sync_sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source={"type": "git", "url": "https://github.com/vercel/vercel-py"},
+            resources={"vcpus": 2, "memory": 4096},
+        )
+        async_sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source=GitSource(url="https://github.com/vercel/vercel-py"),
+            resources=Resources(vcpus=2, memory=4096),
+        )
+
+        first_body = json.loads(route.calls[0].request.content)
+        second_body = json.loads(route.calls[1].request.content)
+
+        assert first_body == second_body
+        assert first_body["source"] == {
+            "type": "git",
+            "url": "https://github.com/vercel/vercel-py",
+        }
+        assert first_body["resources"] == {"vcpus": 2, "memory": 4096}
+
+        sync_sandbox.client.close()
+        await async_sandbox.client.aclose()
+
+    @respx.mock
+    def test_create_sandbox_accepts_camel_case_snapshot_dict(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            source={"type": "snapshot", "snapshotId": "snap_123"},
+        )
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["source"] == {"type": "snapshot", "snapshotId": "snap_123"}
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_create_sandbox_rejects_invalid_inputs_before_request(self, mock_env_clear):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(200, json={"sandbox": {}, "routes": []})
+        )
+
+        with pytest.raises(SandboxValidationError) as exc_info:
+            Sandbox.create(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+                source={"type": "git", "depth": 0, "username": "scott"},
+                resources={"vcpus": 3, "memory": 4096},
+            )
+
+        issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
+        assert ("source.url", "is required") in issues
+        assert ("source.depth", "must be a positive integer") in issues
+        assert ("source", "git username and password must be provided together") in issues
+        assert route.called is False
+
+    @respx.mock
+    def test_create_sandbox_rejects_invalid_resources_before_request(self, mock_env_clear):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(200, json={"sandbox": {}, "routes": []})
+        )
+
+        with pytest.raises(SandboxValidationError) as exc_info:
+            Sandbox.create(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+                resources={"vcpus": 3, "memory": 4096},
+            )
+
+        issues = {(issue.path, issue.message) for issue in exc_info.value.issues}
+        assert ("resources.vcpus", "must be even") in issues
+        assert ("resources.memory", "must equal resources.vcpus * 2048 (6144)") in issues
+        assert route.called is False
+
+    @respx.mock
     def test_create_sandbox_with_options(self, mock_env_clear, mock_sandbox_create_response):
         """Test sandbox creation with all options."""
         from vercel.sandbox import Sandbox
@@ -152,6 +280,35 @@ class TestSandboxCreate:
         assert body["ports"] == [3000, 8080]
         assert body["timeout"] == 600000
         assert body["runtime"] == "nodejs20.x"
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_create_sandbox_sync_serializes_timedelta_timeout(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            timeout=timedelta(minutes=10),
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["timeout"] == 600000
 
         sandbox.client.close()
 
@@ -215,6 +372,36 @@ class TestSandboxCreate:
 
         body = json.loads(route.calls.last.request.content)
         assert body["env"] == {"NODE_ENV": "production"}
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_async_serializes_timedelta_timeout(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_create_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            timeout=timedelta(minutes=10),
+        )
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["timeout"] == 600000
 
         await sandbox.client.aclose()
 
@@ -490,13 +677,12 @@ class TestSandboxGet:
 
 
 class TestSandboxList:
-    """Test sandbox listing pagination behavior."""
+    """Test sandbox listing iteration behavior."""
 
     @respx.mock
-    def test_list_sandbox_sync_serializes_datetime_filters_and_typed_pages(
+    def test_list_sandbox_sync_serializes_datetime_filters_and_caps_total_items(
         self, mock_env_clear, mock_sandbox_get_response
     ):
-        from vercel._internal.sandbox.models import Sandbox as SandboxModel
         from vercel.sandbox import Sandbox
 
         project = "sandbox-project"
@@ -551,13 +737,15 @@ class TestSandboxList:
 
         respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
-        page = Sandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id=project,
-            limit=limit,
-            since=since,
-            until=until,
+        sandboxes = list(
+            Sandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id=project,
+                limit=limit,
+                since=since,
+                until=until,
+            )
         )
 
         assert requests == [
@@ -569,49 +757,26 @@ class TestSandboxList:
                 "until": expected_until,
             }
         ]
-        assert isinstance(page.sandboxes[0], SandboxModel)
-        assert page.sandboxes[0].id == "sbx_filtered_1"
-        assert page.sandboxes[0].created_at == 1705311000000
-        assert page.sandboxes[0].requested_at == 1705311000000
-        assert page.pagination.count == 3
-        assert page.next_page_info() is not None
-        assert page.next_page_info().until == int(next_until)
-
-        assert [sandbox.id for sandbox in page.iter_items()] == [
-            "sbx_filtered_1",
-            "sbx_filtered_2",
-            "sbx_filtered_3",
-        ]
-        assert requests == [
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": expected_since,
-                "until": expected_until,
-            },
-            {
-                "teamId": "team_test123",
-                "project": project,
-                "limit": str(limit),
-                "since": expected_since,
-                "until": next_until,
-            },
+        assert [
+            (sandbox.id, sandbox.created_at, sandbox.requested_at) for sandbox in sandboxes
+        ] == [
+            ("sbx_filtered_1", 1705311000000, 1705311000000),
+            ("sbx_filtered_2", 1705310700000, 1705310700000),
         ]
 
     @respx.mock
     @pytest.mark.asyncio
-    async def test_list_sandbox_async_serializes_integer_filters_and_typed_pages(
+    async def test_list_sandbox_async_serializes_integer_filters_and_preserves_budget(
         self, mock_env_clear, mock_sandbox_get_response
     ):
-        from vercel._internal.sandbox.models import Sandbox as SandboxModel
         from vercel.sandbox import AsyncSandbox
 
         project = "sandbox-project"
-        limit = 2
+        limit = 3
         since = 1705312800000
         until = 1705314600000
-        next_until = "1705312500000"
+        next_cursor = 1705312500000
+        next_until = str(next_cursor - 1)
 
         first_page = {
             "sandboxes": [
@@ -628,7 +793,7 @@ class TestSandboxList:
             ],
             "pagination": {
                 "count": 3,
-                "next": int(next_until),
+                "next": next_cursor,
                 "prev": None,
             },
         }
@@ -657,15 +822,22 @@ class TestSandboxList:
 
         respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
-        page = await AsyncSandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id=project,
-            limit=limit,
-            since=since,
-            until=until,
+        items = await _collect_async_items(
+            AsyncSandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id=project,
+                limit=limit,
+                since=since,
+                until=until,
+            )
         )
 
+        assert [(sandbox.id, sandbox.created_at, sandbox.requested_at) for sandbox in items] == [
+            ("sbx_async_filtered_1", 1705313400000, 1705313400000),
+            ("sbx_async_filtered_2", 1705313100000, 1705313100000),
+            ("sbx_async_filtered_3", 1705312500000, 1705312500000),
+        ]
         assert requests == [
             {
                 "teamId": "team_test123",
@@ -673,17 +845,97 @@ class TestSandboxList:
                 "limit": str(limit),
                 "since": str(since),
                 "until": str(until),
-            }
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": "1",
+                "since": str(since),
+                "until": next_until,
+            },
         ]
-        assert isinstance(page.sandboxes[0], SandboxModel)
-        assert page.sandboxes[0].id == "sbx_async_filtered_1"
-        assert page.sandboxes[0].created_at == 1705313400000
-        assert page.sandboxes[0].requested_at == 1705313400000
-        assert page.pagination.count == 3
-        assert page.next_page_info() is not None
-        assert page.next_page_info().until == int(next_until)
 
-        items = await _collect_async_items(page)
+    @respx.mock
+    async def test_list_sandbox_async_internal_page_size_caps_request_limit(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        project = "sandbox-project"
+        limit = 3
+        internal_page_size = 1
+        since = 1705312800000
+        next_cursor_1 = 1705313100000
+        next_cursor_2 = 1705312500000
+        next_until_1 = str(next_cursor_1 - 1)
+        next_until_2 = str(next_cursor_2 - 1)
+
+        first_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_filtered_1",
+                    created_at=1705313400000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": next_cursor_1,
+                "prev": None,
+            },
+        }
+        second_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_filtered_2",
+                    created_at=1705313100000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": next_cursor_2,
+                "prev": 1705313400000,
+            },
+        }
+        third_page = {
+            "sandboxes": [
+                _sandbox_with_id(
+                    mock_sandbox_get_response,
+                    "sbx_async_filtered_3",
+                    created_at=1705312500000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705313100000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until_1:
+                return httpx.Response(200, json=second_page)
+            if params.get("until") == next_until_2:
+                return httpx.Response(200, json=third_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
+
+        items = await _collect_async_items(
+            AsyncSandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id=project,
+                limit=limit,
+                since=since,
+                _internal_page_size=internal_page_size,
+            )
+        )
+
         assert [sandbox.id for sandbox in items] == [
             "sbx_async_filtered_1",
             "sbx_async_filtered_2",
@@ -693,21 +945,27 @@ class TestSandboxList:
             {
                 "teamId": "team_test123",
                 "project": project,
-                "limit": str(limit),
+                "limit": "1",
                 "since": str(since),
-                "until": str(until),
             },
             {
                 "teamId": "team_test123",
                 "project": project,
-                "limit": str(limit),
+                "limit": "1",
                 "since": str(since),
-                "until": next_until,
+                "until": next_until_1,
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": "1",
+                "since": str(since),
+                "until": next_until_2,
             },
         ]
 
     @respx.mock
-    def test_list_sandbox_sync_iterates_pages_and_items(
+    def test_list_sandbox_sync_without_limit_iterates_all_pages(
         self, mock_env_clear, mock_sandbox_get_response
     ):
         from vercel.sandbox import Sandbox
@@ -750,55 +1008,30 @@ class TestSandboxList:
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
             requests.append(params)
-            if params.get("until") == "1705319400000":
+            if params.get("until") == "1705319399999":
                 return httpx.Response(200, json=second_page)
             return httpx.Response(200, json=first_page)
 
         route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
-        page = Sandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
+        sandboxes = list(
+            Sandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+            )
         )
 
         assert route.called
-        assert [sandbox.id for sandbox in page.sandboxes] == ["sbx_page_1", "sbx_page_2"]
-        assert page.pagination.count == 3
-        assert page.pagination.next == 1705319400000
-        assert page.has_next_page() is True
-        assert page.next_page_info() is not None
-        assert page.next_page_info().until == 1705319400000
-
-        pages = list(page.iter_pages())
-        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
-            ["sbx_page_1", "sbx_page_2"],
-            ["sbx_page_3"],
-        ]
+        assert [sandbox.id for sandbox in sandboxes] == ["sbx_page_1", "sbx_page_2", "sbx_page_3"]
         assert requests == [
             {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
-        ]
-
-        requests.clear()
-        items_page = Sandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
-        assert [sandbox.id for sandbox in items_page.iter_items()] == [
-            "sbx_page_1",
-            "sbx_page_2",
-            "sbx_page_3",
-        ]
-        assert requests == [
-            {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319399999"},
         ]
 
     @respx.mock
     @pytest.mark.asyncio
-    async def test_list_sandbox_async_iterates_pages_and_items(
+    async def test_list_sandbox_async_supports_direct_iteration_without_await(
         self, mock_env_clear, mock_sandbox_get_response
     ):
         from vercel.sandbox import AsyncSandbox
@@ -841,112 +1074,11 @@ class TestSandboxList:
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
             requests.append(params)
-            if params.get("until") == "1705319400000":
+            if params.get("until") == "1705319399999":
                 return httpx.Response(200, json=second_page)
             return httpx.Response(200, json=first_page)
 
         route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
-
-        page = await AsyncSandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
-
-        assert route.called
-        assert [sandbox.id for sandbox in page.sandboxes] == ["sbx_async_1", "sbx_async_2"]
-        assert page.pagination.count == 3
-        assert page.pagination.next == 1705319400000
-        assert page.has_next_page() is True
-        assert page.next_page_info() is not None
-        assert page.next_page_info().until == 1705319400000
-        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
-
-        requests.clear()
-        next_page = await page.get_next_page()
-        assert next_page is not None
-        assert [sandbox.id for sandbox in next_page.sandboxes] == ["sbx_async_3"]
-        assert requests == [
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"}
-        ]
-
-        requests.clear()
-        pages = await _collect_async_pages(page)
-        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
-            ["sbx_async_1", "sbx_async_2"],
-            ["sbx_async_3"],
-        ]
-        assert requests == [
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"}
-        ]
-
-        requests.clear()
-        items_page = await AsyncSandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
-        items = await _collect_async_items(items_page)
-        assert [sandbox.id for sandbox in items] == [
-            "sbx_async_1",
-            "sbx_async_2",
-            "sbx_async_3",
-        ]
-        assert requests == [
-            {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
-        ]
-
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_list_sandbox_async_builder_supports_direct_iteration(
-        self, mock_env_clear, mock_sandbox_get_response
-    ):
-        from vercel.sandbox import AsyncSandbox
-
-        first_page = {
-            "sandboxes": [
-                _sandbox_with_id(
-                    mock_sandbox_get_response,
-                    "sbx_builder_1",
-                    created_at=1705320600000,
-                ),
-                _sandbox_with_id(
-                    mock_sandbox_get_response,
-                    "sbx_builder_2",
-                    created_at=1705320000000,
-                ),
-            ],
-            "pagination": {
-                "count": 3,
-                "next": 1705319400000,
-                "prev": None,
-            },
-        }
-        second_page = {
-            "sandboxes": [
-                _sandbox_with_id(
-                    mock_sandbox_get_response,
-                    "sbx_builder_3",
-                    created_at=1705319400000,
-                ),
-            ],
-            "pagination": {
-                "count": 3,
-                "next": None,
-                "prev": 1705320600000,
-            },
-        }
-        requests: list[dict[str, str]] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            params = dict(request.url.params)
-            requests.append(params)
-            if params.get("until") == "1705319400000":
-                return httpx.Response(200, json=second_page)
-            return httpx.Response(200, json=first_page)
-
-        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
         item_ids = [
             sandbox.id
@@ -956,27 +1088,12 @@ class TestSandboxList:
                 project_id="prj_test123",
             )
         ]
-        assert item_ids == ["sbx_builder_1", "sbx_builder_2", "sbx_builder_3"]
-        assert requests == [
-            {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
-        ]
 
-        requests.clear()
-        pages = await _collect_async_pages(
-            AsyncSandbox.list(
-                token="test_token",
-                team_id="team_test123",
-                project_id="prj_test123",
-            )
-        )
-        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
-            ["sbx_builder_1", "sbx_builder_2"],
-            ["sbx_builder_3"],
-        ]
+        assert route.called
+        assert item_ids == ["sbx_async_1", "sbx_async_2", "sbx_async_3"]
         assert requests == [
             {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319400000"},
+            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319399999"},
         ]
 
     @respx.mock
@@ -1007,21 +1124,15 @@ class TestSandboxList:
 
         respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
-        page = Sandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
+        sandboxes = list(
+            Sandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+            )
         )
 
-        assert page.has_next_page() is False
-        assert page.next_page_info() is None
-        assert page.get_next_page() is None
-        assert [
-            [sandbox.id for sandbox in current_page.sandboxes] for current_page in page.iter_pages()
-        ] == [
-            ["sbx_single_page"],
-        ]
-        assert [sandbox.id for sandbox in page.iter_items()] == ["sbx_single_page"]
+        assert [sandbox.id for sandbox in sandboxes] == ["sbx_single_page"]
         assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
 
     @respx.mock
@@ -1053,22 +1164,298 @@ class TestSandboxList:
 
         respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
-        page = await AsyncSandbox.list(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
+        items = await _collect_async_items(
+            AsyncSandbox.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id="prj_test123",
+            )
         )
 
-        assert page.has_next_page() is False
-        assert page.next_page_info() is None
-        assert await page.get_next_page() is None
-        pages = await _collect_async_pages(page)
-        assert [[sandbox.id for sandbox in current_page.sandboxes] for current_page in pages] == [
-            ["sbx_async_terminal"],
-        ]
-        items = await _collect_async_items(page)
         assert [sandbox.id for sandbox in items] == ["sbx_async_terminal"]
         assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
+
+
+class TestSnapshotList:
+    """Test snapshot listing operations."""
+
+    @respx.mock
+    def test_list_snapshot_sync_serializes_filters_and_caps_total_items(
+        self, mock_env_clear, mock_sandbox_snapshot_response
+    ):
+        from vercel.sandbox import Snapshot
+
+        project = "snapshot-project"
+        limit = 2
+        since = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 15, 12, 30, tzinfo=timezone.utc)
+        expected_since = str(int(since.timestamp() * 1000))
+        expected_until = str(int(until.timestamp() * 1000))
+        next_cursor = 1705320000000
+        next_until = str(next_cursor - 1)
+
+        first_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_1",
+                    created_at=1705320600000,
+                ),
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_2",
+                    created_at=1705320300000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": next_cursor,
+                "prev": None,
+            },
+        }
+        second_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_3",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until:
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
+
+        snapshots = list(
+            Snapshot.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id=project,
+                limit=limit,
+                since=since,
+                until=until,
+            )
+        )
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": expected_since,
+                "until": expected_until,
+            }
+        ]
+        assert [
+            (snapshot.id, snapshot.created_at, snapshot.expires_at) for snapshot in snapshots
+        ] == [
+            (
+                "snap_list_1",
+                1705320600000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+            (
+                "snap_list_2",
+                1705320300000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+        ]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_snapshot_async_serializes_integer_filters_and_preserves_budget(
+        self, mock_env_clear, mock_sandbox_snapshot_response
+    ):
+        from vercel.sandbox import AsyncSnapshot
+
+        project = "snapshot-project"
+        limit = 3
+        since = 1705321200000
+        until = 1705323000000
+        next_cursor = 1705319400000
+        next_until = str(next_cursor - 1)
+
+        first_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_async_1",
+                    created_at=1705320600000,
+                ),
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_async_2",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": next_cursor,
+                "prev": None,
+            },
+        }
+        second_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_async_3",
+                    created_at=1705319400000,
+                ),
+            ],
+            "pagination": {
+                "count": 3,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until:
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
+
+        snapshots = await _collect_async_items(
+            AsyncSnapshot.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id=project,
+                limit=limit,
+                since=since,
+                until=until,
+            )
+        )
+
+        assert [
+            (snapshot.id, snapshot.created_at, snapshot.expires_at) for snapshot in snapshots
+        ] == [
+            (
+                "snap_async_1",
+                1705320600000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+            (
+                "snap_async_2",
+                1705320000000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+            (
+                "snap_async_3",
+                1705319400000,
+                mock_sandbox_snapshot_response["expiresAt"],
+            ),
+        ]
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": str(limit),
+                "since": str(since),
+                "until": str(until),
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": "1",
+                "since": str(since),
+                "until": next_until,
+            },
+        ]
+
+    @respx.mock
+    def test_list_snapshot_sync_internal_page_size_caps_request_limit(
+        self, mock_env_clear, mock_sandbox_snapshot_response
+    ):
+        from vercel.sandbox import Snapshot
+
+        project = "snapshot-project"
+        limit = 2
+        internal_page_size = 1
+        since = 1705321200000
+        next_cursor = 1705320000000
+        next_until = str(next_cursor - 1)
+
+        first_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_1",
+                    created_at=1705320600000,
+                ),
+            ],
+            "pagination": {
+                "count": 2,
+                "next": next_cursor,
+                "prev": None,
+            },
+        }
+        second_page = {
+            "snapshots": [
+                _snapshot_with_id(
+                    mock_sandbox_snapshot_response,
+                    "snap_list_2",
+                    created_at=1705320000000,
+                ),
+            ],
+            "pagination": {
+                "count": 2,
+                "next": None,
+                "prev": 1705320600000,
+            },
+        }
+        requests: list[dict[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            if params.get("until") == next_until:
+                return httpx.Response(200, json=second_page)
+            return httpx.Response(200, json=first_page)
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(side_effect=handler)
+
+        snapshots = list(
+            Snapshot.list(
+                token="test_token",
+                team_id="team_test123",
+                project_id=project,
+                limit=limit,
+                since=since,
+                _internal_page_size=internal_page_size,
+            )
+        )
+
+        assert [snapshot.id for snapshot in snapshots] == ["snap_list_1", "snap_list_2"]
+        assert requests == [
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": "1",
+                "since": str(since),
+            },
+            {
+                "teamId": "team_test123",
+                "project": project,
+                "limit": "1",
+                "since": str(since),
+                "until": next_until,
+            },
+        ]
 
     @respx.mock
     def test_get_sandbox_sync_exposes_mode_network_policy(
@@ -1785,8 +2172,45 @@ class TestSandboxFileOperations:
         sandbox.client.close()
 
     @respx.mock
+    def test_iter_file_sync(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content
+    ):
+        """Test synchronous streamed file read."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        stream = sandbox.iter_file("/etc/hosts", chunk_size=4)
+
+        assert stream is not None
+        assert b"".join(stream) == mock_sandbox_read_file_content
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_read_file_not_found(self, mock_env_clear, mock_sandbox_get_response):
-        """Test file read returns None for non-existent file."""
+        """Test file read raises for non-existent file."""
         from vercel.sandbox import Sandbox
 
         sandbox_id = "sbx_test123456"
@@ -1814,9 +2238,299 @@ class TestSandboxFileOperations:
             project_id="prj_test123",
         )
 
-        content = sandbox.read_file("/nonexistent/file")
+        assert sandbox.read_file("/nonexistent/file") is None
 
-        assert content is None
+        sandbox.client.close()
+
+    @respx.mock
+    def test_iter_file_not_found(self, mock_env_clear, mock_sandbox_get_response):
+        """Test streamed file read raises for non-existent file."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            sandbox.iter_file("/nonexistent/file")
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test synchronous sandbox-to-local file download."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        result = sandbox.download_file("/etc/hosts", destination)
+
+        assert result == str(destination.resolve())
+        assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync_creates_parents(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test sync download can create parent directories."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "nested" / "dir" / "downloaded.txt"
+        result = sandbox.download_file("/etc/hosts", destination, create_parents=True)
+
+        assert result == str(destination.resolve())
+        assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync_uses_filesystem_client_for_local_path_setup(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test sync download uses the injected filesystem client for local setup."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        requested_destination = tmp_path / "ignored.txt"
+        rewritten_destination = tmp_path / "rewritten" / "downloaded.txt"
+        sandbox.client._filesystem_client.coerce_path = AsyncMock(
+            return_value=str(rewritten_destination)
+        )
+
+        async def create_parent_directories(path: str) -> None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        sandbox.client._filesystem_client.create_parent_directories = AsyncMock(
+            side_effect=create_parent_directories
+        )
+
+        result = sandbox.download_file("/etc/hosts", requested_destination, create_parents=True)
+
+        assert result == str(rewritten_destination.resolve())
+        assert rewritten_destination.read_bytes() == mock_sandbox_read_file_content
+        assert not requested_destination.exists()
+        sandbox.client._filesystem_client.coerce_path.assert_awaited_once_with(
+            requested_destination
+        )
+        sandbox.client._filesystem_client.create_parent_directories.assert_awaited_once_with(
+            str(rewritten_destination.resolve())
+        )
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync_stream_failure_removes_part_file(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test sync download cleans up the temp file after a stream failure."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=b"ignored")
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        async def fail_after_partial_chunk(
+            response: httpx.Response, *, chunk_size: int
+        ) -> AsyncIterator[bytes]:
+            del response, chunk_size
+            yield b"partial"
+            raise RuntimeError("stream failed")
+
+        sandbox.client._stream_file_chunks = fail_after_partial_chunk  # type: ignore[method-assign]
+
+        destination = tmp_path / "downloaded.txt"
+        temp_path = destination.with_name(destination.name + ".part")
+
+        with pytest.raises(RuntimeError, match="stream failed"):
+            sandbox.download_file("/etc/hosts", destination)
+
+        assert not destination.exists()
+        assert not temp_path.exists()
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync_not_found(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test sync download raises for non-existent file."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            sandbox.download_file("/nonexistent/file", destination)
+        assert not destination.exists()
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_download_file_sync_server_error_propagates(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test sync download preserves non-404 sandbox API errors."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(500, json={"message": "remote exploded"})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+
+        with pytest.raises(SandboxServerError, match="HTTP 500: remote exploded"):
+            sandbox.download_file("/etc/hosts", destination)
+
+        assert not destination.exists()
 
         sandbox.client.close()
 
@@ -1856,6 +2570,366 @@ class TestSandboxFileOperations:
         content = await sandbox.read_file("/etc/hosts")
 
         assert content is not None
+        assert content == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_iter_file_async(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content
+    ):
+        """Test asynchronous streamed file read."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        stream = await sandbox.iter_file("/etc/hosts", chunk_size=4)
+
+        assert stream is not None
+        chunks = [chunk async for chunk in stream]
+        assert b"".join(chunks) == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_read_file_async_not_found(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async file read raises for non-existent file."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        assert await sandbox.read_file("/nonexistent/file") is None
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_iter_file_async_not_found(self, mock_env_clear, mock_sandbox_get_response):
+        """Test async streamed file read raises for non-existent file."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            await sandbox.iter_file("/nonexistent/file")
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test async sandbox-to-local file download."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        result = await sandbox.download_file("/etc/hosts", destination)
+
+        assert result == str(destination.resolve())
+        assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_creates_parents(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test async download can create parent directories."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "nested" / "dir" / "downloaded.txt"
+        result = await sandbox.download_file("/etc/hosts", destination, create_parents=True)
+
+        assert result == str(destination.resolve())
+        assert destination.parent.is_dir()
+        assert destination.read_bytes() == mock_sandbox_read_file_content
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_uses_filesystem_client_for_local_path_setup(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_read_file_content, tmp_path
+    ):
+        """Test async download uses the injected filesystem client for local setup."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=mock_sandbox_read_file_content)
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        requested_destination = tmp_path / "ignored.txt"
+        rewritten_destination = tmp_path / "rewritten" / "downloaded.txt"
+        sandbox.client._filesystem_client.coerce_path = AsyncMock(
+            return_value=str(rewritten_destination)
+        )
+
+        async def create_parent_directories(path: str) -> None:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+        sandbox.client._filesystem_client.create_parent_directories = AsyncMock(
+            side_effect=create_parent_directories
+        )
+
+        result = await sandbox.download_file(
+            "/etc/hosts", requested_destination, create_parents=True
+        )
+
+        assert result == str(rewritten_destination.resolve())
+        assert rewritten_destination.read_bytes() == mock_sandbox_read_file_content
+        assert not requested_destination.exists()
+        sandbox.client._filesystem_client.coerce_path.assert_awaited_once_with(
+            requested_destination
+        )
+        sandbox.client._filesystem_client.create_parent_directories.assert_awaited_once_with(
+            str(rewritten_destination.resolve())
+        )
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_uses_filesystem_client_for_file_writes_and_cleanup(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test async download routes writes through the filesystem client and cleans up."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(200, content=b"ignored")
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        async def stream_chunks(
+            response: httpx.Response, *, chunk_size: int
+        ) -> AsyncIterator[bytes]:
+            del response, chunk_size
+            yield b"first"
+            yield b"second"
+
+        sandbox.client._stream_file_chunks = stream_chunks  # type: ignore[method-assign]
+
+        destination = tmp_path / "downloaded.txt"
+        resolved_destination = destination.resolve()
+        temp_path = Path(str(resolved_destination) + ".part")
+
+        original_open = sandbox.client._filesystem_client.open_binary_writer
+        original_close = sandbox.client._filesystem_client.close
+        original_remove_if_exists = sandbox.client._filesystem_client.remove_if_exists
+
+        sandbox.client._filesystem_client.open_binary_writer = AsyncMock(side_effect=original_open)
+        sandbox.client._filesystem_client.close = AsyncMock(side_effect=original_close)
+        sandbox.client._filesystem_client.remove_if_exists = AsyncMock(
+            side_effect=original_remove_if_exists
+        )
+
+        original_write = sandbox.client._filesystem_client.write
+
+        async def fail_during_write(handle: object, data: bytes) -> None:
+            await original_write(handle, data)
+            raise RuntimeError("write failed")
+
+        sandbox.client._filesystem_client.write = AsyncMock(side_effect=fail_during_write)
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            await sandbox.download_file("/etc/hosts", destination)
+
+        assert not destination.exists()
+        assert not temp_path.exists()
+        sandbox.client._filesystem_client.open_binary_writer.assert_awaited_once_with(
+            str(temp_path)
+        )
+        sandbox.client._filesystem_client.write.assert_awaited_once()
+        sandbox.client._filesystem_client.close.assert_awaited_once()
+        sandbox.client._filesystem_client.remove_if_exists.assert_awaited_once_with(str(temp_path))
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_download_file_async_not_found(
+        self, mock_env_clear, mock_sandbox_get_response, tmp_path
+    ):
+        """Test async download raises for non-existent file."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/fs/read").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "not_found"}})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        destination = tmp_path / "downloaded.txt"
+        with pytest.raises(SandboxNotFoundError, match="HTTP 404"):
+            await sandbox.download_file("/nonexistent/file", destination)
+        assert not destination.exists()
 
         await sandbox.client.aclose()
 
@@ -2335,10 +3409,10 @@ class TestSandboxSnapshot:
     """Test sandbox snapshot operations."""
 
     @respx.mock
-    def test_create_snapshot_sync(
+    def test_create_snapshot_sync_without_expiration(
         self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
     ):
-        """Test synchronous snapshot creation."""
+        """Test sync snapshot creation omits the body when expiration is unset."""
         from vercel.sandbox import Sandbox
 
         sandbox_id = "sbx_test123456"
@@ -2377,11 +3451,356 @@ class TestSandboxSnapshot:
         snapshot = sandbox.snapshot()
 
         assert route.called
+        assert route.calls.last.request.content == b""
         assert snapshot.snapshot_id == mock_sandbox_snapshot_response["id"]
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert snapshot.expires_at == mock_sandbox_snapshot_response["expiresAt"]
         # Sandbox should be stopped after snapshot
         assert sandbox.status == "stopped"
 
         sandbox.client.close()
+
+    @respx.mock
+    def test_create_snapshot_sync_with_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test sync snapshot creation forwards a non-zero expiration."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = sandbox.snapshot(expiration=86_400_000)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 86_400_000}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_create_snapshot_sync_with_timedelta_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test sync snapshot creation serializes timedelta expiration to milliseconds."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = sandbox.snapshot(expiration=timedelta(days=1))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 86_400_000}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_create_snapshot_sync_with_zero_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test sync snapshot creation preserves explicit zero expiration."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.snapshot(expiration=0)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 0}
+        assert sandbox.status == "stopped"
+
+        sandbox.client.close()
+
+    @respx.mock
+    async def test_create_snapshot_async_without_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation omits the body when expiration is unset."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot()
+
+        assert route.called
+        assert route.calls.last.request.content == b""
+        assert snapshot.snapshot_id == mock_sandbox_snapshot_response["id"]
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert snapshot.expires_at == mock_sandbox_snapshot_response["expiresAt"]
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_snapshot_async_with_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation forwards a non-zero expiration."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot(expiration=86_400_000)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 86_400_000}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_snapshot_async_with_timedelta_expiration(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation serializes timedelta expiration to milliseconds."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": mock_sandbox_snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot(expiration=timedelta(days=1))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 86_400_000}
+        assert snapshot.created_at == mock_sandbox_snapshot_response["createdAt"]
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_snapshot_async_with_zero_expiration_and_optional_expires_at(
+        self, mock_env_clear, mock_sandbox_get_response, mock_sandbox_snapshot_response
+    ):
+        """Test async snapshot creation keeps zero expiration and optional expiry metadata."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        snapshot_response = dict(mock_sandbox_snapshot_response)
+        snapshot_response.pop("expiresAt")
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        stopped_response = dict(mock_sandbox_get_response)
+        stopped_response["status"] = "stopped"
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/snapshot").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": stopped_response,
+                    "snapshot": snapshot_response,
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        snapshot = await sandbox.snapshot(expiration=0)
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body == {"expiration": 0}
+        assert snapshot.created_at == snapshot_response["createdAt"]
+        assert snapshot.expires_at is None
+        assert sandbox.status == "stopped"
+
+        await sandbox.client.aclose()
 
 
 class TestSandboxExtendTimeout:
@@ -2429,6 +3848,87 @@ class TestSandboxExtendTimeout:
         assert sandbox.timeout == 600
 
         sandbox.client.close()
+
+    @respx.mock
+    def test_extend_timeout_sync_serializes_timedelta(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        extended_response = dict(mock_sandbox_get_response)
+        extended_response["timeout"] = 600
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/extend-timeout").mock(
+            return_value=httpx.Response(200, json={"sandbox": extended_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.extend_timeout(timedelta(minutes=5))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["duration"] == 300000
+        assert sandbox.timeout == 600
+
+        sandbox.client.close()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_extend_timeout_async_serializes_timedelta(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        extended_response = dict(mock_sandbox_get_response)
+        extended_response["timeout"] = 600
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/extend-timeout").mock(
+            return_value=httpx.Response(200, json={"sandbox": extended_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        await sandbox.extend_timeout(timedelta(minutes=5))
+
+        assert route.called
+        body = json.loads(route.calls.last.request.content)
+        assert body["duration"] == 300000
+        assert sandbox.timeout == 600
+
+        await sandbox.client.aclose()
 
 
 class TestSandboxDomain:
@@ -2585,7 +4085,7 @@ class TestSandboxWaitForStatus:
     @respx.mock
     def test_wait_for_status_already_matched(self, mock_env_clear, mock_sandbox_get_response):
         """Test wait_for_status returns immediately if already at target status."""
-        from vercel.sandbox import Sandbox
+        from vercel.sandbox import Sandbox, SandboxStatus
 
         sandbox_id = "sbx_test123456"
 
@@ -2606,16 +4106,47 @@ class TestSandboxWaitForStatus:
             project_id="prj_test123",
         )
 
-        assert sandbox.status == "running"
+        assert sandbox.status is SandboxStatus.RUNNING
         # Should return immediately without making additional API calls
-        sandbox.wait_for_status("running")
+        sandbox.wait_for_status(SandboxStatus.RUNNING)
+
+        sandbox.client.close()
+
+    @respx.mock
+    def test_wait_for_status_timeout_formats_string_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test timeout formatting preserves raw status strings."""
+        from vercel.sandbox import Sandbox, SandboxStatus
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": pending_response, "routes": []},
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'running' status") as exc_info:
+            sandbox.wait_for_status(SandboxStatus.RUNNING, timeout=0.05, poll_interval=0.01)
+
+        assert "'SandboxStatus.RUNNING'" not in str(exc_info.value)
 
         sandbox.client.close()
 
     @respx.mock
     def test_wait_for_status_polls(self, mock_env_clear, mock_sandbox_get_response):
         """Test wait_for_status polls until status matches."""
-        from vercel.sandbox import Sandbox
+        from vercel.sandbox import Sandbox, SandboxStatus
 
         sandbox_id = "sbx_test123456"
         pending_response = {**mock_sandbox_get_response, "status": "pending"}
@@ -2647,9 +4178,9 @@ class TestSandboxWaitForStatus:
             project_id="prj_test123",
         )
 
-        assert sandbox.status == "pending"
+        assert sandbox.status is SandboxStatus.PENDING
         sandbox.wait_for_status("running", poll_interval=0.01)
-        assert sandbox.status == "running"
+        assert sandbox.status is SandboxStatus.RUNNING
 
         sandbox.client.close()
 
@@ -2681,10 +4212,41 @@ class TestSandboxWaitForStatus:
         sandbox.client.close()
 
     @respx.mock
+    def test_wait_for_status_rejects_unknown_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test wait_for_status validates requested statuses."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(ValueError, match="'invalid' is not a valid SandboxStatus"):
+            sandbox.wait_for_status("invalid")
+
+        sandbox.client.close()
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_wait_for_status_async_polls(self, mock_env_clear, mock_sandbox_get_response):
         """Test async wait_for_status polls until status matches."""
-        from vercel.sandbox import AsyncSandbox
+        from vercel.sandbox import AsyncSandbox, SandboxStatus
 
         sandbox_id = "sbx_test123456"
         pending_response = {**mock_sandbox_get_response, "status": "pending"}
@@ -2713,9 +4275,41 @@ class TestSandboxWaitForStatus:
             project_id="prj_test123",
         )
 
-        assert sandbox.status == "pending"
-        await sandbox.wait_for_status("running", poll_interval=0.01)
-        assert sandbox.status == "running"
+        assert sandbox.status is SandboxStatus.PENDING
+        await sandbox.wait_for_status(SandboxStatus.RUNNING, poll_interval=0.01)
+        assert sandbox.status is SandboxStatus.RUNNING
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_async_timeout_formats_string_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test async timeout formatting preserves raw status strings."""
+        from vercel.sandbox import AsyncSandbox, SandboxStatus
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": pending_response, "routes": []},
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(TimeoutError, match="did not reach 'running' status") as exc_info:
+            await sandbox.wait_for_status(SandboxStatus.RUNNING, timeout=0.05, poll_interval=0.01)
+
+        assert "'SandboxStatus.RUNNING'" not in str(exc_info.value)
 
         await sandbox.client.aclose()
 
@@ -2744,5 +4338,37 @@ class TestSandboxWaitForStatus:
 
         with pytest.raises(TimeoutError, match="did not reach 'running' status"):
             await sandbox.wait_for_status("running", timeout=0.05, poll_interval=0.01)
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_async_rejects_unknown_status(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test async wait_for_status validates requested statuses."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sandbox": mock_sandbox_get_response,
+                    "routes": [],
+                },
+            )
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        with pytest.raises(ValueError, match="'invalid' is not a valid SandboxStatus"):
+            await sandbox.wait_for_status("invalid")
 
         await sandbox.client.aclose()

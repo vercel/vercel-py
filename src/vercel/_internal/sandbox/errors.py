@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import httpx
 
 
@@ -23,11 +21,11 @@ class SandboxError(Exception):
 
 
 class APIError(SandboxError):
-    def __init__(self, response: httpx.Response, message: str, *, data: Any | None = None):
+    def __init__(self, response: httpx.Response, message: str, *, data: object | None = None):
         super().__init__(message)
         self.response = response
         self.status_code = response.status_code
-        self.data = data
+        self.data: object | None = data
 
 
 class SandboxAuthError(APIError):
@@ -38,13 +36,17 @@ class SandboxPermissionError(APIError):
     """Authorization failures returned by the sandbox API."""
 
 
+class SandboxNotFoundError(APIError):
+    """Requested sandbox resource was not found."""
+
+
 class SandboxRateLimitError(APIError):
     def __init__(
         self,
         response: httpx.Response,
         message: str,
         *,
-        data: Any | None = None,
+        data: object | None = None,
         retry_after: str | int | None = None,
     ) -> None:
         super().__init__(response, message, data=data)
@@ -60,6 +62,7 @@ __all__ = [
     "APIError",
     "SandboxAuthError",
     "SandboxPermissionError",
+    "SandboxNotFoundError",
     "SandboxRateLimitError",
     "SandboxServerError",
 ]

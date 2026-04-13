@@ -7,6 +7,7 @@ They require VERCEL_TOKEN and VERCEL_TEAM_ID environment variables.
 
 import os
 import time
+from uuid import uuid4
 
 import pytest
 
@@ -29,9 +30,8 @@ class TestProjectsRealAPI:
 
     @pytest.fixture
     def test_project_name(self):
-        """Generate unique test project name."""
-        timestamp = int(time.time())
-        return f"vercel-py-test-{timestamp}"
+        """Generate a collision-resistant test project name."""
+        return f"vercel-py-test-{uuid4().hex}"
 
     def test_get_projects_real_api(self, team_id):
         """Test get_projects with real API and validate actual response structure."""

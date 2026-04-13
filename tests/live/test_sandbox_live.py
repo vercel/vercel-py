@@ -5,6 +5,7 @@ VERCEL_PROJECT_ID environment variables.
 Run with: pytest tests/live/test_sandbox_live.py -v
 """
 
+import os
 import time
 
 import pytest
@@ -78,7 +79,7 @@ class TestSandboxLive:
 
         # Context manager should have stopped the sandbox
 
-    def test_file_operations(self, vercel_token, vercel_team_id, cleanup_registry):
+    def test_file_operations(self, vercel_token, vercel_team_id, cleanup_registry, tmp_path):
         """Test sandbox file write and read operations."""
         from vercel.sandbox import Sandbox
         from vercel.sandbox.models import WriteFile
@@ -101,8 +102,13 @@ class TestSandboxLive:
             assert test_content in content.decode()
 
             # Read a non-existent file
-            missing = sandbox.read_file("/tmp/nonexistent.txt")
-            assert missing is None
+            assert sandbox.read_file("/tmp/nonexistent.txt") is None
+
+            # Download the file locally without buffering API callers separately
+            local_path = tmp_path / "sandbox-download.txt"
+            downloaded = sandbox.download_file("/tmp/test.txt", local_path)
+            assert downloaded == os.fspath(local_path.resolve())
+            assert local_path.read_text() == test_content
 
         finally:
             try:
@@ -237,14 +243,14 @@ class TestSandboxLive:
             found_ids: list[str] = []
 
             for _ in range(10):
-                page = Sandbox.list(
+                sandboxes = Sandbox.list(
                     token=vercel_token,
                     team_id=vercel_team_id,
                     project_id=vercel_project_id,
                     limit=20,
                     since=since,
                 )
-                found_ids = [item.id for item in page.iter_items()]
+                found_ids = [item.id for item in sandboxes]
                 if sandbox.sandbox_id in found_ids:
                     break
                 time.sleep(1)

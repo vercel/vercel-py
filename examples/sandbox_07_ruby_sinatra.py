@@ -160,6 +160,7 @@ async def main() -> None:
                 if not ready.is_set() and (
                     "Listening on" in line.data
                     or "WEBrick::HTTPServer#start" in line.data
+                    or "Rackup::Handler::WEBrick::Server#start" in line.data
                     or "Sinatra has taken the stage" in line.data
                     or f"tcp://0.0.0.0:{port}" in line.data
                     or "WEBrick::HTTPServer#start: pid=" in line.data

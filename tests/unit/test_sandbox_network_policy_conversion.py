@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
-from vercel._internal.sandbox.network_policy import (
+from vercel._internal.sandbox.models import (
     ApiNetworkInjectionRule,
     ApiNetworkPolicy,
 )
@@ -562,33 +562,6 @@ class TestNetworkPolicyEdgeCases:
                 ]
             }
         )
-
-    def test_api_network_policy_to_dict_uses_wire_keys(self) -> None:
-        policy = ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers={"X-Trace": "trace-value"},
-                )
-            ],
-            allowed_cidrs=["10.0.0.0/8"],
-            denied_cidrs=["192.168.0.0/16"],
-        )
-
-        assert policy.to_dict() == {
-            "mode": "custom",
-            "allowedDomains": ["example.com"],
-            "injectionRules": [
-                {
-                    "domain": "example.com",
-                    "headers": {"X-Trace": "trace-value"},
-                }
-            ],
-            "allowedCIDRs": ["10.0.0.0/8"],
-            "deniedCIDRs": ["192.168.0.0/16"],
-        }
 
     def test_injection_rules_for_unknown_domains_surface_in_public_result(self) -> None:
         assert ApiNetworkPolicy(

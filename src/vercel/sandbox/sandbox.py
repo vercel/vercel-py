@@ -2,22 +2,33 @@ from __future__ import annotations
 
 import builtins
 import time
+import warnings
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
+from os import PathLike
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
+from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
+    ApiNetworkPolicy,
     CommandResponse,
+    GitSource,
+    NetworkPolicy,
+    Resources,
+    ResourcesInput,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
+    SandboxStatus,
+    SnapshotSource,
     Source,
+    SourceInput,
+    TarballSource,
     WriteFile,
-)
-from vercel._internal.sandbox.network_policy import (
-    ApiNetworkPolicy,
-    NetworkPolicy,
+    parse_resources,
+    parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
 
@@ -28,92 +39,49 @@ from .command import (
     Command,
     CommandFinished,
 )
-from .page import AsyncSandboxPage, AsyncSandboxPager, SandboxPage
 from .pty.shell import start_interactive_shell
-from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
+from .snapshot import (
+    AsyncSnapshot,
+    Snapshot as SnapshotClass,
+    SnapshotExpiration,
+)
 
 
-def _normalize_source(source: Source | None) -> dict[str, Any] | None:
-    """Convert snake_case keys in source dict to camelCase for the API."""
-    if source is None:
-        return None
-
-    # Map of snake_case -> camelCase for source dict keys
-    key_map = {
-        "snapshot_id": "snapshotId",
-    }
-
-    return {key_map.get(k, k): v for k, v in source.items()}
-
-
-async def _build_async_sandbox_page(
+def _parse_create_inputs(
     *,
-    creds: Credentials,
-    params: SandboxListParams,
-) -> AsyncSandboxPage:
-    client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-    try:
-        response = await client.list_sandboxes(
-            project_id=params.project_id,
-            limit=params.limit,
-            since=params.since,
-            until=params.until,
-        )
-    finally:
-        await client.aclose()
-
-    async def fetch_next_page(page_info) -> AsyncSandboxPage:
-        return await _build_async_sandbox_page(
-            creds=creds,
-            params=params.with_until(page_info.until),
-        )
-
-    return AsyncSandboxPage.create(
-        sandboxes=response.sandboxes,
-        pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
-    )
+    source: SourceInput | None,
+    resources: ResourcesInput | None,
+) -> tuple[Source | None, Resources | None]:
+    _warn_deprecated_create_mapping("source", source)
+    _warn_deprecated_create_mapping("resources", resources)
+    return parse_source(source), parse_resources(resources)
 
 
-async def _build_sync_sandbox_page(
-    *,
-    creds: Credentials,
-    params: SandboxListParams,
-) -> SandboxPage:
-    client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-    try:
-        response = await client.list_sandboxes(
-            project_id=params.project_id,
-            limit=params.limit,
-            since=params.since,
-            until=params.until,
-        )
-    finally:
-        client.close()
-
-    async def fetch_next_page(page_info) -> SandboxPage:
-        return await _build_sync_sandbox_page(
-            creds=creds,
-            params=params.with_until(page_info.until),
+def _warn_deprecated_create_mapping(name: str, value: object | None) -> None:
+    deprecated_models = (GitSource, TarballSource, SnapshotSource, Resources)
+    if isinstance(value, Mapping) and not isinstance(value, deprecated_models):
+        replacement = _deprecated_create_mapping_replacement(name, value)
+        warnings.warn(
+            f"Passing a raw mapping for Sandbox.create(..., {name}=...) is deprecated; "
+            f"pass a typed {replacement} model instead.",
+            DeprecationWarning,
+            stacklevel=4,
         )
 
-    return SandboxPage.create(
-        sandboxes=response.sandboxes,
-        pagination=response.pagination,
-        fetch_next_page=fetch_next_page,
-    )
 
-
-def _normalize_list_timestamp(value: datetime | int | None) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return int(value.timestamp() * 1000)
-    raise TypeError("Sandbox list timestamps must be datetime or integer milliseconds")
+def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) -> str:
+    if name == "resources":
+        return "Resources"
+    if name == "source":
+        source_type = value.get("type")
+        if source_type == "git":
+            return "GitSource"
+        if source_type == "tarball":
+            return "TarballSource"
+        if source_type == "snapshot":
+            return "SnapshotSource"
+        return "Source"
+    return name
 
 
 @dataclass
@@ -127,7 +95,7 @@ class AsyncSandbox:
         return self.sandbox.id
 
     @property
-    def status(self) -> str:
+    def status(self) -> SandboxStatus:
         return self.sandbox.status
 
     @property
@@ -157,8 +125,8 @@ class AsyncSandbox:
         *,
         source: Source | None = None,
         ports: list[int] | None = None,
-        timeout: int | None = None,
-        resources: dict[str, Any] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -172,7 +140,7 @@ class AsyncSandbox:
         Args:
             source: Source to initialize the sandbox from (git, tarball, or snapshot).
             ports: List of ports to expose.
-            timeout: Sandbox timeout in milliseconds.
+            timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
             token: API token (uses OIDC if not provided).
@@ -188,14 +156,15 @@ class AsyncSandbox:
         Returns:
             Created AsyncSandbox instance.
         """
+        parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=creds.project_id,
-            source=_normalize_source(source),
+            source=parsed_source,
             ports=ports,
             timeout=timeout,
-            resources=resources,
+            resources=parsed_resources,
             runtime=runtime,
             interactive=interactive,
             env=env,
@@ -228,16 +197,21 @@ class AsyncSandbox:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> AsyncSandboxPager:
-        """List sandboxes and return the first page.
+    ) -> AsyncIterator[SandboxModel]:
+        """List sandboxes as an async iterable of sandbox models.
 
         Args:
-            limit: Maximum number of sandboxes to request per page.
+            limit: Maximum number of sandboxes to yield across the full
+                traversal.
+            _internal_page_size: Private override for the backend request size
+                used while traversing pages internally. This is intended only
+                for internal debugging and examples.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
@@ -248,20 +222,43 @@ class AsyncSandbox:
             team_id: Team ID scope for the sandbox API.
 
         Returns:
-            An awaitable pager whose first awaited value is the first page of
-            typed sandbox results. Continue pagination with ``iter_pages()``
-            or ``iter_items()`` on the page or pager.
+            An async iterable of typed sandbox results.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=_normalize_list_timestamp(since),
-            until=_normalize_list_timestamp(until),
+            internal_page_size=_internal_page_size,
+            since=since,
+            until=until,
         )
-        return AsyncSandboxPager(
-            _fetch_first_page=lambda: _build_async_sandbox_page(creds=creds, params=params)
-        )
+
+        async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
+            current_params = params
+            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
+                    response = await client.list_sandboxes(
+                        project_id=current_params.project_id,
+                        limit=current_params.request_limit,
+                        since=current_params.since,
+                        until=current_params.until,
+                    )
+                    sandboxes = response.sandboxes[: current_params.remaining]
+                    for sandbox in sandboxes:
+                        yield sandbox
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(sandboxes) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(sandboxes),
+                    )
+
+        return iter_sandboxes()
 
     async def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
@@ -281,7 +278,11 @@ class AsyncSandbox:
         return updated_network_policy
 
     async def wait_for_status(
-        self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
+        self,
+        status: SandboxStatus | str,
+        *,
+        timeout: float = 30.0,
+        poll_interval: float = 0.5,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
@@ -295,16 +296,17 @@ class AsyncSandbox:
         """
         import asyncio
 
+        target_status = SandboxStatus(status)
         start = time.monotonic()
         while time.monotonic() - start < timeout:
-            if self.status == status:
+            if self.status == target_status:
                 return
             await asyncio.sleep(poll_interval)
             await self.refresh()
-        if self.status == status:
+        if self.status == target_status:
             return
         raise TimeoutError(
-            f"Sandbox {self.sandbox_id} did not reach '{status}' status within {timeout}s"
+            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within {timeout}s"
         )
 
     def domain(self, port: int) -> str:
@@ -366,8 +368,39 @@ class AsyncSandbox:
     async def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
         await self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
 
+    async def iter_file(
+        self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
+    ) -> AsyncIterator[bytes]:
+        return await self.client.iter_file(
+            sandbox_id=self.sandbox.id,
+            path=path,
+            cwd=cwd,
+            chunk_size=chunk_size,
+        )
+
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
-        return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        try:
+            return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        except SandboxNotFoundError:
+            return None
+
+    async def download_file(
+        self,
+        remote_path: str,
+        local_path: str | PathLike,
+        *,
+        cwd: str | None = None,
+        create_parents: bool = False,
+        chunk_size: int = 65536,
+    ) -> str:
+        return await self.client.download_file(
+            sandbox_id=self.sandbox.id,
+            remote_path=remote_path,
+            local_path=local_path,
+            cwd=cwd,
+            create_parents=create_parents,
+            chunk_size=chunk_size,
+        )
 
     async def write_files(self, files: builtins.list[WriteFile]) -> None:
         await self.client.write_files(
@@ -403,7 +436,7 @@ class AsyncSandbox:
             return
         await self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
-    async def extend_timeout(self, duration: int) -> None:
+    async def extend_timeout(self, duration: int | timedelta) -> None:
         """
         Extend the timeout of the sandbox by the specified duration.
 
@@ -411,19 +444,26 @@ class AsyncSandbox:
         execution timeout for your plan.
 
         Args:
-            duration: The duration in milliseconds to extend the timeout by.
+            duration: The duration in milliseconds or as a ``timedelta`` to
+                extend the timeout by.
         """
         response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
         self.sandbox = response.sandbox
 
-    async def snapshot(self) -> AsyncSnapshot:
+    async def snapshot(
+        self, *, expiration: int | timedelta | SnapshotExpiration | None = None
+    ) -> AsyncSnapshot:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        response = await self.client.create_snapshot(sandbox_id=self.sandbox.id)
+        normalized_expiration = None if expiration is None else SnapshotExpiration(expiration)
+        response = await self.client.create_snapshot(
+            sandbox_id=self.sandbox.id,
+            expiration=normalized_expiration,
+        )
         self.sandbox = response.sandbox
         return AsyncSnapshot(client=self.client, snapshot=response.snapshot)
 
@@ -481,7 +521,7 @@ class Sandbox:
         return self.sandbox.id
 
     @property
-    def status(self) -> str:
+    def status(self) -> SandboxStatus:
         return self.sandbox.status
 
     @property
@@ -513,8 +553,8 @@ class Sandbox:
         *,
         source: Source | None = None,
         ports: list[int] | None = None,
-        timeout: int | None = None,
-        resources: dict[str, Any] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
@@ -528,7 +568,7 @@ class Sandbox:
         Args:
             source: Source to initialize the sandbox from (git, tarball, or snapshot).
             ports: List of ports to expose.
-            timeout: Sandbox timeout in milliseconds.
+            timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
             token: API token (uses OIDC if not provided).
@@ -545,15 +585,16 @@ class Sandbox:
         Returns:
             Created Sandbox instance.
         """
+        parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
                 project_id=creds.project_id,
-                source=_normalize_source(source),
+                source=parsed_source,
                 ports=ports,
                 timeout=timeout,
-                resources=resources,
+                resources=parsed_resources,
                 runtime=runtime,
                 interactive=interactive,
                 env=env,
@@ -587,16 +628,21 @@ class Sandbox:
     def list(
         *,
         limit: int | None = None,
+        _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
-    ) -> SandboxPage:
-        """List sandboxes and return the first page.
+    ) -> Iterator[SandboxModel]:
+        """List sandboxes as an iterable of sandbox models.
 
         Args:
-            limit: Maximum number of sandboxes to request per page.
+            limit: Maximum number of sandboxes to yield across the full
+                traversal.
+            _internal_page_size: Private override for the backend request size
+                used while traversing pages internally. This is intended only
+                for internal debugging and examples.
             since: Lower timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
@@ -607,17 +653,44 @@ class Sandbox:
             team_id: Team ID scope for the sandbox API.
 
         Returns:
-            The first page of typed sandbox results. Continue pagination with
-            ``iter_pages()`` or ``iter_items()`` on the returned page.
+            An iterable of typed sandbox results.
         """
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
         params = SandboxListParams(
             project_id=creds.project_id,
             limit=limit,
-            since=_normalize_list_timestamp(since),
-            until=_normalize_list_timestamp(until),
+            internal_page_size=_internal_page_size,
+            since=since,
+            until=until,
         )
-        return iter_coroutine(_build_sync_sandbox_page(creds=creds, params=params))
+
+        def iter_sandboxes() -> Iterator[SandboxModel]:
+            current_params = params
+            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+                while True:
+                    response = iter_coroutine(
+                        client.list_sandboxes(
+                            project_id=current_params.project_id,
+                            limit=current_params.request_limit,
+                            since=current_params.since,
+                            until=current_params.until,
+                        )
+                    )
+                    sandboxes = response.sandboxes[: current_params.remaining]
+                    yield from sandboxes
+                    if response.pagination.next is None:
+                        return
+                    if (
+                        current_params.remaining is not None
+                        and len(sandboxes) >= current_params.remaining
+                    ):
+                        return
+                    current_params = current_params.with_until(
+                        response.pagination.next,
+                        yielded_count=len(sandboxes),
+                    )
+
+        return iter_sandboxes()
 
     def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
@@ -639,7 +712,11 @@ class Sandbox:
         return updated_network_policy
 
     def wait_for_status(
-        self, status: str, *, timeout: float = 30.0, poll_interval: float = 0.5
+        self,
+        status: SandboxStatus | str,
+        *,
+        timeout: float = 30.0,
+        poll_interval: float = 0.5,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
@@ -651,16 +728,17 @@ class Sandbox:
         Raises:
             TimeoutError: If the sandbox does not reach *status* within *timeout*.
         """
+        target_status = SandboxStatus(status)
         start = time.monotonic()
         while time.monotonic() - start < timeout:
-            if self.status == status:
+            if self.status == target_status:
                 return
             time.sleep(poll_interval)
             self.refresh()
-        if self.status == status:
+        if self.status == target_status:
             return
         raise TimeoutError(
-            f"Sandbox {self.sandbox_id} did not reach '{status}' status within {timeout}s"
+            f"Sandbox {self.sandbox_id} did not reach '{target_status}' status within {timeout}s"
         )
 
     def domain(self, port: int) -> str:
@@ -722,8 +800,43 @@ class Sandbox:
     def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
         iter_coroutine(self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
 
+    def iter_file(
+        self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
+    ) -> Iterator[bytes]:
+        return self.client.iter_file(
+            sandbox_id=self.sandbox.id,
+            path=path,
+            cwd=cwd,
+            chunk_size=chunk_size,
+        )
+
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
-        return iter_coroutine(self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
+        try:
+            return iter_coroutine(
+                self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+            )
+        except SandboxNotFoundError:
+            return None
+
+    def download_file(
+        self,
+        remote_path: str,
+        local_path: str | PathLike,
+        *,
+        cwd: str | None = None,
+        create_parents: bool = False,
+        chunk_size: int = 65536,
+    ) -> str:
+        return iter_coroutine(
+            self.client.download_file(
+                sandbox_id=self.sandbox.id,
+                remote_path=remote_path,
+                local_path=local_path,
+                cwd=cwd,
+                create_parents=create_parents,
+                chunk_size=chunk_size,
+            )
+        )
 
     def write_files(self, files: builtins.list[WriteFile]) -> None:
         iter_coroutine(
@@ -761,7 +874,7 @@ class Sandbox:
             return
         self.wait_for_status("stopped", timeout=timeout, poll_interval=poll_interval)
 
-    def extend_timeout(self, duration: int) -> None:
+    def extend_timeout(self, duration: int | timedelta) -> None:
         """
         Extend the timeout of the sandbox by the specified duration.
 
@@ -769,21 +882,30 @@ class Sandbox:
         execution timeout for your plan.
 
         Args:
-            duration: The duration in milliseconds to extend the timeout by.
+            duration: The duration in milliseconds or as a ``timedelta`` to
+                extend the timeout by.
         """
         response = iter_coroutine(
             self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
         )
         self.sandbox = response.sandbox
 
-    def snapshot(self) -> SnapshotClass:
+    def snapshot(
+        self, *, expiration: int | timedelta | SnapshotExpiration | None = None
+    ) -> SnapshotClass:
         """
         Create a snapshot from this currently running sandbox.
         New sandboxes can then be created from this snapshot.
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        response = iter_coroutine(self.client.create_snapshot(sandbox_id=self.sandbox.id))
+        normalized_expiration = None if expiration is None else SnapshotExpiration(expiration)
+        response = iter_coroutine(
+            self.client.create_snapshot(
+                sandbox_id=self.sandbox.id,
+                expiration=normalized_expiration,
+            )
+        )
         self.sandbox = response.sandbox
         return SnapshotClass(client=self.client, snapshot=response.snapshot)
 

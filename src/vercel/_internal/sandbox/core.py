@@ -10,16 +10,25 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import platform
 import posixpath
 import sys
 import tarfile
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from contextlib import asynccontextmanager
+from datetime import timedelta
 from importlib.metadata import version as _pkg_version
-from typing import Any
+from typing import Any, TypeAlias, cast
 
 import httpx
 
+from vercel._internal.fs import (
+    FileHandle,
+    FilesystemClient,
+    create_async_filesystem_client,
+    create_filesystem_client,
+)
 from vercel._internal.http import (
     BytesBody,
     JSONBody,
@@ -31,25 +40,30 @@ from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.errors import (
     APIError,
     SandboxAuthError,
+    SandboxNotFoundError,
     SandboxPermissionError,
     SandboxRateLimitError,
     SandboxServerError,
 )
 from vercel._internal.sandbox.models import (
+    ApiNetworkPolicy,
     CommandFinishedResponse,
     CommandResponse,
+    CreateSandboxRequest,
     CreateSnapshotResponse,
     LogLine,
+    NetworkPolicy,
+    Resources,
     SandboxAndRoutesResponse,
     SandboxesResponse,
     SandboxResponse,
     SnapshotResponse,
+    SnapshotsResponse,
+    Source,
     WriteFile,
 )
-from vercel._internal.sandbox.network_policy import (
-    ApiNetworkPolicy,
-    NetworkPolicy,
-)
+from vercel._internal.sandbox.snapshot import SnapshotExpiration
+from vercel._internal.sandbox.time import normalize_duration_ms
 
 try:
     VERSION = _pkg_version("vercel")
@@ -60,6 +74,10 @@ PLATFORM = platform.uname()
 USER_AGENT = (
     f"vercel/sandbox/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
+
+JSONScalar: TypeAlias = str | int | float | bool | None
+JSONValue: TypeAlias = JSONScalar | dict[str, "JSONValue"] | list["JSONValue"]
+RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
 
 
 # ---------------------------------------------------------------------------
@@ -83,11 +101,11 @@ class SandboxRequestClient:
         path: str,
         *,
         headers: dict[str, str] | None = None,
-        query: dict[str, Any] | None = None,
+        query: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        params: dict[str, Any] | None = None
+        params: RequestQuery | None = None
         if query:
             params = {k: v for k, v in query.items() if v is not None}
 
@@ -113,7 +131,7 @@ class SandboxRequestClient:
                 error_body = None
 
         # Parse a helpful error message
-        parsed: Any | None = None
+        parsed: JSONValue | None = None
         message = f"HTTP {response.status_code}"
         if error_body:
             try:
@@ -148,21 +166,34 @@ class SandboxRequestClient:
         self,
         method: str,
         path: str,
-        **kwargs: Any,
-    ) -> Any:
-        headers = kwargs.pop("headers", None) or {}
+        *,
+        headers: dict[str, str] | None = None,
+        query: RequestQuery | None = None,
+        body: JSONBody | BytesBody | None = None,
+        stream: bool = False,
+    ) -> JSONValue:
+        headers = dict(headers or {})
         headers.setdefault("content-type", "application/json")
-        r = await self.request(method, path, headers=headers, **kwargs)
-        return r.json()
+        r = await self.request(
+            method,
+            path,
+            headers=headers,
+            query=query,
+            body=body,
+            stream=stream,
+        )
+        return cast(JSONValue, r.json())
 
 
 def _build_sandbox_error(
     response: httpx.Response,
     message: str,
     *,
-    data: Any | None = None,
+    data: JSONValue | None = None,
 ) -> APIError:
     status_code = response.status_code
+    if status_code == 404:
+        return SandboxNotFoundError(response, message, data=data)
     if status_code == 401:
         return SandboxAuthError(response, message, data=data)
     if status_code == 403:
@@ -234,38 +265,35 @@ class BaseSandboxOpsClient:
     """
 
     _request_client: SandboxRequestClient
+    _filesystem_client: FilesystemClient[Any]
+
+    def __init__(self, *, filesystem_client: FilesystemClient[Any]) -> None:
+        self._filesystem_client = filesystem_client
 
     async def create_sandbox(
         self,
         *,
         project_id: str,
         ports: list[int] | None = None,
-        source: dict[str, Any] | None = None,
-        timeout: int | None = None,
-        resources: dict[str, Any] | None = None,
+        source: Source | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
         runtime: str | None = None,
         network_policy: NetworkPolicy | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
-        body: dict[str, Any] = {"projectId": project_id}
-        if ports:
-            body["ports"] = ports
-        if source is not None:
-            body["source"] = source
-        if timeout is not None:
-            body["timeout"] = timeout
-        if resources is not None:
-            body["resources"] = resources
-        if runtime is not None:
-            body["runtime"] = runtime
-        if network_policy is not None:
-            body["networkPolicy"] = ApiNetworkPolicy.from_network_policy(network_policy).to_dict()
-        if interactive:
-            body["__interactive"] = True
-        if env is not None:
-            body["env"] = env
-
+        body = CreateSandboxRequest(
+            project_id=project_id,
+            ports=ports if ports else None,
+            source=source,
+            timeout=timeout,
+            resources=resources,
+            runtime=runtime,
+            network_policy=network_policy,
+            interactive=True if interactive else None,
+            env=env,
+        ).model_dump(by_alias=True, exclude_none=True)
         data = await self._request_client.request_json("POST", "/v1/sandboxes", body=JSONBody(body))
         return SandboxAndRoutesResponse.model_validate(data)
 
@@ -302,7 +330,7 @@ class BaseSandboxOpsClient:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/network-policy",
-            body=JSONBody(network_policy.to_dict()),
+            body=JSONBody(network_policy.model_dump(by_alias=True, exclude_none=True)),
         )
         return SandboxResponse.model_validate(data)
 
@@ -357,25 +385,97 @@ class BaseSandboxOpsClient:
             body=JSONBody(body),
         )
 
-    async def read_file(
-        self, *, sandbox_id: str, path: str, cwd: str | None = None
-    ) -> bytes | None:
+    async def read_file(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> bytes:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
-        try:
-            resp = await self._request_client.request(
-                "POST",
-                f"/v1/sandboxes/{sandbox_id}/fs/read",
-                body=JSONBody(body),
-            )
-        except APIError as e:
-            if e.status_code == 404:
-                return None
-            raise
-        if resp.content is None:
-            return None
+        resp = await self._request_client.request(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/fs/read",
+            body=JSONBody(body),
+        )
         return resp.content
+
+    async def _open_file_stream(
+        self, *, sandbox_id: str, path: str, cwd: str | None = None
+    ) -> httpx.Response:
+        body: dict[str, Any] = {"path": path}
+        if cwd is not None:
+            body["cwd"] = cwd
+        return await self._request_client.request(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/fs/read",
+            body=JSONBody(body),
+            stream=True,
+        )
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        raise NotImplementedError
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        raise NotImplementedError
+
+    @asynccontextmanager
+    async def file_chunk_stream(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[AsyncIterator[bytes]]:
+        response = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+
+        try:
+            yield self._stream_file_chunks(response, chunk_size=chunk_size)
+        finally:
+            await self._close_file_response(response)
+
+    async def download_file(
+        self,
+        *,
+        sandbox_id: str,
+        remote_path: str,
+        local_path: str | os.PathLike,
+        cwd: str | None = None,
+        create_parents: bool = False,
+        chunk_size: int = 65536,
+    ) -> str:
+        if not remote_path:
+            raise ValueError("remote_path is required")
+        if not local_path:
+            raise ValueError("local_path is required")
+
+        destination = os.path.abspath(await self._filesystem_client.coerce_path(local_path))
+        if create_parents:
+            await self._filesystem_client.create_parent_directories(destination)
+        temp_path = destination + ".part"
+
+        async with self.file_chunk_stream(
+            sandbox_id=sandbox_id,
+            path=remote_path,
+            cwd=cwd,
+            chunk_size=chunk_size,
+        ) as stream:
+            handle: FileHandle | None = None
+            try:
+                handle = await self._filesystem_client.open_binary_writer(temp_path)
+                try:
+                    async for chunk in stream:
+                        if chunk:
+                            await self._filesystem_client.write(handle, chunk)
+                finally:
+                    if handle is not None:
+                        await self._filesystem_client.close(handle)
+                        handle = None
+                await self._filesystem_client.replace(temp_path, destination)
+            except Exception:
+                await self._filesystem_client.remove_if_exists(temp_path)
+                raise
+
+        return destination
 
     async def write_files(
         self,
@@ -402,17 +502,24 @@ class BaseSandboxOpsClient:
             body=JSONBody({"signal": signal}),
         )
 
-    async def extend_timeout(self, *, sandbox_id: str, duration: int) -> SandboxResponse:
+    async def extend_timeout(
+        self, *, sandbox_id: str, duration: int | timedelta
+    ) -> SandboxResponse:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/extend-timeout",
-            body=JSONBody({"duration": duration}),
+            body=JSONBody({"duration": normalize_duration_ms(duration)}),
         )
         return SandboxResponse.model_validate(data)
 
-    async def create_snapshot(self, *, sandbox_id: str) -> CreateSnapshotResponse:
+    async def create_snapshot(
+        self, *, sandbox_id: str, expiration: SnapshotExpiration | None = None
+    ) -> CreateSnapshotResponse:
+        body = None if expiration is None else JSONBody({"expiration": int(expiration)})
         data = await self._request_client.request_json(
-            "POST", f"/v1/sandboxes/{sandbox_id}/snapshot"
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/snapshot",
+            body=body,
         )
         return CreateSnapshotResponse.model_validate(data)
 
@@ -421,6 +528,26 @@ class BaseSandboxOpsClient:
             "GET", f"/v1/sandboxes/snapshots/{snapshot_id}"
         )
         return SnapshotResponse.model_validate(data)
+
+    async def list_snapshots(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int | None = None,
+        since: int | None = None,
+        until: int | None = None,
+    ) -> SnapshotsResponse:
+        data = await self._request_client.request_json(
+            "GET",
+            "/v1/sandboxes/snapshots",
+            query={
+                "project": project_id,
+                "limit": limit,
+                "since": since,
+                "until": until,
+            },
+        )
+        return SnapshotsResponse.model_validate(data)
 
     async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
         data = await self._request_client.request_json(
@@ -443,7 +570,15 @@ class BaseSandboxOpsClient:
 
 
 class SyncSandboxOpsClient(BaseSandboxOpsClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "https://api.vercel.com",
+        team_id: str,
+        token: str,
+        filesystem_client: FilesystemClient[Any] | None = None,
+    ) -> None:
+        super().__init__(filesystem_client=filesystem_client or create_filesystem_client())
         rc = create_request_client(
             token=token,
             base_headers={"user-agent": USER_AGENT},
@@ -474,6 +609,38 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         finally:
             resp.close()
 
+    def iter_file(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> Generator[bytes, None, None]:
+        resp = iter_coroutine(self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd))
+
+        def _iterate() -> Generator[bytes, None, None]:
+            try:
+                for chunk in resp.iter_bytes(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
+            finally:
+                resp.close()
+
+        return _iterate()
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            for chunk in response.iter_bytes(chunk_size=chunk_size):
+                yield chunk
+
+        return _iterate()
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        response.close()
+
     def close(self) -> None:
         self._rc.close()
 
@@ -490,7 +657,15 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
 
 
 class AsyncSandboxOpsClient(BaseSandboxOpsClient):
-    def __init__(self, *, host: str = "https://api.vercel.com", team_id: str, token: str) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "https://api.vercel.com",
+        team_id: str,
+        token: str,
+        filesystem_client: FilesystemClient[Any] | None = None,
+    ) -> None:
+        super().__init__(filesystem_client=filesystem_client or create_async_filesystem_client())
         rc = create_async_request_client(
             token=token,
             base_headers={"user-agent": USER_AGENT},
@@ -520,6 +695,38 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             return
         finally:
             await resp.aclose()
+
+    async def iter_file(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        chunk_size: int = 65536,
+    ) -> AsyncGenerator[bytes, None]:
+        resp = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+
+        async def _iterate() -> AsyncGenerator[bytes, None]:
+            try:
+                async for chunk in resp.aiter_bytes(chunk_size=chunk_size):
+                    if chunk:
+                        yield chunk
+            finally:
+                await resp.aclose()
+
+        return _iterate()
+
+    def _stream_file_chunks(
+        self, response: httpx.Response, *, chunk_size: int
+    ) -> AsyncIterator[bytes]:
+        async def _iterate() -> AsyncIterator[bytes]:
+            async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                yield chunk
+
+        return _iterate()
+
+    async def _close_file_response(self, response: httpx.Response) -> None:
+        await response.aclose()
 
     async def aclose(self) -> None:
         await self._rc.aclose()
