@@ -576,6 +576,50 @@ class _PreloadedLoader(Loader):
 
 
 @contextmanager
+def _sandbox_linecache() -> Iterator[None]:
+    """Patch linecache so ``traceback.format_exc()`` works in the sandbox.
+
+    Python 3.14 moved linecache's ``os``/``tokenize`` imports into
+    function bodies (lazy imports for startup perf).  Inside the
+    sandbox those ``import`` statements resolve through
+    ``sys.modules`` and pick up the restricted proxies.
+
+    We replace ``updatecache`` with a minimal version that uses a
+    captured host ``open``, and ``checkcache`` with a no-op (files
+    don't change during a workflow run).
+    """
+    import linecache
+
+    host_open = open
+    cache = linecache.cache
+    orig_updatecache = linecache.updatecache
+    orig_checkcache = linecache.checkcache
+
+    def updatecache(filename: str, module_globals: Any = None) -> list[str]:
+        if filename in cache:
+            del cache[filename]
+        try:
+            with host_open(filename, "rb") as f:
+                data = f.read()
+            lines = data.decode("utf-8", errors="replace").splitlines(True)
+        except OSError:
+            return []
+        cache[filename] = (len(data), 0, lines, filename)
+        return lines
+
+    def checkcache(filename: str | None = None) -> None:
+        pass
+
+    linecache.updatecache = updatecache
+    linecache.checkcache = checkcache
+    try:
+        yield
+    finally:
+        linecache.updatecache = orig_updatecache
+        linecache.checkcache = orig_checkcache
+
+
+@contextmanager
 def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
     """Activate the sandbox.
 
@@ -619,16 +663,17 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
         random_seed=random_seed,
     )
 
-    # Mutate sys.modules IN-PLACE so interp->modules sees the change.
-    sys.modules.clear()
-    sys.modules["sys"] = sys
-    sys.modules["builtins"] = proxy_builtins
-    sys.meta_path.insert(0, finder)
-    try:
-        yield
-    finally:
-        if sys.meta_path is not None:
-            sys.meta_path.remove(finder)
-        # Restore original sys.modules contents.
+    with _sandbox_linecache():
+        # Mutate sys.modules IN-PLACE so interp->modules sees the change.
         sys.modules.clear()
-        sys.modules.update(orig_modules)
+        sys.modules["sys"] = sys
+        sys.modules["builtins"] = proxy_builtins
+        sys.meta_path.insert(0, finder)
+        try:
+            yield
+        finally:
+            if sys.meta_path is not None:
+                sys.meta_path.remove(finder)
+            # Restore original sys.modules contents.
+            sys.modules.clear()
+            sys.modules.update(orig_modules)

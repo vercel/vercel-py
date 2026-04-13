@@ -160,6 +160,23 @@ class TestOsRestrictions:
 
             assert not hasattr(os, "register_at_fork")
 
+    def test_traceback_format_exc_with_real_files(self):
+        """traceback.format_exc() must work inside the sandbox when the
+        traceback includes frames from real files on disk.
+
+        Regression: traceback uses linecache which calls os.stat() and
+        open(), triggering SandboxRestrictionError.
+        """
+        # json.loads raises from a real .py file (not <string>)
+        ns = _run_in_sandbox(
+            "import traceback, json\n"
+            "try:\n"
+            "    json.loads('{invalid')\n"
+            "except Exception:\n"
+            "    result = traceback.format_exc()\n"
+        )
+        assert "JSONDecodeError" in ns["result"]
+
     def test_os_environ_is_copy(self):
         """os.environ should be a static copy, not the live environ."""
         import os as real_os
