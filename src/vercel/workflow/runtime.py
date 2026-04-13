@@ -149,9 +149,11 @@ class WorkflowOrchestratorContext:
         if self._fut is None:
             return
 
+        print(f"[DEBUG runtime] resume(): replay_index={self.replay_index}, events={len(self.events)}, suspensions={list(self.suspensions.keys())}")
         while self.replay_index < len(self.events) and self.suspensions:
             event = self.events[self.replay_index]
             self.replay_index += 1
+            print(f"[DEBUG runtime] resume(): replaying event[{self.replay_index-1}]: type={event.event_type} corr={event.correlation_id}")
 
             match event:
                 case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
@@ -210,7 +212,9 @@ class WorkflowOrchestratorContext:
                     self.suspensions.pop(event.correlation_id, None)
                     self.hooks.pop(event.correlation_id)
 
+        print(f"[DEBUG runtime] resume(): done replaying. remaining suspensions={list(self.suspensions.keys())}")
         if self.suspensions:
+            print(f"[DEBUG runtime] resume(): cancelling future with SUSPENDED_MESSAGE")
             self._fut.cancel(SUSPENDED_MESSAGE)
 
 
@@ -223,12 +227,15 @@ async def workflow_handler(
 ) -> float | None:
     world = w.get_world()
     run_id = w.WorkflowInvokePayload.model_validate(message).run_id
+    print(f"[DEBUG runtime] workflow_handler: run_id={run_id}, queue={queue_name}, attempt={attempt}")
     workflow_run = await world.runs_get(run_id)
+    print(f"[DEBUG runtime] workflow_handler: run status={workflow_run.status}")
     if workflow_run.status == "pending":
         result = await world.events_create(run_id, w.RunStartedEvent())
         assert result.run is not None
         workflow_run = result.run
     elif workflow_run.status == "cancelled":
+        print(f"[DEBUG runtime] workflow_handler: run is cancelled, returning None")
         return None
 
     # At this point, the workflow is "running" and `startedAt` should
@@ -239,10 +246,15 @@ async def workflow_handler(
 
     if workflow_run.status != "running":
         # Workflow has already completed or failed, so we can skip it
+        print(f"[DEBUG runtime] workflow_handler: run status={workflow_run.status}, not running -> returning None")
         return None
 
     # Load all events into memory before running
+    print(f"[DEBUG runtime] workflow_handler: loading events...")
     events = await get_all_workflow_run_events(run_id)
+    print(f"[DEBUG runtime] workflow_handler: loaded {len(events)} events")
+    for i, e in enumerate(events):
+        print(f"[DEBUG runtime]   event[{i}]: type={e.event_type} corr={e.correlation_id}")
 
     # Check for any elapsed waits and create wait_completed events
     now = datetime.now(UTC)
@@ -271,13 +283,25 @@ async def workflow_handler(
 
     context = WorkflowOrchestratorContext(events, seed=run_id, started_at=workflow_started_at)
     try:
+        print(f"[DEBUG runtime] workflow_handler: running workflow...")
         result = await context.run_workflow(workflow_run)
         output = b"json" + json.dumps(result).encode()
+        print(f"[DEBUG runtime] workflow_handler: workflow completed normally, result={result!r}")
     except BaseException as e:
         if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
             # Workflow suspended, continue outside the try..except block
+            print(f"[DEBUG runtime] workflow_handler: workflow SUSPENDED")
+            print(f"[DEBUG runtime]   suspensions: {list(context.suspensions.keys())}")
+            for k, s in context.suspensions.items():
+                print(f"[DEBUG runtime]   sus[{k}]: type={type(s).__name__}, has_created={s.has_created_event}")
+            print(f"[DEBUG runtime]   hooks: {list(context.hooks.keys())}")
+            for k, h in context.hooks.items():
+                print(f"[DEBUG runtime]   hook[{k}]: token={h.token}, disposed={h.disposed}")
             pass
         elif isinstance(e, Exception):
+            print(f"[DEBUG runtime] workflow_handler: workflow FAILED: {e}")
+            import traceback as tb
+            tb.print_exc()
             await world.events_create(
                 run_id,
                 w.RunFailedEventData(error=str(e)).into_event(),
@@ -286,6 +310,7 @@ async def workflow_handler(
         else:
             raise
     else:
+        print(f"[DEBUG runtime] workflow_handler: creating run_completed event")
         await world.events_create(
             run_id,
             w.RunCompletedEventData(output=[output]).into_event(),
@@ -334,7 +359,9 @@ async def workflow_handler(
                 min_timeout_seconds = seconds
             else:
                 min_timeout_seconds = min(min_timeout_seconds, seconds)
-    return None if min_timeout_seconds < 0 else min_timeout_seconds
+    rv = None if min_timeout_seconds < 0 else min_timeout_seconds
+    print(f"[DEBUG runtime] workflow_handler: returning {rv} (min_timeout={min_timeout_seconds})")
+    return rv
 
 
 async def step_handler(

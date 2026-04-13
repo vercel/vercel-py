@@ -129,11 +129,16 @@ class VercelWorld(w.World):
         else:
             result = resp.json()
 
+        print(f"[DEBUG vercel] {method} {endpoint} -> {resp.status_code}")
+        print(f"[DEBUG vercel]   response body: {result}")
+
         if resp.is_success:
             if isinstance(schema, pydantic.TypeAdapter):
-                return schema.validate_python(result)
+                rv = schema.validate_python(result)
             else:
-                return schema.model_validate(result)
+                rv = schema.model_validate(result)
+            print(f"[DEBUG vercel]   parsed: {rv!r}")
+            return rv
         else:
             raise RuntimeError(
                 result.get("message")
@@ -162,6 +167,8 @@ class VercelWorld(w.World):
         delay_seconds: float | None = None,
         **kwargs,
     ) -> str:
+        print(f"[DEBUG vercel] queue(name={queue_name}, delay={delay_seconds})")
+        print(f"[DEBUG vercel]   message: {message.model_dump()}")
         # Check if we have a deployment ID either from options or environment
         if not deployment_id:
             deployment_id = os.getenv("VERCEL_DEPLOYMENT_ID")
@@ -210,6 +217,7 @@ class VercelWorld(w.World):
             topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
         )
         async def async_handler(body: Any, meta: vqs_client.MessageMetadata) -> None:
+            print(f"[DEBUG vercel] queue_handler invoked: topic={meta.get('topic', '?')}, messageId={meta['messageId']}, attempt={meta['deliveryCount']}")
             try:
                 if not isinstance(body, dict):
                     raise ValueError("Invalid message body: expected a JSON object")
@@ -219,12 +227,14 @@ class VercelWorld(w.World):
                     raise ValueError("Invalid message body: missing 'queueName' field")
                 queue_name = body["queueName"]
                 payload = body["payload"]
+                print(f"[DEBUG vercel]   queue_name={queue_name}, calling handler...")
                 result = await handler(
                     payload,
                     queue_name=queue_name,
                     attempt=meta["deliveryCount"],
                     message_id=meta["messageId"],
                 )
+                print(f"[DEBUG vercel]   handler returned: {result}")
                 if result is not None:
                     # Use delaySeconds approach: send new message with delay, then delete current
                     # Clamp to max delay (23h) - for longer sleeps, the workflow will chain
@@ -260,9 +270,12 @@ class VercelWorld(w.World):
         return http_handler
 
     async def runs_get(self, run_id: str) -> w.WorkflowRun:
-        return await self._cbor_request(
+        print(f"[DEBUG vercel] runs_get(run_id={run_id})")
+        rv = await self._cbor_request(
             "GET", f"/v2/runs/{run_id}?remoteRefBehavior=resolve", schema=w.WorkflowRunAdaptor
         )
+        print(f"[DEBUG vercel] runs_get -> status={rv.status}")
+        return rv
 
     async def steps_get(self, run_id: str, step_id: str) -> w.WorkflowStep:
         return await self._cbor_request(
@@ -285,12 +298,17 @@ class VercelWorld(w.World):
             if data.event_type in {"run_created", "run_started", "step_started"}
             else "lazy"
         )
-        return await self._cbor_request(
+        dump = data.model_dump()
+        print(f"[DEBUG vercel] events_create(run_id={run_id}, event_type={data.event_type}, correlation_id={data.correlation_id})")
+        print(f"[DEBUG vercel]   event dump: {dump}")
+        rv = await self._cbor_request(
             "POST",
             f"/v2/runs/{run_id_path}/events",
-            data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+            data=dump | {"remoteRefBehavior": remote_ref_behavior},
             schema=w.EventResult,
         )
+        print(f"[DEBUG vercel] events_create -> result events={rv.events}")
+        return rv
 
     async def events_list(
         self,
@@ -304,8 +322,13 @@ class VercelWorld(w.World):
         search_params["remoteRefBehavior"] = "resolve"
         query_string = urllib.parse.urlencode(search_params)
         query = f"?{query_string}" if query_string else ""
-        return await self._cbor_request(
+        print(f"[DEBUG vercel] events_list(run_id={run_id}, pagination={pagination})")
+        rv = await self._cbor_request(
             "GET",
             f"/v2/runs/{run_id}/events{query}",
             schema=w.PaginatedResult[w.Event],
         )
+        print(f"[DEBUG vercel] events_list -> {len(rv.data)} events, has_more={rv.has_more}")
+        for i, e in enumerate(rv.data):
+            print(f"[DEBUG vercel]   event[{i}]: type={e.event_type} corr={e.correlation_id}")
+        return rv
