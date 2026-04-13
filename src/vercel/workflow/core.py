@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import datetime
 import json
@@ -19,17 +21,50 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 T = TypeVar("T")
-_workflows: dict[str, Workflow[Any, Any]] = {}
-_steps: dict[str, Step[Any, Any]] = {}
+
+# Global (default) registries — used when no sandbox is active.
+_global_workflows: dict[str, Workflow[Any, Any]] = {}
+_global_steps: dict[str, Step[Any, Any]] = {}
+
+# When a sandbox sets these, decorators and lookups use the
+# sandbox-local dicts instead of the globals above.
+_cv_workflows: contextvars.ContextVar[dict[str, Workflow[Any, Any]] | None] = (
+    contextvars.ContextVar("_cv_workflows", default=None)
+)
+_cv_steps: contextvars.ContextVar[dict[str, Step[Any, Any]] | None] = contextvars.ContextVar(
+    "_cv_steps", default=None
+)
+
+
+def _get_workflows() -> dict[str, Workflow[Any, Any]]:
+    rv = _cv_workflows.get()
+    return _global_workflows if rv is None else rv
+
+
+def _get_steps() -> dict[str, Step[Any, Any]]:
+    rv = _cv_steps.get()
+    return _global_steps if rv is None else rv
+
+
+@contextlib.contextmanager
+def clean_registry():
+    wf_token = _cv_workflows.set({})
+    st_token = _cv_steps.set({})
+    try:
+        yield
+    finally:
+        _cv_steps.reset(st_token)
+        _cv_workflows.reset(wf_token)
 
 
 class Workflow(Generic[P, T]):
     def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
         self.func = func
-        module = getattr(func, "__module__", "<unknown module>")
-        self.workflow_id = f"workflow//{module}//{func.__qualname__}"
-        assert self.workflow_id not in _workflows, f"Duplicate workflow ID: {self.workflow_id}"
-        _workflows[self.workflow_id] = self
+        self.module = getattr(func, "__module__", "<unknown module>")
+        self.workflow_id = f"workflow//{self.module}//{func.__qualname__}"
+        registry = _get_workflows()
+        assert self.workflow_id not in registry, f"Duplicate workflow ID: {self.workflow_id}"
+        registry[self.workflow_id] = self
 
 
 def workflow(func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
@@ -37,7 +72,7 @@ def workflow(func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
 
 
 def get_workflow(workflow_id: str) -> Workflow[Any, Any]:
-    return _workflows[workflow_id]
+    return _get_workflows()[workflow_id]
 
 
 class Step(Generic[P, T]):
@@ -47,8 +82,9 @@ class Step(Generic[P, T]):
         self.func = func
         module = getattr(func, "__module__", "<unknown module>")
         self.name = f"step//{module}//{func.__qualname__}"
-        assert self.name not in _steps, f"Duplicate step name: {self.name}"
-        _steps[self.name] = self
+        registry = _get_steps()
+        assert self.name not in registry, f"Duplicate step name: {self.name}"
+        registry[self.name] = self
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         from . import runtime
@@ -68,7 +104,7 @@ def step(func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
 
 
 def get_step(step_name: str) -> Step[Any, Any]:
-    return _steps[step_name]
+    return _get_steps()[step_name]
 
 
 async def sleep(param: int | float | datetime.datetime | str) -> None:
