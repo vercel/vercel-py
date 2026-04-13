@@ -264,17 +264,20 @@ class TestTimeRestrictions:
         import asyncio
         import time as real_time
 
-        barrier = asyncio.Barrier(2)
+        ready_a = asyncio.Event()
+        ready_b = asyncio.Event()
 
         async def sandbox_a():
             with workflow_sandbox(random_seed="a"):
-                await barrier.wait()
+                ready_a.set()
+                await ready_b.wait()
                 _raises_in_sandbox("import time; time.time()")
                 await asyncio.sleep(0.02)
 
         async def sandbox_b():
             with workflow_sandbox(random_seed="b"):
-                await barrier.wait()
+                ready_b.set()
+                await ready_a.wait()
                 _raises_in_sandbox("import time; time.time()")
                 await asyncio.sleep(0.01)
 
@@ -291,12 +294,17 @@ class TestTimeRestrictions:
         each other."""
         import asyncio
 
-        barrier = asyncio.Barrier(2)
         results: dict[str, list[float]] = {}
 
-        async def run_sandbox(seed: str, res: dict[str, list[float]]):
+        async def run_sandbox(
+            seed: str,
+            res: dict[str, list[float]],
+            ready: asyncio.Event,
+            other: asyncio.Event,
+        ):
             with workflow_sandbox(random_seed=seed):
-                await barrier.wait()
+                ready.set()
+                await other.wait()
                 ns: dict[str, object] = {}
                 ns["__builtins__"] = sys.modules["builtins"]
                 exec(  # noqa: S102
@@ -305,15 +313,21 @@ class TestTimeRestrictions:
                 )
                 res[seed] = ns["result"]  # type: ignore[assignment]
 
-        await asyncio.gather(run_sandbox("seed-A", results), run_sandbox("seed-B", results))
+        r1, r2 = asyncio.Event(), asyncio.Event()
+        await asyncio.gather(
+            run_sandbox("seed-A", results, r1, r2),
+            run_sandbox("seed-B", results, r2, r1),
+        )
         assert "seed-A" in results and "seed-B" in results
         assert results["seed-A"] != results["seed-B"]
 
         # Each sequence must be deterministic: run again and compare
         results2: dict[str, list[float]] = {}
-        barrier = asyncio.Barrier(2)
-
-        await asyncio.gather(run_sandbox("seed-A", results2), run_sandbox("seed-B", results2))
+        r1, r2 = asyncio.Event(), asyncio.Event()
+        await asyncio.gather(
+            run_sandbox("seed-A", results2, r1, r2),
+            run_sandbox("seed-B", results2, r2, r1),
+        )
         assert results["seed-A"] == results2["seed-A"]
         assert results["seed-B"] == results2["seed-B"]
 
