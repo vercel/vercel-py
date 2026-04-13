@@ -28,7 +28,7 @@ jobs:
         uses: astral-sh/setup-uv@v3
 
       - name: Sync dependencies
-        run: uv sync --python ${{ matrix.python-version }}
+        run: uv sync --python ${{ matrix.python-version }} --managed-python
 
       - name: Run tests, including lint and typecheck
         run: ./scripts/test.sh
