@@ -169,13 +169,14 @@ class TestOsRestrictions:
         """
         # json.loads raises from a real .py file (not <string>)
         ns = _run_in_sandbox(
-            "import traceback, json\n"
+            "import traceback, ast\n"
             "try:\n"
-            "    json.loads('{invalid')\n"
+            "    ast.literal_eval('{')\n"
             "except Exception:\n"
             "    result = traceback.format_exc()\n"
         )
-        assert "JSONDecodeError" in ns["result"]
+        # traceback.format_exc() must produce output with real file paths
+        assert "ast.py" in ns["result"]
 
     def test_os_environ_is_copy(self):
         """os.environ should be a static copy, not the live environ."""
@@ -429,6 +430,7 @@ class TestAsyncioRestrictions:
             await task
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
     async def test_taskgroup_works_in_sandbox(self):
         """asyncio.TaskGroup must work inside the sandbox.
 
