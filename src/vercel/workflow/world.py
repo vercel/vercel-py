@@ -589,6 +589,7 @@ class PaginatedResult(BaseModel, Generic[T]):
 
 class EventResult(BaseModel):
     event: Event | None = None
+    events: list[Event] | None = None
     run: WorkflowRun | None = None
     step: WorkflowStep | None = None
     hook: Any | None = None
