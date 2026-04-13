@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import datetime as _dt
 import os
@@ -13,6 +14,12 @@ from importlib.abc import Loader, MetaPathFinder
 from importlib.machinery import ModuleSpec
 from importlib.util import spec_from_loader
 from typing import Any, NoReturn
+
+# When True, proxy modules enforce restrictions.  When False (default),
+# attribute access on proxy modules falls through to the real module.
+# This allows concurrent coroutines that are NOT running a workflow to
+# use the real module even while the sandbox has replaced sys.modules.
+_in_sandbox: contextvars.ContextVar[bool] = contextvars.ContextVar("_in_sandbox", default=False)
 
 
 class SandboxRestrictionError(RuntimeError):
@@ -39,6 +46,32 @@ class _ModulePolicy:
 
     def post_exec(self, *, proxy: _ProxyModule, module: types.ModuleType, random_seed: str) -> None:
         pass
+
+    def resolve_attr(self, name: str, real: types.ModuleType) -> Any:
+        """Resolve an allowed attribute on the real module.
+
+        Called by ``_ProxyModule.__getattr__`` as the final fallback.
+        Subclasses can override to intercept (e.g. per-context random).
+        """
+        return getattr(real, name)
+
+
+def _context_restricted(name: str, real_fn: Any) -> Callable[..., Any]:
+    """Like ``_restricted`` but falls through to *real_fn* outside sandbox context.
+
+    Used for builtins overrides where CPython's ``LOAD_GLOBAL`` reads
+    ``__dict__`` directly, bypassing ``__getattr__``.
+    """
+
+    def _wrapper(*_args: Any, **_kwargs: Any) -> Any:
+        if _in_sandbox.get(False):
+            raise SandboxRestrictionError(
+                f"Cannot call {name}() inside a workflow. Workflows must be deterministic."
+            )
+        return real_fn(*_args, **_kwargs)
+
+    _wrapper.__qualname__ = f"<context-restricted {name}>"
+    return _wrapper
 
 
 def _blocklist(
@@ -114,12 +147,24 @@ class _RestrictedRandom(random.Random, metaclass=_RestrictedRandomMeta):
         super().seed(a, **kwargs)
 
 
+# Per-sandbox Random instance, so concurrent sandboxes with different
+# seeds don't corrupt each other's random state.
+_sandbox_random: contextvars.ContextVar[random.Random | None] = contextvars.ContextVar(
+    "_sandbox_random", default=None
+)
+
+
 class _RestrictedRandomPolicy(_ModulePolicy):
     def __init__(self) -> None:
         super().__init__("random", overrides={"Random": _RestrictedRandom})
 
-    def post_exec(self, *, proxy: _ProxyModule, module: types.ModuleType, random_seed: str) -> None:
-        module.seed(random_seed)
+    def resolve_attr(self, name: str, real: types.ModuleType) -> Any:
+        inst = _sandbox_random.get(None)
+        if inst is not None:
+            method = getattr(inst, name, None)
+            if method is not None:
+                return method
+        return getattr(real, name)
 
 
 def _wrap_get_loop(real_fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -409,11 +454,26 @@ class _ProxyModule(types.ModuleType):
                 self.__dict__[attr] = val
         if copy_dict:
             self.__dict__.update(real.__dict__)
-        # Overrides go into __dict__ so they are found by direct
-        # dict lookup (important for builtins).
-        self.__dict__.update(policy.overrides)
+            # For dict-based lookups (builtins), overrides must be
+            # context-aware so concurrent coroutines outside the sandbox
+            # can still call the real functions.
+            for key, val in policy.overrides.items():
+                real_fn = real.__dict__.get(key)
+                if real_fn is not None and callable(val):
+                    self.__dict__[key] = _context_restricted(f"{policy.module_name}.{key}", real_fn)
+                else:
+                    self.__dict__[key] = val
+        else:
+            # Overrides go into __dict__ so they are found by direct
+            # dict lookup (important for builtins).
+            self.__dict__.update(policy.overrides)
 
     def __getattr__(self, name: str) -> Any:
+        real = object.__getattribute__(self, "_proxy_real")
+        # Outside a sandbox context, delegate everything to the real module
+        # so concurrent coroutines are not affected by the global proxy.
+        if not _in_sandbox.get(False):
+            return getattr(real, name)
         policy = object.__getattribute__(self, "_proxy_policy")
         if name in policy.drops:
             raise AttributeError(name)
@@ -431,8 +491,7 @@ class _ProxyModule(types.ModuleType):
             # This allows module init code like ``from os import urandom``
             # to succeed — the error fires when the function is *called*.
             return _restricted(f"{policy.module_name}.{name}")
-        real = object.__getattribute__(self, "_proxy_real")
-        return getattr(real, name)
+        return policy.resolve_attr(name, real)
 
     def __repr__(self) -> str:
         real = object.__getattribute__(self, "_proxy_real")
@@ -442,9 +501,17 @@ class _ProxyModule(types.ModuleType):
 class _StubModule(types.ModuleType):
     """A stub module where every attribute access returns a restricted callable."""
 
+    def __init__(self, name: str, real: types.ModuleType | None = None) -> None:
+        super().__init__(name)
+        object.__setattr__(self, "_stub_real", real)
+
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
+        if not _in_sandbox.get(False):
+            real = object.__getattribute__(self, "_stub_real")
+            if real is not None:
+                return getattr(real, name)
         return _restricted(f"{self.__name__}.{name}")
 
 
@@ -491,8 +558,9 @@ class _SandboxFinder(MetaPathFinder):
             # Return a stub module instead of raising — other modules may
             # ``import subprocess`` at module level but never call it.
             # Every attribute access on the stub returns a restricted callable.
+            real = self._host.get(fullname)
             return spec_from_loader(
-                fullname, _PreloadedLoader(_StubModule(fullname)), origin="blocked"
+                fullname, _PreloadedLoader(_StubModule(fullname, real)), origin="blocked"
             )
         if fullname in self._restrictions:
             policy = self._restrictions[fullname]
@@ -619,30 +687,33 @@ def _sandbox_linecache() -> Iterator[None]:
         linecache.checkcache = orig_checkcache
 
 
+_sandbox_refcount: int = 0
+
+
 @contextmanager
-def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
-    """Activate the sandbox.
+def _sandbox_modules(random_seed: str) -> Iterator[None]:
+    """Ref-counted sys.modules patch.
 
-    1. Snapshots ``sys.modules`` and replaces its contents in-place
-       (CPython's C-level import uses ``interp->modules`` which is
-       the *same dict object* — replacing ``sys.modules`` with a
-       new dict would not affect ``IMPORT_NAME`` bytecode).
-    2. Installs a ``_SandboxFinder`` at the front of
-       ``sys.meta_path`` — restricted modules are wrapped in
-       ``_ProxyModule`` to block non-deterministic calls;
-       passthrough modules are served from the host as-is.
-    3. Sets fresh workflow/step registries via ContextVar.
-    4. Seeds the global ``random`` module for determinism.
-    5. On exit, restores everything.
+    The first caller patches sys.modules with proxy modules and installs
+    the sandbox finder.  Subsequent concurrent callers are no-ops.
+    The last caller to exit restores everything.
+
+    Thread safety: only called from synchronous code inside async
+    coroutines on the main event loop thread, so no lock is needed.
     """
-    if not isinstance(random_seed, str):
-        raise TypeError("random_seed must be a str")
+    global _sandbox_refcount
 
-    # Snapshot the original contents so we can restore later.
+    _sandbox_refcount += 1
+    if _sandbox_refcount > 1:
+        try:
+            yield
+        finally:
+            _sandbox_refcount -= 1
+        return
+
+    # First sandbox in — snapshot and patch.
     orig_modules = dict(sys.modules)
 
-    # Build a proxy builtins whose __dict__ has the restricted
-    # entries so that CPython's LOAD_GLOBAL sees them.
     builtins_policy = _RESTRICTIONS.get("builtins")
     if builtins_policy is not None:
         proxy_builtins: types.ModuleType = _ProxyModule(
@@ -653,7 +724,6 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
     else:
         proxy_builtins = sys.modules["builtins"]
 
-    # Non-builtins restrictions are handled by the finder.
     module_restrictions = {k: v for k, v in _RESTRICTIONS.items() if k != "builtins"}
     finder = _SandboxFinder(
         host_modules=orig_modules,
@@ -664,7 +734,6 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
     )
 
     with _sandbox_linecache():
-        # Mutate sys.modules IN-PLACE so interp->modules sees the change.
         sys.modules.clear()
         sys.modules["sys"] = sys
         sys.modules["builtins"] = proxy_builtins
@@ -672,8 +741,29 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
         try:
             yield
         finally:
+            _sandbox_refcount -= 1
             if sys.meta_path is not None:
                 sys.meta_path.remove(finder)
-            # Restore original sys.modules contents.
             sys.modules.clear()
             sys.modules.update(orig_modules)
+
+
+@contextmanager
+def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
+    """Activate the workflow sandbox.
+
+    Patches ``sys.modules`` (ref-counted for concurrent sandboxes),
+    sets ``_in_sandbox`` so proxy modules enforce restrictions only in
+    this async context, and provides a per-context seeded ``Random``.
+    """
+    if not isinstance(random_seed, str):
+        raise TypeError("random_seed must be a str")
+
+    with _sandbox_modules(random_seed):
+        sandbox_token = _in_sandbox.set(True)
+        random_token = _sandbox_random.set(random.Random(random_seed))
+        try:
+            yield
+        finally:
+            _sandbox_random.reset(random_token)
+            _in_sandbox.reset(sandbox_token)
