@@ -183,6 +183,15 @@ def _wrap_get_loop(real_fn: Callable[..., Any]) -> Callable[..., Any]:
                     return getattr(self._real, name)
                 return _restricted(f"loop.{name}")
 
+            def __hash__(self) -> int:
+                return hash(self._real)
+
+            def __eq__(self, other: object) -> bool:
+                real = self._real
+                if hasattr(other, "_real"):
+                    return real is other._real
+                return real is other
+
             def __repr__(self) -> str:
                 return f"<proxy for {self._real!r}>"
 
@@ -201,6 +210,19 @@ class _RestrictedAsyncioPolicy(_ModulePolicy):
             real_fn = getattr(module, attr, None)
             if real_fn is not None:
                 proxy.__dict__[attr] = _wrap_get_loop(real_fn)
+
+        # Wrap current_task so that passing a _LoopProxy works.
+        # The C implementation uses internal identity-based lookup that
+        # does not honour __hash__/__eq__, so we unwrap the proxy first.
+        real_current_task = getattr(module, "current_task", None)
+        if real_current_task is not None:
+
+            def _current_task(loop: Any = None) -> Any:
+                if loop is not None and hasattr(loop, "_real"):
+                    loop = loop._real
+                return real_current_task(loop)
+
+            proxy.__dict__["current_task"] = _current_task
 
 
 _RESTRICTIONS: dict[str, _ModulePolicy] = {
@@ -342,6 +364,9 @@ _PASSTHROUGHS: set[str] = {
     "unicodedata",
     "weakref",
     "zlib",
+    # C extension with per-module state (PEP 489 multi-phase init).
+    # Must share the host instance so the task registry is not lost.
+    "_asyncio",
     # SDK internals — must share the singleton registries, runtime, etc.
     "vercel",
     # Common third-party deps that are side-effect-free

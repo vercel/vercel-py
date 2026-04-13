@@ -411,6 +411,28 @@ class TestAsyncioRestrictions:
             task = loop.create_task(noop())
             await task
 
+    @pytest.mark.asyncio
+    async def test_taskgroup_works_in_sandbox(self):
+        """asyncio.TaskGroup must work inside the sandbox.
+
+        Regression: TaskGroup.__aenter__ calls current_task() which
+        returned None inside the sandbox, causing RuntimeError:
+        'TaskGroup cannot determine the parent task'.
+        """
+        with workflow_sandbox(random_seed=SEED):
+            import asyncio
+
+            results = []
+
+            async def worker(value: int) -> None:
+                results.append(value)
+
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(worker(1))
+                tg.create_task(worker(2))
+
+            assert sorted(results) == [1, 2]
+
 
 # ═══════════════════════════════════════════════════════════════
 #  asyncio loop proxy with uvloop
