@@ -156,7 +156,3 @@ class HookMixin:
             raise TypeError("resume only supports pydantic models or dataclasses")
 
         return await runtime.resume_hook(token_or_hook, json_str)
-
-
-# must not import in workflow
-# celery/temporal/CLI style, how to import subapps
