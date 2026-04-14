@@ -40,6 +40,7 @@ from .command import (
     Command,
     CommandFinished,
 )
+from .pty.session import AsyncPTYSession
 from .pty.shell import start_interactive_shell
 from .snapshot import (
     AsyncSnapshot,
@@ -511,6 +512,42 @@ class AsyncSandbox:
                 await sandbox.shell(["python3"])
         """
         await start_interactive_shell(self, command, env=env, cwd=cwd, sudo=sudo)
+
+    async def open_pty(
+        self,
+        command: builtins.list[str] | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        sudo: bool = False,
+        cols: int | None = None,
+        rows: int | None = None,
+    ) -> AsyncPTYSession:
+        """Open a low-level async PTY session without taking over the terminal.
+
+        Requires the sandbox to be created with ``interactive=True``.
+
+        Args:
+            command: Command to execute inside the PTY (default: ``["/bin/bash"]``).
+            env: Additional environment variables.
+            cwd: Working directory.
+            sudo: Run with elevated privileges.
+            cols: Initial PTY width in columns.
+            rows: Initial PTY height in rows.
+
+        Returns:
+            An ``AsyncPTYSession`` that owns the remote PTY process and
+            websocket tunnel lifecycle.
+        """
+        return await AsyncPTYSession.open(
+            self,
+            command,
+            env=env,
+            cwd=cwd,
+            sudo=sudo,
+            cols=cols,
+            rows=rows,
+        )
 
     # Async context manager to ensure cleanup
     async def __aenter__(self) -> AsyncSandbox:

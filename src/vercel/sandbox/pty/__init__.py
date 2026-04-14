@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from .client import PTYClient
 from .protocol import Message, MessageType, message, message_bytes, parse, ready, resize
+from .session import AsyncPTYSession
 
 __all__ = [
+    "AsyncPTYSession",
     # Client
     "PTYClient",
     # Protocol
