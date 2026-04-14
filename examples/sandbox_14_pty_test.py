@@ -20,16 +20,22 @@ from vercel.sandbox.pty import AsyncPTYSession
 load_dotenv()
 
 EXPECTED_OUTPUT = "PTY_OK"
+PROMPT_MARKER = "$ "
 
 
-async def collect_output(session: AsyncPTYSession, *, timeout: float = 30.0) -> bytes:
+async def collect_output_until(
+    session: AsyncPTYSession,
+    marker: str,
+    *,
+    timeout: float = 30.0,
+) -> bytes:
     """Read PTY output until the expected marker appears."""
 
     async def _collect() -> bytes:
         output = b""
         async for data in session.iter_output():
             output += data
-            if EXPECTED_OUTPUT.encode() in output:
+            if marker.encode() in output:
                 return output
         return output
 
@@ -63,11 +69,25 @@ async def main() -> int:
             print("Sending ready signal and resize event...")
             await session.ready()
             await session.resize(100, 30)
+            print("Waiting for the shell prompt...")
+            try:
+                initial_output = await collect_output_until(session, PROMPT_MARKER)
+            except asyncio.TimeoutError:
+                print("Timed out waiting for the shell prompt.")
+                return 1
+
+            initial_output_text = initial_output.decode("utf-8", errors="replace")
+            print()
+            print("Received initial PTY output:")
+            print("-" * 60)
+            print(initial_output_text.rstrip())
+            print("-" * 60)
+
             print("Writing a simple command through the PTY...")
             await session.write(f"printf '{EXPECTED_OUTPUT}\\n'; pwd; exit\n")
 
             try:
-                output = await collect_output(session)
+                output = await collect_output_until(session, EXPECTED_OUTPUT)
             except asyncio.TimeoutError:
                 print("Timed out waiting for PTY output.")
                 return 1
