@@ -70,7 +70,7 @@ def _context_restricted(name: str, real_fn: Any) -> Callable[..., Any]:
             )
         return real_fn(*_args, **_kwargs)
 
-    _wrapper.__qualname__ = f"<context-restricted {name}>"
+    _wrapper.__qualname__ = f"<workflow-context-restricted {name}>"
     return _wrapper
 
 
