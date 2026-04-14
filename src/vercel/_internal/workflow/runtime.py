@@ -82,7 +82,7 @@ class WorkflowOrchestratorContext:
         return cls._ctx.get()
 
     async def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
-        wf = self.registry.get_workflow(workflow_run.workflow_name)
+        wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input or not isinstance(workflow_run.input, list):
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
         if not workflow_run.input[0].startswith(b"json"):
@@ -359,7 +359,7 @@ async def step_handler(
 
     # Get the step entity
     step_run = await world.steps_get(req.workflow_run_id, req.step_id)
-    step = registry.get_step(step_run.step_name)
+    step = registry._get_step(step_run.step_name)
 
     # Check if retry_after timestamp hasn't been reached yet
     now = datetime.now(UTC)

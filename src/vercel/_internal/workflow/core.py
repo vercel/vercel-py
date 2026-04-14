@@ -151,7 +151,7 @@ class Workflows:
         self._workflows[rv.workflow_id] = rv
         return rv
 
-    def get_workflow(self, workflow_id: str) -> Workflow[Any, Any]:
+    def _get_workflow(self, workflow_id: str) -> Workflow[Any, Any]:
         return self._workflows[workflow_id]
 
     def step(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
@@ -160,5 +160,5 @@ class Workflows:
         self._steps[rv.name] = rv
         return rv
 
-    def get_step(self, step_name: str) -> Step[Any, Any]:
+    def _get_step(self, step_name: str) -> Step[Any, Any]:
         return self._steps[step_name]
