@@ -750,9 +750,10 @@ def _sandbox_modules() -> Iterator[None]:
 def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
     """Activate the workflow sandbox.
 
-    Patches ``sys.modules`` (ref-counted for concurrent sandboxes),
-    sets ``_in_sandbox`` so proxy modules enforce restrictions only in
-    this async context, and provides a per-context seeded ``Random``.
+    Sets ``_in_sandbox`` so proxy modules are active only in this async
+    context, and provides a per-context seeded ``Random``.  Also
+    ensures ``sys.modules`` is patched to enforce import restrictions
+    before user code runs. See also _sandbox_modules().
     """
     if not isinstance(random_seed, str):
         raise TypeError("random_seed must be a str")
