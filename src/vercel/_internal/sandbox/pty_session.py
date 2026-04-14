@@ -174,7 +174,7 @@ class AsyncPTYSession:
         _client_factory: PTYClientFactory | None = None,
         _connection_timeout: DurationSeconds = 30.0,
     ) -> AsyncPTYSession:
-        if not sandbox.interactive_port:
+        if sandbox.interactive_port is None:
             raise RuntimeError(
                 "Sandbox was not created with interactive=True. "
                 "Create with: await AsyncSandbox.create(interactive=True)"
@@ -226,6 +226,10 @@ class AsyncPTYSession:
     @property
     def port(self) -> int | None:
         return self.connection_info.get("port")
+
+    @property
+    def is_open(self) -> bool:
+        return not self._closed and self.client.is_open
 
     async def ready(self) -> None:
         await self.client.send_ready()

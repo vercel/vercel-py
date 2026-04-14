@@ -144,7 +144,7 @@ async def _forward_stdin(
 
     loop.add_reader(stdin_fd, on_stdin_ready)
     try:
-        while not stop_event.is_set() and session.client.is_open:
+        while not stop_event.is_set() and session.is_open:
             # Wait for stdin data or stop signal
             wait_task = asyncio.create_task(data_ready.wait())
             stop_task = asyncio.create_task(stop_event.wait())

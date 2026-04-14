@@ -70,7 +70,7 @@ class FakePTYClient:
 
 class FakeShellSession:
     def __init__(self, *, output: list[bytes] | None = None, is_open: bool = True) -> None:
-        self.client = SimpleNamespace(is_open=is_open)
+        self.is_open = is_open
         self.output = output or []
         self.calls: list[tuple] = []
         self.closed = False
@@ -220,6 +220,7 @@ async def test_open_installs_server_when_missing_and_streams_io(monkeypatch) -> 
     assert session.process_id == 101
     assert session.server_process_id == 202
     assert session.port == 9999
+    assert session.is_open is True
 
     await session.ready()
     await session.resize(100, 50)
@@ -238,6 +239,7 @@ async def test_open_installs_server_when_missing_and_streams_io(monkeypatch) -> 
     await session.close()
 
     assert client.closed is True
+    assert session.is_open is False
     assert sandbox._detached_command.kill_calls == [15]
 
 
