@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from dataclasses import dataclass
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
@@ -14,7 +14,7 @@ from vercel._internal.sandbox.pty_session import (
     PTYClientFactory,
     read_connection_info,
 )
-from vercel.sandbox import AsyncSandbox
+from vercel.sandbox import AsyncCommand, AsyncSandbox
 from vercel.sandbox.pty import AsyncPTYSession as PublicAsyncPTYSession
 from vercel.sandbox.pty.shell import _run_interactive_loop, start_interactive_shell
 
@@ -247,8 +247,7 @@ async def test_read_connection_info_accepts_timedelta_timeout(monkeypatch) -> No
         [
             FakeLog(
                 "stdout",
-                '{"port": 9999, "token": "test-token", "processId": 101, '
-                '"serverProcessId": 202}\n',
+                '{"port": 9999, "token": "test-token", "processId": 101, "serverProcessId": 202}\n',
             )
         ]
     )
@@ -261,7 +260,9 @@ async def test_read_connection_info_accepts_timedelta_timeout(monkeypatch) -> No
 
     monkeypatch.setattr("vercel._internal.sandbox.pty_session.asyncio.wait_for", fake_wait_for)
 
-    connection_info = await read_connection_info(cmd, timeout=timedelta(milliseconds=250))
+    connection_info = await read_connection_info(
+        cast(AsyncCommand, cmd), timeout=timedelta(milliseconds=250)
+    )
 
     assert connection_info["processId"] == 101
     assert recorded == [0.25]
