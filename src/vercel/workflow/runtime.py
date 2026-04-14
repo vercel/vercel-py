@@ -64,7 +64,7 @@ class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
     def __init__(
-        self, events: list[w.Event], *, seed: str, started_at: int, registry: core.WorkflowRegistry
+        self, events: list[w.Event], *, seed: str, started_at: int, registry: core.Workflows
     ):
         self.events = events
         self.replay_index = 0
@@ -226,7 +226,7 @@ async def workflow_handler(
     attempt: int,
     queue_name: str,
     message_id: str,
-    registry: core.WorkflowRegistry,
+    registry: core.Workflows,
 ) -> float | None:
     world = w.get_world()
     run_id = w.WorkflowInvokePayload.model_validate(message).run_id
@@ -352,7 +352,7 @@ async def step_handler(
     attempt: int,
     queue_name: str,
     message_id: str,
-    registry: core.WorkflowRegistry,
+    registry: core.Workflows,
 ) -> float | None:
     world = w.get_world()
     req = w.StepInvokePayload.model_validate(message)
@@ -508,14 +508,14 @@ async def step_handler(
     return None
 
 
-def workflow_entrypoint(registry: core.WorkflowRegistry) -> w.HTTPHandler:
+def workflow_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     return w.get_world().create_queue_handler(
         "__wkf_workflow_",
         functools.partial(workflow_handler, registry=registry),
     )
 
 
-def step_entrypoint(registry: core.WorkflowRegistry) -> w.HTTPHandler:
+def step_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     return w.get_world().create_queue_handler(
         "__wkf_step_",
         functools.partial(step_handler, registry=registry),

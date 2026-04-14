@@ -102,7 +102,7 @@ class HookEvent(Generic[T]):
         ctx.dispose_hook(correlation_id=self._correlation_id)
 
 
-class HookMixin:
+class BaseHook:
     @classmethod
     def wait(cls, *, token: str | None = None) -> HookEvent[Self]:
         from . import runtime
@@ -135,7 +135,7 @@ class HookMixin:
         return await runtime.resume_hook(token_or_hook, json_str)
 
 
-class WorkflowRegistry:
+class Workflows:
     def __init__(self, *, as_vercel_job: bool = True):
         self._workflows: dict[str, Workflow] = {}
         self._steps: dict[str, Step] = {}
