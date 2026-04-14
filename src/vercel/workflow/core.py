@@ -137,8 +137,8 @@ class HookMixin:
 
 class WorkflowRegistry:
     def __init__(self, *, as_vercel_job: bool = True):
-        self._workflows = {}
-        self._steps = {}
+        self._workflows: dict[str, Workflow] = {}
+        self._steps: dict[str, Step] = {}
         if as_vercel_job and not py_sandbox.in_sandbox():
             from . import runtime
 
