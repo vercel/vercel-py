@@ -1,4 +1,4 @@
-from .core import BaseHook, HookEvent, Workflows, sleep
-from .runtime import Run, start
+from vercel._internal.workflow.core import BaseHook, HookEvent, Workflows, sleep
+from vercel._internal.workflow.runtime import Run, start
 
 __all__ = ["Workflows", "sleep", "start", "Run", "BaseHook", "HookEvent"]
