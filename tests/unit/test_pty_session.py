@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
@@ -7,7 +9,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from vercel._internal.sandbox.pty_session import AsyncPTYSession, PTYClientFactory
+from vercel._internal.sandbox.pty_session import (
+    AsyncPTYSession,
+    PTYClientFactory,
+    read_connection_info,
+)
 from vercel.sandbox import AsyncSandbox
 from vercel.sandbox.pty import AsyncPTYSession as PublicAsyncPTYSession
 from vercel.sandbox.pty.shell import _run_interactive_loop, start_interactive_shell
@@ -236,6 +242,32 @@ async def test_open_installs_server_when_missing_and_streams_io(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_read_connection_info_accepts_timedelta_timeout(monkeypatch) -> None:
+    cmd = FakeDetachedCommand(
+        [
+            FakeLog(
+                "stdout",
+                '{"port": 9999, "token": "test-token", "processId": 101, '
+                '"serverProcessId": 202}\n',
+            )
+        ]
+    )
+    recorded: list[float | None] = []
+    original_wait_for = asyncio.wait_for
+
+    async def fake_wait_for(awaitable, timeout=None):
+        recorded.append(timeout)
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr("vercel._internal.sandbox.pty_session.asyncio.wait_for", fake_wait_for)
+
+    connection_info = await read_connection_info(cmd, timeout=timedelta(milliseconds=250))
+
+    assert connection_info["processId"] == 101
+    assert recorded == [0.25]
+
+
+@pytest.mark.asyncio
 async def test_open_cleans_up_detached_command_when_client_connection_fails(
     monkeypatch,
 ) -> None:
@@ -290,6 +322,42 @@ async def test_async_sandbox_open_pty_delegates_to_session(monkeypatch) -> None:
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_async_pty_session_open_passes_timedelta_connection_timeout(monkeypatch) -> None:
+    sandbox = FakeSandbox()
+    client = FakePTYClient()
+    recorded: list[timedelta] = []
+
+    async def fake_start_pty_server(bound_sandbox, command, **kwargs):
+        assert bound_sandbox is sandbox
+        assert command == ["/bin/bash"]
+        recorded.append(kwargs["connection_timeout"])
+        return sandbox._detached_command, {
+            "port": 9999,
+            "token": "test-token",
+            "processId": 101,
+            "serverProcessId": 202,
+        }
+
+    async def fake_connect(url: str) -> FakePTYClient:
+        assert url == "wss://pty.example.test/ws/client?token=test-token&processId=101"
+        return client
+
+    monkeypatch.setattr(
+        "vercel._internal.sandbox.pty_session.start_pty_server",
+        fake_start_pty_server,
+    )
+
+    session = await AsyncPTYSession.open(
+        cast(AsyncSandbox, sandbox),
+        _client_factory=cast(PTYClientFactory, fake_connect),
+        _connection_timeout=timedelta(seconds=5),
+    )
+
+    assert recorded == [timedelta(seconds=5)]
+    await session.close()
 
 
 @pytest.mark.asyncio

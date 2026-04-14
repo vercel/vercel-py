@@ -6,9 +6,11 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from .pty_binary import SERVER_BIN_NAME, get_binary_bytes_async
+from .time import SECOND, coerce_duration
 
 if TYPE_CHECKING:
     from vercel.sandbox.command import AsyncCommand
@@ -17,6 +19,7 @@ if TYPE_CHECKING:
 
 DEFAULT_PTY_COLS = 80
 DEFAULT_PTY_ROWS = 24
+DurationSeconds = int | float | timedelta
 
 
 def resolve_terminal_size(
@@ -56,9 +59,12 @@ async def setup_sandbox_environment(sandbox: AsyncSandbox) -> None:
     )
 
 
-async def read_connection_info(cmd: AsyncCommand, timeout: float = 30.0) -> dict[str, Any]:
+async def read_connection_info(
+    cmd: AsyncCommand, timeout: DurationSeconds = 30.0
+) -> dict[str, Any]:
     """Read connection metadata JSON from the PTY server command output."""
     collected = ""
+    timeout_seconds = coerce_duration(timeout, SECOND).total_seconds()
 
     async def read_logs() -> dict[str, Any] | None:
         nonlocal collected
@@ -77,14 +83,14 @@ async def read_connection_info(cmd: AsyncCommand, timeout: float = 30.0) -> dict
         return None
 
     try:
-        result = await asyncio.wait_for(read_logs(), timeout=timeout)
+        result = await asyncio.wait_for(read_logs(), timeout=timeout_seconds)
         if result is not None:
             return result
     except TimeoutError:
         pass
 
     raise RuntimeError(
-        f"Failed to get connection info from PTY server within {timeout}s. "
+        f"Failed to get connection info from PTY server within {timeout_seconds}s. "
         f"Collected output: {collected[:500]}"
     )
 
@@ -98,7 +104,7 @@ async def start_pty_server(
     sudo: bool = False,
     cols: int | None = None,
     rows: int | None = None,
-    connection_timeout: float = 30.0,
+    connection_timeout: DurationSeconds = 30.0,
 ) -> tuple[AsyncCommand, dict[str, Any]]:
     """Start a PTY server command and return its command handle and metadata."""
     terminal_cols, terminal_rows = resolve_terminal_size(cols, rows)
@@ -166,7 +172,7 @@ class AsyncPTYSession:
         cols: int | None = None,
         rows: int | None = None,
         _client_factory: PTYClientFactory | None = None,
-        _connection_timeout: float = 30.0,
+        _connection_timeout: DurationSeconds = 30.0,
     ) -> AsyncPTYSession:
         if not sandbox.interactive_port:
             raise RuntimeError(
