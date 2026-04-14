@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from vercel.workflow.py_sandbox import SandboxRestrictionError, workflow_sandbox
+from vercel._internal.workflow.py_sandbox import SandboxRestrictionError, workflow_sandbox
 
 SEED = "test-seed-42"
 
