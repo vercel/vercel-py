@@ -63,7 +63,9 @@ class Hook(BaseSuspension, Generic[T]):
 class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
-    def __init__(self, events: list[w.Event], *, seed: str, started_at: int):
+    def __init__(
+        self, events: list[w.Event], *, seed: str, started_at: int, registry: core.Workflows
+    ):
         self.events = events
         self.replay_index = 0
         prng = random.Random(seed)
@@ -73,28 +75,32 @@ class WorkflowOrchestratorContext:
         self.suspensions: dict[str, BaseSuspension] = {}
         self.hooks: dict[str, Hook] = {}
         self.resume_handle: asyncio.Handle | None = None
+        self.registry = registry
 
     @classmethod
     def current(cls) -> Self:
         return cls._ctx.get()
 
     async def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
-        mod_name = core.get_workflow(workflow_run.workflow_name).module
+        wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input or not isinstance(workflow_run.input, list):
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
         if not workflow_run.input[0].startswith(b"json"):
             raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
         args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
 
-        with core.clean_registry(), workflow_sandbox(random_seed=workflow_run.run_id):
-            # Re-import the user module inside the sandbox so @workflow
-            # registers into the sandbox-local _cv_workflows dict.
-            importlib.import_module(mod_name)
+        with workflow_sandbox(random_seed=workflow_run.run_id):
+            mod = importlib.import_module(wf.module)
 
-            workflow = core.get_workflow(workflow_run.workflow_name)
+            # Resolve the sandboxed Workflow by qualname from the
+            # re-imported module.
+            obj: Any = mod
+            for attr in wf.qualname.split("."):
+                obj = getattr(obj, attr)
+
             token = self._ctx.set(self)
             try:
-                self._fut = asyncio.ensure_future(workflow.func(*args, **kwargs))
+                self._fut = asyncio.ensure_future(obj.func(*args, **kwargs))
             finally:
                 self._ctx.reset(token)
             return await self._fut
@@ -220,6 +226,7 @@ async def workflow_handler(
     attempt: int,
     queue_name: str,
     message_id: str,
+    registry: core.Workflows,
 ) -> float | None:
     world = w.get_world()
     run_id = w.WorkflowInvokePayload.model_validate(message).run_id
@@ -269,7 +276,9 @@ async def workflow_handler(
         assert result.event is not None
         events.append(result.event)
 
-    context = WorkflowOrchestratorContext(events, seed=run_id, started_at=workflow_started_at)
+    context = WorkflowOrchestratorContext(
+        events, seed=run_id, started_at=workflow_started_at, registry=registry
+    )
     try:
         result = await context.run_workflow(workflow_run)
         output = b"json" + json.dumps(result).encode()
@@ -343,13 +352,14 @@ async def step_handler(
     attempt: int,
     queue_name: str,
     message_id: str,
+    registry: core.Workflows,
 ) -> float | None:
     world = w.get_world()
     req = w.StepInvokePayload.model_validate(message)
 
     # Get the step entity
     step_run = await world.steps_get(req.workflow_run_id, req.step_id)
-    step = core.get_step(step_run.step_name)
+    step = registry._get_step(step_run.step_name)
 
     # Check if retry_after timestamp hasn't been reached yet
     now = datetime.now(UTC)
@@ -498,17 +508,17 @@ async def step_handler(
     return None
 
 
-def workflow_entrypoint() -> w.HTTPHandler:
+def workflow_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     return w.get_world().create_queue_handler(
         "__wkf_workflow_",
-        workflow_handler,
+        functools.partial(workflow_handler, registry=registry),
     )
 
 
-def step_entrypoint() -> w.HTTPHandler:
+def step_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     return w.get_world().create_queue_handler(
         "__wkf_step_",
-        step_handler,
+        functools.partial(step_handler, registry=registry),
     )
 
 

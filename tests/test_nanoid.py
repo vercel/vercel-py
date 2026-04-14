@@ -1,6 +1,6 @@
 """Test nanoid implementation."""
 
-from vercel.workflow import nanoid
+from vercel._internal.workflow import nanoid
 
 
 def test_generate_default():

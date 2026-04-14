@@ -1,78 +1,31 @@
 from __future__ import annotations
 
-import contextlib
-import contextvars
 import dataclasses
 import datetime
 import json
-import sys
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar
 
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:
-    from typing_extensions import Self
-
 import pydantic
+
+from vercel._internal.polyfills import Self
+
+from . import py_sandbox
 
 if TYPE_CHECKING:
     from . import world as w
 
+
 P = ParamSpec("P")
 T = TypeVar("T")
-
-# Global (default) registries — used when no sandbox is active.
-_global_workflows: dict[str, Workflow[Any, Any]] = {}
-_global_steps: dict[str, Step[Any, Any]] = {}
-
-# When a sandbox sets these, decorators and lookups use the
-# sandbox-local dicts instead of the globals above.
-_cv_workflows: contextvars.ContextVar[dict[str, Workflow[Any, Any]] | None] = (
-    contextvars.ContextVar("_cv_workflows", default=None)
-)
-_cv_steps: contextvars.ContextVar[dict[str, Step[Any, Any]] | None] = contextvars.ContextVar(
-    "_cv_steps", default=None
-)
-
-
-def _get_workflows() -> dict[str, Workflow[Any, Any]]:
-    rv = _cv_workflows.get()
-    return _global_workflows if rv is None else rv
-
-
-def _get_steps() -> dict[str, Step[Any, Any]]:
-    rv = _cv_steps.get()
-    return _global_steps if rv is None else rv
-
-
-@contextlib.contextmanager
-def clean_registry():
-    wf_token = _cv_workflows.set({})
-    st_token = _cv_steps.set({})
-    try:
-        yield
-    finally:
-        _cv_steps.reset(st_token)
-        _cv_workflows.reset(wf_token)
 
 
 class Workflow(Generic[P, T]):
     def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
         self.func = func
-        self.module = getattr(func, "__module__", "<unknown module>")
-        self.workflow_id = f"workflow//{self.module}//{func.__qualname__}"
-        registry = _get_workflows()
-        assert self.workflow_id not in registry, f"Duplicate workflow ID: {self.workflow_id}"
-        registry[self.workflow_id] = self
-
-
-def workflow(func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
-    return Workflow(func)
-
-
-def get_workflow(workflow_id: str) -> Workflow[Any, Any]:
-    return _get_workflows()[workflow_id]
+        self.module = func.__module__
+        self.qualname = func.__qualname__
+        self.workflow_id = f"workflow//{self.module}.{self.qualname}"
 
 
 class Step(Generic[P, T]):
@@ -80,11 +33,7 @@ class Step(Generic[P, T]):
 
     def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
         self.func = func
-        module = getattr(func, "__module__", "<unknown module>")
-        self.name = f"step//{module}//{func.__qualname__}"
-        registry = _get_steps()
-        assert self.name not in registry, f"Duplicate step name: {self.name}"
-        registry[self.name] = self
+        self.name = f"step//{func.__module__}.{func.__qualname__}"
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         from . import runtime
@@ -97,14 +46,6 @@ class Step(Generic[P, T]):
             ) from None
 
         return await ctx.run_step(self, *args, **kwargs)
-
-
-def step(func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
-    return Step(func)
-
-
-def get_step(step_name: str) -> Step[Any, Any]:
-    return _get_steps()[step_name]
 
 
 async def sleep(param: int | float | datetime.datetime | str) -> None:
@@ -161,7 +102,7 @@ class HookEvent(Generic[T]):
         ctx.dispose_hook(correlation_id=self._correlation_id)
 
 
-class HookMixin:
+class BaseHook:
     @classmethod
     def wait(cls, *, token: str | None = None) -> HookEvent[Self]:
         from . import runtime
@@ -192,3 +133,32 @@ class HookMixin:
             raise TypeError("resume only supports pydantic models or dataclasses")
 
         return await runtime.resume_hook(token_or_hook, json_str)
+
+
+class Workflows:
+    def __init__(self, *, as_vercel_job: bool = True):
+        self._workflows: dict[str, Workflow] = {}
+        self._steps: dict[str, Step] = {}
+        if as_vercel_job and not py_sandbox.in_sandbox():
+            from . import runtime
+
+            runtime.workflow_entrypoint(self)
+            runtime.step_entrypoint(self)
+
+    def workflow(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
+        rv = Workflow(func)
+        assert rv.workflow_id not in self._workflows, f"Duplicate workflow ID: {rv.workflow_id}"
+        self._workflows[rv.workflow_id] = rv
+        return rv
+
+    def _get_workflow(self, workflow_id: str) -> Workflow[Any, Any]:
+        return self._workflows[workflow_id]
+
+    def step(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
+        rv = Step(func)
+        assert rv.name not in self._steps, f"Duplicate step name: {rv.name}"
+        self._steps[rv.name] = rv
+        return rv
+
+    def _get_step(self, step_name: str) -> Step[Any, Any]:
+        return self._steps[step_name]

@@ -2,7 +2,7 @@
 
 import pytest
 
-from vercel.workflow.ulid import monotonic_factory
+from vercel._internal.workflow.ulid import monotonic_factory
 
 
 class TestMonotonicFactory:

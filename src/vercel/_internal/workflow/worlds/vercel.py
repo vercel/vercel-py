@@ -236,7 +236,7 @@ class VercelWorld(w.World):
                     # we may get a duplicate invocation but won't lose the scheduled wakeup
                     await self.queue(
                         queue_name,
-                        payload,
+                        w.WorkflowInvokePayload.model_validate(payload),
                         deployment_id=body.get("deploymentId"),
                         delay_seconds=delay_seconds,
                     )
