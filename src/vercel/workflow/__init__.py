@@ -1,4 +1,4 @@
-from .core import HookEvent, HookMixin, sleep, step, workflow
+from .core import HookEvent, HookMixin, sleep, WorkflowRegistry
 from .runtime import Run, start
 
-__all__ = ["step", "workflow", "sleep", "start", "Run", "HookMixin", "HookEvent"]
+__all__ = ["WorkflowRegistry", "sleep", "start", "Run", "HookMixin", "HookEvent"]
