@@ -227,6 +227,157 @@ class TestTimeRestrictions:
     def test_time_constants_allowed(self):
         _run_in_sandbox("import time; _ = time.CLOCK_MONOTONIC")
 
+    @pytest.mark.asyncio
+    async def test_concurrent_coroutine_not_affected_by_sandbox(self):
+        """Regression test: a concurrent coroutine that lazy-imports time
+        while another coroutine has the sandbox active must NOT be
+        restricted — the sandbox context is per-task via ContextVar."""
+        import asyncio
+
+        barrier = asyncio.Event()
+        result = None
+
+        async def sandbox_task():
+            """Activates the sandbox and waits inside it."""
+            with workflow_sandbox(random_seed="test"):
+                barrier.set()
+                await asyncio.sleep(0.05)
+
+        async def victim_task():
+            """Lazy-imports time while sandbox is active, then calls time.time()."""
+            nonlocal result
+            await barrier.wait()
+            import time
+
+            result = time.time()
+
+        await asyncio.gather(sandbox_task(), victim_task())
+        assert isinstance(result, float) and result > 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sandboxes_do_not_corrupt_sys_modules(self):
+        """Two concurrent sandboxes must not corrupt sys.modules.
+
+        The first sandbox to enter patches sys.modules; the second must
+        not snapshot the patched state.  On exit, sys.modules must be
+        fully restored regardless of exit order."""
+        import asyncio
+        import time as real_time
+
+        ready_a = asyncio.Event()
+        ready_b = asyncio.Event()
+
+        async def sandbox_a():
+            with workflow_sandbox(random_seed="a"):
+                ready_a.set()
+                await ready_b.wait()
+                _raises_in_sandbox("import time; time.time()")
+                await asyncio.sleep(0.02)
+
+        async def sandbox_b():
+            with workflow_sandbox(random_seed="b"):
+                ready_b.set()
+                await ready_a.wait()
+                _raises_in_sandbox("import time; time.time()")
+                await asyncio.sleep(0.01)
+
+        await asyncio.gather(sandbox_a(), sandbox_b())
+        # After both exit, sys.modules must be restored
+        assert sys.modules.get("time") is real_time
+        # Sanity check: no proxy modules leaked
+        assert isinstance(sys.modules["time"].time, type(real_time.time))
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sandboxes_have_independent_random_seeds(self):
+        """Two concurrent sandboxes with different seeds must each see
+        their own deterministic random sequence, not interfere with
+        each other."""
+        import asyncio
+
+        results: dict[str, list[float]] = {}
+
+        async def run_sandbox(
+            seed: str,
+            res: dict[str, list[float]],
+            ready: asyncio.Event,
+            other: asyncio.Event,
+        ):
+            with workflow_sandbox(random_seed=seed):
+                ready.set()
+                await other.wait()
+                ns: dict[str, object] = {}
+                ns["__builtins__"] = sys.modules["builtins"]
+                exec(  # noqa: S102
+                    "import random; result = [random.random() for _ in range(5)]",
+                    ns,
+                )
+                res[seed] = ns["result"]  # type: ignore[assignment]
+
+        r1, r2 = asyncio.Event(), asyncio.Event()
+        await asyncio.gather(
+            run_sandbox("seed-A", results, r1, r2),
+            run_sandbox("seed-B", results, r2, r1),
+        )
+        assert "seed-A" in results and "seed-B" in results
+        assert results["seed-A"] != results["seed-B"]
+
+        # Each sequence must be deterministic: run again and compare
+        results2: dict[str, list[float]] = {}
+        r1, r2 = asyncio.Event(), asyncio.Event()
+        await asyncio.gather(
+            run_sandbox("seed-A", results2, r1, r2),
+            run_sandbox("seed-B", results2, r2, r1),
+        )
+        assert results["seed-A"] == results2["seed-A"]
+        assert results["seed-B"] == results2["seed-B"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sandboxes_interleaved_random(self):
+        """When two sandboxes interleave their random calls, each must
+        still get its own deterministic sequence."""
+        import asyncio
+
+        step1 = asyncio.Event()
+        step2 = asyncio.Event()
+        results: dict[str, list[float]] = {}
+
+        async def sandbox_a():
+            with workflow_sandbox(random_seed="aaa"):
+                ns = {}
+                ns["__builtins__"] = sys.modules["builtins"]
+                exec("import random; r1 = random.random()", ns)  # noqa: S102
+                step1.set()  # let B run
+                await step2.wait()  # wait for B to call random
+                exec("r2 = random.random()", ns)  # noqa: S102
+                results["a"] = [ns["r1"], ns["r2"]]
+
+        async def sandbox_b():
+            with workflow_sandbox(random_seed="bbb"):
+                await step1.wait()  # wait for A's first call
+                ns = {}
+                ns["__builtins__"] = sys.modules["builtins"]
+                exec("import random; r1 = random.random()", ns)  # noqa: S102
+                step2.set()  # let A continue
+                results["b"] = [ns["r1"]]
+
+        await asyncio.gather(sandbox_a(), sandbox_b())
+
+        # Run A alone to get the expected sequence
+        expected_a: list[float] = []
+        with workflow_sandbox(random_seed="aaa"):
+            ns = {}
+            ns["__builtins__"] = sys.modules["builtins"]
+            exec(  # noqa: S102
+                "import random; result = [random.random(), random.random()]",
+                ns,
+            )
+            expected_a = ns["result"]
+
+        assert results["a"] == expected_a, (
+            f"Sandbox A's random sequence was corrupted by concurrent sandbox B: "
+            f"got {results['a']}, expected {expected_a}"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════
 #  socket restrictions (allowlist)
