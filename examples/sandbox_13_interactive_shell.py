@@ -10,8 +10,8 @@ Prerequisites:
 - Or run from a Vercel Function with OIDC credentials
 
 Usage:
-    python examples/13_interactive_shell.py          # Interactive bash shell
-    python examples/13_interactive_shell.py --python # Interactive Python REPL
+    python examples/sandbox_13_interactive_shell.py          # Interactive bash shell
+    python examples/sandbox_13_interactive_shell.py --python # Interactive Python REPL
 
 Interactive mode will:
 1. Create a sandbox with interactive support enabled
@@ -102,7 +102,7 @@ if __name__ == "__main__":
             asyncio.run(python_repl_example())
         else:
             print(f"Unknown flag: {sys.argv[1]}")
-            print("Usage: python 13_interactive_shell.py [--python]")
+            print("Usage: python sandbox_13_interactive_shell.py [--python]")
             sys.exit(1)
     elif is_ci or not has_tty:
         reason = "CI environment detected" if is_ci else "no interactive TTY detected"
