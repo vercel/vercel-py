@@ -6,10 +6,11 @@ import json
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar
 
-from vercel._internal.polyfills import Self
-from . import py_sandbox
-
 import pydantic
+
+from vercel._internal.polyfills import Self
+
+from . import py_sandbox
 
 if TYPE_CHECKING:
     from . import world as w
