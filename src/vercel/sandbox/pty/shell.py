@@ -12,16 +12,9 @@ from typing import TYPE_CHECKING
 
 import websockets
 
-from vercel._internal.sandbox.pty_session import (
-    build_ws_url,
-    setup_sandbox_environment,
-    start_pty_server,
-)
-
-from .client import PTYClient
+from .session import AsyncPTYSession
 
 if TYPE_CHECKING:
-    from ..command import AsyncCommand
     from ..sandbox import AsyncSandbox
 
 
@@ -56,27 +49,16 @@ async def start_interactive_shell(
 
     command = command or ["/bin/bash"]
 
-    # Setup sandbox environment (install PTY server if needed)
     print("Setting up interactive session...", file=sys.stderr)
-    await setup_sandbox_environment(sandbox)
-
-    # Start PTY server
-    print("Starting PTY server...", file=sys.stderr)
-    cmd, conn_info = await start_pty_server(sandbox, command, env=env, cwd=cwd, sudo=sudo)
-
-    client = await PTYClient.connect(build_ws_url(sandbox, conn_info))
-    try:
-        await _run_interactive_loop(client, cmd)
-    finally:
-        await client.close()
+    async with await sandbox.open_pty(command, env=env, cwd=cwd, sudo=sudo) as session:
+        await _run_interactive_loop(session)
 
 
-async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
+async def _run_interactive_loop(session: AsyncPTYSession) -> None:
     """Main interactive loop - forward stdin/stdout between terminal and sandbox.
 
     Args:
-        client: Connected PTY client.
-        cmd: The PTY server command handle.
+        session: Connected PTY session.
     """
     # Get initial terminal size
     try:
@@ -85,8 +67,8 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
         cols, rows = 80, 24
 
     # Send ready and initial resize
-    await client.send_ready()
-    await client.send_resize(cols, rows)
+    await session.ready()
+    await session.resize(cols, rows)
 
     # Save terminal settings
     stdin_fd = sys.stdin.fileno()
@@ -107,7 +89,7 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
             try:
                 new_cols, new_rows = os.get_terminal_size()
                 loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(client.send_resize(new_cols, new_rows))
+                    lambda: asyncio.create_task(session.resize(new_cols, new_rows))
                 )
             except OSError:
                 pass
@@ -115,8 +97,8 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
         signal.signal(signal.SIGWINCH, on_resize)
 
         # Create tasks for stdin and stdout forwarding
-        stdin_task = asyncio.create_task(_forward_stdin(client, stop_event, loop))
-        stdout_task = asyncio.create_task(_forward_stdout(client))
+        stdin_task = asyncio.create_task(_forward_stdin(session, stop_event, loop))
+        stdout_task = asyncio.create_task(_forward_stdout(session))
 
         # Wait for either to complete (connection closed or error)
         done, pending = await asyncio.wait(
@@ -141,14 +123,16 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
 
 
 async def _forward_stdin(
-    client: PTYClient, stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop
+    session: AsyncPTYSession,
+    stop_event: asyncio.Event,
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
     """Forward local stdin to the PTY client.
 
     Uses asyncio's add_reader for efficient non-blocking I/O instead of polling.
 
     Args:
-        client: Connected PTY client.
+        session: Connected PTY session.
         stop_event: Event that signals when to stop.
         loop: The event loop for registering the reader.
     """
@@ -160,7 +144,7 @@ async def _forward_stdin(
 
     loop.add_reader(stdin_fd, on_stdin_ready)
     try:
-        while not stop_event.is_set() and client.is_open:
+        while not stop_event.is_set() and session.client.is_open:
             # Wait for stdin data or stop signal
             wait_task = asyncio.create_task(data_ready.wait())
             stop_task = asyncio.create_task(stop_event.wait())
@@ -185,7 +169,7 @@ async def _forward_stdin(
             try:
                 data = os.read(stdin_fd, 4096)
                 if data:
-                    await client.send_input_bytes(data)
+                    await session.write_bytes(data)
                 else:
                     # EOF on stdin
                     break
@@ -195,14 +179,14 @@ async def _forward_stdin(
         loop.remove_reader(stdin_fd)
 
 
-async def _forward_stdout(client: PTYClient) -> None:
+async def _forward_stdout(session: AsyncPTYSession) -> None:
     """Forward PTY output to local stdout.
 
     Args:
-        client: Connected PTY client.
+        session: Connected PTY session.
     """
     try:
-        async for data in client.raw_messages():
+        async for data in session.iter_output():
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
     except websockets.ConnectionClosed:

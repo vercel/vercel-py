@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 
 from vercel._internal.sandbox.pty_session import AsyncPTYSession, PTYClientFactory
 from vercel.sandbox import AsyncSandbox
 from vercel.sandbox.pty import AsyncPTYSession as PublicAsyncPTYSession
+from vercel.sandbox.pty.shell import _run_interactive_loop, start_interactive_shell
 
 
 @dataclass
@@ -54,6 +56,40 @@ class FakePTYClient:
 
     async def close(self) -> None:
         self.closed = True
+
+    @property
+    def is_open(self) -> bool:
+        return not self.closed
+
+
+class FakeShellSession:
+    def __init__(self, *, output: list[bytes] | None = None, is_open: bool = True) -> None:
+        self.client = SimpleNamespace(is_open=is_open)
+        self.output = output or []
+        self.calls: list[tuple] = []
+        self.closed = False
+
+    async def ready(self) -> None:
+        self.calls.append(("ready",))
+
+    async def resize(self, cols: int, rows: int) -> None:
+        self.calls.append(("resize", cols, rows))
+
+    async def write_bytes(self, data: bytes) -> None:
+        self.calls.append(("write_bytes", data))
+
+    async def iter_output(self):
+        for chunk in self.output:
+            yield chunk
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def __aenter__(self) -> FakeShellSession:
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
 
 
 class FakeSandbox:
@@ -254,3 +290,65 @@ async def test_async_sandbox_open_pty_delegates_to_session(monkeypatch) -> None:
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_interactive_shell_delegates_via_open_pty(monkeypatch) -> None:
+    sandbox = FakeSandbox()
+    session = FakeShellSession()
+    recorded: list[tuple] = []
+
+    async def fake_open_pty(command, **kwargs):
+        recorded.append((command, kwargs))
+        return session
+
+    async def fake_loop(bound_session):
+        assert bound_session is session
+
+    monkeypatch.setattr(sandbox, "open_pty", fake_open_pty, raising=False)
+    monkeypatch.setattr("vercel.sandbox.pty.shell._run_interactive_loop", fake_loop)
+
+    await start_interactive_shell(
+        cast(AsyncSandbox, sandbox),
+        ["/bin/sh"],
+        env={"FOO": "bar"},
+        cwd="/workspace",
+        sudo=True,
+    )
+
+    assert recorded == [(["/bin/sh"], {"env": {"FOO": "bar"}, "cwd": "/workspace", "sudo": True})]
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_interactive_loop_uses_session_surface(monkeypatch) -> None:
+    session = FakeShellSession(output=[b"hello from pty"], is_open=False)
+    stdin = SimpleNamespace(fileno=lambda: 0)
+    stdout_buffer = SimpleNamespace(write=Mock(), flush=Mock())
+    stdout = SimpleNamespace(buffer=stdout_buffer)
+    signal_calls: list[tuple] = []
+
+    monkeypatch.setattr("vercel.sandbox.pty.shell.sys.stdin", stdin)
+    monkeypatch.setattr("vercel.sandbox.pty.shell.sys.stdout", stdout)
+    monkeypatch.setattr("vercel.sandbox.pty.shell.os.get_terminal_size", lambda: (120, 40))
+    monkeypatch.setattr("vercel.sandbox.pty.shell.termios.tcgetattr", lambda fd: "saved-settings")
+    monkeypatch.setattr("vercel.sandbox.pty.shell.termios.tcsetattr", Mock())
+    monkeypatch.setattr("vercel.sandbox.pty.shell.tty.setraw", Mock())
+    monkeypatch.setattr("vercel.sandbox.pty.shell.os.read", lambda fd, size: b"")
+
+    def fake_signal(sig, handler):
+        signal_calls.append((sig, handler))
+        return None
+
+    monkeypatch.setattr("vercel.sandbox.pty.shell.signal.signal", fake_signal)
+
+    await _run_interactive_loop(cast(AsyncPTYSession, session))
+
+    assert session.calls[:2] == [("ready",), ("resize", 120, 40)]
+    assert stdout_buffer.write.call_args_list == [((b"hello from pty",),)]
+    assert stdout_buffer.flush.call_count == 1
+    assert signal_calls[0][1] is not None
+    assert signal_calls[-1] == (
+        signal_calls[0][0],
+        start_interactive_shell.__globals__["signal"].SIG_DFL,
+    )

@@ -98,12 +98,10 @@ async def test():
     This tests the PTY infrastructure without taking over the terminal:
     1. Creates sandbox with interactive=True
     2. Verifies interactive port is allocated
-    3. Sets up sandbox environment (installs PTY server)
-    4. Connects to WebSocket and runs a command
+    3. Opens a low-level AsyncPTYSession
+    4. Runs a command through the shared PTY session API
     5. Verifies output is received
     """
-    from vercel.sandbox.pty.client import PTYClient
-    from vercel.sandbox.pty.shell import setup_sandbox_environment, start_pty_server
 
     print("=" * 60)
     print("Interactive Shell CI Test (non-interactive)")
@@ -125,56 +123,35 @@ async def test():
         print("   ✅ Interactive port allocated")
         print()
 
-        print("2. Setting up sandbox environment (installing PTY server)...")
-        await setup_sandbox_environment(sandbox)
-        print("   ✅ PTY server installed")
-        print()
-
-        print("3. Starting PTY server with bash...")
-        # Use bash with a command that outputs, waits, then exits
-        # This gives us time to connect and read output
-        cmd, conn_info = await start_pty_server(
-            sandbox,
+        print("2. Opening low-level PTY session...")
+        session = await sandbox.open_pty(
             ["bash", "-c", "echo 'PTY_TEST_OUTPUT'; sleep 2; echo 'DONE'"],
         )
-        print(f"   Process ID: {conn_info['processId']}")
-        print(f"   Token: {conn_info['token'][:20]}...")
-        print("   ✅ PTY server started")
+        print(f"   Process ID: {session.process_id}")
+        print(f"   Server process ID: {session.server_process_id}")
+        print("   ✅ PTY session opened")
         print()
-
-        print("4. Connecting to WebSocket...")
-        host = sandbox.domain(sandbox.interactive_port)
-        host = host.replace("https://", "").replace("http://", "")
-        ws_url = (
-            f"wss://{host}/ws/client?token={conn_info['token']}&processId={conn_info['processId']}"
-        )
-
-        # Small delay to ensure server is ready
-        await asyncio.sleep(0.5)
-
-        client = await PTYClient.connect(ws_url)
-        print("   ✅ WebSocket connected")
-        print()
-
-        print("5. Sending ready signal and receiving output...")
-        await client.send_ready()
-        await client.send_resize(80, 24)
-
-        # Collect output with timeout. asyncio.timeout() is only available in 3.11+.
-        async def collect_output() -> bytes:
-            output = b""
-            async for data in client.raw_messages():
-                output += data
-                if b"PTY_TEST_OUTPUT" in output:
-                    break
-            return output
 
         try:
-            output = await asyncio.wait_for(collect_output(), timeout=5)
-        except asyncio.TimeoutError:
-            output = b""
+            print("3. Sending ready signal and receiving output...")
+            await session.ready()
+            await session.resize(80, 24)
 
-        await client.close()
+            # Collect output with timeout. asyncio.timeout() is only available in 3.11+.
+            async def collect_output() -> bytes:
+                output = b""
+                async for data in session.iter_output():
+                    output += data
+                    if b"PTY_TEST_OUTPUT" in output:
+                        break
+                return output
+
+            try:
+                output = await asyncio.wait_for(collect_output(), timeout=5)
+            except asyncio.TimeoutError:
+                output = b""
+        finally:
+            await session.close()
 
         # Verify output
         output_str = output.decode("utf-8", errors="replace")

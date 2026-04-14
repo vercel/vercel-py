@@ -494,9 +494,12 @@ class AsyncSandbox:
         """Start an interactive shell session.
 
         This takes over the terminal and provides a full interactive experience,
-        forwarding stdin/stdout between the local terminal and the remote sandbox.
+        forwarding stdin/stdout between the local terminal and a remote
+        ``AsyncPTYSession`` managed by this sandbox.
 
-        Requires the sandbox to be created with interactive=True.
+        Requires the sandbox to be created with ``interactive=True``. For
+        low-level PTY lifecycle control without terminal takeover, use
+        ``open_pty()`` instead.
 
         Args:
             command: Command to execute (default: ["/bin/bash"]).
@@ -537,7 +540,7 @@ class AsyncSandbox:
 
         Returns:
             An ``AsyncPTYSession`` that owns the remote PTY process and
-            websocket tunnel lifecycle.
+            websocket tunnel lifecycle without taking over local terminal I/O.
         """
         return await AsyncPTYSession.open(
             self,
