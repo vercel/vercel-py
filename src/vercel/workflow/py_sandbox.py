@@ -44,7 +44,7 @@ class _ModulePolicy:
     allowed: frozenset[str] | None = None
     allow_if: Callable[[str], bool] | None = None
 
-    def post_exec(self, *, proxy: _ProxyModule, module: types.ModuleType, random_seed: str) -> None:
+    def post_exec(self, *, proxy: _ProxyModule, module: types.ModuleType) -> None:
         pass
 
     def resolve_attr(self, name: str, real: types.ModuleType) -> Any:
@@ -534,13 +534,11 @@ class _SandboxFinder(MetaPathFinder):
         passthrough: set[str],
         restrictions: dict[str, _ModulePolicy] | None = None,
         blocked: set[str] | None = None,
-        random_seed: str,
     ) -> None:
         self._host = host_modules
         self._passthrough = passthrough
         self._restrictions = restrictions or {}
         self._blocked = blocked or set()
-        self._random_seed = random_seed
 
     def _is_passthrough(self, name: str) -> bool:
         for prefix in self._passthrough:
@@ -571,7 +569,8 @@ class _SandboxFinder(MetaPathFinder):
             if fullname in self._host and self._is_passthrough(fullname):
                 proxy = _ProxyModule(self._host[fullname], policy)
                 policy.post_exec(
-                    proxy=proxy, module=self._host[fullname], random_seed=self._random_seed
+                    proxy=proxy,
+                    module=self._host[fullname],
                 )
                 return spec_from_loader(fullname, _PreloadedLoader(proxy), origin="sandbox")
             real_spec = self._find_real_spec(fullname, path, target)
@@ -580,7 +579,8 @@ class _SandboxFinder(MetaPathFinder):
             return ModuleSpec(
                 fullname,
                 _RestrictedLoader(
-                    real_spec, self._restrictions[fullname], random_seed=self._random_seed
+                    real_spec,
+                    self._restrictions[fullname],
                 ),
                 origin=real_spec.origin,
                 is_package=real_spec.submodule_search_locations is not None,
@@ -610,10 +610,9 @@ class _SandboxFinder(MetaPathFinder):
 
 
 class _RestrictedLoader(Loader):
-    def __init__(self, real_spec: ModuleSpec, policy: _ModulePolicy, *, random_seed: str) -> None:
+    def __init__(self, real_spec: ModuleSpec, policy: _ModulePolicy) -> None:
         self._real_spec = real_spec
         self._policy = policy
-        self._random_seed = random_seed
 
     def create_module(self, spec: ModuleSpec) -> types.ModuleType | None:
         loader = self._real_spec.loader
@@ -626,7 +625,7 @@ class _RestrictedLoader(Loader):
         if loader is not None:
             loader.exec_module(module)
         proxy = sys.modules[module.__name__] = _ProxyModule(module, self._policy)
-        self._policy.post_exec(proxy=proxy, module=module, random_seed=self._random_seed)
+        self._policy.post_exec(proxy=proxy, module=module)
 
 
 class _PreloadedLoader(Loader):
@@ -691,7 +690,7 @@ _sandbox_refcount: int = 0
 
 
 @contextmanager
-def _sandbox_modules(random_seed: str) -> Iterator[None]:
+def _sandbox_modules() -> Iterator[None]:
     """Ref-counted sys.modules patch.
 
     The first caller patches sys.modules with proxy modules and installs
@@ -730,7 +729,6 @@ def _sandbox_modules(random_seed: str) -> Iterator[None]:
         passthrough=_PASSTHROUGHS,
         restrictions=module_restrictions,
         blocked=_BLOCKED,
-        random_seed=random_seed,
     )
 
     with _sandbox_linecache():
@@ -759,7 +757,7 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
     if not isinstance(random_seed, str):
         raise TypeError("random_seed must be a str")
 
-    with _sandbox_modules(random_seed):
+    with _sandbox_modules():
         sandbox_token = _in_sandbox.set(True)
         random_token = _sandbox_random.set(random.Random(random_seed))
         try:
@@ -767,3 +765,7 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
         finally:
             _sandbox_random.reset(random_token)
             _in_sandbox.reset(sandbox_token)
+
+
+def in_sandbox() -> bool:
+    return _in_sandbox.get()
