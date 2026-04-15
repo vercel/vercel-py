@@ -184,6 +184,28 @@ class TestGetCredentials:
         assert creds.project_id == "prj_oidc_embedded"
         assert creds.team_id == "team_oidc_embedded"
 
+    def test_get_credentials_from_oidc_header_context(self, mock_env_clear):
+        """Test getting credentials from OIDC token in request header context."""
+        from vercel.cache.context import set_headers
+        from vercel.oidc import get_credentials
+
+        payload = {
+            "project_id": "prj_from_header",
+            "owner_id": "team_from_header",
+            "exp": 9999999999,
+        }
+        payload_json = json.dumps(payload)
+        payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
+        oidc_token = f"header.{payload_b64}.signature"
+
+        set_headers({"x-vercel-oidc-token": oidc_token})
+
+        creds = get_credentials()
+
+        assert creds.token == oidc_token
+        assert creds.project_id == "prj_from_header"
+        assert creds.team_id == "team_from_header"
+
     def test_get_credentials_oidc_with_env_project_team(self, mock_env_clear, monkeypatch):
         """Test OIDC token with project/team from env vars."""
         from vercel.oidc import get_credentials

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from .token import decode_oidc_payload
+from .token import VercelOidcTokenError, decode_oidc_payload, get_vercel_oidc_token_from_context
 from .types import Credentials
 
 
@@ -15,7 +15,13 @@ def get_credentials(
     if token and project_id and team_id:
         return Credentials(token=token, project_id=project_id, team_id=team_id)
 
-    oidc = os.getenv("VERCEL_OIDC_TOKEN")
+    # Resolve OIDC token from request headers (set by the runtime) or env var.
+    oidc: str | None = None
+    try:
+        oidc = get_vercel_oidc_token_from_context()
+    except VercelOidcTokenError:
+        pass
+
     if oidc:
         project = os.getenv("VERCEL_PROJECT_ID")
         team = os.getenv("VERCEL_TEAM_ID")
@@ -29,7 +35,7 @@ def get_credentials(
         if project and team:
             return Credentials(token=oidc, project_id=project, team_id=team)
         raise RuntimeError(
-            "VERCEL_OIDC_TOKEN present but could not determine VERCEL_PROJECT_ID and VERCEL_TEAM_ID"
+            "OIDC token present but could not determine VERCEL_PROJECT_ID and VERCEL_TEAM_ID"
         )
 
     token = token or os.getenv("VERCEL_TOKEN")
@@ -40,6 +46,7 @@ def get_credentials(
         return Credentials(token=token, project_id=project_id, team_id=team_id)
 
     raise RuntimeError(
-        "Missing credentials. Provide VERCEL_OIDC_TOKEN with VERCEL_PROJECT_ID "
-        "and VERCEL_TEAM_ID, or VERCEL_TOKEN, VERCEL_PROJECT_ID, VERCEL_TEAM_ID."
+        "Missing credentials. "
+        "For local development, run 'vercel link && vercel env pull'. "
+        "Otherwise, set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID."
     )
