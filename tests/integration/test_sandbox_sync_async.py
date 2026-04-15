@@ -3209,6 +3209,49 @@ class TestSandboxStop:
         sandbox.client.close()
 
     @respx.mock
+    def test_stop_sync_blocking_accepts_timedelta(self, mock_env_clear, mock_sandbox_get_response):
+        """Test blocking sync stop accepts timedelta inputs."""
+        from vercel.sandbox import Sandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+        stopped_response = {
+            **mock_sandbox_get_response,
+            "status": "stopped",
+            "stoppedAt": mock_sandbox_get_response["updatedAt"] + 1,
+        }
+
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopped_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.stop(
+            blocking=True,
+            timeout=timedelta(milliseconds=50),
+            poll_interval=timedelta(milliseconds=10),
+        )
+
+        assert stop_route.called
+        assert sandbox.status == "stopped"
+        assert get_route.call_count == 3
+
+        sandbox.client.close()
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_stop_async_blocking_polls_until_stopped(
         self, mock_env_clear, mock_sandbox_get_response
@@ -3326,6 +3369,52 @@ class TestSandboxStop:
         assert stop_route.called
         assert sandbox.status == "stopped"
         assert get_route.call_count == 2
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_stop_async_blocking_accepts_timedelta(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test blocking async stop accepts timedelta inputs."""
+        from vercel.sandbox import AsyncSandbox
+
+        sandbox_id = "sbx_test123456"
+        stopping_response = {**mock_sandbox_get_response, "status": "stopping"}
+        stopped_response = {
+            **mock_sandbox_get_response,
+            "status": "stopped",
+            "stoppedAt": mock_sandbox_get_response["updatedAt"] + 1,
+        }
+
+        get_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(200, json={"sandbox": mock_sandbox_get_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopping_response, "routes": []}),
+                httpx.Response(200, json={"sandbox": stopped_response, "routes": []}),
+            ]
+        )
+        stop_route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}/stop").mock(
+            return_value=httpx.Response(200, json={"sandbox": stopping_response})
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        await sandbox.stop(
+            blocking=True,
+            timeout=timedelta(milliseconds=50),
+            poll_interval=timedelta(milliseconds=10),
+        )
+
+        assert stop_route.called
+        assert sandbox.status == "stopped"
+        assert get_route.call_count == 3
 
         await sandbox.client.aclose()
 
@@ -4185,6 +4274,47 @@ class TestSandboxWaitForStatus:
         sandbox.client.close()
 
     @respx.mock
+    def test_wait_for_status_accepts_timedelta(self, mock_env_clear, mock_sandbox_get_response):
+        """Test wait_for_status accepts timedelta inputs."""
+        from vercel.sandbox import Sandbox, SandboxStatus
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": mock_sandbox_get_response, "routes": []},
+                ),
+            ]
+        )
+
+        sandbox = Sandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        sandbox.wait_for_status(
+            SandboxStatus.RUNNING,
+            timeout=timedelta(milliseconds=50),
+            poll_interval=timedelta(milliseconds=10),
+        )
+        assert sandbox.status is SandboxStatus.RUNNING
+
+        sandbox.client.close()
+
+    @respx.mock
     def test_wait_for_status_timeout(self, mock_env_clear, mock_sandbox_get_response):
         """Test wait_for_status raises TimeoutError."""
         from vercel.sandbox import Sandbox
@@ -4338,6 +4468,50 @@ class TestSandboxWaitForStatus:
 
         with pytest.raises(TimeoutError, match="did not reach 'running' status"):
             await sandbox.wait_for_status("running", timeout=0.05, poll_interval=0.01)
+
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_wait_for_status_async_accepts_timedelta(
+        self, mock_env_clear, mock_sandbox_get_response
+    ):
+        """Test async wait_for_status accepts timedelta inputs."""
+        from vercel.sandbox import AsyncSandbox, SandboxStatus
+
+        sandbox_id = "sbx_test123456"
+        pending_response = {**mock_sandbox_get_response, "status": "pending"}
+
+        respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/{sandbox_id}").mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": pending_response, "routes": []},
+                ),
+                httpx.Response(
+                    200,
+                    json={"sandbox": mock_sandbox_get_response, "routes": []},
+                ),
+            ]
+        )
+
+        sandbox = await AsyncSandbox.get(
+            sandbox_id=sandbox_id,
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+        )
+
+        await sandbox.wait_for_status(
+            SandboxStatus.RUNNING,
+            timeout=timedelta(milliseconds=50),
+            poll_interval=timedelta(milliseconds=10),
+        )
+        assert sandbox.status is SandboxStatus.RUNNING
 
         await sandbox.client.aclose()
 

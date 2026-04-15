@@ -63,7 +63,7 @@ from vercel._internal.sandbox.models import (
     WriteFile,
 )
 from vercel._internal.sandbox.snapshot import SnapshotExpiration
-from vercel._internal.sandbox.time import normalize_duration_ms
+from vercel._internal.sandbox.time import to_ms_int
 
 try:
     VERSION = _pkg_version("vercel")
@@ -502,13 +502,11 @@ class BaseSandboxOpsClient:
             body=JSONBody({"signal": signal}),
         )
 
-    async def extend_timeout(
-        self, *, sandbox_id: str, duration: int | timedelta
-    ) -> SandboxResponse:
+    async def extend_timeout(self, *, sandbox_id: str, duration: timedelta) -> SandboxResponse:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/extend-timeout",
-            body=JSONBody({"duration": normalize_duration_ms(duration)}),
+            body=JSONBody({"duration": to_ms_int(duration)}),
         )
         return SandboxResponse.model_validate(data)
 

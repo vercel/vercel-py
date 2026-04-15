@@ -1,26 +1,41 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Final
 
-from vercel._internal.sandbox.time import normalize_duration_ms
+from vercel._internal.sandbox.time import MILLISECOND, coerce_duration, to_ms_int
 
-MIN_SNAPSHOT_EXPIRATION_MS: Final[int] = 86_400_000
+MIN_SNAPSHOT_EXPIRATION = timedelta(milliseconds=86_400_000)
+_ZERO_DELTA = timedelta(seconds=0)
 
 
-class SnapshotExpiration(int):
+@dataclass(eq=False)
+class SnapshotExpiration:
+    _td: timedelta
     """Snapshot expiration in milliseconds.
 
     Valid values are ``0`` for no expiration or any value greater than or equal
     to ``86_400_000`` (24 hours).
     """
 
-    def __new__(cls, value: int | timedelta) -> SnapshotExpiration:
-        normalized_value = normalize_duration_ms(value)
-        if normalized_value is None:
-            raise TypeError("Snapshot expiration cannot be None")
-        if normalized_value != 0 and normalized_value < MIN_SNAPSHOT_EXPIRATION_MS:
+    def __init__(self, value: int | timedelta):
+        normalized_delta = coerce_duration(value, MILLISECOND)
+        if normalized_delta != _ZERO_DELTA and normalized_delta < MIN_SNAPSHOT_EXPIRATION:
             raise ValueError(
                 "Snapshot expiration must be 0 for no expiration or >= 86400000 milliseconds"
             )
-        return int.__new__(cls, normalized_value)
+        self._td = normalized_delta
+
+    def __int__(self) -> int:
+        return to_ms_int(self._td)
+
+    def __eq__(self, other: object) -> bool:
+        match other:
+            case SnapshotExpiration():
+                return int(self) == int(other)
+            case int() if not isinstance(other, bool):
+                return int(self) == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(int(self))
