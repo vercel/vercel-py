@@ -6,6 +6,9 @@ from pathlib import Path
 
 import httpx
 
+from .constants import PTY_BINARY_DOWNLOAD_TIMEOUT
+from .time import to_seconds_float
+
 BINARY_BASE_URL = "https://pty-tunnel.labs.vercel.dev"
 
 CACHE_DIR = Path.home() / ".cache" / "vercel-sandbox"
@@ -34,7 +37,10 @@ def download_binary(arch: str | None = None, *, force: bool = False) -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     url = f"{BINARY_BASE_URL}/linux-{arch}"
-    with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+    with httpx.Client(
+        timeout=to_seconds_float(PTY_BINARY_DOWNLOAD_TIMEOUT),
+        follow_redirects=True,
+    ) as client:
         response = client.get(url)
         response.raise_for_status()
         cache_path.write_bytes(response.content)
@@ -59,7 +65,10 @@ async def download_binary_async(arch: str | None = None, *, force: bool = False)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     url = f"{BINARY_BASE_URL}/linux-{arch}"
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=to_seconds_float(PTY_BINARY_DOWNLOAD_TIMEOUT),
+        follow_redirects=True,
+    ) as client:
         response = await client.get(url)
         response.raise_for_status()
         cache_path.write_bytes(response.content)

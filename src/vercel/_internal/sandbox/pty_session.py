@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from .constants import DEFAULT_PTY_CONNECTION_TIMEOUT
 from .pty_binary import SERVER_BIN_NAME, get_binary_bytes_async
 from .time import SECOND, coerce_duration
 
@@ -60,7 +61,7 @@ async def setup_sandbox_environment(sandbox: AsyncSandbox) -> None:
 
 
 async def read_connection_info(
-    cmd: AsyncCommand, timeout: DurationSeconds = 30.0
+    cmd: AsyncCommand, timeout: DurationSeconds = DEFAULT_PTY_CONNECTION_TIMEOUT
 ) -> dict[str, Any]:
     """Read connection metadata JSON from the PTY server command output."""
     collected = ""
@@ -104,7 +105,7 @@ async def start_pty_server(
     sudo: bool = False,
     cols: int | None = None,
     rows: int | None = None,
-    connection_timeout: DurationSeconds = 30.0,
+    connection_timeout: DurationSeconds = DEFAULT_PTY_CONNECTION_TIMEOUT,
 ) -> tuple[AsyncCommand, dict[str, Any]]:
     """Start a PTY server command and return its command handle and metadata."""
     terminal_cols, terminal_rows = resolve_terminal_size(cols, rows)
@@ -172,7 +173,7 @@ class AsyncPTYSession:
         cols: int | None = None,
         rows: int | None = None,
         _client_factory: PTYClientFactory | None = None,
-        _connection_timeout: DurationSeconds = 30.0,
+        _connection_timeout: DurationSeconds = DEFAULT_PTY_CONNECTION_TIMEOUT,
     ) -> AsyncPTYSession:
         if sandbox.interactive_port is None:
             raise RuntimeError(

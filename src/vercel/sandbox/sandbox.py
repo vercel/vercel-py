@@ -10,6 +10,10 @@ from os import PathLike
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.sandbox.constants import (
+    DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
+    DEFAULT_SANDBOX_WAIT_TIMEOUT,
+)
 from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
@@ -31,7 +35,12 @@ from vercel._internal.sandbox.models import (
     parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
-from vercel._internal.sandbox.time import MILLISECOND, SECOND, coerce_duration, to_seconds_float
+from vercel._internal.sandbox.time import (
+    MILLISECOND,
+    SECOND,
+    coerce_duration,
+    to_seconds_float,
+)
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -283,8 +292,8 @@ class AsyncSandbox:
         self,
         status: SandboxStatus | str,
         *,
-        timeout: float | timedelta = 30.0,
-        poll_interval: float | timedelta = 0.5,
+        timeout: float | timedelta = DEFAULT_SANDBOX_WAIT_TIMEOUT,
+        poll_interval: float | timedelta = DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
@@ -420,8 +429,8 @@ class AsyncSandbox:
         self,
         *,
         blocking: bool = False,
-        timeout: float | timedelta = 30.0,
-        poll_interval: float | timedelta = 0.5,
+        timeout: float | timedelta = DEFAULT_SANDBOX_WAIT_TIMEOUT,
+        poll_interval: float | timedelta = DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
     ) -> None:
         """Stop this sandbox.
 
@@ -770,8 +779,8 @@ class Sandbox:
         self,
         status: SandboxStatus | str,
         *,
-        timeout: float | timedelta = 30.0,
-        poll_interval: float | timedelta = 0.5,
+        timeout: float | timedelta = DEFAULT_SANDBOX_WAIT_TIMEOUT,
+        poll_interval: float | timedelta = DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
     ) -> None:
         """Wait for this sandbox to reach the given status.
 
@@ -911,8 +920,8 @@ class Sandbox:
         self,
         *,
         blocking: bool = False,
-        timeout: float | timedelta = 30.0,
-        poll_interval: float | timedelta = 0.5,
+        timeout: float | timedelta = DEFAULT_SANDBOX_WAIT_TIMEOUT,
+        poll_interval: float | timedelta = DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
     ) -> None:
         """Stop this sandbox.
 
