@@ -4171,6 +4171,29 @@ class TestSandboxRefresh:
 class TestSandboxWaitForStatus:
     """Test sandbox wait_for_status operations."""
 
+    def test_wait_and_stop_share_named_public_duration_defaults(self):
+        from inspect import signature
+
+        from vercel._internal.sandbox.constants import (
+            DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
+            DEFAULT_SANDBOX_WAIT_TIMEOUT,
+        )
+        from vercel.sandbox import AsyncSandbox, Sandbox
+
+        async_wait = signature(AsyncSandbox.wait_for_status)
+        async_stop = signature(AsyncSandbox.stop)
+        sync_wait = signature(Sandbox.wait_for_status)
+        sync_stop = signature(Sandbox.stop)
+
+        assert async_wait.parameters["timeout"].default == DEFAULT_SANDBOX_WAIT_TIMEOUT
+        assert async_wait.parameters["poll_interval"].default == DEFAULT_SANDBOX_WAIT_POLL_INTERVAL
+        assert async_stop.parameters["timeout"].default == DEFAULT_SANDBOX_WAIT_TIMEOUT
+        assert async_stop.parameters["poll_interval"].default == DEFAULT_SANDBOX_WAIT_POLL_INTERVAL
+        assert sync_wait.parameters["timeout"].default == DEFAULT_SANDBOX_WAIT_TIMEOUT
+        assert sync_wait.parameters["poll_interval"].default == DEFAULT_SANDBOX_WAIT_POLL_INTERVAL
+        assert sync_stop.parameters["timeout"].default == DEFAULT_SANDBOX_WAIT_TIMEOUT
+        assert sync_stop.parameters["poll_interval"].default == DEFAULT_SANDBOX_WAIT_POLL_INTERVAL
+
     @respx.mock
     def test_wait_for_status_already_matched(self, mock_env_clear, mock_sandbox_get_response):
         """Test wait_for_status returns immediately if already at target status."""

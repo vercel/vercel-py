@@ -10,9 +10,8 @@ Prerequisites:
 - Or run from a Vercel Function with OIDC credentials
 
 Usage:
-    python examples/13_interactive_shell.py          # Interactive bash shell
-    python examples/13_interactive_shell.py --python # Interactive Python REPL
-    python examples/13_interactive_shell.py --test   # Non-interactive CI test
+    python examples/sandbox_13_interactive_shell.py          # Interactive bash shell
+    python examples/sandbox_13_interactive_shell.py --python # Interactive Python REPL
 
 Interactive mode will:
 1. Create a sandbox with interactive support enabled
@@ -22,6 +21,7 @@ Interactive mode will:
 """
 
 import asyncio
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -92,129 +92,22 @@ async def python_repl_example():
         print("Done!")
 
 
-async def test():
-    """Non-interactive test for CI environments.
-
-    This tests the PTY infrastructure without taking over the terminal:
-    1. Creates sandbox with interactive=True
-    2. Verifies interactive port is allocated
-    3. Sets up sandbox environment (installs PTY server)
-    4. Connects to WebSocket and runs a command
-    5. Verifies output is received
-    """
-    from vercel.sandbox.pty.client import PTYClient
-    from vercel.sandbox.pty.shell import setup_sandbox_environment, start_pty_server
-
-    print("=" * 60)
-    print("Interactive Shell CI Test (non-interactive)")
-    print("=" * 60)
-    print()
-
-    print("1. Creating sandbox with interactive=True...")
-    sandbox = await AsyncSandbox.create(
-        interactive=True,
-        timeout=120_000,  # 2 minutes
-    )
-
-    try:
-        print(f"   Sandbox ID: {sandbox.sandbox_id}")
-        print(f"   Interactive port: {sandbox.interactive_port}")
-
-        # Verify interactive port
-        assert sandbox.interactive_port is not None, "Interactive port should be set"
-        print("   ✅ Interactive port allocated")
-        print()
-
-        print("2. Setting up sandbox environment (installing PTY server)...")
-        await setup_sandbox_environment(sandbox)
-        print("   ✅ PTY server installed")
-        print()
-
-        print("3. Starting PTY server with bash...")
-        # Use bash with a command that outputs, waits, then exits
-        # This gives us time to connect and read output
-        cmd, conn_info = await start_pty_server(
-            sandbox,
-            ["bash", "-c", "echo 'PTY_TEST_OUTPUT'; sleep 2; echo 'DONE'"],
-        )
-        print(f"   Process ID: {conn_info['processId']}")
-        print(f"   Token: {conn_info['token'][:20]}...")
-        print("   ✅ PTY server started")
-        print()
-
-        print("4. Connecting to WebSocket...")
-        host = sandbox.domain(sandbox.interactive_port)
-        host = host.replace("https://", "").replace("http://", "")
-        ws_url = (
-            f"wss://{host}/ws/client?token={conn_info['token']}&processId={conn_info['processId']}"
-        )
-
-        # Small delay to ensure server is ready
-        await asyncio.sleep(0.5)
-
-        client = await PTYClient.connect(ws_url)
-        print("   ✅ WebSocket connected")
-        print()
-
-        print("5. Sending ready signal and receiving output...")
-        await client.send_ready()
-        await client.send_resize(80, 24)
-
-        # Collect output with timeout. asyncio.timeout() is only available in 3.11+.
-        async def collect_output() -> bytes:
-            output = b""
-            async for data in client.raw_messages():
-                output += data
-                if b"PTY_TEST_OUTPUT" in output:
-                    break
-            return output
-
-        try:
-            output = await asyncio.wait_for(collect_output(), timeout=5)
-        except asyncio.TimeoutError:
-            output = b""
-
-        await client.close()
-
-        # Verify output
-        output_str = output.decode("utf-8", errors="replace")
-        print(f"   Received {len(output)} bytes")
-
-        if "PTY_TEST_OUTPUT" in output_str:
-            print("   ✅ Expected output received!")
-        else:
-            print("   ⚠️  Output received but test string not found")
-            print(f"   Output preview: {repr(output_str[:200])}")
-
-        print()
-        print("=" * 60)
-        print("✅ All tests passed!")
-        print("=" * 60)
-
-    finally:
-        print()
-        print("Stopping sandbox...")
-        await sandbox.stop()
-        print("Done!")
-
-
 if __name__ == "__main__":
-    import os
-
-    # Auto-detect CI environment (no TTY or CI env var set)
-    is_ci = os.environ.get("CI") == "1" or not sys.stdin.isatty()
+    # This example is intentionally interactive; CI runs should skip it.
+    is_ci = os.environ.get("CI") == "1"
+    has_tty = sys.stdin.isatty() and sys.stdout.isatty()
 
     if len(sys.argv) > 1:
         if sys.argv[1] == "--python":
             asyncio.run(python_repl_example())
-        elif sys.argv[1] == "--test":
-            asyncio.run(test())
         else:
             print(f"Unknown flag: {sys.argv[1]}")
-            print("Usage: python 13_interactive_shell.py [--python|--test]")
+            print("Usage: python sandbox_13_interactive_shell.py [--python]")
             sys.exit(1)
-    elif is_ci:
-        # In CI, run non-interactive test automatically
-        asyncio.run(test())
+    elif is_ci or not has_tty:
+        reason = "CI environment detected" if is_ci else "no interactive TTY detected"
+        print(f"Skipping interactive shell example: {reason}.")
+        print("Run this example from a local terminal to exercise AsyncSandbox.shell().")
+        sys.exit(0)
     else:
         asyncio.run(main())

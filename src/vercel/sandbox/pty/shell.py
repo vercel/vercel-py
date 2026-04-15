@@ -1,18 +1,8 @@
-"""Interactive shell session management.
-
-This module provides the high-level orchestration for interactive shell
-sessions with Vercel Sandboxes. It handles:
-
-1. Setting up the sandbox environment (installing PTY server binary)
-2. Starting the PTY server in client mode
-3. Connecting via WebSocket
-4. Forwarding stdin/stdout between local terminal and remote sandbox
-"""
+"""Interactive shell session management."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import signal
 import sys
@@ -20,145 +10,10 @@ import termios
 import tty
 from typing import TYPE_CHECKING
 
-import websockets
-
-from .binary import SERVER_BIN_NAME, get_binary_bytes_async
-from .client import PTYClient
+from .session import AsyncPTYSession
 
 if TYPE_CHECKING:
-    from ..command import AsyncCommand
     from ..sandbox import AsyncSandbox
-
-
-async def setup_sandbox_environment(sandbox: AsyncSandbox) -> None:
-    """Install the PTY server binary in the sandbox if not present.
-
-    This downloads the Go PTY server binary and uploads it to the sandbox,
-    making it available for interactive shell sessions.
-
-    Args:
-        sandbox: The sandbox to set up.
-    """
-    # Check if already installed
-    result = await sandbox.run_command("command", ["-v", SERVER_BIN_NAME])
-    if result.exit_code == 0:
-        return
-
-    # Download binary for sandbox architecture (defaults to x86_64)
-    binary = await get_binary_bytes_async()
-
-    # Upload to sandbox
-    tmp_path = f"/tmp/{SERVER_BIN_NAME}-install"
-    await sandbox.write_files([{"path": tmp_path, "content": binary}])
-
-    # Move to /usr/local/bin and make executable
-    await sandbox.run_command(
-        "bash",
-        [
-            "-c",
-            f'mv "{tmp_path}" /usr/local/bin/{SERVER_BIN_NAME} && '
-            f"chmod +x /usr/local/bin/{SERVER_BIN_NAME}",
-        ],
-        sudo=True,
-    )
-
-
-async def start_pty_server(
-    sandbox: AsyncSandbox,
-    command: list[str],
-    *,
-    env: dict[str, str] | None = None,
-    cwd: str | None = None,
-    sudo: bool = False,
-) -> tuple[AsyncCommand, dict]:
-    """Start the PTY server in the sandbox and return connection info.
-
-    Args:
-        sandbox: The sandbox to run in.
-        command: Command to execute (e.g., ["python3"] or ["/bin/bash"]).
-        env: Additional environment variables.
-        cwd: Working directory.
-        sudo: Run with elevated privileges.
-
-    Returns:
-        Tuple of (command handle, connection info dict).
-        Connection info contains: port, token, processId, serverProcessId
-
-    Raises:
-        RuntimeError: If connection info cannot be parsed.
-    """
-    # Get terminal size
-    try:
-        cols, rows = os.get_terminal_size()
-    except OSError:
-        # Default size if not a terminal
-        cols, rows = 80, 24
-
-    # Start PTY server in client mode
-    cmd = await sandbox.run_command_detached(
-        SERVER_BIN_NAME,
-        [
-            f"--port={sandbox.interactive_port}",
-            "--mode=client",
-            f"--cols={cols}",
-            f"--rows={rows}",
-            *command,
-        ],
-        env={"TERM": "xterm-256color", **(env or {})},
-        cwd=cwd,
-        sudo=sudo,
-    )
-
-    # Read connection info from command stdout
-    connection_info = await _read_connection_info(cmd)
-
-    return cmd, connection_info
-
-
-async def _read_connection_info(cmd: AsyncCommand, timeout: float = 30.0) -> dict:
-    """Read connection info JSON from command stdout.
-
-    The PTY server outputs a JSON line with connection details:
-    {"port": N, "token": "...", "processId": N, "serverProcessId": N}
-
-    Args:
-        cmd: The command handle to read from.
-        timeout: Maximum time to wait for connection info.
-
-    Returns:
-        Parsed connection info dictionary.
-
-    Raises:
-        RuntimeError: If connection info is not received within timeout.
-    """
-    collected = ""
-
-    async def read_logs():
-        nonlocal collected
-        async for log in cmd.logs():
-            if log.stream == "stdout":
-                collected += log.data
-                # Try to parse as JSON
-                for line in collected.split("\n"):
-                    line = line.strip()
-                    if line.startswith("{") and line.endswith("}"):
-                        try:
-                            return json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-        return None
-
-    try:
-        result = await asyncio.wait_for(read_logs(), timeout=timeout)
-        if result:
-            return result
-    except TimeoutError:
-        pass
-
-    raise RuntimeError(
-        f"Failed to get connection info from PTY server within {timeout}s. "
-        f"Collected output: {collected[:500]}"
-    )
 
 
 async def start_interactive_shell(
@@ -192,34 +47,16 @@ async def start_interactive_shell(
 
     command = command or ["/bin/bash"]
 
-    # Setup sandbox environment (install PTY server if needed)
     print("Setting up interactive session...", file=sys.stderr)
-    await setup_sandbox_environment(sandbox)
-
-    # Start PTY server
-    print("Starting PTY server...", file=sys.stderr)
-    cmd, conn_info = await start_pty_server(sandbox, command, env=env, cwd=cwd, sudo=sudo)
-
-    # Build WebSocket URL
-    host = sandbox.domain(sandbox.interactive_port)
-    # Remove protocol prefix for WebSocket URL
-    host = host.replace("https://", "").replace("http://", "")
-    ws_url = f"wss://{host}/ws/client?token={conn_info['token']}&processId={conn_info['processId']}"
-
-    # Connect and run interactive loop
-    client = await PTYClient.connect(ws_url)
-    try:
-        await _run_interactive_loop(client, cmd)
-    finally:
-        await client.close()
+    async with await sandbox.open_pty(command, env=env, cwd=cwd, sudo=sudo) as session:
+        await _run_interactive_loop(session)
 
 
-async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
+async def _run_interactive_loop(session: AsyncPTYSession) -> None:
     """Main interactive loop - forward stdin/stdout between terminal and sandbox.
 
     Args:
-        client: Connected PTY client.
-        cmd: The PTY server command handle.
+        session: Connected PTY session.
     """
     # Get initial terminal size
     try:
@@ -228,8 +65,8 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
         cols, rows = 80, 24
 
     # Send ready and initial resize
-    await client.send_ready()
-    await client.send_resize(cols, rows)
+    await session.ready()
+    await session.resize(cols, rows)
 
     # Save terminal settings
     stdin_fd = sys.stdin.fileno()
@@ -250,7 +87,7 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
             try:
                 new_cols, new_rows = os.get_terminal_size()
                 loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(client.send_resize(new_cols, new_rows))
+                    lambda: asyncio.create_task(session.resize(new_cols, new_rows))
                 )
             except OSError:
                 pass
@@ -258,8 +95,8 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
         signal.signal(signal.SIGWINCH, on_resize)
 
         # Create tasks for stdin and stdout forwarding
-        stdin_task = asyncio.create_task(_forward_stdin(client, stop_event, loop))
-        stdout_task = asyncio.create_task(_forward_stdout(client))
+        stdin_task = asyncio.create_task(_forward_stdin(session, stop_event, loop))
+        stdout_task = asyncio.create_task(_forward_stdout(session))
 
         # Wait for either to complete (connection closed or error)
         done, pending = await asyncio.wait(
@@ -284,14 +121,16 @@ async def _run_interactive_loop(client: PTYClient, cmd: AsyncCommand) -> None:
 
 
 async def _forward_stdin(
-    client: PTYClient, stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop
+    session: AsyncPTYSession,
+    stop_event: asyncio.Event,
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
     """Forward local stdin to the PTY client.
 
     Uses asyncio's add_reader for efficient non-blocking I/O instead of polling.
 
     Args:
-        client: Connected PTY client.
+        session: Connected PTY session.
         stop_event: Event that signals when to stop.
         loop: The event loop for registering the reader.
     """
@@ -303,7 +142,7 @@ async def _forward_stdin(
 
     loop.add_reader(stdin_fd, on_stdin_ready)
     try:
-        while not stop_event.is_set() and client.is_open:
+        while not stop_event.is_set() and session.is_open:
             # Wait for stdin data or stop signal
             wait_task = asyncio.create_task(data_ready.wait())
             stop_task = asyncio.create_task(stop_event.wait())
@@ -328,7 +167,7 @@ async def _forward_stdin(
             try:
                 data = os.read(stdin_fd, 4096)
                 if data:
-                    await client.send_input_bytes(data)
+                    await session.stream.send(data)
                 else:
                     # EOF on stdin
                     break
@@ -338,16 +177,12 @@ async def _forward_stdin(
         loop.remove_reader(stdin_fd)
 
 
-async def _forward_stdout(client: PTYClient) -> None:
+async def _forward_stdout(session: AsyncPTYSession) -> None:
     """Forward PTY output to local stdout.
 
     Args:
-        client: Connected PTY client.
+        session: Connected PTY session.
     """
-    try:
-        async for data in client.raw_messages():
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-    except websockets.ConnectionClosed:
-        # Connection closing is expected when session ends
-        pass
+    async for data in session.stream:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()

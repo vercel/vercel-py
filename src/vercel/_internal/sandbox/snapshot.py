@@ -3,9 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 
-from vercel._internal.sandbox.time import MILLISECOND, coerce_duration, to_ms_int
+from vercel._internal.sandbox.constants import MIN_SNAPSHOT_EXPIRATION
+from vercel._internal.sandbox.time import (
+    MILLISECOND,
+    coerce_duration,
+    to_ms_int,
+)
 
-MIN_SNAPSHOT_EXPIRATION = timedelta(milliseconds=86_400_000)
 _ZERO_DELTA = timedelta(seconds=0)
 
 
