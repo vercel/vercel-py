@@ -400,9 +400,7 @@ class TestBlobPut:
 
         import asyncio
 
-        async_result = asyncio.get_event_loop().run_until_complete(
-            put_async("test.txt", b"data", token="test_token")
-        )
+        async_result = asyncio.run(put_async("test.txt", b"data", token="test_token"))
 
         assert sync_result.url == async_result.url
         assert sync_result.pathname == async_result.pathname
