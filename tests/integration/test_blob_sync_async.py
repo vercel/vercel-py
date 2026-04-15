@@ -388,7 +388,8 @@ class TestBlobPut:
         assert request.headers.get("x-cache-control-max-age") == "3600"
 
     @respx.mock
-    def test_put_sync_async_parity(self, mock_env_clear, mock_blob_put_response):
+    @pytest.mark.asyncio
+    async def test_put_sync_async_parity(self, mock_env_clear, mock_blob_put_response):
         """Verify sync and async produce identical results."""
         respx.put(BLOB_API_BASE).mock(return_value=httpx.Response(200, json=mock_blob_put_response))
 
@@ -398,9 +399,7 @@ class TestBlobPut:
         respx.reset()
         respx.put(BLOB_API_BASE).mock(return_value=httpx.Response(200, json=mock_blob_put_response))
 
-        import asyncio
-
-        async_result = asyncio.run(put_async("test.txt", b"data", token="test_token"))
+        async_result = await put_async("test.txt", b"data", token="test_token")
 
         assert sync_result.url == async_result.url
         assert sync_result.pathname == async_result.pathname
