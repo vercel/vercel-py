@@ -5,7 +5,13 @@ import tempfile
 
 from dotenv import load_dotenv
 
-from vercel.blob import AsyncBlobClient, BlobClient, BlobNotFoundError, UploadProgressEvent
+from vercel.blob import (
+    AsyncBlobClient,
+    BlobClient,
+    BlobNotFoundError,
+    HeadBlobResult,
+    UploadProgressEvent,
+)
 
 load_dotenv()
 
@@ -24,7 +30,7 @@ def on_download_progress(bytes_read: int, total: int | None) -> None:
 
 async def head_with_retry(
     client: AsyncBlobClient, url_or_path: str, *, attempts: int = 5, delay: float = 0.5
-):
+) -> HeadBlobResult:
     for attempt in range(1, attempts + 1):
         try:
             return await client.head(url_or_path)
@@ -73,7 +79,7 @@ async def main() -> None:
 
     # 4) Copy (async client)
     copied = await client.copy(
-        uploaded.pathname,
+        uploaded.url,
         f"{folder_prefix}/hello-copy.txt",
         access="public",
         overwrite=True,
