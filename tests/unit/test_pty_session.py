@@ -8,6 +8,7 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
+from anyio import EndOfStream
 
 from vercel._internal.sandbox.constants import DEFAULT_PTY_CONNECTION_TIMEOUT
 from vercel._internal.sandbox.pty_session import (
@@ -73,22 +74,15 @@ class FakePTYClient:
 class FakeShellSession:
     def __init__(self, *, output: list[bytes] | None = None, is_open: bool = True) -> None:
         self.is_open = is_open
-        self.output = output or []
         self.calls: list[tuple] = []
         self.closed = False
+        self.stream = FakeShellStream(self, output=output or [])
 
     async def ready(self) -> None:
         self.calls.append(("ready",))
 
     async def resize(self, cols: int, rows: int) -> None:
         self.calls.append(("resize", cols, rows))
-
-    async def write_bytes(self, data: bytes) -> None:
-        self.calls.append(("write_bytes", data))
-
-    async def iter_output(self):
-        for chunk in self.output:
-            yield chunk
 
     async def close(self) -> None:
         self.closed = True
@@ -98,6 +92,36 @@ class FakeShellSession:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.close()
+
+
+class FakeShellStream:
+    def __init__(self, session: FakeShellSession, *, output: list[bytes]) -> None:
+        self._session = session
+        self._output = output
+        self._index = 0
+
+    def __aiter__(self) -> FakeShellStream:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await self.receive()
+        except EndOfStream:
+            raise StopAsyncIteration from None
+
+    async def send(self, data: bytes) -> None:
+        self._session.calls.append(("stream_send", data))
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if self._index >= len(self._output):
+            raise EndOfStream
+
+        chunk = self._output[self._index]
+        self._index += 1
+        return chunk[:max_bytes]
+
+    async def aclose(self) -> None:
+        await self._session.close()
 
 
 class FakeSandbox:
@@ -174,7 +198,7 @@ async def test_open_requires_interactive_sandbox() -> None:
 @pytest.mark.asyncio
 async def test_open_installs_server_when_missing_and_streams_io(monkeypatch) -> None:
     sandbox = FakeSandbox(install_present=False)
-    client = FakePTYClient(output=[b"hello ", b"world"])
+    client = FakePTYClient(output=[b"hello world"])
 
     async def fake_binary_bytes() -> bytes:
         return b"pty-binary"
@@ -226,19 +250,21 @@ async def test_open_installs_server_when_missing_and_streams_io(monkeypatch) -> 
 
     await session.ready()
     await session.resize(100, 50)
-    await session.write("pwd\n")
-    await session.write_bytes(b"exit\n")
-    output = [chunk async for chunk in session.iter_output()]
+    await session.stream.send(b"pwd\n")
+    assert await session.stream.receive(5) == b"hello"
+    assert await session.stream.receive() == b" world"
+    with pytest.raises(EndOfStream):
+        await session.stream.receive()
+    await session.stream.send(b"exit\n")
 
-    assert output == [b"hello ", b"world"]
     assert client.calls == [
         ("ready",),
         ("resize", 100, 50),
-        ("write", "pwd\n"),
+        ("write_bytes", b"pwd\n"),
         ("write_bytes", b"exit\n"),
     ]
 
-    await session.close()
+    await session.stream.aclose()
 
     assert client.closed is True
     assert session.is_open is False

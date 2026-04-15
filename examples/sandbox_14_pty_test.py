@@ -33,7 +33,7 @@ async def collect_output_until(
 
     async def _collect() -> bytes:
         output = b""
-        async for data in session.iter_output():
+        async for data in session.stream:
             output += data
             if marker.encode() in output:
                 return output
@@ -83,8 +83,8 @@ async def main() -> int:
             print(initial_output_text.rstrip())
             print("-" * 60)
 
-            print("Writing a simple command through the PTY...")
-            await session.write(f"printf '{EXPECTED_OUTPUT}\\n'; pwd; exit\n")
+            print("Writing a simple command through the PTY stream...")
+            await session.stream.send(f"printf '{EXPECTED_OUTPUT}\\n'; pwd; exit\n".encode())
 
             try:
                 output = await collect_output_until(session, EXPECTED_OUTPUT)

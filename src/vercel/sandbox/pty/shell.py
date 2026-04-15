@@ -10,8 +10,6 @@ import termios
 import tty
 from typing import TYPE_CHECKING
 
-import websockets
-
 from .session import AsyncPTYSession
 
 if TYPE_CHECKING:
@@ -169,7 +167,7 @@ async def _forward_stdin(
             try:
                 data = os.read(stdin_fd, 4096)
                 if data:
-                    await session.write_bytes(data)
+                    await session.stream.send(data)
                 else:
                     # EOF on stdin
                     break
@@ -185,10 +183,6 @@ async def _forward_stdout(session: AsyncPTYSession) -> None:
     Args:
         session: Connected PTY session.
     """
-    try:
-        async for data in session.iter_output():
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-    except websockets.ConnectionClosed:
-        # Connection closing is expected when session ends
-        pass
+    async for data in session.stream:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()

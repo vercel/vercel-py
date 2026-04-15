@@ -550,6 +550,7 @@ class AsyncSandbox:
         Returns:
             An ``AsyncPTYSession`` that owns the remote PTY process and
             websocket tunnel lifecycle without taking over local terminal I/O.
+            Read and write PTY bytes through ``session.stream``.
         """
         return await AsyncPTYSession.open(
             self,

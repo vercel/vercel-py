@@ -5,10 +5,13 @@ import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from anyio import ClosedResourceError, EndOfStream
+from anyio.abc import ByteReceiveStream, ByteSendStream
+from anyio.streams.stapled import StapledByteStream
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from .constants import DEFAULT_PTY_CONNECTION_TIMEOUT
@@ -195,14 +198,68 @@ async def _connect_pty_client(url: str) -> PTYClient:
     return await PTYClient.connect(url)
 
 
+class _PTYReceiveStream(ByteReceiveStream):
+    def __init__(self, session: AsyncPTYSession) -> None:
+        self._session = session
+        self._messages: AsyncIterator[bytes] | None = None
+        self._buffer = b""
+        self._closed = False
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be at least 1")
+        if self._closed:
+            raise ClosedResourceError
+
+        while not self._buffer:
+            if self._messages is None:
+                self._messages = self._session.client.raw_messages()
+            try:
+                self._buffer = await anext(self._messages)
+            except StopAsyncIteration:
+                raise EndOfStream from None
+
+        data = self._buffer[:max_bytes]
+        self._buffer = self._buffer[max_bytes:]
+        return data
+
+    async def aclose(self) -> None:
+        self._closed = True
+        await self._session.close()
+
+
+class _PTYSendStream(ByteSendStream):
+    def __init__(self, session: AsyncPTYSession) -> None:
+        self._session = session
+        self._closed = False
+
+    async def send(self, item: bytes) -> None:
+        if self._closed:
+            raise ClosedResourceError
+        if not item:
+            return
+        await self._session.client.send_input_bytes(item)
+
+    async def aclose(self) -> None:
+        self._closed = True
+        await self._session.close()
+
+
 @dataclass
 class AsyncPTYSession:
     sandbox: AsyncSandbox
     command: AsyncCommand
     client: PTYClient
     connection_info: ConnectionInfo
+    stream: StapledByteStream = field(init=False)
 
     _closed: bool = False
+
+    def __post_init__(self) -> None:
+        self.stream = StapledByteStream(
+            send_stream=_PTYSendStream(self),
+            receive_stream=_PTYReceiveStream(self),
+        )
 
     @classmethod
     async def open(
@@ -280,16 +337,6 @@ class AsyncPTYSession:
 
     async def resize(self, cols: int, rows: int) -> None:
         await self.client.send_resize(cols, rows)
-
-    async def write(self, text: str) -> None:
-        await self.client.send_input(text)
-
-    async def write_bytes(self, data: bytes) -> None:
-        await self.client.send_input_bytes(data)
-
-    async def iter_output(self) -> AsyncIterator[bytes]:
-        async for data in self.client.raw_messages():
-            yield data
 
     async def close(self) -> None:
         if self._closed:
