@@ -35,7 +35,12 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
     ]
     for var in env_vars_to_clear:
         monkeypatch.delenv(var, raising=False)
+
+    from vercel.cache.context import set_headers
+
+    set_headers(None)
     yield
+    set_headers(None)
 
 
 @pytest.fixture
