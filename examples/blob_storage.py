@@ -1,10 +1,11 @@
 import asyncio
 import os
+import secrets
 import tempfile
 
 from dotenv import load_dotenv
 
-from vercel.blob import AsyncBlobClient, BlobClient, UploadProgressEvent
+from vercel.blob import AsyncBlobClient, BlobClient, BlobNotFoundError, UploadProgressEvent
 
 load_dotenv()
 
@@ -21,6 +22,19 @@ def on_download_progress(bytes_read: int, total: int | None) -> None:
         print(f"download: {bytes_read} bytes")
 
 
+async def head_with_retry(
+    client: AsyncBlobClient, url_or_path: str, *, attempts: int = 5, delay: float = 0.5
+):
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.head(url_or_path)
+        except BlobNotFoundError:
+            if attempt == attempts:
+                raise
+            await asyncio.sleep(delay * attempt)
+    raise AssertionError("unreachable")
+
+
 async def main() -> None:
     token = os.getenv("BLOB_READ_WRITE_TOKEN")
     assert token, "Set BLOB_READ_WRITE_TOKEN"
@@ -28,15 +42,16 @@ async def main() -> None:
     # Instantiate clients
     client = AsyncBlobClient(token)
     client_sync = BlobClient(token)
+    folder_prefix = f"examples/assets/{secrets.token_urlsafe(8)}"
 
     # 1) Create a folder entry (async client)
-    folder = await client.create_folder("examples/assets", overwrite=True)
+    folder = await client.create_folder(folder_prefix, overwrite=True)
     print("folder:", folder.pathname)
 
     # 2) Upload a text file via put() (async client)
     data = b"hello from python" * 1024
     uploaded = await client.put(
-        "examples/assets/hello.txt",
+        f"{folder_prefix}/hello.txt",
         data,
         access="public",
         content_type="text/plain",
@@ -46,10 +61,10 @@ async def main() -> None:
     print("uploaded (put):", uploaded.pathname)
 
     # 3) List and head (async client)
-    listing = await client.list_objects(prefix="examples/assets/", limit=5)
+    listing = await client.list_objects(prefix=f"{folder_prefix}/", limit=5)
     print("hasMore:", listing.has_more)
     for b in listing.blobs:
-        meta = await client.head(b.url)
+        meta = await head_with_retry(client, b.url)
         print(" -", b.pathname, b.size, meta.content_type)
 
     # 3b) Get object via get() (async client)
@@ -59,7 +74,7 @@ async def main() -> None:
     # 4) Copy (async client)
     copied = await client.copy(
         uploaded.pathname,
-        "examples/assets/hello-copy.txt",
+        f"{folder_prefix}/hello-copy.txt",
         access="public",
         overwrite=True,
     )
@@ -72,7 +87,7 @@ async def main() -> None:
         tmp_local_path = tmp.name
     uploaded_file = await client.upload_file(
         tmp_local_path,
-        "examples/assets/uploaded-from-file.txt",
+        f"{folder_prefix}/uploaded-from-file.txt",
         access="public",
         content_type="text/plain",
         add_random_suffix=True,
@@ -100,7 +115,8 @@ async def main() -> None:
         pass
 
     # 7) Demonstrate synchronous BlobClient: head + download + cleanup
-    meta_sync = client_sync.head(uploaded.url)
+    uploaded_meta = await head_with_retry(client, uploaded.url)
+    meta_sync = client_sync.head(uploaded_meta.url)
     print("sync head content_type:", meta_sync.content_type)
 
     sync_download_path = os.path.join(tempfile.gettempdir(), "downloaded-hello-sync.txt")
@@ -118,8 +134,8 @@ async def main() -> None:
         pass
 
     # Cleanup using sync client
-    client_sync.delete([uploaded.url, copied.url, uploaded_file.url])
-    print("deleted uploaded, copy, and file-upload objects (sync client)")
+    client_sync.delete([uploaded.url, copied.url, uploaded_file.url, folder.url])
+    print("deleted folder and uploaded objects (sync client)")
 
 
 if __name__ == "__main__":
