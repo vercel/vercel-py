@@ -296,6 +296,92 @@ async def test_read_connection_info_uses_shared_default_timeout(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_read_connection_info_ignores_stdout_noise_before_metadata() -> None:
+    cmd = FakeDetachedCommand(
+        [
+            FakeLog("stdout", "booting pty server\n"),
+            FakeLog(
+                "stderr",
+                '{"port": 1, "token": "wrong", "processId": 2, "serverProcessId": 3}\n',
+            ),
+            FakeLog("stdout", "still starting\n"),
+            FakeLog(
+                "stdout",
+                '{"port": 9999, "token": "test-token", "processId": 101, "serverProcessId": 202}\n',
+            ),
+            FakeLog("stdout", "trailing log\n"),
+        ]
+    )
+
+    connection_info = await read_connection_info(cast(AsyncCommand, cmd))
+
+    assert connection_info == {
+        "port": 9999,
+        "token": "test-token",
+        "processId": 101,
+        "serverProcessId": 202,
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_connection_info_accepts_partial_json_across_stdout_chunks() -> None:
+    cmd = FakeDetachedCommand(
+        [
+            FakeLog("stdout", '{"port": 9999, "token": "test-'),
+            FakeLog(
+                "stdout",
+                'token", "processId": 101, "serverProcessId": 202}\n',
+            ),
+        ]
+    )
+
+    connection_info = await read_connection_info(cast(AsyncCommand, cmd))
+
+    assert connection_info["token"] == "test-token"
+
+
+@pytest.mark.asyncio
+async def test_read_connection_info_ignores_malformed_and_wrong_shape_json() -> None:
+    cmd = FakeDetachedCommand(
+        [
+            FakeLog("stdout", '{"port": 9999, "token": }\n'),
+            FakeLog("stdout", '{"port": 9999, "token": "missing newline"'),
+            FakeLog("stdout", "}\n"),
+            FakeLog("stdout", '{"token": "missing-fields"}\n'),
+            FakeLog(
+                "stdout",
+                '{"port": 9999, "token": "test-token", "processId": 101, "serverProcessId": 202}\n',
+            ),
+        ]
+    )
+
+    connection_info = await read_connection_info(cast(AsyncCommand, cmd))
+
+    assert connection_info["serverProcessId"] == 202
+
+
+@pytest.mark.asyncio
+async def test_read_connection_info_times_out_with_bounded_output_excerpt() -> None:
+    repeated = "x" * 600
+    cmd = FakeDetachedCommand(
+        [
+            FakeLog("stdout", "starting\n"),
+            FakeLog("stdout", '{"token": "wrong-shape"}\n'),
+            FakeLog("stdout", repeated),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match=r"within 0\.01s") as exc_info:
+        await read_connection_info(cast(AsyncCommand, cmd), timeout=timedelta(milliseconds=10))
+
+    message = str(exc_info.value)
+    assert "starting" not in message
+    assert "wrong-shape" not in message
+    assert repeated[-100:] in message
+    assert len(message.split("Collected output: ", 1)[1]) <= 500
+
+
+@pytest.mark.asyncio
 async def test_open_cleans_up_detached_command_when_client_connection_fails(
     monkeypatch,
 ) -> None:

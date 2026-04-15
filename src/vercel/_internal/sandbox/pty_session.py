@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 DEFAULT_PTY_COLS = 80
 DEFAULT_PTY_ROWS = 24
+MAX_CONNECTION_INFO_OUTPUT_EXCERPT = 500
 DurationSeconds = int | float | timedelta
 
 
@@ -60,27 +61,66 @@ async def setup_sandbox_environment(sandbox: AsyncSandbox) -> None:
     )
 
 
+def _append_output_excerpt(excerpt: str, chunk: str) -> str:
+    combined = excerpt + chunk
+    if len(combined) <= MAX_CONNECTION_INFO_OUTPUT_EXCERPT:
+        return combined
+    return combined[-MAX_CONNECTION_INFO_OUTPUT_EXCERPT:]
+
+
+def _parse_connection_info_line(line: str) -> dict[str, Any] | None:
+    stripped = line.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return None
+
+    try:
+        candidate = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(candidate, dict):
+        return None
+
+    port = candidate.get("port")
+    token = candidate.get("token")
+    process_id = candidate.get("processId")
+    server_process_id = candidate.get("serverProcessId")
+
+    if not isinstance(port, int):
+        return None
+    if not isinstance(token, str):
+        return None
+    if not isinstance(process_id, int):
+        return None
+    if not isinstance(server_process_id, int):
+        return None
+
+    return candidate
+
+
 async def read_connection_info(
     cmd: AsyncCommand, timeout: DurationSeconds = DEFAULT_PTY_CONNECTION_TIMEOUT
 ) -> dict[str, Any]:
     """Read connection metadata JSON from the PTY server command output."""
-    collected = ""
+    collected_excerpt = ""
+    buffered_stdout = ""
     timeout_seconds = coerce_duration(timeout, SECOND).total_seconds()
 
     async def read_logs() -> dict[str, Any] | None:
-        nonlocal collected
+        nonlocal buffered_stdout, collected_excerpt
         async for log in cmd.logs():
             if log.stream != "stdout":
                 continue
-            collected += log.data
-            for line in collected.split("\n"):
-                line = line.strip()
-                if not (line.startswith("{") and line.endswith("}")):
-                    continue
-                try:
-                    return json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+
+            chunk = log.data
+            collected_excerpt = _append_output_excerpt(collected_excerpt, chunk)
+            buffered_stdout += chunk
+
+            while "\n" in buffered_stdout:
+                line, buffered_stdout = buffered_stdout.split("\n", 1)
+                connection_info = _parse_connection_info_line(line)
+                if connection_info is not None:
+                    return connection_info
         return None
 
     try:
@@ -92,7 +132,7 @@ async def read_connection_info(
 
     raise RuntimeError(
         f"Failed to get connection info from PTY server within {timeout_seconds}s. "
-        f"Collected output: {collected[:500]}"
+        f"Collected output: {collected_excerpt}"
     )
 
 
