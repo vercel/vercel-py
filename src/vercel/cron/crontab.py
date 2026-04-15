@@ -53,6 +53,14 @@ def _resolve(fn: Callable[..., Any]) -> None:
         raise CronTabError(f"Cannot register {name!r}: could not resolve {module_name}:{name}")
 
 
+def _make_schedule(schedule: str | CronSchedule | None, **kwargs: _Field) -> CronSchedule:
+    if schedule is not None:
+        if isinstance(schedule, str):
+            return CronSchedule.from_str(schedule)
+        return schedule
+    return CronSchedule(**kwargs)
+
+
 class CronTab:
     def __init__(self) -> None:
         self._jobs: list[tuple[Callable[..., Any], CronSchedule]] = []
@@ -72,28 +80,9 @@ class CronTab:
     ) -> Callable[[_F], _F]: ...
 
     def register(
-        self,
-        schedule: str | CronSchedule | None = None,
-        *,
-        minute: _Field = "*",
-        hour: _Field = "*",
-        day: _Field = "*",
-        month: _Field = "*",
-        day_of_week: _Field = "*",
+        self, schedule: str | CronSchedule | None = None, **kwargs: _Field
     ) -> Callable[[_F], _F]:
-        if schedule is not None:
-            if isinstance(schedule, str):
-                sched = CronSchedule.from_str(schedule)
-            else:
-                sched = schedule
-        else:
-            sched = CronSchedule(
-                minute=minute,
-                hour=hour,
-                day=day,
-                month=month,
-                day_of_week=day_of_week,
-            )
+        sched = _make_schedule(schedule, **kwargs)
 
         def decorator(fn: _F) -> _F:
             self._jobs.append((fn, sched))
@@ -109,3 +98,32 @@ class CronTab:
             name = fn.__name__
             result.append((f"{module}:{name}", str(sched)))
         return result
+
+
+@overload
+def cron(schedule: str | CronSchedule, /) -> Callable[[_F], _F]: ...
+
+
+@overload
+def cron(
+    *,
+    minute: _Field = "*",
+    hour: _Field = "*",
+    day: _Field = "*",
+    month: _Field = "*",
+    day_of_week: _Field = "*",
+) -> Callable[[_F], _F]: ...
+
+
+def cron(schedule: str | CronSchedule | None = None, **kwargs: _Field) -> Callable[[_F], _F]:
+    sched = _make_schedule(schedule, **kwargs)
+
+    def decorator(fn: _F) -> _F:
+        def get_crons() -> list[tuple[str, str]]:
+            _resolve(fn)
+            return [(f"{fn.__module__}:{fn.__name__}", str(sched))]
+
+        fn.get_crons = get_crons  # type: ignore[attr-defined]
+        return fn
+
+    return decorator
