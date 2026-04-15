@@ -30,14 +30,19 @@ async def collect_output_until(
     marker: str,
     *,
     timeout: float = 30.0,
+    require_full_line: bool = False,
 ) -> bytes:
     """Read PTY output until the expected marker appears."""
 
     async def _collect() -> bytes:
         output = b""
+        marker_bytes = marker.encode()
         async for data in session.stream:
             output += data
-            if marker.encode() in output:
+            if require_full_line:
+                if any(line.rstrip(b"\r") == marker_bytes for line in output.splitlines()):
+                    return output
+            elif marker_bytes in output:
                 return output
         return output
 
@@ -50,11 +55,17 @@ async def run_and_collect(
     marker: str,
     *,
     timeout: float = 30.0,
+    require_full_line: bool = False,
 ) -> bytes:
     """Send a command to the PTY and collect output until a marker appears."""
 
     await session.stream.send(command.encode())
-    return await collect_output_until(session, marker, timeout=timeout)
+    return await collect_output_until(
+        session,
+        marker,
+        timeout=timeout,
+        require_full_line=require_full_line,
+    )
 
 
 async def main() -> int:
@@ -104,6 +115,7 @@ async def main() -> int:
                     session,
                     f"printf '{READY_OUTPUT}\\n'\n",
                     READY_OUTPUT,
+                    require_full_line=True,
                 )
             except asyncio.TimeoutError:
                 print("Timed out waiting for PTY round-trip confirmation.")
@@ -123,6 +135,7 @@ async def main() -> int:
                     session,
                     f"printf '{EXPECTED_OUTPUT}\\n'; pwd; printf '{DONE_OUTPUT}\\n'; exit\n",
                     DONE_OUTPUT,
+                    require_full_line=True,
                 )
             except asyncio.TimeoutError:
                 print("Timed out waiting for PTY output.")
