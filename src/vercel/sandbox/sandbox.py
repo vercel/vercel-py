@@ -465,7 +465,15 @@ class AsyncSandbox:
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        normalized_expiration = None if expiration is None else SnapshotExpiration(expiration)
+        match expiration:
+            case None:
+                normalized_expiration = None
+            case int() | timedelta() if not isinstance(expiration, bool):
+                normalized_expiration = SnapshotExpiration(expiration)
+            case SnapshotExpiration():
+                normalized_expiration = expiration
+            case _:
+                raise TypeError("expiration must be an int, SnapshotExpiration, timedelta, or None")
         response = await self.client.create_snapshot(
             sandbox_id=self.sandbox.id,
             expiration=normalized_expiration,
@@ -910,7 +918,15 @@ class Sandbox:
 
         Note: this sandbox will be stopped as part of the snapshot creation process.
         """
-        normalized_expiration = None if expiration is None else SnapshotExpiration(expiration)
+        match expiration:
+            case None:
+                normalized_expiration = None
+            case int() | timedelta() if not isinstance(expiration, bool):
+                normalized_expiration = SnapshotExpiration(expiration)
+            case SnapshotExpiration():
+                normalized_expiration = expiration
+            case _:
+                raise TypeError("expiration must be an int, SnapshotExpiration, timedelta, or None")
         response = iter_coroutine(
             self.client.create_snapshot(
                 sandbox_id=self.sandbox.id,

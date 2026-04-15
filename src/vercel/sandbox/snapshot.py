@@ -10,13 +10,14 @@ from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
 from vercel._internal.sandbox.pagination import SnapshotListParams
 from vercel._internal.sandbox.snapshot import (
-    MIN_SNAPSHOT_EXPIRATION_MS as _MIN_SNAPSHOT_EXPIRATION_MS,
+    MIN_SNAPSHOT_EXPIRATION,
     SnapshotExpiration as _SnapshotExpiration,
 )
+from vercel._internal.sandbox.time import MILLISECOND
 
 from ..oidc import Credentials, get_credentials
 
-MIN_SNAPSHOT_EXPIRATION_MS = _MIN_SNAPSHOT_EXPIRATION_MS
+MIN_SNAPSHOT_EXPIRATION_MS = MIN_SNAPSHOT_EXPIRATION // MILLISECOND
 SnapshotExpiration = _SnapshotExpiration
 
 
