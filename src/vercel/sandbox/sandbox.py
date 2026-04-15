@@ -31,7 +31,7 @@ from vercel._internal.sandbox.models import (
     parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
-from vercel._internal.sandbox.time import SECOND, coerce_duration
+from vercel._internal.sandbox.time import MILLISECOND, SECOND, coerce_duration, to_seconds_float
 
 from ..oidc import Credentials, get_credentials
 from .command import (
@@ -299,8 +299,8 @@ class AsyncSandbox:
         import asyncio
 
         target_status = SandboxStatus(status)
-        normalized_timeout = coerce_duration(timeout, SECOND) / SECOND
-        normalized_poll_interval = coerce_duration(poll_interval, SECOND) / SECOND
+        normalized_timeout = to_seconds_float(coerce_duration(timeout, SECOND))
+        normalized_poll_interval = to_seconds_float(coerce_duration(poll_interval, SECOND))
         start = time.monotonic()
         while time.monotonic() - start < normalized_timeout:
             if self.status == target_status:
@@ -453,7 +453,8 @@ class AsyncSandbox:
             duration: The duration in milliseconds or as a ``timedelta`` to
                 extend the timeout by.
         """
-        response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
+        delta = coerce_duration(duration, MILLISECOND)
+        response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=delta)
         self.sandbox = response.sandbox
 
     async def snapshot(
@@ -744,8 +745,8 @@ class Sandbox:
             TimeoutError: If the sandbox does not reach *status* within *timeout*.
         """
         target_status = SandboxStatus(status)
-        normalized_timeout = coerce_duration(timeout, SECOND) / SECOND
-        normalized_poll_interval = coerce_duration(poll_interval, SECOND) / SECOND
+        normalized_timeout = to_seconds_float(coerce_duration(timeout, SECOND))
+        normalized_poll_interval = to_seconds_float(coerce_duration(poll_interval, SECOND))
         start = time.monotonic()
         while time.monotonic() - start < normalized_timeout:
             if self.status == target_status:
@@ -904,8 +905,9 @@ class Sandbox:
             duration: The duration in milliseconds or as a ``timedelta`` to
                 extend the timeout by.
         """
+        delta = coerce_duration(duration, MILLISECOND)
         response = iter_coroutine(
-            self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=duration)
+            self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=delta)
         )
         self.sandbox = response.sandbox
 

@@ -9,10 +9,16 @@ import pytest
 from hypothesis import given, strategies as st
 
 from vercel._internal.sandbox.models import CreateSandboxRequest
-from vercel._internal.sandbox.time import MILLISECOND, SECOND, coerce_duration, parse_duration
+from vercel._internal.sandbox.time import (
+    MILLISECOND,
+    SECOND,
+    coerce_duration,
+    parse_duration,
+    to_ms_int,
+)
 
-MAX_DURATION_MS = timedelta.max // MILLISECOND
-MIN_DURATION_MS = timedelta.min // MILLISECOND
+MAX_DURATION_MS = to_ms_int(timedelta.max)
+MIN_DURATION_MS = to_ms_int(timedelta.min)
 
 
 @pytest.mark.parametrize(

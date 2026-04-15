@@ -22,7 +22,7 @@ from pydantic_core import InitErrorDetails
 
 from vercel._internal.polyfills import StrEnum
 from vercel._internal.sandbox.errors import SandboxError
-from vercel._internal.sandbox.time import MILLISECOND, parse_duration
+from vercel._internal.sandbox.time import MILLISECOND, parse_duration, to_ms_int
 
 # Source types for Sandbox.create()
 _REDACTED_HEADER_VALUE = "<redacted>"
@@ -487,7 +487,7 @@ class CreateSandboxRequest(_CreateModel):
     def _serialize_timeout(self, value: timedelta | None) -> int | None:
         if value is None:
             return None
-        return value // MILLISECOND
+        return to_ms_int(value)
 
 
 def parse_source(value: SourceInput | None) -> Source | None:

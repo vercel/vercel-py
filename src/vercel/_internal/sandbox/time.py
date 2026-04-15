@@ -28,3 +28,11 @@ def parse_duration(value: object, unit: timedelta) -> timedelta | None:
             return coerce_duration(value, unit)
         case _:
             raise TypeError("duration must be an int, float, timedelta, or None")
+
+
+def to_ms_int(td: timedelta) -> int:
+    return td // MILLISECOND
+
+
+def to_seconds_float(td: timedelta) -> float:
+    return td / SECOND
