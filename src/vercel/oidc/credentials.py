@@ -46,6 +46,7 @@ def get_credentials(
         return Credentials(token=token, project_id=project_id, team_id=team_id)
 
     raise RuntimeError(
-        "Missing credentials. Provide VERCEL_OIDC_TOKEN with VERCEL_PROJECT_ID "
-        "and VERCEL_TEAM_ID, or VERCEL_TOKEN, VERCEL_PROJECT_ID, VERCEL_TEAM_ID."
+        "Missing credentials. "
+        "For local development, run 'vercel link && vercel env pull'. "
+        "Otherwise, set VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID."
     )
