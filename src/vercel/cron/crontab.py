@@ -101,7 +101,7 @@ class CronTab:
 
         return decorator
 
-    def __call__(self) -> list[tuple[str, str]]:
+    def get_crons(self) -> list[tuple[str, str]]:
         result = []
         for fn, sched in self._jobs:
             _resolve(fn)

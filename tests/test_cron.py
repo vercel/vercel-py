@@ -167,13 +167,13 @@ class TestCronTabRejectsUnresolvable:
             pass
 
         with pytest.raises(CronTabError, match="only module-level functions"):
-            ct()
+            ct.get_crons()
 
     def test_rejects_lambda(self):
         ct = CronTab()
         ct.register("0 0 * * *")(lambda: None)
         with pytest.raises(CronTabError, match="only module-level functions"):
-            ct()
+            ct.get_crons()
 
     def test_rejects_method(self):
         ct = CronTab()
@@ -184,20 +184,19 @@ class TestCronTabRejectsUnresolvable:
                 pass
 
         with pytest.raises(CronTabError, match="only module-level functions"):
-            ct()
+            ct.get_crons()
 
 
 class TestCronTabCall:
     def test_empty(self):
         ct = CronTab()
-        assert ct() == []
+        assert ct.get_crons() == []
 
     def test_entries(self):
-        result = _ct_call()
+        result = _ct_call.get_crons()
         module = __name__
         assert result == [
             (f"{module}:_job_daily", "0 0 * * *"),
             (f"{module}:_job_frequent", "*/15 * * * *"),
             (f"{module}:_job_weekly", "* 6 * * 1"),
         ]
-
