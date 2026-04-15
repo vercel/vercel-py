@@ -15,7 +15,7 @@ import platform
 import posixpath
 import sys
 import tarfile
-from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from collections.abc import AsyncGenerator, AsyncIterator, Generator, Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from importlib.metadata import version as _pkg_version
@@ -46,7 +46,6 @@ from vercel._internal.sandbox.errors import (
     SandboxServerError,
 )
 from vercel._internal.sandbox.models import (
-    ApiNetworkPolicy,
     CommandFinishedResponse,
     CommandResponse,
     CreateSandboxRequest,
@@ -325,12 +324,12 @@ class BaseSandboxOpsClient:
         self,
         *,
         sandbox_id: str,
-        network_policy: ApiNetworkPolicy,
+        network_policy: Mapping[str, Any],
     ) -> SandboxResponse:
         data = await self._request_client.request_json(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/network-policy",
-            body=JSONBody(network_policy.model_dump(by_alias=True, exclude_none=True)),
+            body=JSONBody(dict(network_policy)),
         )
         return SandboxResponse.model_validate(data)
 

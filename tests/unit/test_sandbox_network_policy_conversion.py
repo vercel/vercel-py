@@ -8,10 +8,7 @@ from typing import Any
 import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
-from vercel._internal.sandbox.models import (
-    ApiNetworkInjectionRule,
-    ApiNetworkPolicy,
-)
+from vercel._internal.sandbox.models import parse_network_policy, serialize_network_policy
 from vercel.sandbox import (
     NetworkPolicy,
     NetworkPolicyCustom,
@@ -192,25 +189,25 @@ class TestNetworkPolicyModes:
     @pytest.mark.parametrize(
         ("policy", "api_payload"),
         [
-            ("allow-all", ApiNetworkPolicy(mode="allow-all")),
-            ("deny-all", ApiNetworkPolicy(mode="deny-all")),
+            ("allow-all", {"mode": "allow-all"}),
+            ("deny-all", {"mode": "deny-all"}),
         ],
         ids=["allow_all", "deny_all"],
     )
     def test_mode_strings_round_trip_exactly(
-        self, policy: NetworkPolicy, api_payload: ApiNetworkPolicy
+        self, policy: NetworkPolicy, api_payload: dict[str, str]
     ) -> None:
-        assert ApiNetworkPolicy.from_network_policy(policy) == api_payload
-        assert api_payload.to_network_policy() == policy
+        assert serialize_network_policy(policy) == api_payload
+        assert parse_network_policy(api_payload) == policy
 
     @given(st.sampled_from(["allow-all", "deny-all"]))
     @settings(max_examples=2, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_mode_strings_round_trip_property_based(self, policy: NetworkPolicy) -> None:
-        assert ApiNetworkPolicy.from_network_policy(policy).to_network_policy() == policy
+        assert parse_network_policy(serialize_network_policy(policy)) == policy
 
     @pytest.mark.parametrize("policy", ["allow-all", "deny-all"])
-    def test_api_network_policy_codec_methods_round_trip_modes(self, policy: NetworkPolicy) -> None:
-        assert ApiNetworkPolicy.from_network_policy(policy).to_network_policy() == policy
+    def test_internal_codec_round_trip_modes(self, policy: NetworkPolicy) -> None:
+        assert parse_network_policy(serialize_network_policy(policy)) == policy
 
 
 class TestNetworkPolicyExamples:
@@ -222,15 +219,15 @@ class TestNetworkPolicyExamples:
                 deny=["192.168.0.0/16"],
             ),
         )
-        api_payload = ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com", "*.example.net"],
-            allowed_cidrs=["10.0.0.0/8"],
-            denied_cidrs=["192.168.0.0/16"],
-        )
+        api_payload = {
+            "mode": "custom",
+            "allowedDomains": ["example.com", "*.example.net"],
+            "allowedCIDRs": ["10.0.0.0/8"],
+            "deniedCIDRs": ["192.168.0.0/16"],
+        }
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == api_payload
-        assert api_payload.to_network_policy() == policy
+        assert serialize_network_policy(policy) == api_payload
+        assert parse_network_policy(api_payload) == policy
 
     def test_custom_record_form_converts_with_injection_rules(self) -> None:
         policy = NetworkPolicyCustom(
@@ -240,29 +237,21 @@ class TestNetworkPolicyExamples:
                 ]
             }
         )
-        api_payload = ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers={"X-API-Key": "value-for-x-api-key"},
-                )
+        api_payload = {
+            "mode": "custom",
+            "allowedDomains": ["example.com"],
+            "injectionRules": [
+                {"domain": "example.com", "headers": {"X-API-Key": "value-for-x-api-key"}}
             ],
-        )
-        api_response = ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    header_names=["X-API-Key"],
-                )
-            ],
-        )
+        }
+        api_response = {
+            "mode": "custom",
+            "allowedDomains": ["example.com"],
+            "injectionRules": [{"domain": "example.com", "headerNames": ["X-API-Key"]}],
+        }
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == api_payload
-        assert api_response.to_network_policy() == NetworkPolicyCustom(
+        assert serialize_network_policy(policy) == api_payload
+        assert parse_network_policy(api_response) == NetworkPolicyCustom(
             allow={
                 "example.com": [
                     NetworkPolicyRule(
@@ -290,44 +279,40 @@ class TestNetworkPolicyExamples:
                 ],
             }
         )
-        api_payload = ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["*", "api.example.com", "docs.example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(domain="*", headers={"X-Wild": "value-for-x-wild"}),
-                ApiNetworkInjectionRule(
-                    domain="api.example.com",
-                    headers={
+        api_payload = {
+            "mode": "custom",
+            "allowedDomains": ["*", "api.example.com", "docs.example.com"],
+            "injectionRules": [
+                {"domain": "*", "headers": {"X-Wild": "value-for-x-wild"}},
+                {
+                    "domain": "api.example.com",
+                    "headers": {
                         "X-Api": "value-for-x-api",
                         "X-Dupe": "value-for-x-dupe",
                     },
-                ),
-                ApiNetworkInjectionRule(
-                    domain="docs.example.com",
-                    headers={
+                },
+                {
+                    "domain": "docs.example.com",
+                    "headers": {
                         "X-Dupe": "value-for-x-dupe",
                         "X-Docs": "value-for-x-docs",
                     },
-                ),
+                },
             ],
-        )
+        }
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == api_payload
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["*", "api.example.com", "docs.example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(domain="*", header_names=["X-Wild"]),
-                ApiNetworkInjectionRule(
-                    domain="api.example.com",
-                    header_names=["X-Api", "X-Dupe"],
-                ),
-                ApiNetworkInjectionRule(
-                    domain="docs.example.com",
-                    header_names=["X-Dupe", "X-Docs"],
-                ),
-            ],
-        ).to_network_policy() == NetworkPolicyCustom(
+        assert serialize_network_policy(policy) == api_payload
+        assert parse_network_policy(
+            {
+                "mode": "custom",
+                "allowedDomains": ["*", "api.example.com", "docs.example.com"],
+                "injectionRules": [
+                    {"domain": "*", "headerNames": ["X-Wild"]},
+                    {"domain": "api.example.com", "headerNames": ["X-Api", "X-Dupe"]},
+                    {"domain": "docs.example.com", "headerNames": ["X-Dupe", "X-Docs"]},
+                ],
+            }
+        ) == NetworkPolicyCustom(
             allow={
                 "*": [
                     NetworkPolicyRule(
@@ -360,14 +345,16 @@ class TestNetworkPolicyEdgeCases:
     def test_empty_rule_arrays_remain_valid_allowed_domains(self) -> None:
         policy = NetworkPolicyCustom(allow={"example.com": []})
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-        )
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-        ).to_network_policy() == NetworkPolicyCustom(allow=["example.com"])
+        assert serialize_network_policy(policy) == {
+            "mode": "custom",
+            "allowedDomains": ["example.com"],
+        }
+        assert parse_network_policy(
+            {
+                "mode": "custom",
+                "allowedDomains": ["example.com"],
+            }
+        ) == NetworkPolicyCustom(allow=["example.com"])
 
     def test_domains_with_empty_transforms_do_not_emit_injection_rules(self) -> None:
         policy = NetworkPolicyCustom(
@@ -379,16 +366,13 @@ class TestNetworkPolicyEdgeCases:
             }
         )
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com", "api.example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="api.example.com",
-                    headers={"X-Api": "value-for-x-api"},
-                )
+        assert serialize_network_policy(policy) == {
+            "mode": "custom",
+            "allowedDomains": ["example.com", "api.example.com"],
+            "injectionRules": [
+                {"domain": "api.example.com", "headers": {"X-Api": "value-for-x-api"}}
             ],
-        )
+        }
 
     def test_multiple_transforms_for_same_domain_merge_headers(self) -> None:
         policy = NetworkPolicyCustom(
@@ -408,20 +392,20 @@ class TestNetworkPolicyEdgeCases:
             }
         )
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers={
+        assert serialize_network_policy(policy) == {
+            "mode": "custom",
+            "allowedDomains": ["example.com"],
+            "injectionRules": [
+                {
+                    "domain": "example.com",
+                    "headers": {
                         "X-First": "one",
                         "X-Dupe": "second",
                         "X-Second": "two",
                     },
-                )
+                }
             ],
-        )
+        }
 
     def test_multiple_transforms_merge_case_insensitive_header_names(self) -> None:
         policy = NetworkPolicyCustom(
@@ -439,16 +423,16 @@ class TestNetworkPolicyEdgeCases:
             }
         )
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers={"x-trace": "second", "X-Other": "other-value"},
-                )
+        assert serialize_network_policy(policy) == {
+            "mode": "custom",
+            "allowedDomains": ["example.com"],
+            "injectionRules": [
+                {
+                    "domain": "example.com",
+                    "headers": {"x-trace": "second", "X-Other": "other-value"},
+                }
             ],
-        )
+        }
 
     def test_single_rule_preserves_distinct_case_variants_in_api_headers(self) -> None:
         policy = NetworkPolicyCustom(
@@ -463,16 +447,16 @@ class TestNetworkPolicyEdgeCases:
             }
         )
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers={"X-Trace": "first", "x-trace": "second"},
-                )
+        assert serialize_network_policy(policy) == {
+            "mode": "custom",
+            "allowedDomains": ["example.com"],
+            "injectionRules": [
+                {
+                    "domain": "example.com",
+                    "headers": {"X-Trace": "first", "x-trace": "second"},
+                }
             ],
-        )
+        }
 
     def test_later_rules_replace_earlier_case_variants_for_same_header(self) -> None:
         policy = NetworkPolicyCustom(
@@ -487,28 +471,27 @@ class TestNetworkPolicyEdgeCases:
             }
         )
 
-        assert ApiNetworkPolicy.from_network_policy(policy) == ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers={"x-trace": "second", "X-Other": "other"},
-                )
+        assert serialize_network_policy(policy) == {
+            "mode": "custom",
+            "allowedDomains": ["example.com"],
+            "injectionRules": [
+                {
+                    "domain": "example.com",
+                    "headers": {"x-trace": "second", "X-Other": "other"},
+                }
             ],
-        )
+        }
 
     def test_api_response_header_names_merge_case_insensitively(self) -> None:
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    header_names=["X-Trace", "x-trace", "X-Other"],
-                )
-            ],
-        ).to_network_policy() == NetworkPolicyCustom(
+        assert parse_network_policy(
+            {
+                "mode": "custom",
+                "allowedDomains": ["example.com"],
+                "injectionRules": [
+                    {"domain": "example.com", "headerNames": ["X-Trace", "x-trace", "X-Other"]}
+                ],
+            }
+        ) == NetworkPolicyCustom(
             allow={
                 "example.com": [
                     NetworkPolicyRule(
@@ -523,16 +506,15 @@ class TestNetworkPolicyEdgeCases:
         )
 
     def test_api_response_header_names_keep_last_case_variant(self) -> None:
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    header_names=["X-Trace", "x-trace", "X-TRACE"],
-                )
-            ],
-        ).to_network_policy() == NetworkPolicyCustom(
+        assert parse_network_policy(
+            {
+                "mode": "custom",
+                "allowedDomains": ["example.com"],
+                "injectionRules": [
+                    {"domain": "example.com", "headerNames": ["X-Trace", "x-trace", "X-TRACE"]}
+                ],
+            }
+        ) == NetworkPolicyCustom(
             allow={
                 "example.com": [
                     NetworkPolicyRule(
@@ -543,17 +525,19 @@ class TestNetworkPolicyEdgeCases:
         )
 
     def test_empty_api_header_names_fall_back_to_headers(self) -> None:
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="example.com",
-                    headers={"X-Trace": "trace-value"},
-                    header_names=[],
-                )
-            ],
-        ).to_network_policy() == NetworkPolicyCustom(
+        assert parse_network_policy(
+            {
+                "mode": "custom",
+                "allowedDomains": ["example.com"],
+                "injectionRules": [
+                    {
+                        "domain": "example.com",
+                        "headers": {"X-Trace": "trace-value"},
+                        "headerNames": [],
+                    }
+                ],
+            }
+        ) == NetworkPolicyCustom(
             allow={
                 "example.com": [
                     NetworkPolicyRule(
@@ -564,16 +548,13 @@ class TestNetworkPolicyEdgeCases:
         )
 
     def test_injection_rules_for_unknown_domains_surface_in_public_result(self) -> None:
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-            injection_rules=[
-                ApiNetworkInjectionRule(
-                    domain="api.example.com",
-                    header_names=["X-Trace"],
-                )
-            ],
-        ).to_network_policy() == NetworkPolicyCustom(
+        assert parse_network_policy(
+            {
+                "mode": "custom",
+                "allowedDomains": ["example.com"],
+                "injectionRules": [{"domain": "api.example.com", "headerNames": ["X-Trace"]}],
+            }
+        ) == NetworkPolicyCustom(
             allow={
                 "example.com": [],
                 "api.example.com": [
@@ -585,13 +566,15 @@ class TestNetworkPolicyEdgeCases:
         )
 
     def test_missing_subnet_fields_do_not_create_empty_subnets(self) -> None:
-        assert ApiNetworkPolicy(
-            mode="custom",
-            allowed_domains=["example.com"],
-        ).to_network_policy() == NetworkPolicyCustom(allow=["example.com"])
+        assert parse_network_policy(
+            {
+                "mode": "custom",
+                "allowedDomains": ["example.com"],
+            }
+        ) == NetworkPolicyCustom(allow=["example.com"])
 
     def test_missing_optional_fields_do_not_raise_conversion_errors(self) -> None:
-        assert ApiNetworkPolicy(mode="custom").to_network_policy() == NetworkPolicyCustom(allow=[])
+        assert parse_network_policy({"mode": "custom"}) == NetworkPolicyCustom(allow=[])
 
 
 class TestNetworkPolicyGeneratedCases:
@@ -600,16 +583,16 @@ class TestNetworkPolicyGeneratedCases:
     def test_generated_list_form_policies_round_trip_exactly(
         self, policy: NetworkPolicyCustom
     ) -> None:
-        assert _policy_semantics(
-            ApiNetworkPolicy.from_network_policy(policy).to_network_policy()
-        ) == _policy_semantics(policy)
+        assert _policy_semantics(parse_network_policy(serialize_network_policy(policy))) == (
+            _policy_semantics(policy)
+        )
 
     @given(_record_policy_strategy())
     @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_generated_record_form_policies_preserve_normalized_semantics(
         self, policy: NetworkPolicyCustom
     ) -> None:
-        round_tripped = ApiNetworkPolicy.from_network_policy(policy).to_network_policy()
+        round_tripped = parse_network_policy(serialize_network_policy(policy))
 
         assert isinstance(round_tripped, NetworkPolicyCustom)
         assert _normalized_custom_policy_semantics(
@@ -621,7 +604,7 @@ class TestNetworkPolicyGeneratedCases:
     def test_generated_record_form_policies_decode_to_redacted_headers(
         self, policy: NetworkPolicyCustom
     ) -> None:
-        round_tripped = ApiNetworkPolicy.from_network_policy(policy).to_network_policy()
+        round_tripped = parse_network_policy(serialize_network_policy(policy))
 
         assert isinstance(round_tripped, NetworkPolicyCustom)
         assert _header_values(round_tripped) <= {"<redacted>"}
