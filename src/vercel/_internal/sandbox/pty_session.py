@@ -7,7 +7,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from .constants import DEFAULT_PTY_CONNECTION_TIMEOUT
 from .pty_binary import SERVER_BIN_NAME, get_binary_bytes_async
@@ -22,6 +24,21 @@ DEFAULT_PTY_COLS = 80
 DEFAULT_PTY_ROWS = 24
 MAX_CONNECTION_INFO_OUTPUT_EXCERPT = 500
 DurationSeconds = int | float | timedelta
+
+
+class ConnectionInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, serialize_by_alias=True)
+
+    port: int
+    token: str
+    process_id: int = Field(
+        validation_alias=AliasChoices("process_id", "processId"),
+        serialization_alias="processId",
+    )
+    server_process_id: int = Field(
+        validation_alias=AliasChoices("server_process_id", "serverProcessId"),
+        serialization_alias="serverProcessId",
+    )
 
 
 def resolve_terminal_size(
@@ -68,7 +85,7 @@ def _append_output_excerpt(excerpt: str, chunk: str) -> str:
     return combined[-MAX_CONNECTION_INFO_OUTPUT_EXCERPT:]
 
 
-def _parse_connection_info_line(line: str) -> dict[str, Any] | None:
+def _parse_connection_info_line(line: str) -> ConnectionInfo | None:
     stripped = line.strip()
     if not (stripped.startswith("{") and stripped.endswith("}")):
         return None
@@ -78,35 +95,21 @@ def _parse_connection_info_line(line: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
 
-    if not isinstance(candidate, dict):
+    try:
+        return ConnectionInfo.model_validate(candidate)
+    except ValidationError:
         return None
-
-    port = candidate.get("port")
-    token = candidate.get("token")
-    process_id = candidate.get("processId")
-    server_process_id = candidate.get("serverProcessId")
-
-    if not isinstance(port, int):
-        return None
-    if not isinstance(token, str):
-        return None
-    if not isinstance(process_id, int):
-        return None
-    if not isinstance(server_process_id, int):
-        return None
-
-    return candidate
 
 
 async def read_connection_info(
     cmd: AsyncCommand, timeout: DurationSeconds = DEFAULT_PTY_CONNECTION_TIMEOUT
-) -> dict[str, Any]:
+) -> ConnectionInfo:
     """Read connection metadata JSON from the PTY server command output."""
     collected_excerpt = ""
     buffered_stdout = ""
     timeout_seconds = coerce_duration(timeout, SECOND).total_seconds()
 
-    async def read_logs() -> dict[str, Any] | None:
+    async def read_logs() -> ConnectionInfo | None:
         nonlocal buffered_stdout, collected_excerpt
         async for log in cmd.logs():
             if log.stream != "stdout":
@@ -146,7 +149,7 @@ async def start_pty_server(
     cols: int | None = None,
     rows: int | None = None,
     connection_timeout: DurationSeconds = DEFAULT_PTY_CONNECTION_TIMEOUT,
-) -> tuple[AsyncCommand, dict[str, Any]]:
+) -> tuple[AsyncCommand, ConnectionInfo]:
     """Start a PTY server command and return its command handle and metadata."""
     terminal_cols, terminal_rows = resolve_terminal_size(cols, rows)
 
@@ -168,7 +171,7 @@ async def start_pty_server(
     return cmd, connection_info
 
 
-def build_ws_url(sandbox: AsyncSandbox, connection_info: dict[str, Any]) -> str:
+def build_ws_url(sandbox: AsyncSandbox, connection_info: ConnectionInfo) -> str:
     interactive_port = sandbox.interactive_port
     if interactive_port is None:
         raise RuntimeError(
@@ -179,7 +182,7 @@ def build_ws_url(sandbox: AsyncSandbox, connection_info: dict[str, Any]) -> str:
     host = host.replace("https://", "").replace("http://", "")
     return (
         f"wss://{host}/ws/client"
-        f"?token={connection_info['token']}&processId={connection_info['processId']}"
+        f"?token={connection_info.token}&processId={connection_info.process_id}"
     )
 
 
@@ -197,7 +200,7 @@ class AsyncPTYSession:
     sandbox: AsyncSandbox
     command: AsyncCommand
     client: PTYClient
-    connection_info: dict[str, Any]
+    connection_info: ConnectionInfo
 
     _closed: bool = False
 
@@ -258,15 +261,15 @@ class AsyncPTYSession:
 
     @property
     def process_id(self) -> int | None:
-        return self.connection_info.get("processId")
+        return self.connection_info.process_id
 
     @property
     def server_process_id(self) -> int | None:
-        return self.connection_info.get("serverProcessId")
+        return self.connection_info.server_process_id
 
     @property
     def port(self) -> int | None:
-        return self.connection_info.get("port")
+        return self.connection_info.port
 
     @property
     def is_open(self) -> bool:

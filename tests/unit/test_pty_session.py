@@ -12,6 +12,7 @@ import pytest
 from vercel._internal.sandbox.constants import DEFAULT_PTY_CONNECTION_TIMEOUT
 from vercel._internal.sandbox.pty_session import (
     AsyncPTYSession,
+    ConnectionInfo,
     PTYClientFactory,
     read_connection_info,
 )
@@ -267,7 +268,7 @@ async def test_read_connection_info_accepts_timedelta_timeout(monkeypatch) -> No
         cast(AsyncCommand, cmd), timeout=timedelta(milliseconds=250)
     )
 
-    assert connection_info["processId"] == 101
+    assert connection_info.process_id == 101
     assert recorded == [0.25]
 
 
@@ -315,12 +316,12 @@ async def test_read_connection_info_ignores_stdout_noise_before_metadata() -> No
 
     connection_info = await read_connection_info(cast(AsyncCommand, cmd))
 
-    assert connection_info == {
-        "port": 9999,
-        "token": "test-token",
-        "processId": 101,
-        "serverProcessId": 202,
-    }
+    assert connection_info == ConnectionInfo(
+        port=9999,
+        token="test-token",
+        process_id=101,
+        server_process_id=202,
+    )
 
 
 @pytest.mark.asyncio
@@ -337,7 +338,7 @@ async def test_read_connection_info_accepts_partial_json_across_stdout_chunks() 
 
     connection_info = await read_connection_info(cast(AsyncCommand, cmd))
 
-    assert connection_info["token"] == "test-token"
+    assert connection_info.token == "test-token"
 
 
 @pytest.mark.asyncio
@@ -357,7 +358,7 @@ async def test_read_connection_info_ignores_malformed_and_wrong_shape_json() -> 
 
     connection_info = await read_connection_info(cast(AsyncCommand, cmd))
 
-    assert connection_info["serverProcessId"] == 202
+    assert connection_info.server_process_id == 202
 
 
 @pytest.mark.asyncio
@@ -379,6 +380,24 @@ async def test_read_connection_info_times_out_with_bounded_output_excerpt() -> N
     assert "wrong-shape" not in message
     assert repeated[-100:] in message
     assert len(message.split("Collected output: ", 1)[1]) <= 500
+
+
+@pytest.mark.asyncio
+async def test_read_connection_info_returns_connection_info_model() -> None:
+    cmd = FakeDetachedCommand(
+        [
+            FakeLog(
+                "stdout",
+                '{"port": 9999, "token": "test-token", "processId": 101, "serverProcessId": 202}\n',
+            )
+        ]
+    )
+
+    connection_info = await read_connection_info(cast(AsyncCommand, cmd))
+
+    assert isinstance(connection_info, ConnectionInfo)
+    assert connection_info.process_id == 101
+    assert connection_info.server_process_id == 202
 
 
 @pytest.mark.asyncio
@@ -448,12 +467,12 @@ async def test_async_pty_session_open_passes_timedelta_connection_timeout(monkey
         assert bound_sandbox is sandbox
         assert command == ["/bin/bash"]
         recorded.append(kwargs["connection_timeout"])
-        return sandbox._detached_command, {
-            "port": 9999,
-            "token": "test-token",
-            "processId": 101,
-            "serverProcessId": 202,
-        }
+        return sandbox._detached_command, ConnectionInfo(
+            port=9999,
+            token="test-token",
+            process_id=101,
+            server_process_id=202,
+        )
 
     async def fake_connect(url: str) -> FakePTYClient:
         assert url == "wss://pty.example.test/ws/client?token=test-token&processId=101"
@@ -486,12 +505,12 @@ async def test_async_pty_session_open_uses_shared_default_connection_timeout(
         assert bound_sandbox is sandbox
         assert command == ["/bin/bash"]
         recorded.append(kwargs["connection_timeout"])
-        return sandbox._detached_command, {
-            "port": 9999,
-            "token": "test-token",
-            "processId": 101,
-            "serverProcessId": 202,
-        }
+        return sandbox._detached_command, ConnectionInfo(
+            port=9999,
+            token="test-token",
+            process_id=101,
+            server_process_id=202,
+        )
 
     async def fake_connect(url: str) -> FakePTYClient:
         assert url == "wss://pty.example.test/ws/client?token=test-token&processId=101"
