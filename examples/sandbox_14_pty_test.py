@@ -20,6 +20,8 @@ from vercel.sandbox.pty import AsyncPTYSession
 load_dotenv()
 
 EXPECTED_OUTPUT = "PTY_OK"
+READY_OUTPUT = "PTY_READY"
+DONE_OUTPUT = "PTY_DONE"
 PROMPT_MARKER = "$ "
 
 
@@ -40,6 +42,19 @@ async def collect_output_until(
         return output
 
     return await asyncio.wait_for(_collect(), timeout=timeout)
+
+
+async def run_and_collect(
+    session: AsyncPTYSession,
+    command: str,
+    marker: str,
+    *,
+    timeout: float = 30.0,
+) -> bytes:
+    """Send a command to the PTY and collect output until a marker appears."""
+
+    await session.stream.send(command.encode())
+    return await collect_output_until(session, marker, timeout=timeout)
 
 
 async def main() -> int:
@@ -83,11 +98,32 @@ async def main() -> int:
             print(initial_output_text.rstrip())
             print("-" * 60)
 
+            print("Verifying PTY input/output round-trip...")
+            try:
+                ready_output = await run_and_collect(
+                    session,
+                    f"printf '{READY_OUTPUT}\\n'\n",
+                    READY_OUTPUT,
+                )
+            except asyncio.TimeoutError:
+                print("Timed out waiting for PTY round-trip confirmation.")
+                return 1
+
+            ready_output_text = ready_output.decode("utf-8", errors="replace")
+            print()
+            print("Received PTY round-trip output:")
+            print("-" * 60)
+            print(ready_output_text.rstrip())
+            print("-" * 60)
+
             print("Writing a simple command through the PTY stream...")
-            await session.stream.send(f"printf '{EXPECTED_OUTPUT}\\n'; pwd; exit\n".encode())
 
             try:
-                output = await collect_output_until(session, EXPECTED_OUTPUT)
+                output = await run_and_collect(
+                    session,
+                    f"printf '{EXPECTED_OUTPUT}\\n'; pwd; printf '{DONE_OUTPUT}\\n'; exit\n",
+                    DONE_OUTPUT,
+                )
             except asyncio.TimeoutError:
                 print("Timed out waiting for PTY output.")
                 return 1
@@ -101,6 +137,9 @@ async def main() -> int:
 
             if EXPECTED_OUTPUT not in output_text:
                 print("Expected PTY output marker was not observed.")
+                return 1
+            if DONE_OUTPUT not in output_text:
+                print("PTY command completion marker was not observed.")
                 return 1
 
     print()
