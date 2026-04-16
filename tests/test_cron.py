@@ -2,7 +2,7 @@
 
 import pytest
 
-from vercel.cron import CronSchedule, CronTab, CronTabError
+from vercel.cron import CronSchedule, CronTab, CronTabError, cron
 
 # --- Module-level functions for registration tests ---
 
@@ -78,6 +78,21 @@ def _job_frequent():
 
 @_ct_call.register(CronSchedule(hour=6, day_of_week=1))
 def _job_weekly():
+    pass
+
+
+@cron("0 0 * * *")
+def _cron_string():
+    return "hello"
+
+
+@cron(hour=6)
+def _cron_kwargs():
+    pass
+
+
+@cron(CronSchedule(minute="*/5"))
+def _cron_schedule():
     pass
 
 
@@ -200,3 +215,31 @@ class TestCronTabCall:
             (f"{module}:_job_frequent", "*/15 * * * *"),
             (f"{module}:_job_weekly", "* 6 * * 1"),
         ]
+
+
+class TestCronDecorator:
+    def test_callable(self):
+        assert _cron_string() == "hello"
+
+    def test_preserves_name(self):
+        assert _cron_string.__name__ == "_cron_string"
+
+    def test_get_crons_string(self):
+        module = __name__
+        assert _cron_string.get_crons() == [(f"{module}:_cron_string", "0 0 * * *")]
+
+    def test_get_crons_kwargs(self):
+        module = __name__
+        assert _cron_kwargs.get_crons() == [(f"{module}:_cron_kwargs", "* 6 * * *")]
+
+    def test_get_crons_schedule(self):
+        module = __name__
+        assert _cron_schedule.get_crons() == [(f"{module}:_cron_schedule", "*/5 * * * *")]
+
+    def test_rejects_local_function(self):
+        @cron("0 0 * * *")
+        def local_job():
+            pass
+
+        with pytest.raises(CronTabError, match="only module-level functions"):
+            local_job.get_crons()
