@@ -60,15 +60,16 @@ jobs:
         run: |
           VERSION=$(python scripts/get-version.py)
           TAG="v$VERSION"
-          # Check if tag already exists
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
+          REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # Check the remote directly because the checkout is shallow and does not fetch tags.
+          if git ls-remote --exit-code --tags "$REMOTE_URL" "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping tag creation"
           else
             echo "Creating tag $TAG"
             git config --local user.email "action@github.com"
             git config --local user.name "GitHub Action"
             git tag "$TAG"
-            git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" "$TAG"
+            git push "$REMOTE_URL" "$TAG"
           fi
       - name: Verify tag matches version
         run: |
