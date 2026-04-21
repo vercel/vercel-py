@@ -624,6 +624,10 @@ class HTTPError(Exception):
         super().__init__(f"HTTP Error {response.status}")
 
 
+class EntityConflictError(Exception):
+    pass
+
+
 class QueueHandler(Protocol):
     async def __call__(
         self, message: Any, *, attempt: int, queue_name: str, message_id: str

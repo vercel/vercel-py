@@ -135,9 +135,14 @@ class VercelWorld(w.World):
             else:
                 return schema.model_validate(result)
         else:
-            raise RuntimeError(
+            message = (
                 result.get("message")
-                or f"{method} {endpoint} -> HTTP {resp.status_code}: {resp.reason_phrase}",
+                or f"{method} {endpoint} -> HTTP {resp.status_code}: {resp.reason_phrase}"
+            )
+            if resp.status_code == 409:
+                raise w.EntityConflictError(message)
+            raise RuntimeError(
+                message,
                 {
                     "url": f"{self._base_url}{endpoint}",
                     "status": resp.status_code,

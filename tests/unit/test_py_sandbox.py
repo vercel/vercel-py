@@ -603,6 +603,41 @@ class TestAsyncioRestrictions:
 
             assert sorted(results) == [1, 2]
 
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
+    async def test_taskgroup_cancels_siblings_on_error(self):
+        """TaskGroup must correctly cancel siblings when one task fails.
+
+        Regression: when asyncio was a plain passthrough (no restriction
+        proxy), CancelledError inside the sandbox was a different class
+        than the one used by the C _asyncio extension, so TaskGroup's
+        _on_task_done failed with:
+            AttributeError: 'NoneType' object has no attribute 'append'
+        """
+        with workflow_sandbox(random_seed=SEED):
+            import asyncio
+
+            cancelled = asyncio.Event()
+
+            async def failing():
+                raise ValueError("boom")
+
+            async def slow():
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            with pytest.raises(ExceptionGroup) as exc_info:  # noqa: F821
+                async with asyncio.TaskGroup() as tg:
+                    tg.create_task(slow())
+                    tg.create_task(failing())
+
+            assert len(exc_info.value.exceptions) == 1
+            assert isinstance(exc_info.value.exceptions[0], ValueError)
+            assert cancelled.is_set()
+
 
 # ═══════════════════════════════════════════════════════════════
 #  asyncio loop proxy with uvloop
