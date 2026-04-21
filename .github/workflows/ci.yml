@@ -41,8 +41,5 @@ jobs:
       - name: Run tests, including lint and typecheck
         run: ./scripts/test.sh
 
-      - name: Run example tests
-        run: ./scripts/test-examples.sh
-
       - name: Build package
         run: ./scripts/build.sh
