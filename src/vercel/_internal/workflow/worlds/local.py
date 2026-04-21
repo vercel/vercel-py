@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import pathlib
 import traceback
@@ -48,7 +49,7 @@ def read_json(path: pathlib.Path, schema: type[T] | pydantic.TypeAdapter[T]) -> 
 def write_json(path: pathlib.Path, data: w.BaseModel | dict, *, overwrite: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not overwrite:
-        raise FileExistsError()
+        raise w.EntityConflictError(f"File already exists: {path}")
     if isinstance(data, w.BaseModel):
         data = data.model_dump()
     with path.open("wb") as f:
@@ -73,13 +74,15 @@ class LocalWorld(w.World):
 
     def delete_all_hooks_for_run(self, run_id: str) -> None:
         hooks_dir = self.data_dir / "hooks"
+        if not hooks_dir.exists():
+            return
         for hook_path in hooks_dir.iterdir():
             if hook_path.suffix != ".json":
                 continue
             hook = read_json(hook_path, w.Hook)
             if hook is not None and hook.run_id == run_id:
                 hashed_token = hashlib.sha256(hook.token.encode()).hexdigest()
-                constraint_path = hooks_dir / "tokens" / f"${hashed_token}.json"
+                constraint_path = hooks_dir / "tokens" / f"{hashed_token}.json"
                 constraint_path.unlink(missing_ok=True)
                 hook_path.unlink(missing_ok=True)
 
@@ -93,6 +96,7 @@ class LocalWorld(w.World):
         *,
         deployment_id: str | None = None,
         idempotency_key: str | None = None,
+        delay_seconds: float | None = None,
         **kwargs,
     ) -> str:
         payload = {
@@ -100,11 +104,15 @@ class LocalWorld(w.World):
             "queueName": queue_name,
             "deploymentId": "<local>",
         }
+        vqs_delay: int | None = None
+        if delay_seconds is not None:
+            vqs_delay = max(1, math.ceil(delay_seconds))
         response = await vqs_client.send_async(
             "".join(char if char.isalnum() or char in "-_" else "-" for char in queue_name),
             payload,
             idempotency_key=idempotency_key,
             deployment_id="<local>",
+            delay_seconds=vqs_delay,
         )
         return response["messageId"]
 
@@ -569,6 +577,16 @@ class LocalWorld(w.World):
             )
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
             write_json(hook_path, hook)
+
+        elif data.event_type == "wait_completed" and data.correlation_id:
+            wait_lock = (
+                self.data_dir
+                / ".locks"
+                / "waits"
+                / f"{effective_run_id}-{data.correlation_id}.completed"
+            )
+            if not write_exclusive(wait_lock, ""):
+                raise w.EntityConflictError(f'Wait "{data.correlation_id}" already completed')
 
         elif data.event_type == "hook_disposed":
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"

@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import importlib
 import json
+import logging
 import random
 import re
 import traceback
@@ -22,6 +23,7 @@ from .py_sandbox import workflow_sandbox
 P = ParamSpec("P")
 T = TypeVar("T")
 SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -47,6 +49,7 @@ class Wait(BaseSuspension):
 class Hook(BaseSuspension, Generic[T]):
     token: str
     disposed: bool = False
+    has_dispose_event: bool = False
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
     hook_cls: type[T]
 
@@ -67,6 +70,9 @@ class WorkflowOrchestratorContext:
         self, events: list[w.Event], *, seed: str, started_at: int, registry: core.Workflows
     ):
         self.events = events
+        # List of Out-of-order HookReceivedEvent: such events may arrive at any time unexpectedly,
+        # so we stash them separately for delayed consumption
+        self.ooo_hook_received_events: deque[w.HookReceivedEvent] = deque()
         self.replay_index = 0
         prng = random.Random(seed)
         self.generate_ulid = functools.partial(ulid.monotonic_factory(prng.random), started_at)
@@ -147,7 +153,10 @@ class WorkflowOrchestratorContext:
         hook = self.hooks[correlation_id]
         hook.disposed = True
         while hook.futures:
-            hook.futures.popleft().set_exception(StopAsyncIteration)
+            fut = hook.futures.popleft()
+            if not fut.done():
+                fut.set_exception(StopAsyncIteration)
+        self.suspensions.pop(correlation_id, None)
 
     def resume(self) -> None:
         self.resume_handle = None
@@ -155,9 +164,37 @@ class WorkflowOrchestratorContext:
         if self._fut is None:
             return
 
-        while self.replay_index < len(self.events) and self.suspensions:
-            event = self.events[self.replay_index]
-            self.replay_index += 1
+        while (
+            self.replay_index < len(self.events) or self.ooo_hook_received_events
+        ) and self.suspensions:
+            event: w.Event | None = None
+            if self.ooo_hook_received_events:
+                event = self.ooo_hook_received_events[0]
+                if event.correlation_id in self.suspensions:
+                    self.ooo_hook_received_events.popleft()
+                else:
+                    event = None
+            if event is None:
+                if self.replay_index < len(self.events):
+                    event = self.events[self.replay_index]
+                    if event.correlation_id not in self.suspensions:
+                        match event:
+                            # In case of multitasking, one task may progress twice in a row,
+                            # when we see the replayed event before actually having the
+                            # suspension from the task. So we yield here and let the task
+                            # suspend and resume again in next iteration.
+                            case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
+                                return
+                            # HookReceivedEvent is not created from workflows, it may arrive
+                            # at any time out of order. At this momemnt we don't need one,
+                            # so we just stash it and continue with the event log.
+                            case w.HookReceivedEvent():
+                                self.ooo_hook_received_events.append(event)
+                                self.replay_index += 1
+                                continue
+                    self.replay_index += 1
+                else:
+                    break
 
             match event:
                 case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
@@ -213,8 +250,8 @@ class WorkflowOrchestratorContext:
                         self.suspensions.pop(event.correlation_id)
 
                 case w.HookDisposedEvent():
-                    self.suspensions.pop(event.correlation_id, None)
-                    self.hooks.pop(event.correlation_id)
+                    self.hooks[event.correlation_id].has_dispose_event = True
+                    self.dispose_hook(correlation_id=event.correlation_id)
 
         if self.suspensions:
             self._fut.cancel(SUSPENDED_MESSAGE)
@@ -232,7 +269,11 @@ async def workflow_handler(
     run_id = w.WorkflowInvokePayload.model_validate(message).run_id
     workflow_run = await world.runs_get(run_id)
     if workflow_run.status == "pending":
-        result = await world.events_create(run_id, w.RunStartedEvent())
+        try:
+            result = await world.events_create(run_id, w.RunStartedEvent())
+        except w.EntityConflictError:
+            logger.debug(f"Workflow run {run_id} has already been started")
+            return None
         assert result.run is not None
         workflow_run = result.run
     elif workflow_run.status == "cancelled":
@@ -269,9 +310,14 @@ async def workflow_handler(
 
     # Create all wait_completed events
     for wait_event in waits_to_complete:
-        result = await world.events_create(
-            run_id, w.WaitCompletedEvent(correlationId=wait_event.correlation_id)
-        )
+        try:
+            result = await world.events_create(
+                run_id, w.WaitCompletedEvent(correlationId=wait_event.correlation_id)
+            )
+        except w.EntityConflictError:
+            # Another concurrent invocation already completed this wait
+            logger.debug(f"Wait {wait_event.correlation_id!r} is already completed")
+            continue
         # Add the event to the events array so the workflow can see it
         assert result.event is not None
         events.append(result.event)
@@ -287,52 +333,106 @@ async def workflow_handler(
             # Workflow suspended, continue outside the try..except block
             pass
         elif isinstance(e, Exception):
-            await world.events_create(
-                run_id,
-                w.RunFailedEventData(error=str(e)).into_event(),
-            )
+            try:
+                await world.events_create(
+                    run_id,
+                    w.RunFailedEventData(error=str(e)).into_event(),
+                )
+            except w.EntityConflictError:
+                logger.warning(f"Workflow run {run_id} was already completed")
             return None
         else:
             raise
     else:
-        await world.events_create(
-            run_id,
-            w.RunCompletedEventData(output=[output]).into_event(),
-        )
+        try:
+            await world.events_create(
+                run_id,
+                w.RunCompletedEventData(output=[output]).into_event(),
+            )
+        except w.EntityConflictError:
+            logger.warning(f"Workflow run {run_id} was already completed")
         return None
 
+    # Now that the workflow is fully suspended, we can create all pending events in parallel
+    events_created = False
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
             if sus.has_created_event:
                 pass
+
             elif isinstance(sus, Suspension):
-                step_data = w.StepCreatedEventData(stepName=sus.step.name, input=[sus.input])
-                tg.start_soon(world.events_create, run_id, step_data.into_event(sus.correlation_id))
-                tg.start_soon(
-                    world.queue,
-                    f"__wkf_step_{sus.step.name}",
-                    w.StepInvokePayload(
-                        workflowName=workflow_run.workflow_name,
-                        workflowRunId=run_id,
-                        workflowStartedAt=workflow_started_at,
-                        stepId=sus.correlation_id,
-                        requestedAt=datetime.now(UTC),
-                    ),
-                )
+
+                async def create_step(s=sus):
+                    step_data = w.StepCreatedEventData(stepName=s.step.name, input=[s.input])
+                    try:
+                        await world.events_create(run_id, step_data.into_event(s.correlation_id))
+                    except w.EntityConflictError:
+                        logger.debug(f"Workflow step {s.correlation_id!r} has already been created")
+                    await world.queue(
+                        f"__wkf_step_{s.step.name}",
+                        w.StepInvokePayload(
+                            workflowName=workflow_run.workflow_name,
+                            workflowRunId=run_id,
+                            workflowStartedAt=workflow_started_at,
+                            stepId=s.correlation_id,
+                            requestedAt=datetime.now(UTC),
+                        ),
+                    )
+
+                tg.start_soon(create_step)
+                events_created = True
+
             elif isinstance(sus, Wait):
-                wait_data = w.WaitCreatedEventData(resumeAt=sus.resume_at)
-                tg.start_soon(world.events_create, run_id, wait_data.into_event(sus.correlation_id))
+
+                async def create_wait(s=sus):
+                    wait_data = w.WaitCreatedEventData(resumeAt=s.resume_at)
+                    try:
+                        await world.events_create(run_id, wait_data.into_event(s.correlation_id))
+                    except w.EntityConflictError:
+                        logger.debug(f"Workflow wait {s.correlation_id!r} has already been created")
+
+                tg.start_soon(create_wait)
+                events_created = True
+
             elif isinstance(sus, Hook):
-                hook_data = w.HookCreatedEventData(token=sus.token)
-                tg.start_soon(world.events_create, run_id, hook_data.into_event(sus.correlation_id))
+
+                async def create_hook(s=sus):
+                    hook_data = w.HookCreatedEventData(token=s.token)
+                    try:
+                        await world.events_create(run_id, hook_data.into_event(s.correlation_id))
+                    except w.EntityConflictError:
+                        logger.debug(f"Workflow hook {s.correlation_id!r} has already been created")
+
+                tg.start_soon(create_hook)
+                events_created = True
 
         for hook in context.hooks.values():
-            if hook.disposed:
-                tg.start_soon(
-                    world.events_create,
-                    run_id,
-                    w.HookDisposedEvent(correlationId=hook.correlation_id),
-                )
+            if hook.disposed and not hook.has_dispose_event:
+
+                async def dispose_hook(h=hook):
+                    try:
+                        await world.events_create(
+                            run_id,
+                            w.HookDisposedEvent(correlationId=h.correlation_id),
+                        )
+                    except w.EntityConflictError:
+                        logger.debug(
+                            f"Workflow hook {h.correlation_id!r} has already been disposed"
+                        )
+
+                tg.start_soon(dispose_hook)
+                events_created = True
+
+    if not context.suspensions and events_created:
+        # We captured a SUSPENDED_MESSAGE but there is no suspension - this is likely caused
+        # by a disposed hook that cleared its suspensions. Just retry if event log changed.
+        return await workflow_handler(
+            message,
+            attempt=attempt,
+            queue_name=queue_name,
+            message_id=message_id,
+            registry=registry,
+        )
 
     now = datetime.now(UTC)
     min_timeout_seconds = -1.0
@@ -415,10 +515,14 @@ async def step_handler(
             return None
 
         # Start the step via event (increments attempt counter)
-        start_result = await world.events_create(
-            req.workflow_run_id,
-            w.StepStartedEvent(correlationId=req.step_id),
-        )
+        try:
+            start_result = await world.events_create(
+                req.workflow_run_id,
+                w.StepStartedEvent(correlationId=req.step_id),
+            )
+        except w.EntityConflictError:
+            logger.debug(f"Workflow step {req.step_id!r} was already started")
+            return None
 
         # Use the step entity from the event response
         if not start_result.step:

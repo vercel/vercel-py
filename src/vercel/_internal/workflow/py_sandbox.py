@@ -323,6 +323,7 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
         # all-caps constants (AF_*, SOCK_*, SOL_*, SO_*, IPPROTO_*, etc.)
         allow_if=str.isupper,
     ),
+    "asyncio": _RestrictedAsyncioPolicy("asyncio"),
     "_asyncio": _RestrictedAsyncioPolicy("asyncio.events"),
     "threading": _blocklist(
         "threading",
@@ -360,6 +361,7 @@ _PASSTHROUGHS: set[str] = {
     "abc",
     "array",
     "ast",
+    "asyncio",
     "base64",
     "binascii",
     "bisect",
@@ -734,6 +736,9 @@ def _sandbox_modules() -> Iterator[None]:
     with _sandbox_linecache():
         sys.modules.clear()
         sys.modules["sys"] = sys
+        for key in orig_modules:
+            if key == "importlib" or key.startswith("importlib."):
+                sys.modules[key] = orig_modules[key]
         sys.modules["builtins"] = proxy_builtins
         sys.meta_path.insert(0, finder)
         try:
