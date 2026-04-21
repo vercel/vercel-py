@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -39,6 +40,24 @@ class TestLint(unittest.TestCase):
         except subprocess.CalledProcessError as ex:
             output = ex.output.decode()
             raise AssertionError(f"ruff format validation failed:\n{output}") from None
+
+    def test_cqa_zizmor_check(self) -> None:
+        if shutil.which("zizmor") is None:
+            raise unittest.SkipTest("zizmor is not installed") from None
+
+        try:
+            subprocess.run(
+                ["zizmor", "--offline", "."],
+                check=True,
+                capture_output=True,
+                cwd=PROJECT_ROOT,
+                text=True,
+            )
+        except subprocess.CalledProcessError as ex:
+            output = ex.stdout
+            if ex.stderr:
+                output += "\n\n" + ex.stderr
+            raise AssertionError(f"zizmor validation failed:\n{output}") from None
 
 
 class TestTypecheck(unittest.TestCase):

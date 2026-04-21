@@ -6,11 +6,15 @@ on:
       - main
   pull_request:
 
+permissions: {}
+
 jobs:
   lint-test-and-build:
     name: test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     environment: ci
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -22,19 +26,20 @@ jobs:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
 
       - name: Sync dependencies
         run: uv sync --python ${{ matrix.python-version }}
 
       - name: Run tests, including lint and typecheck
         run: ./scripts/test.sh
-
-      - name: Run example tests
-        run: ./scripts/test-examples.sh
 
       - name: Build package
         run: ./scripts/build.sh

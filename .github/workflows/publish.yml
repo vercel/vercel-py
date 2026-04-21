@@ -4,18 +4,20 @@ on:
     branches:
       - main   # publish on push to main
 
-permissions:
-  contents: write  # required for creating tags
-  id-token: write  # required for Trusted Publishing (OIDC)
+permissions: {}
 
 jobs:
   check-version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       should-publish: ${{ steps.version-check.outputs.should-publish }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.14"
       - name: Check if version already published
@@ -35,29 +37,39 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.should-publish == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     environment:
       name: pypi
       url: https://pypi.org/p/vercel
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
       - run: uv venv --python 3.14
       - name: Create tag from version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(python scripts/get-version.py)
           TAG="v$VERSION"
-          # Check if tag already exists
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
+          REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # Check the remote directly because the checkout is shallow and does not fetch tags.
+          if git ls-remote --exit-code --tags "$REMOTE_URL" "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping tag creation"
           else
             echo "Creating tag $TAG"
             git config --local user.email "action@github.com"
             git config --local user.name "GitHub Action"
             git tag "$TAG"
-            git push origin "$TAG"
+            git push "$REMOTE_URL" "$TAG"
           fi
       - name: Verify tag matches version
         run: |
@@ -67,4 +79,4 @@ jobs:
       - name: Build
         run: uv build
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
