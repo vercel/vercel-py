@@ -7,9 +7,10 @@ from typing import Annotated, Any, Literal, TypeAlias, TypedDict, cast
 from pydantic import (
     AliasChoices,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
-    PrivateAttr,
+    PlainSerializer,
     StrictInt,
     StrictStr,
     TypeAdapter,
@@ -91,124 +92,81 @@ class NetworkPolicyCustom(_CreateModel):
 
 
 NetworkPolicy: TypeAlias = Literal["allow-all", "deny-all"] | NetworkPolicyCustom
+_NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
 
 
-class ApiNetworkInjectionRule(_CreateModel):
-    """Wire-format injection rule for a single domain."""
+def parse_network_policy(payload: Mapping[str, Any]) -> NetworkPolicy:
+    """Parse sandbox API network-policy JSON into the public NetworkPolicy type."""
+    mode = payload.get("mode")
+    if mode in ("allow-all", "deny-all"):
+        return cast(Literal["allow-all", "deny-all"], mode)
+    if mode != "custom":
+        raise ValueError("networkPolicy.mode must be 'allow-all', 'deny-all', or 'custom'")
 
-    domain: str
-    headers: dict[str, str] | None = None
-    header_names: list[str] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("header_names", "headerNames"),
-        serialization_alias="headerNames",
-    )
+    allowed_domains = _get_optional_str_list(payload, "allowed_domains", "allowedDomains")
+    injection_rules = _get_optional_mapping_list(payload, "injection_rules", "injectionRules")
+    subnets = _subnets_from_payload(payload)
 
-    def to_redacted_headers(self) -> dict[str, str]:
-        if self.header_names:
-            redacted: dict[str, str] = {}
-            lower_to_name: dict[str, str] = {}
-            for name in self.header_names:
-                lower_name = name.lower()
-                previous_name = lower_to_name.get(lower_name)
-                if previous_name is not None and previous_name != name:
-                    redacted.pop(previous_name, None)
-                lower_to_name[lower_name] = name
-                redacted[name] = _REDACTED_HEADER_VALUE
-            return redacted
-        return dict.fromkeys(self.headers or {}, _REDACTED_HEADER_VALUE)
+    if not injection_rules:
+        return NetworkPolicyCustom(allow=allowed_domains or [], subnets=subnets)
+
+    allow: dict[str, list[NetworkPolicyRule]] = {domain: [] for domain in allowed_domains or []}
+    for rule in injection_rules:
+        domain = rule.get("domain")
+        if not isinstance(domain, str):
+            raise TypeError("networkPolicy.injectionRules[].domain must be a string")
+
+        allow.setdefault(domain, [])
+        headers = _redacted_headers_from_rule(rule)
+        if not headers:
+            continue
+        allow[domain].append(NetworkPolicyRule(transform=[NetworkTransformer(headers=headers)]))
+
+    return NetworkPolicyCustom(allow=allow, subnets=subnets)
 
 
-class ApiNetworkPolicy(_CreateModel):
-    """Wire-format network policy returned by the Sandbox API."""
+def serialize_network_policy(network_policy: NetworkPolicy) -> dict[str, Any]:
+    """Serialize a public NetworkPolicy into sandbox API JSON."""
+    network_policy = _NETWORK_POLICY_ADAPTER.validate_python(network_policy)
+    if isinstance(network_policy, str):
+        return {"mode": network_policy}
 
-    mode: Literal["allow-all", "deny-all", "custom"]
-    allowed_domains: list[str] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("allowed_domains", "allowedDomains"),
-        serialization_alias="allowedDomains",
-    )
-    injection_rules: list[ApiNetworkInjectionRule] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("injection_rules", "injectionRules"),
-        serialization_alias="injectionRules",
-    )
-    allowed_cidrs: list[str] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("allowed_cidrs", "allowedCIDRs"),
-        serialization_alias="allowedCIDRs",
-    )
-    denied_cidrs: list[str] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("denied_cidrs", "deniedCIDRs"),
-        serialization_alias="deniedCIDRs",
-    )
+    if isinstance(network_policy.allow, list):
+        payload: dict[str, Any] = {
+            "mode": "custom",
+            "allowedDomains": list(network_policy.allow),
+        }
+        _set_subnet_payload(payload, network_policy.subnets)
+        return payload
 
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> ApiNetworkPolicy:
-        return cls.model_validate(payload)
+    injection_rules: list[dict[str, Any]] = []
+    for domain, rules in network_policy.allow.items():
+        headers = _merge_rule_headers(rules)
+        if not headers:
+            continue
+        injection_rules.append({"domain": domain, "headers": headers})
 
-    @classmethod
-    def from_network_policy(cls, network_policy: NetworkPolicy) -> ApiNetworkPolicy:
-        if isinstance(network_policy, str):
-            return cls(mode=network_policy)
+    payload = {
+        "mode": "custom",
+        "allowedDomains": list(network_policy.allow.keys()),
+    }
+    if injection_rules:
+        payload["injectionRules"] = injection_rules
+    _set_subnet_payload(payload, network_policy.subnets)
+    return payload
 
-        if isinstance(network_policy.allow, list):
-            allowed_cidrs = None
-            denied_cidrs = None
-            if network_policy.subnets is not None:
-                allowed_cidrs = network_policy.subnets.allow
-                denied_cidrs = network_policy.subnets.deny
-            return cls(
-                mode="custom",
-                allowed_domains=list(network_policy.allow),
-                allowed_cidrs=allowed_cidrs,
-                denied_cidrs=denied_cidrs,
-            )
 
-        injection_rules: list[ApiNetworkInjectionRule] = []
-        for domain, rules in network_policy.allow.items():
-            headers = _merge_rule_headers(rules)
-            if not headers:
-                continue
-            injection_rules.append(ApiNetworkInjectionRule(domain=domain, headers=headers))
+def _coerce_network_policy_value(value: object) -> NetworkPolicy:
+    if isinstance(value, Mapping):
+        return parse_network_policy(value)
+    return _NETWORK_POLICY_ADAPTER.validate_python(value)
 
-        allowed_cidrs = None
-        denied_cidrs = None
-        if network_policy.subnets is not None:
-            allowed_cidrs = network_policy.subnets.allow
-            denied_cidrs = network_policy.subnets.deny
 
-        return cls(
-            mode="custom",
-            allowed_domains=list(network_policy.allow.keys()),
-            injection_rules=injection_rules or None,
-            allowed_cidrs=allowed_cidrs,
-            denied_cidrs=denied_cidrs,
-        )
-
-    def to_network_policy(self) -> NetworkPolicy:
-        if self.mode in ("allow-all", "deny-all"):
-            return cast(Literal["allow-all", "deny-all"], self.mode)
-
-        allowed_domains = list(self.allowed_domains or [])
-        injection_rules = list(self.injection_rules or [])
-        subnets = _subnets_from_api(self)
-
-        if not injection_rules:
-            return NetworkPolicyCustom(allow=allowed_domains, subnets=subnets)
-
-        allow: dict[str, list[NetworkPolicyRule]] = {domain: [] for domain in allowed_domains}
-        for rule in injection_rules:
-            allow.setdefault(rule.domain, [])
-            headers = rule.to_redacted_headers()
-            if not headers:
-                continue
-            allow[rule.domain].append(
-                NetworkPolicyRule(transform=[NetworkTransformer(headers=headers)])
-            )
-
-        return NetworkPolicyCustom(allow=allow, subnets=subnets)
+NetworkPolicyCodec: TypeAlias = Annotated[
+    NetworkPolicy,
+    BeforeValidator(_coerce_network_policy_value),
+    PlainSerializer(serialize_network_policy, return_type=dict[str, Any]),
+]
 
 
 def _merge_headers_case_insensitively(
@@ -246,18 +204,84 @@ def _merge_rule_transform_headers(rule: NetworkPolicyRule) -> dict[str, str]:
     return merged
 
 
-def _subnets_from_api(network_policy: ApiNetworkPolicy) -> NetworkPolicySubnets | None:
-    if network_policy.allowed_cidrs is None and network_policy.denied_cidrs is None:
+def _redacted_headers_from_rule(rule: Mapping[str, Any]) -> dict[str, str]:
+    header_names = _get_optional_str_list(rule, "header_names", "headerNames")
+    if header_names:
+        redacted: dict[str, str] = {}
+        lower_to_name: dict[str, str] = {}
+        for name in header_names:
+            lower_name = name.lower()
+            previous_name = lower_to_name.get(lower_name)
+            if previous_name is not None and previous_name != name:
+                redacted.pop(previous_name, None)
+            lower_to_name[lower_name] = name
+            redacted[name] = _REDACTED_HEADER_VALUE
+        return redacted
+
+    headers = _get_optional_str_mapping(rule, "headers")
+    return dict.fromkeys(headers, _REDACTED_HEADER_VALUE)
+
+
+def _get_optional_str_list(payload: Mapping[str, Any], *keys: str) -> list[str] | None:
+    value = _get_alias_value(payload, *keys)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        joined = "/".join(keys)
+        raise TypeError(f"networkPolicy.{joined} must be a list of strings")
+    return list(value)
+
+
+def _get_optional_mapping_list(
+    payload: Mapping[str, Any], *keys: str
+) -> list[Mapping[str, Any]] | None:
+    value = _get_alias_value(payload, *keys)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, Mapping) for item in value):
+        joined = "/".join(keys)
+        raise TypeError(f"networkPolicy.{joined} must be a list of objects")
+    return [cast(Mapping[str, Any], item) for item in value]
+
+
+def _get_optional_str_mapping(payload: Mapping[str, Any], *keys: str) -> dict[str, str]:
+    value = _get_alias_value(payload, *keys)
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    ):
+        joined = "/".join(keys)
+        raise TypeError(f"networkPolicy.{joined} must be a string map")
+    return dict(cast(Mapping[str, str], value))
+
+
+def _get_alias_value(payload: Mapping[str, Any], *keys: str) -> object | None:
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None
+
+
+def _subnets_from_payload(payload: Mapping[str, Any]) -> NetworkPolicySubnets | None:
+    allowed_cidrs = _get_optional_str_list(payload, "allowed_cidrs", "allowedCIDRs")
+    denied_cidrs = _get_optional_str_list(payload, "denied_cidrs", "deniedCIDRs")
+    if allowed_cidrs is None and denied_cidrs is None:
         return None
 
     return NetworkPolicySubnets(
-        allow=(
-            list(network_policy.allowed_cidrs) if network_policy.allowed_cidrs is not None else None
-        ),
-        deny=(
-            list(network_policy.denied_cidrs) if network_policy.denied_cidrs is not None else None
-        ),
+        allow=allowed_cidrs,
+        deny=denied_cidrs,
     )
+
+
+def _set_subnet_payload(payload: dict[str, Any], subnets: NetworkPolicySubnets | None) -> None:
+    if subnets is None:
+        return
+    if subnets.allow is not None:
+        payload["allowedCIDRs"] = subnets.allow
+    if subnets.deny is not None:
+        payload["deniedCIDRs"] = subnets.deny
 
 
 def _value_error(loc: tuple[str, ...], message: str, input_value: object) -> InitErrorDetails:
@@ -458,25 +482,12 @@ class CreateSandboxRequest(_CreateModel):
     timeout: int | timedelta | None = None
     resources: Resources | None = None
     runtime: StrictStr | None = None
-    network_policy: (
-        ApiNetworkPolicy | NetworkPolicyCustom | Literal["allow-all", "deny-all"] | None
-    ) = Field(
+    network_policy: NetworkPolicyCodec | None = Field(
         default=None,
         serialization_alias="networkPolicy",
     )
     interactive: bool | None = Field(default=None, serialization_alias="__interactive")
     env: dict[str, str] | None = None
-
-    @field_validator("network_policy", mode="before")
-    @classmethod
-    def _coerce_network_policy(cls, value: object) -> ApiNetworkPolicy | None:
-        if value is None:
-            return None
-        if isinstance(value, ApiNetworkPolicy):
-            return value
-        if isinstance(value, dict):
-            return ApiNetworkPolicy.model_validate(value)
-        return ApiNetworkPolicy.from_network_policy(cast(NetworkPolicy, value))
 
     @field_validator("timeout", mode="before")
     @classmethod
@@ -565,29 +576,16 @@ class Sandbox(BaseModel):
     cwd: str
     updated_at: int = Field(alias="updatedAt")
     interactive_port: int | None = Field(default=None, alias="interactivePort")
-    network_policy_data: ApiNetworkPolicy | None = Field(default=None, alias="networkPolicy")
-    _network_policy: NetworkPolicy | None = PrivateAttr(default=None)
+    network_policy: NetworkPolicyCodec | None = Field(default=None, alias="networkPolicy")
 
-    @field_validator("network_policy_data", mode="before")
+    @field_validator("network_policy", mode="before")
     @classmethod
-    def _parse_network_policy_data(cls, value: object) -> ApiNetworkPolicy | None:
+    def _parse_network_policy(cls, value: object) -> object:
         if value is None:
             return None
-        if isinstance(value, ApiNetworkPolicy):
-            return value
-        if isinstance(value, dict):
-            return ApiNetworkPolicy.from_payload(value)
-        raise TypeError("networkPolicy must be a mapping")
-
-    def model_post_init(self, __context: object) -> None:
-        if self.network_policy_data is None:
-            self._network_policy = None
-            return
-        self._network_policy = self.network_policy_data.to_network_policy()
-
-    @property
-    def network_policy(self) -> NetworkPolicy | None:
-        return self._network_policy
+        if isinstance(value, Mapping):
+            return parse_network_policy(value)
+        return value
 
 
 class SandboxRoute(BaseModel):
