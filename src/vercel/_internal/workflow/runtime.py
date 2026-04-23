@@ -60,7 +60,14 @@ class Hook(BaseSuspension, Generic[T]):
             res = self.hook_cls.model_validate(raw_data)
         else:
             raise RuntimeError(f"Invalid hook type for {self.hook_cls}")
-        self.futures.popleft().set_result(res)
+        while self.futures:
+            fut = self.futures.popleft()
+            # The future might be cancelled by the user
+            if not fut.done():
+                fut.set_result(res)
+                break
+        else:
+            logger.warning("Hook %r resumed but no handler needs it; ignoring: %r", self.token, res)
 
 
 class WorkflowOrchestratorContext:
@@ -81,6 +88,7 @@ class WorkflowOrchestratorContext:
         self.suspensions: dict[str, BaseSuspension] = {}
         self.hooks: dict[str, Hook] = {}
         self.resume_handle: asyncio.Handle | None = None
+        self._suspended = False
         self.registry = registry
 
     @classmethod
@@ -115,7 +123,7 @@ class WorkflowOrchestratorContext:
         input_data = b"json" + json.dumps((args, kwargs), sort_keys=True).encode()
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
-        if self.resume_handle is None:
+        if self.resume_handle is None and not self._suspended:
             self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         return await sus.future
 
@@ -125,7 +133,7 @@ class WorkflowOrchestratorContext:
             resume_at=(parse_duration_to_date(param)),
         )
         self.suspensions[wait.correlation_id] = wait
-        if self.resume_handle is None:
+        if self.resume_handle is None and not self._suspended:
             self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         await wait.future
 
@@ -145,7 +153,7 @@ class WorkflowOrchestratorContext:
         self.suspensions[hook.correlation_id] = hook
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
-        if self.resume_handle is None:
+        if self.resume_handle is None and not self._suspended:
             self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         return await fut
 
@@ -254,6 +262,7 @@ class WorkflowOrchestratorContext:
                     self.dispose_hook(correlation_id=event.correlation_id)
 
         if self.suspensions:
+            self._suspended = True
             self._fut.cancel(SUSPENDED_MESSAGE)
 
 
