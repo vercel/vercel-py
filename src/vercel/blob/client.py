@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from datetime import timedelta
 from os import PathLike
 from typing import Any
 
@@ -11,6 +12,7 @@ from vercel._internal.blob.core import (
 )
 from vercel._internal.blob.multipart import MultipartClient
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.time import SECOND, coerce_duration
 from vercel.blob.errors import BlobError
 from vercel.blob.multipart.api import (
     AsyncMultipartUploader,
@@ -31,13 +33,9 @@ from vercel.blob.types import (
 
 
 class BlobClient:
-    def __init__(self, token: str | None = None):
-        self._ops_client = SyncBlobOpsClient(token=token)
+    def __init__(self):
+        self._ops_client = SyncBlobOpsClient()
         self._closed = False
-
-    @property
-    def token(self) -> str:
-        return self._ops_client._request_client.token
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -68,6 +66,7 @@ class BlobClient:
         cache_control_max_age: int | None = None,
         multipart: bool = False,
         on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
+        token: str | None = None,
     ) -> PutBlobResultType:
         self._ensure_open()
         result, _ = iter_coroutine(
@@ -79,7 +78,7 @@ class BlobClient:
                 add_random_suffix=add_random_suffix,
                 overwrite=overwrite,
                 cache_control_max_age=cache_control_max_age,
-                token=None,
+                token=token,
                 multipart=multipart,
                 on_upload_progress=on_upload_progress,
             )
@@ -94,33 +93,38 @@ class BlobClient:
         timeout: float | None = None,
         use_cache: bool = True,
         if_none_match: str | None = None,
+        token: str | None = None,
     ) -> GetBlobResultType:
         self._ensure_open()
+        resolved_timeout = coerce_duration(timeout, SECOND) if timeout is not None else None
         return iter_coroutine(
             self._ops_client.get_blob(
                 url_or_path,
                 access=access,
-                timeout=timeout,
+                timeout=resolved_timeout,
                 use_cache=use_cache,
                 if_none_match=if_none_match,
-                default_timeout=30.0,
+                default_timeout=timedelta(seconds=30),
+                token=token,
             )
         )
 
-    def head(self, url_or_path: str) -> HeadBlobResultType:
+    def head(self, url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
         self._ensure_open()
         return iter_coroutine(
             self._ops_client.head_blob(
                 url_or_path,
+                token=token,
             )
         )
 
-    def delete(self, url_or_path: str | Iterable[str]) -> None:
+    def delete(self, url_or_path: str | Iterable[str], *, token: str | None = None) -> None:
         self._ensure_open()
         normalized_urls = normalize_delete_urls(url_or_path)
         iter_coroutine(
             self._ops_client.delete_blob(
                 normalized_urls,
+                token=token,
             )
         )
 
@@ -131,6 +135,7 @@ class BlobClient:
         prefix: str | None = None,
         cursor: str | None = None,
         mode: str | None = None,
+        token: str | None = None,
     ) -> ListBlobResultType:
         self._ensure_open()
         return self._ops_client.list_objects(
@@ -138,6 +143,7 @@ class BlobClient:
             prefix=prefix,
             cursor=cursor,
             mode=mode,
+            token=token,
         )
 
     def iter_objects(
@@ -148,6 +154,7 @@ class BlobClient:
         batch_size: int | None = None,
         limit: int | None = None,
         cursor: str | None = None,
+        token: str | None = None,
     ) -> Iterator[ListBlobItem]:
         self._ensure_open()
         return self._ops_client.iter_objects(
@@ -156,6 +163,7 @@ class BlobClient:
             batch_size=batch_size,
             limit=limit,
             cursor=cursor,
+            token=token,
         )
 
     def copy(
@@ -168,6 +176,7 @@ class BlobClient:
         add_random_suffix: bool = False,
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
+        token: str | None = None,
     ) -> PutBlobResultType:
         self._ensure_open()
         return iter_coroutine(
@@ -179,15 +188,19 @@ class BlobClient:
                 add_random_suffix=add_random_suffix,
                 overwrite=overwrite,
                 cache_control_max_age=cache_control_max_age,
+                token=token,
             )
         )
 
-    def create_folder(self, path: str, *, overwrite: bool = False) -> CreateFolderResultType:
+    def create_folder(
+        self, path: str, *, overwrite: bool = False, token: str | None = None
+    ) -> CreateFolderResultType:
         self._ensure_open()
         return iter_coroutine(
             self._ops_client.create_folder(
                 path,
                 overwrite=overwrite,
+                token=token,
             )
         )
 
@@ -201,17 +214,20 @@ class BlobClient:
         overwrite: bool = True,
         create_parents: bool = True,
         progress: Callable[[int, int | None], None] | None = None,
+        token: str | None = None,
     ) -> str:
         self._ensure_open()
+        resolved_timeout = coerce_duration(timeout, SECOND) if timeout is not None else None
         return iter_coroutine(
             self._ops_client.download_file(
                 url_or_path,
                 local_path,
                 access=access,
-                timeout=timeout,
+                timeout=resolved_timeout,
                 overwrite=overwrite,
                 create_parents=create_parents,
                 progress=progress,
+                token=token,
             )
         )
 
@@ -227,6 +243,7 @@ class BlobClient:
         cache_control_max_age: int | None = None,
         multipart: bool = False,
         on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
+        token: str | None = None,
     ) -> PutBlobResultType:
         self._ensure_open()
         return iter_coroutine(
@@ -238,7 +255,7 @@ class BlobClient:
                 add_random_suffix=add_random_suffix,
                 overwrite=overwrite,
                 cache_control_max_age=cache_control_max_age,
-                token=None,
+                token=token,
                 multipart=multipart,
                 on_upload_progress=on_upload_progress,
                 missing_local_path_error="src_path is required",
@@ -254,8 +271,9 @@ class BlobClient:
         add_random_suffix: bool = True,
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
+        token: str | None = None,
     ) -> MultipartUploader:
-        """Create a multipart uploader bound to this client's token."""
+        """Create a multipart uploader bound to this client's transport."""
         self._ensure_open()
         return create_multipart_uploader(
             path,
@@ -264,19 +282,15 @@ class BlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=self.token,
+            token=token,
             multipart_client=MultipartClient(self._ops_client._request_client),
         )
 
 
 class AsyncBlobClient:
-    def __init__(self, token: str | None = None):
-        self._ops_client = AsyncBlobOpsClient(token=token)
+    def __init__(self):
+        self._ops_client = AsyncBlobOpsClient()
         self._closed = False
-
-    @property
-    def token(self) -> str:
-        return self._ops_client._request_client.token
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -311,6 +325,7 @@ class AsyncBlobClient:
             | Callable[[UploadProgressEvent], Awaitable[None]]
             | None
         ) = None,
+        token: str | None = None,
     ) -> PutBlobResultType:
         self._ensure_open()
         result, _ = await self._ops_client.put_blob(
@@ -321,7 +336,7 @@ class AsyncBlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=None,
+            token=token,
             multipart=multipart,
             on_upload_progress=on_upload_progress,
         )
@@ -335,28 +350,33 @@ class AsyncBlobClient:
         timeout: float | None = None,
         use_cache: bool = True,
         if_none_match: str | None = None,
+        token: str | None = None,
     ) -> GetBlobResultType:
         self._ensure_open()
+        resolved_timeout = coerce_duration(timeout, SECOND) if timeout is not None else None
         return await self._ops_client.get_blob(
             url_or_path,
             access=access,
-            timeout=timeout,
+            timeout=resolved_timeout,
             use_cache=use_cache,
             if_none_match=if_none_match,
-            default_timeout=30.0,
+            default_timeout=timedelta(seconds=30),
+            token=token,
         )
 
-    async def head(self, url_or_path: str) -> HeadBlobResultType:
+    async def head(self, url_or_path: str, *, token: str | None = None) -> HeadBlobResultType:
         self._ensure_open()
         return await self._ops_client.head_blob(
             url_or_path,
+            token=token,
         )
 
-    async def delete(self, url_or_path: str | Iterable[str]) -> None:
+    async def delete(self, url_or_path: str | Iterable[str], *, token: str | None = None) -> None:
         self._ensure_open()
         normalized_urls = normalize_delete_urls(url_or_path)
         await self._ops_client.delete_blob(
             normalized_urls,
+            token=token,
         )
 
     async def iter_objects(
@@ -367,6 +387,7 @@ class AsyncBlobClient:
         batch_size: int | None = None,
         limit: int | None = None,
         cursor: str | None = None,
+        token: str | None = None,
     ) -> AsyncIterator[ListBlobItem]:
         self._ensure_open()
         return self._ops_client.iter_objects(
@@ -375,6 +396,7 @@ class AsyncBlobClient:
             batch_size=batch_size,
             limit=limit,
             cursor=cursor,
+            token=token,
         )
 
     async def list_objects(
@@ -384,6 +406,7 @@ class AsyncBlobClient:
         prefix: str | None = None,
         cursor: str | None = None,
         mode: str | None = None,
+        token: str | None = None,
     ) -> ListBlobResultType:
         self._ensure_open()
         return await self._ops_client.list_objects(
@@ -391,13 +414,17 @@ class AsyncBlobClient:
             prefix=prefix,
             cursor=cursor,
             mode=mode,
+            token=token,
         )
 
-    async def create_folder(self, path: str, *, overwrite: bool = False) -> CreateFolderResultType:
+    async def create_folder(
+        self, path: str, *, overwrite: bool = False, token: str | None = None
+    ) -> CreateFolderResultType:
         self._ensure_open()
         return await self._ops_client.create_folder(
             path,
             overwrite=overwrite,
+            token=token,
         )
 
     async def copy(
@@ -410,6 +437,7 @@ class AsyncBlobClient:
         add_random_suffix: bool = False,
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
+        token: str | None = None,
     ) -> PutBlobResultType:
         self._ensure_open()
         return await self._ops_client.copy_blob(
@@ -420,6 +448,7 @@ class AsyncBlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
+            token=token,
         )
 
     async def download_file(
@@ -434,16 +463,19 @@ class AsyncBlobClient:
         progress: (
             Callable[[int, int | None], None] | Callable[[int, int | None], Awaitable[None]] | None
         ) = None,
+        token: str | None = None,
     ) -> str:
         self._ensure_open()
+        resolved_timeout = coerce_duration(timeout, SECOND) if timeout is not None else None
         return await self._ops_client.download_file(
             url_or_path,
             local_path,
             access=access,
-            timeout=timeout,
+            timeout=resolved_timeout,
             overwrite=overwrite,
             create_parents=create_parents,
             progress=progress,
+            token=token,
         )
 
     async def upload_file(
@@ -462,6 +494,7 @@ class AsyncBlobClient:
             | Callable[[UploadProgressEvent], Awaitable[None]]
             | None
         ) = None,
+        token: str | None = None,
     ) -> PutBlobResultType:
         self._ensure_open()
         return await self._ops_client.upload_file(
@@ -472,7 +505,7 @@ class AsyncBlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=None,
+            token=token,
             multipart=multipart,
             on_upload_progress=on_upload_progress,
             missing_local_path_error="local_path is required",
@@ -487,8 +520,9 @@ class AsyncBlobClient:
         add_random_suffix: bool = True,
         overwrite: bool = False,
         cache_control_max_age: int | None = None,
+        token: str | None = None,
     ) -> AsyncMultipartUploader:
-        """Create an async multipart uploader bound to this client's token."""
+        """Create an async multipart uploader bound to this client's transport."""
         self._ensure_open()
         return await create_multipart_uploader_async(
             path,
@@ -497,6 +531,6 @@ class AsyncBlobClient:
             add_random_suffix=add_random_suffix,
             overwrite=overwrite,
             cache_control_max_age=cache_control_max_age,
-            token=self.token,
+            token=token,
             multipart_client=MultipartClient(self._ops_client._request_client),
         )

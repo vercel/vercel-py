@@ -75,17 +75,14 @@ class TestDownloadFile:
         dest = tmp_path / "downloaded.txt"
         mock_core_client = MagicMock()
         mock_core_client.download_file = AsyncMock(return_value=str(dest))
-        captured_tokens: list[str | None] = []
 
-        def _run(operation, *, token=None):
-            captured_tokens.append(token)
+        def _run(operation):
             return iter_coroutine(operation(mock_core_client))
 
         with patch("vercel.blob.ops._run_sync_blob_operation", side_effect=_run):
             result = download_file("my/file.txt", str(dest), token=TOKEN, access="public")
 
         assert result == str(dest)
-        assert captured_tokens == [TOKEN]
         mock_core_client.download_file.assert_awaited_once_with(
             "my/file.txt",
             str(dest),
@@ -94,24 +91,30 @@ class TestDownloadFile:
             overwrite=True,
             create_parents=True,
             progress=None,
+            token=TOKEN,
         )
 
     def test_private_access_passes_access_to_core_client(self, tmp_path):
         dest = tmp_path / "private.txt"
         mock_core_client = MagicMock()
         mock_core_client.download_file = AsyncMock(return_value=str(dest))
-        captured_tokens: list[str | None] = []
 
-        def _run(operation, *, token=None):
-            captured_tokens.append(token)
+        def _run(operation):
             return iter_coroutine(operation(mock_core_client))
 
         with patch("vercel.blob.ops._run_sync_blob_operation", side_effect=_run):
             download_file("my/secret.txt", str(dest), token=TOKEN, access="private")
 
-        assert captured_tokens == [TOKEN]
-        kwargs = mock_core_client.download_file.await_args.kwargs
-        assert kwargs["access"] == "private"
+        mock_core_client.download_file.assert_awaited_once_with(
+            "my/secret.txt",
+            str(dest),
+            access="private",
+            timeout=None,
+            overwrite=True,
+            create_parents=True,
+            progress=None,
+            token=TOKEN,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +135,7 @@ class TestDownloadFileAsync:
             )
 
         assert result == str(dest)
-        # Token is passed at construction
-        mock_cls.assert_called_once_with(token=TOKEN)
+        mock_cls.assert_called_once_with()
         mock_core_client.download_file.assert_awaited_once_with(
             "my/file.txt",
             str(dest),
@@ -142,6 +144,7 @@ class TestDownloadFileAsync:
             overwrite=True,
             create_parents=True,
             progress=None,
+            token=TOKEN,
         )
 
     async def test_private_access_passes_access_to_core_client(self, tmp_path):
@@ -155,9 +158,17 @@ class TestDownloadFileAsync:
         with patch("vercel.blob.ops.AsyncBlobOpsClient", mock_cls):
             await download_file_async("my/secret.txt", str(dest), token=TOKEN, access="private")
 
-        mock_cls.assert_called_once_with(token=TOKEN)
-        kwargs = mock_core_client.download_file.await_args.kwargs
-        assert kwargs["access"] == "private"
+        mock_cls.assert_called_once_with()
+        mock_core_client.download_file.assert_awaited_once_with(
+            "my/secret.txt",
+            str(dest),
+            access="private",
+            timeout=None,
+            overwrite=True,
+            create_parents=True,
+            progress=None,
+            token=TOKEN,
+        )
 
 
 # ---------------------------------------------------------------------------

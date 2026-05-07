@@ -24,8 +24,8 @@ load_dotenv()
 token = os.getenv("BLOB_READ_WRITE_TOKEN")
 assert token, "Set BLOB_READ_WRITE_TOKEN"
 
-client = BlobClient(token)
-aclient = AsyncBlobClient(token)
+client = BlobClient()
+aclient = AsyncBlobClient()
 
 
 def sync_example():
@@ -44,6 +44,7 @@ def sync_example():
         "examples/large-file.bin",
         content_type="application/octet-stream",
         add_random_suffix=True,
+        token=token,
     )
 
     print("Created uploader with:")
@@ -84,6 +85,7 @@ async def async_example():
         "examples/large-file-async.bin",
         content_type="application/octet-stream",
         add_random_suffix=True,
+        token=token,
     )
 
     print("Created uploader with:")
@@ -125,6 +127,7 @@ async def async_with_file_example():
     uploader = await aclient.create_multipart_uploader(
         "examples/file-from-disk.bin",
         content_type="application/octet-stream",
+        token=token,
     )
 
     print("\nCreated uploader for file upload")

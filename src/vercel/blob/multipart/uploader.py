@@ -33,7 +33,7 @@ def auto_multipart_upload(
     on_upload_progress: Callable[[UploadProgressEvent], None] | None = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    client = SyncMultipartClient(token=token)
+    client = SyncMultipartClient()
     headers = prepare_upload_headers(
         access=access,
         content_type=content_type,
@@ -92,7 +92,7 @@ async def auto_multipart_upload_async(
     ) = None,
     part_size: int = DEFAULT_PART_SIZE,
 ) -> dict[str, Any]:
-    client = AsyncMultipartClient(token=token)
+    client = AsyncMultipartClient()
     headers = prepare_upload_headers(
         access=access,
         content_type=content_type,

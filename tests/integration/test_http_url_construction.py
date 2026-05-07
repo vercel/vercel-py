@@ -9,6 +9,8 @@ Users can pass base_url with or without trailing slash, and paths with or
 without leading slash - the result will be the same.
 """
 
+from datetime import timedelta
+
 import pytest
 import respx
 from httpx import Response
@@ -17,10 +19,20 @@ from vercel._internal.http import (
     AsyncTransport,
     JSONBody,
     SyncTransport,
+    TransportOptions,
     create_base_async_client,
     create_base_client,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
+
+
+def _transport_options(base_url: str) -> TransportOptions:
+    return TransportOptions(
+        timeout=timedelta(seconds=30),
+        base_url=base_url,
+        max_connections=100,
+        enable_http2=False,
+    )
 
 
 class TestUrlNormalization:
@@ -61,7 +73,7 @@ class TestUrlNormalization:
         """Test that SyncTransport normalizes URLs consistently."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -95,7 +107,7 @@ class TestUrlNormalization:
         """Test that AsyncTransport normalizes URLs consistently."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_async_client(timeout=30.0, base_url=base_url)
+        client = create_base_async_client(_transport_options(base_url))
         transport = AsyncTransport(client)
 
         try:
@@ -138,7 +150,7 @@ class TestEdgeCases:
         """Test edge cases for URL construction."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -166,7 +178,7 @@ class TestCacheUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"data": "cached"}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -185,7 +197,7 @@ class TestCacheUrlPatterns:
 
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -203,7 +215,7 @@ class TestCacheUrlPatterns:
 
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -229,7 +241,7 @@ class TestApiUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"projects": []}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -249,7 +261,7 @@ class TestApiUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"id": project_id}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:

@@ -1095,8 +1095,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_put_response)
         )
 
-        client = BlobClient(token="test_token")
-        result = client.put("test.txt", b"Hello, World!")
+        client = BlobClient()
+        result = client.put("test.txt", b"Hello, World!", token="test_token")
 
         assert route.called
         assert result.url == mock_blob_put_response["url"]
@@ -1108,8 +1108,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_head_response)
         )
 
-        client = BlobClient(token="test_token")
-        result = client.head("https://blob.vercel-storage.com/test.txt")
+        client = BlobClient()
+        result = client.head("https://blob.vercel-storage.com/test.txt", token="test_token")
 
         assert route.called
         assert result.size == 13
@@ -1121,8 +1121,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json={})
         )
 
-        client = BlobClient(token="test_token")
-        client.delete("https://blob.vercel-storage.com/test.txt")
+        client = BlobClient()
+        client.delete("https://blob.vercel-storage.com/test.txt", token="test_token")
 
         assert route.called
 
@@ -1133,8 +1133,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_list_response)
         )
 
-        client = BlobClient(token="test_token")
-        result = client.list_objects()
+        client = BlobClient()
+        result = client.list_objects(token="test_token")
 
         assert route.called
         assert len(result.blobs) == 2
@@ -1146,8 +1146,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, content=b"blob data")
         )
 
-        client = BlobClient(token="test_token")
-        result = client.get("https://blob.vercel-storage.com/test.txt")
+        client = BlobClient()
+        result = client.get("https://blob.vercel-storage.com/test.txt", token="test_token")
 
         assert route.called
         assert result.content == b"blob data"
@@ -1159,8 +1159,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_list_response)
         )
 
-        client = BlobClient(token="test_token")
-        items = list(client.iter_objects())
+        client = BlobClient()
+        items = list(client.iter_objects(token="test_token"))
 
         assert route.called
         assert len(items) == 2
@@ -1172,8 +1172,10 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_copy_response)
         )
 
-        client = BlobClient(token="test_token")
-        result = client.copy("https://blob.vercel-storage.com/source.txt", "copied.txt")
+        client = BlobClient()
+        result = client.copy(
+            "https://blob.vercel-storage.com/source.txt", "copied.txt", token="test_token"
+        )
 
         assert route.called
         assert result.pathname == "copied.txt"
@@ -1185,8 +1187,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_create_folder_response)
         )
 
-        client = BlobClient(token="test_token")
-        result = client.create_folder("my-folder")
+        client = BlobClient()
+        result = client.create_folder("my-folder", token="test_token")
 
         assert route.called
         assert result.pathname == "my-folder/"
@@ -1199,8 +1201,10 @@ class TestBlobClient:
         )
         local_path = tmp_path / "downloaded.txt"
 
-        client = BlobClient(token="test_token")
-        result = client.download_file("https://blob.vercel-storage.com/download.txt", local_path)
+        client = BlobClient()
+        result = client.download_file(
+            "https://blob.vercel-storage.com/download.txt", local_path, token="test_token"
+        )
 
         assert route.called
         assert result == str(local_path)
@@ -1215,8 +1219,8 @@ class TestBlobClient:
         local_file = tmp_path / "client-upload.txt"
         local_file.write_bytes(b"client upload")
 
-        client = BlobClient(token="test_token")
-        result = client.upload_file(local_file, "test.txt")
+        client = BlobClient()
+        result = client.upload_file(local_file, "test.txt", token="test_token")
 
         assert route.called
         assert result.url == mock_blob_put_response["url"]
@@ -1252,9 +1256,9 @@ class TestBlobClient:
             raise AssertionError(f"unexpected multipart action: {action}")
 
         route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
-        client = BlobClient(token="test_token")
+        client = BlobClient()
 
-        uploader = client.create_multipart_uploader("folder/client-mpu.bin")
+        uploader = client.create_multipart_uploader("folder/client-mpu.bin", token="test_token")
         part = uploader.upload_part(1, b"chunk")
         result = uploader.complete([part])
 
@@ -1270,8 +1274,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_put_response)
         )
 
-        client = AsyncBlobClient(token="test_token")
-        result = await client.put("test.txt", b"Hello, World!")
+        client = AsyncBlobClient()
+        result = await client.put("test.txt", b"Hello, World!", token="test_token")
 
         assert route.called
         assert result.url == mock_blob_put_response["url"]
@@ -1284,8 +1288,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_head_response)
         )
 
-        client = AsyncBlobClient(token="test_token")
-        result = await client.head("https://blob.vercel-storage.com/test.txt")
+        client = AsyncBlobClient()
+        result = await client.head("https://blob.vercel-storage.com/test.txt", token="test_token")
 
         assert route.called
         assert result.size == 13
@@ -1298,8 +1302,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, content=b"blob data")
         )
 
-        client = AsyncBlobClient(token="test_token")
-        result = await client.get("https://blob.vercel-storage.com/test.txt")
+        client = AsyncBlobClient()
+        result = await client.get("https://blob.vercel-storage.com/test.txt", token="test_token")
 
         assert route.called
         assert result.content == b"blob data"
@@ -1312,8 +1316,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_list_response)
         )
 
-        client = AsyncBlobClient(token="test_token")
-        result = await client.list_objects()
+        client = AsyncBlobClient()
+        result = await client.list_objects(token="test_token")
 
         assert route.called
         assert len(result.blobs) == 2
@@ -1326,8 +1330,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_list_response)
         )
 
-        client = AsyncBlobClient(token="test_token")
-        iterator = await client.iter_objects()
+        client = AsyncBlobClient()
+        iterator = await client.iter_objects(token="test_token")
         items = [item async for item in iterator]
 
         assert route.called
@@ -1341,8 +1345,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json={})
         )
 
-        client = AsyncBlobClient(token="test_token")
-        await client.delete("https://blob.vercel-storage.com/test.txt")
+        client = AsyncBlobClient()
+        await client.delete("https://blob.vercel-storage.com/test.txt", token="test_token")
 
         assert route.called
 
@@ -1354,8 +1358,10 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_copy_response)
         )
 
-        client = AsyncBlobClient(token="test_token")
-        result = await client.copy("https://blob.vercel-storage.com/source.txt", "copied.txt")
+        client = AsyncBlobClient()
+        result = await client.copy(
+            "https://blob.vercel-storage.com/source.txt", "copied.txt", token="test_token"
+        )
 
         assert route.called
         assert result.pathname == "copied.txt"
@@ -1370,8 +1376,8 @@ class TestBlobClient:
             return_value=httpx.Response(200, json=mock_blob_create_folder_response)
         )
 
-        client = AsyncBlobClient(token="test_token")
-        result = await client.create_folder("my-folder")
+        client = AsyncBlobClient()
+        result = await client.create_folder("my-folder", token="test_token")
 
         assert route.called
         assert result.pathname == "my-folder/"
@@ -1385,9 +1391,11 @@ class TestBlobClient:
         )
         local_path = tmp_path / "downloaded-async.txt"
 
-        client = AsyncBlobClient(token="test_token")
+        client = AsyncBlobClient()
         result = await client.download_file(
-            "https://blob.vercel-storage.com/download.txt", local_path
+            "https://blob.vercel-storage.com/download.txt",
+            local_path,
+            token="test_token",
         )
 
         assert route.called
@@ -1406,8 +1414,8 @@ class TestBlobClient:
         local_file = tmp_path / "client-upload-async.txt"
         local_file.write_bytes(b"async client upload")
 
-        client = AsyncBlobClient(token="test_token")
-        result = await client.upload_file(local_file, "test.txt")
+        client = AsyncBlobClient()
+        result = await client.upload_file(local_file, "test.txt", token="test_token")
 
         assert route.called
         assert result.url == mock_blob_put_response["url"]
@@ -1447,9 +1455,11 @@ class TestBlobClient:
             raise AssertionError(f"unexpected multipart action: {action}")
 
         route = respx.post(f"{BLOB_API_BASE}/mpu").mock(side_effect=mpu_handler)
-        client = AsyncBlobClient(token="test_token")
+        client = AsyncBlobClient()
 
-        uploader = await client.create_multipart_uploader("folder/client-mpu-async.bin")
+        uploader = await client.create_multipart_uploader(
+            "folder/client-mpu-async.bin", token="test_token"
+        )
         part = await uploader.upload_part(1, b"chunk")
         result = await uploader.complete([part])
 
