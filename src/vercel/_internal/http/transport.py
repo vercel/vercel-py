@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import abc
+import json
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import httpx
+from httpx import USE_CLIENT_DEFAULT
+from httpx._types import HeaderTypes, QueryParamTypes
+
+from vercel._internal.time import to_seconds_float
 
 
 def _normalize_path(path: str) -> str:
@@ -34,26 +40,27 @@ class RawBody:
 RequestBody = JSONBody | BytesBody | RawBody | None
 
 
-def _build_request_kwargs(
+@dataclass(frozen=True, slots=True)
+class TransportOptions:
+    timeout: timedelta
+    base_url: str
+    max_connections: int
+    enable_http2: bool
+
+
+def _build_request(
     *,
-    params: dict[str, Any] | None,
     body: RequestBody,
-    headers: dict[str, str] | None,
+    headers: HeaderTypes | None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
-
-    if params:
-        kwargs["params"] = params
-
-    request_headers: dict[str, str] = {}
-    if headers:
-        request_headers.update(headers)
+    request_headers = httpx.Headers(headers)
 
     if isinstance(body, JSONBody):
         kwargs["json"] = body.data
     elif isinstance(body, BytesBody):
         kwargs["content"] = body.data
-        request_headers["Content-Type"] = body.content_type
+        request_headers.setdefault("content-type", body.content_type)
     elif isinstance(body, RawBody):
         kwargs["content"] = body.data
 
@@ -64,24 +71,65 @@ def _build_request_kwargs(
 
 
 class BaseTransport(abc.ABC):
+    _client: httpx.Client | httpx.AsyncClient
+
     @abc.abstractmethod
     async def send(
         self,
         method: str,
         path: str,
         *,
-        params: dict[str, Any] | None = None,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
         body: RequestBody = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        raise NotImplementedError
+        raise NotImplementedError()
+
+    def _build_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
+        body: RequestBody = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
+    ) -> httpx.Request:
+        headers = httpx.Headers(headers)
+        if token is not None:
+            headers.setdefault("authorization", f"Bearer {token}")
+
+        json = None
+        content = None
+        match body:
+            case JSONBody():
+                json = body.data
+            case BytesBody():
+                content = body.data
+                headers.setdefault("content-type", body.content_type)
+            case RawBody():
+                content = body.data
+
+        return self._client.build_request(
+            method,
+            _normalize_path(path),
+            params=params,
+            timeout=httpx.Timeout(to_seconds_float(timeout)) if timeout else None,
+            headers=headers,
+            json=json,
+            content=content,
+        )
 
 
 class SyncTransport(BaseTransport):
     """Sync transport with async interface for use with iter_coroutine()."""
+
+    _client: httpx.Client
 
     def __init__(self, client: httpx.Client) -> None:
         self._client = client
@@ -91,33 +139,34 @@ class SyncTransport(BaseTransport):
         method: str,
         path: str,
         *,
-        params: dict[str, Any] | None = None,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
         body: RequestBody = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        kwargs = _build_request_kwargs(
-            params=params,
-            body=body,
-            headers=headers,
+        request = self._build_request(
+            method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
         )
-
-        if timeout is not None:
-            kwargs["timeout"] = httpx.Timeout(timeout)
-
-        request = self._client.build_request(method, _normalize_path(path), **kwargs)
-        send_kwargs: dict[str, Any] = {"stream": stream}
-        if follow_redirects is not None:
-            send_kwargs["follow_redirects"] = follow_redirects
-        return self._client.send(request, **send_kwargs)
+        return self._client.send(
+            request, stream=stream, follow_redirects=follow_redirects or USE_CLIENT_DEFAULT
+        )
 
     def close(self) -> None:
         self._client.close()
 
+    def __enter__(self) -> SyncTransport:
+        return self
+
+    def __exit__(self) -> None:
+        self.close()
+
 
 class AsyncTransport(BaseTransport):
+    _client: httpx.AsyncClient
+
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
 
@@ -126,30 +175,64 @@ class AsyncTransport(BaseTransport):
         method: str,
         path: str,
         *,
-        params: dict[str, Any] | None = None,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
         body: RequestBody = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        kwargs = _build_request_kwargs(
-            params=params,
-            body=body,
-            headers=headers,
+        request = self._build_request(
+            method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
         )
-
-        if timeout is not None:
-            kwargs["timeout"] = httpx.Timeout(timeout)
-
-        request = self._client.build_request(method, _normalize_path(path), **kwargs)
-        send_kwargs: dict[str, Any] = {"stream": stream}
-        if follow_redirects is not None:
-            send_kwargs["follow_redirects"] = follow_redirects
-        return await self._client.send(request, **send_kwargs)
+        return await self._client.send(
+            request, stream=stream, follow_redirects=follow_redirects or USE_CLIENT_DEFAULT
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def __aenter__(self) -> AsyncTransport:
+        return self
+
+    async def __aexit__(self) -> None:
+        await self.aclose()
+
+
+def extract_structured_error(response: httpx.Response) -> tuple[str, object]:
+    error_body = response.text
+
+    # Parse a helpful error message
+    parsed: object | None = None
+    message = f"HTTP {response.status_code}"
+    try:
+        parsed = json.loads(error_body)
+        if isinstance(parsed, dict):
+            if "message" in parsed and isinstance(parsed["message"], str):
+                message = f"{message}: {parsed['message']}"
+            elif "error" in parsed:
+                err = parsed["error"]
+                if isinstance(err, dict):
+                    code = err.get("code")
+                    msg = err.get("message") or err.get("msg")
+                    if msg:
+                        message = f"{message}: {msg}"
+                    if code:
+                        message = f"{message} (code={code})"
+    except Exception:
+        parsed = None
+
+    if parsed is None:
+        try:
+            text = response.text
+            if text:
+                snippet = text if len(text) <= 500 else text[:500] + "\u2026"
+                message = f"{message}: {snippet}"
+        except Exception:
+            pass
+
+    return (message, parsed)
 
 
 __all__ = [
@@ -160,4 +243,5 @@ __all__ = [
     "BytesBody",
     "RawBody",
     "RequestBody",
+    "extract_structured_error",
 ]

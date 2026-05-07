@@ -1,17 +1,13 @@
 """Shared HTTP infrastructure for Vercel API clients."""
 
-from vercel._internal.http.clients import (
-    create_async_request_client,
+from vercel._internal.http.config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
+from vercel._internal.http.httpx import (
     create_base_async_client,
     create_base_client,
-    create_request_client,
 )
-from vercel._internal.http.config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
-from vercel._internal.http.request_client import (
-    RequestClient,
+from vercel._internal.http.retry import (
     RetryPolicy,
     SleepFn,
-    sync_sleep,
 )
 from vercel._internal.http.transport import (
     AsyncTransport,
@@ -21,6 +17,8 @@ from vercel._internal.http.transport import (
     RawBody,
     RequestBody,
     SyncTransport,
+    TransportOptions,
+    extract_structured_error,
 )
 
 __all__ = [
@@ -29,16 +27,14 @@ __all__ = [
     "BaseTransport",
     "SyncTransport",
     "AsyncTransport",
+    "TransportOptions",
     "JSONBody",
     "BytesBody",
     "RawBody",
     "RequestBody",
-    "RequestClient",
     "RetryPolicy",
     "SleepFn",
-    "sync_sleep",
     "create_base_client",
     "create_base_async_client",
-    "create_request_client",
-    "create_async_request_client",
+    "extract_structured_error",
 ]

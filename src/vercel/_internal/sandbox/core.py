@@ -63,7 +63,7 @@ from vercel._internal.sandbox.models import (
     WriteFile,
 )
 from vercel._internal.sandbox.snapshot import SnapshotExpiration
-from vercel._internal.sandbox.time import to_ms_int
+from vercel._internal.time import to_ms_int
 
 try:
     VERSION = _pkg_version("vercel")

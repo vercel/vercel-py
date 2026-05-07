@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Protocol, TypedDict
 
 
 class ProjectInfo(TypedDict):
@@ -19,3 +19,7 @@ class Credentials:
     token: str
     project_id: str
     team_id: str
+
+
+class CredentialsFactory(Protocol):
+    async def __call__(self) -> Credentials: ...

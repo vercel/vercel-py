@@ -35,7 +35,7 @@ from vercel._internal.sandbox.models import (
     parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
-from vercel._internal.sandbox.time import (
+from vercel._internal.time import (
     MILLISECOND,
     SECOND,
     coerce_duration,

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from vercel._internal.sandbox.constants import MIN_SNAPSHOT_EXPIRATION
-from vercel._internal.sandbox.time import (
+from vercel._internal.time import (
     MILLISECOND,
     coerce_duration,
     to_ms_int,
