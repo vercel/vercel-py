@@ -9,7 +9,6 @@ loop, while ``AsyncSandboxOpsClient`` uses a real ``AsyncTransport``.
 from __future__ import annotations
 
 import io
-import json
 import os
 import platform
 import posixpath
@@ -30,11 +29,15 @@ from vercel._internal.fs import (
     create_filesystem_client,
 )
 from vercel._internal.http import (
+    AsyncTransport,
+    BaseTransport,
     BytesBody,
     JSONBody,
-    RequestClient,
-    create_async_request_client,
-    create_request_client,
+    SyncTransport,
+    TransportOptions,
+    create_base_async_client,
+    create_base_client,
+    extract_structured_error,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.errors import (
@@ -64,6 +67,7 @@ from vercel._internal.sandbox.models import (
 )
 from vercel._internal.sandbox.snapshot import SnapshotExpiration
 from vercel._internal.time import to_ms_int
+from vercel.oidc.types import Credentials, CredentialsFactory
 
 try:
     VERSION = _pkg_version("vercel")
@@ -81,117 +85,114 @@ RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
 
 
 # ---------------------------------------------------------------------------
+# Credentials factory helper
+# ---------------------------------------------------------------------------
+
+
+def _make_sandbox_credentials_factory() -> CredentialsFactory:
+    from vercel.oidc import get_credentials
+
+    async def _factory() -> Credentials:
+        return get_credentials()
+
+    return _factory
+
+
+# ---------------------------------------------------------------------------
 # Request client — error handling + request_json convenience
 # ---------------------------------------------------------------------------
 
 
 class SandboxRequestClient:
-    """Low-level request layer wrapping a :class:`RequestClient`.
+    """Low-level request layer wrapping a :class:`BaseTransport`.
 
     Translates non-2xx responses into sandbox-specific :class:`APIError`
     subclasses and provides a ``request_json`` convenience method.
     """
 
-    def __init__(self, *, request_client: RequestClient) -> None:
-        self._client = request_client
+    def __init__(
+        self,
+        *,
+        transport: BaseTransport,
+        credentials_factory: CredentialsFactory,
+    ) -> None:
+        self._transport = transport
+        self._credentials_factory = credentials_factory
+
+    async def resolve_credentials(self, credentials: Credentials | None = None) -> Credentials:
+        if credentials is not None:
+            return credentials
+        return await self._credentials_factory()
 
     async def request(
         self,
         method: str,
         path: str,
         *,
+        credentials: Credentials | None = None,
         headers: dict[str, str] | None = None,
-        query: RequestQuery | None = None,
+        params: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        params: RequestQuery | None = None
-        if query:
-            params = {k: v for k, v in query.items() if v is not None}
-
-        response = await self._client.send(
+        resolved = await self.resolve_credentials(credentials)
+        response = await self._transport.send(
             method,
             path,
+            token=resolved.token,
             headers=headers,
             params=params,
             body=body,
             stream=stream,
         )
 
-        if 200 <= response.status_code < 300:
-            return response
-
-        error_body: bytes | None = None
-        try:
-            error_body = await response.aread()
-        except Exception:
+        if not response.is_success:
             try:
-                error_body = response.read()
-            except Exception:
-                error_body = None
+                response.read()
+            except RuntimeError:
+                await response.aread()
+            raise _build_sandbox_error(response)
 
-        # Parse a helpful error message
-        parsed: JSONValue | None = None
-        message = f"HTTP {response.status_code}"
-        if error_body:
-            try:
-                parsed = json.loads(error_body)
-                if isinstance(parsed, dict):
-                    if "message" in parsed and isinstance(parsed["message"], str):
-                        message = f"{message}: {parsed['message']}"
-                    elif "error" in parsed:
-                        err = parsed["error"]
-                        if isinstance(err, dict):
-                            code = err.get("code")
-                            msg = err.get("message") or err.get("msg")
-                            if msg:
-                                message = f"{message}: {msg}"
-                            if code:
-                                message = f"{message} (code={code})"
-            except Exception:
-                parsed = None
-
-        if parsed is None:
-            try:
-                text = error_body.decode() if error_body is not None else response.text
-                if text:
-                    snippet = text if len(text) <= 500 else text[:500] + "\u2026"
-                    message = f"{message}: {snippet}"
-            except Exception:
-                pass
-
-        raise _build_sandbox_error(response, message, data=parsed)
+        return response
 
     async def request_json(
         self,
         method: str,
         path: str,
         *,
+        credentials: Credentials | None = None,
         headers: dict[str, str] | None = None,
-        query: RequestQuery | None = None,
+        params: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> JSONValue:
         headers = dict(headers or {})
         headers.setdefault("content-type", "application/json")
+
         r = await self.request(
             method,
             path,
+            credentials=credentials,
             headers=headers,
-            query=query,
+            params=params,
             body=body,
             stream=stream,
         )
         return cast(JSONValue, r.json())
 
+    def close(self) -> None:
+        if isinstance(self._transport, SyncTransport):
+            self._transport.close()
 
-def _build_sandbox_error(
-    response: httpx.Response,
-    message: str,
-    *,
-    data: JSONValue | None = None,
-) -> APIError:
+    async def aclose(self) -> None:
+        if isinstance(self._transport, AsyncTransport):
+            await self._transport.aclose()
+
+
+def _build_sandbox_error(response: httpx.Response) -> APIError:
+    message, data = extract_structured_error(response)
     status_code = response.status_code
+
     if status_code == 404:
         return SandboxNotFoundError(response, message, data=data)
     if status_code == 401:
@@ -267,13 +268,43 @@ class BaseSandboxOpsClient:
     _request_client: SandboxRequestClient
     _filesystem_client: FilesystemClient[Any]
 
-    def __init__(self, *, filesystem_client: FilesystemClient[Any]) -> None:
+    def __init__(
+        self,
+        *,
+        request_client: SandboxRequestClient,
+        filesystem_client: FilesystemClient[Any],
+    ) -> None:
+        self._request_client = request_client
         self._filesystem_client = filesystem_client
+
+    async def _get(
+        self,
+        path: str,
+        *,
+        credentials: Credentials | None = None,
+        params: RequestQuery | None = None,
+    ) -> JSONValue:
+        return await self._request_client.request_json(
+            "GET", path, credentials=credentials, params=params
+        )
+
+    async def _post(
+        self,
+        path: str,
+        *,
+        credentials: Credentials | None = None,
+        body: JSONBody | BytesBody | None = None,
+        stream: bool = False,
+    ) -> JSONValue:
+        return await self._request_client.request_json(
+            "POST", path, credentials=credentials, body=body, stream=stream
+        )
 
     async def create_sandbox(
         self,
         *,
         project_id: str,
+        credentials: Credentials | None = None,
         ports: list[int] | None = None,
         source: Source | None = None,
         timeout: int | timedelta | None = None,
@@ -294,30 +325,36 @@ class BaseSandboxOpsClient:
             interactive=True if interactive else None,
             env=env,
         ).model_dump(by_alias=True, exclude_none=True)
-        data = await self._request_client.request_json("POST", "/v1/sandboxes", body=JSONBody(body))
+        data = await self._post("/v1/sandboxes", body=JSONBody(body), credentials=credentials)
         return SandboxAndRoutesResponse.model_validate(data)
 
-    async def get_sandbox(self, *, sandbox_id: str) -> SandboxAndRoutesResponse:
-        data = await self._request_client.request_json("GET", f"/v1/sandboxes/{sandbox_id}")
+    async def get_sandbox(
+        self, *, sandbox_id: str, credentials: Credentials | None = None
+    ) -> SandboxAndRoutesResponse:
+        data = await self._get(f"/v1/sandboxes/{sandbox_id}", credentials=credentials)
         return SandboxAndRoutesResponse.model_validate(data)
 
     async def list_sandboxes(
         self,
         *,
         project_id: str | None = None,
+        credentials: Credentials | None = None,
         limit: int | None = None,
         since: int | None = None,
         until: int | None = None,
     ) -> SandboxesResponse:
-        data = await self._request_client.request_json(
-            "GET",
+        params: RequestQuery = {
+            "project": project_id,
+            "limit": limit,
+            "since": since,
+            "until": until,
+        }
+        if credentials is not None and credentials.team_id:
+            params["teamId"] = credentials.team_id
+        data = await self._get(
             "/v1/sandboxes",
-            query={
-                "project": project_id,
-                "limit": limit,
-                "since": since,
-                "until": until,
-            },
+            credentials=credentials,
+            params={k: v for k, v in params.items() if v is not None},
         )
         return SandboxesResponse.model_validate(data)
 
@@ -325,11 +362,12 @@ class BaseSandboxOpsClient:
         self,
         *,
         sandbox_id: str,
+        credentials: Credentials | None = None,
         network_policy: ApiNetworkPolicy,
     ) -> SandboxResponse:
-        data = await self._request_client.request_json(
-            "POST",
+        data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/network-policy",
+            credentials=credentials,
             body=JSONBody(network_policy.model_dump(by_alias=True, exclude_none=True)),
         )
         return SandboxResponse.model_validate(data)
@@ -338,6 +376,7 @@ class BaseSandboxOpsClient:
         self,
         *,
         sandbox_id: str,
+        credentials: Credentials | None = None,
         command: str,
         args: list[str],
         cwd: str | None = None,
@@ -352,52 +391,80 @@ class BaseSandboxOpsClient:
         }
         if cwd is not None:
             body["cwd"] = cwd
-        data = await self._request_client.request_json(
-            "POST",
+        data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/cmd",
+            credentials=credentials,
             body=JSONBody(body),
         )
         return CommandResponse.model_validate(data)
 
     async def get_command(
-        self, *, sandbox_id: str, cmd_id: str, wait: bool = False
+        self,
+        *,
+        sandbox_id: str,
+        cmd_id: str,
+        wait: bool = False,
+        credentials: Credentials | None = None,
     ) -> CommandResponse | CommandFinishedResponse:
-        data = await self._request_client.request_json(
-            "GET",
+        data = await self._get(
             f"/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}",
-            query={"wait": "true"} if wait else None,
+            credentials=credentials,
+            params={"wait": "true"} if wait else None,
         )
         if wait:
             return CommandFinishedResponse.model_validate(data)
         return CommandResponse.model_validate(data)
 
-    async def stop_sandbox(self, *, sandbox_id: str) -> SandboxResponse:
-        data = await self._request_client.request_json("POST", f"/v1/sandboxes/{sandbox_id}/stop")
+    async def stop_sandbox(
+        self, *, sandbox_id: str, credentials: Credentials | None = None
+    ) -> SandboxResponse:
+        data = await self._post(f"/v1/sandboxes/{sandbox_id}/stop", credentials=credentials)
         return SandboxResponse.model_validate(data)
 
-    async def mk_dir(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> None:
+    async def mk_dir(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        credentials: Credentials | None = None,
+    ) -> None:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
-        await self._request_client.request_json(
-            "POST",
+
+        await self._post(
             f"/v1/sandboxes/{sandbox_id}/fs/mkdir",
+            credentials=credentials,
             body=JSONBody(body),
         )
 
-    async def read_file(self, *, sandbox_id: str, path: str, cwd: str | None = None) -> bytes:
+    async def read_file(
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        credentials: Credentials | None = None,
+    ) -> bytes:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
             body["cwd"] = cwd
         resp = await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/fs/read",
+            credentials=credentials,
             body=JSONBody(body),
         )
         return resp.content
 
     async def _open_file_stream(
-        self, *, sandbox_id: str, path: str, cwd: str | None = None
+        self,
+        *,
+        sandbox_id: str,
+        path: str,
+        cwd: str | None = None,
+        credentials: Credentials | None = None,
     ) -> httpx.Response:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
@@ -405,6 +472,7 @@ class BaseSandboxOpsClient:
         return await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/fs/read",
+            credentials=credentials,
             body=JSONBody(body),
             stream=True,
         )
@@ -425,8 +493,11 @@ class BaseSandboxOpsClient:
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
+        credentials: Credentials | None = None,
     ) -> AsyncIterator[AsyncIterator[bytes]]:
-        response = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+        response = await self._open_file_stream(
+            sandbox_id=sandbox_id, path=path, cwd=cwd, credentials=credentials
+        )
 
         try:
             yield self._stream_file_chunks(response, chunk_size=chunk_size)
@@ -442,6 +513,7 @@ class BaseSandboxOpsClient:
         cwd: str | None = None,
         create_parents: bool = False,
         chunk_size: int = 65536,
+        credentials: Credentials | None = None,
     ) -> str:
         if not remote_path:
             raise ValueError("remote_path is required")
@@ -458,6 +530,7 @@ class BaseSandboxOpsClient:
             path=remote_path,
             cwd=cwd,
             chunk_size=chunk_size,
+            credentials=credentials,
         ) as stream:
             handle: FileHandle | None = None
             try:
@@ -484,79 +557,114 @@ class BaseSandboxOpsClient:
         files: list[WriteFile],
         extract_dir: str,
         cwd: str,
+        credentials: Credentials | None = None,
     ) -> None:
         payload = _build_tarball(files, cwd, extract_dir)
         await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/fs/write",
+            credentials=credentials,
             headers={
                 "x-cwd": extract_dir,
             },
             body=BytesBody(payload, "application/gzip"),
         )
 
-    async def kill_command(self, *, sandbox_id: str, command_id: str, signal: int = 15) -> None:
+    async def kill_command(
+        self,
+        *,
+        sandbox_id: str,
+        command_id: str,
+        signal: int = 15,
+        credentials: Credentials | None = None,
+    ) -> None:
         await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/cmd/{command_id}/kill",
+            credentials=credentials,
             body=JSONBody({"signal": signal}),
         )
 
-    async def extend_timeout(self, *, sandbox_id: str, duration: timedelta) -> SandboxResponse:
-        data = await self._request_client.request_json(
-            "POST",
+    async def extend_timeout(
+        self,
+        *,
+        sandbox_id: str,
+        duration: timedelta,
+        credentials: Credentials | None = None,
+    ) -> SandboxResponse:
+        data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/extend-timeout",
+            credentials=credentials,
             body=JSONBody({"duration": to_ms_int(duration)}),
         )
         return SandboxResponse.model_validate(data)
 
     async def create_snapshot(
-        self, *, sandbox_id: str, expiration: SnapshotExpiration | None = None
+        self,
+        *,
+        sandbox_id: str,
+        expiration: SnapshotExpiration | None = None,
+        credentials: Credentials | None = None,
     ) -> CreateSnapshotResponse:
         body = None if expiration is None else JSONBody({"expiration": int(expiration)})
-        data = await self._request_client.request_json(
-            "POST",
+        data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/snapshot",
+            credentials=credentials,
             body=body,
         )
         return CreateSnapshotResponse.model_validate(data)
 
-    async def get_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        data = await self._request_client.request_json(
-            "GET", f"/v1/sandboxes/snapshots/{snapshot_id}"
-        )
+    async def get_snapshot(
+        self, *, snapshot_id: str, credentials: Credentials | None = None
+    ) -> SnapshotResponse:
+        data = await self._get(f"/v1/sandboxes/snapshots/{snapshot_id}", credentials=credentials)
         return SnapshotResponse.model_validate(data)
 
     async def list_snapshots(
         self,
         *,
         project_id: str | None = None,
+        credentials: Credentials | None = None,
         limit: int | None = None,
         since: int | None = None,
         until: int | None = None,
     ) -> SnapshotsResponse:
-        data = await self._request_client.request_json(
-            "GET",
+        params: RequestQuery = {
+            "project": project_id,
+            "limit": limit,
+            "since": since,
+            "until": until,
+        }
+        if credentials is not None and credentials.team_id:
+            params["teamId"] = credentials.team_id
+        data = await self._get(
             "/v1/sandboxes/snapshots",
-            query={
-                "project": project_id,
-                "limit": limit,
-                "since": since,
-                "until": until,
-            },
+            credentials=credentials,
+            params={k: v for k, v in params.items() if v is not None},
         )
         return SnapshotsResponse.model_validate(data)
 
-    async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
+    async def delete_snapshot(
+        self, *, snapshot_id: str, credentials: Credentials | None = None
+    ) -> SnapshotResponse:
         data = await self._request_client.request_json(
-            "DELETE", f"/v1/sandboxes/snapshots/{snapshot_id}"
+            "DELETE",
+            f"/v1/sandboxes/snapshots/{snapshot_id}",
+            credentials=credentials,
         )
         return SnapshotResponse.model_validate(data)
 
-    async def _get_log_stream(self, *, sandbox_id: str, cmd_id: str) -> httpx.Response:
+    async def _get_log_stream(
+        self,
+        *,
+        sandbox_id: str,
+        cmd_id: str,
+        credentials: Credentials | None = None,
+    ) -> httpx.Response:
         return await self._request_client.request(
             "GET",
             f"/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}/logs",
+            credentials=credentials,
             headers={"accept": "text/event-stream"},
             stream=True,
         )
@@ -572,23 +680,33 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         self,
         *,
         host: str = "https://api.vercel.com",
-        team_id: str,
-        token: str,
         filesystem_client: FilesystemClient[Any] | None = None,
     ) -> None:
-        super().__init__(filesystem_client=filesystem_client or create_filesystem_client())
-        rc = create_request_client(
-            token=token,
-            base_headers={"user-agent": USER_AGENT},
-            base_params={"teamId": team_id},
-            timeout=180.0,
+        transport_options = TransportOptions(
+            timeout=timedelta(seconds=180),
             base_url=host,
+            max_connections=100,
+            enable_http2=False,
         )
-        self._request_client = SandboxRequestClient(request_client=rc)
-        self._rc = rc
+        transport = SyncTransport(create_base_client(transport_options))
+        super().__init__(
+            request_client=SandboxRequestClient(
+                transport=transport,
+                credentials_factory=_make_sandbox_credentials_factory(),
+            ),
+            filesystem_client=filesystem_client or create_filesystem_client(),
+        )
 
-    def get_logs(self, *, sandbox_id: str, cmd_id: str) -> Generator[LogLine, None, None]:
-        resp = iter_coroutine(self._get_log_stream(sandbox_id=sandbox_id, cmd_id=cmd_id))
+    def get_logs(
+        self,
+        *,
+        sandbox_id: str,
+        cmd_id: str,
+        credentials: Credentials | None = None,
+    ) -> Generator[LogLine, None, None]:
+        resp = iter_coroutine(
+            self._get_log_stream(sandbox_id=sandbox_id, cmd_id=cmd_id, credentials=credentials)
+        )
         try:
             for line in resp.iter_lines():
                 if not line:
@@ -614,8 +732,13 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
+        credentials: Credentials | None = None,
     ) -> Generator[bytes, None, None]:
-        resp = iter_coroutine(self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd))
+        resp = iter_coroutine(
+            self._open_file_stream(
+                sandbox_id=sandbox_id, path=path, cwd=cwd, credentials=credentials
+            )
+        )
 
         def _iterate() -> Generator[bytes, None, None]:
             try:
@@ -640,7 +763,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         response.close()
 
     def close(self) -> None:
-        self._rc.close()
+        self._request_client.close()
 
     def __enter__(self) -> SyncSandboxOpsClient:
         return self
@@ -659,23 +782,33 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         self,
         *,
         host: str = "https://api.vercel.com",
-        team_id: str,
-        token: str,
         filesystem_client: FilesystemClient[Any] | None = None,
     ) -> None:
-        super().__init__(filesystem_client=filesystem_client or create_async_filesystem_client())
-        rc = create_async_request_client(
-            token=token,
-            base_headers={"user-agent": USER_AGENT},
-            base_params={"teamId": team_id},
-            timeout=180.0,
+        transport_options = TransportOptions(
+            timeout=timedelta(seconds=180),
             base_url=host,
+            max_connections=100,
+            enable_http2=False,
         )
-        self._request_client = SandboxRequestClient(request_client=rc)
-        self._rc = rc
+        transport = AsyncTransport(create_base_async_client(transport_options))
+        super().__init__(
+            request_client=SandboxRequestClient(
+                transport=transport,
+                credentials_factory=_make_sandbox_credentials_factory(),
+            ),
+            filesystem_client=filesystem_client or create_async_filesystem_client(),
+        )
 
-    async def get_logs(self, *, sandbox_id: str, cmd_id: str) -> AsyncGenerator[LogLine, None]:
-        resp = await self._get_log_stream(sandbox_id=sandbox_id, cmd_id=cmd_id)
+    async def get_logs(
+        self,
+        *,
+        sandbox_id: str,
+        cmd_id: str,
+        credentials: Credentials | None = None,
+    ) -> AsyncGenerator[LogLine, None]:
+        resp = await self._get_log_stream(
+            sandbox_id=sandbox_id, cmd_id=cmd_id, credentials=credentials
+        )
         try:
             async for line in resp.aiter_lines():
                 if not line:
@@ -701,8 +834,11 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
+        credentials: Credentials | None = None,
     ) -> AsyncGenerator[bytes, None]:
-        resp = await self._open_file_stream(sandbox_id=sandbox_id, path=path, cwd=cwd)
+        resp = await self._open_file_stream(
+            sandbox_id=sandbox_id, path=path, cwd=cwd, credentials=credentials
+        )
 
         async def _iterate() -> AsyncGenerator[bytes, None]:
             try:
@@ -727,7 +863,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         await response.aclose()
 
     async def aclose(self) -> None:
-        await self._rc.aclose()
+        await self._request_client.aclose()
 
     async def __aenter__(self) -> AsyncSandboxOpsClient:
         return self

@@ -6,8 +6,9 @@ from pathlib import Path
 
 import httpx
 
+from vercel._internal.time import to_seconds_float
+
 from .constants import PTY_BINARY_DOWNLOAD_TIMEOUT
-from .time import to_seconds_float
 
 BINARY_BASE_URL = "https://pty-tunnel.labs.vercel.dev"
 

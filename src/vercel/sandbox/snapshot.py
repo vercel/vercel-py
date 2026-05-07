@@ -6,14 +6,13 @@ from datetime import datetime
 from typing import Literal
 
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.time import to_ms_int
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.constants import MIN_SNAPSHOT_EXPIRATION
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
 from vercel._internal.sandbox.pagination import SnapshotListParams
 from vercel._internal.sandbox.snapshot import SnapshotExpiration as _SnapshotExpiration
-
-from ..oidc import Credentials, get_credentials
+from vercel._internal.time import to_ms_int
+from vercel.oidc import Credentials, get_credentials
 
 MIN_SNAPSHOT_EXPIRATION_MS = to_ms_int(MIN_SNAPSHOT_EXPIRATION)
 SnapshotExpiration = _SnapshotExpiration
@@ -25,6 +24,7 @@ class AsyncSnapshot:
 
     client: AsyncSandboxOpsClient
     snapshot: SnapshotModel
+    credentials: Credentials | None = None
 
     @property
     def snapshot_id(self) -> str:
@@ -66,9 +66,9 @@ class AsyncSnapshot:
     ) -> AsyncSnapshot:
         """Retrieve an existing snapshot by ID."""
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp = await client.get_snapshot(snapshot_id=snapshot_id)
-        return AsyncSnapshot(client=client, snapshot=resp.snapshot)
+        client = AsyncSandboxOpsClient()
+        resp = await client.get_snapshot(snapshot_id=snapshot_id, credentials=creds)
+        return AsyncSnapshot(client=client, snapshot=resp.snapshot, credentials=creds)
 
     @staticmethod
     def list(
@@ -98,10 +98,11 @@ class AsyncSnapshot:
 
         async def iter_snapshots() -> AsyncIterator[SnapshotModel]:
             current_params = params
-            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            async with AsyncSandboxOpsClient() as client:
                 while True:
                     response = await client.list_snapshots(
                         project_id=current_params.project_id,
+                        credentials=creds,
                         limit=current_params.request_limit,
                         since=current_params.since,
                         until=current_params.until,
@@ -125,7 +126,9 @@ class AsyncSnapshot:
 
     async def delete(self) -> None:
         """Delete this snapshot."""
-        resp = await self.client.delete_snapshot(snapshot_id=self.snapshot.id)
+        resp = await self.client.delete_snapshot(
+            snapshot_id=self.snapshot.id, credentials=self.credentials
+        )
         self.snapshot = resp.snapshot
 
 
@@ -135,6 +138,7 @@ class Snapshot:
 
     client: SyncSandboxOpsClient
     snapshot: SnapshotModel
+    credentials: Credentials | None = None
 
     @property
     def snapshot_id(self) -> str:
@@ -176,9 +180,9 @@ class Snapshot:
     ) -> Snapshot:
         """Retrieve an existing snapshot by ID."""
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp = iter_coroutine(client.get_snapshot(snapshot_id=snapshot_id))
-        return Snapshot(client=client, snapshot=resp.snapshot)
+        client = SyncSandboxOpsClient()
+        resp = iter_coroutine(client.get_snapshot(snapshot_id=snapshot_id, credentials=creds))
+        return Snapshot(client=client, snapshot=resp.snapshot, credentials=creds)
 
     @staticmethod
     def list(
@@ -208,11 +212,12 @@ class Snapshot:
 
         def iter_snapshots() -> Iterator[SnapshotModel]:
             current_params = params
-            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            with SyncSandboxOpsClient() as client:
                 while True:
                     response = iter_coroutine(
                         client.list_snapshots(
                             project_id=current_params.project_id,
+                            credentials=creds,
                             limit=current_params.request_limit,
                             since=current_params.since,
                             until=current_params.until,
@@ -236,5 +241,7 @@ class Snapshot:
 
     def delete(self) -> None:
         """Delete this snapshot."""
-        resp = iter_coroutine(self.client.delete_snapshot(snapshot_id=self.snapshot.id))
+        resp = iter_coroutine(
+            self.client.delete_snapshot(snapshot_id=self.snapshot.id, credentials=self.credentials)
+        )
         self.snapshot = resp.snapshot

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import timedelta
 
 import httpx
 import pytest
 
-from vercel._internal.http import BaseTransport, RequestClient
-from vercel._internal.http.transport import RequestBody
+from vercel._internal.http import BaseTransport
+from vercel._internal.http.transport import HeaderTypes, QueryParamTypes, RequestBody
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.core import SandboxRequestClient
 from vercel._internal.sandbox.errors import (
@@ -20,6 +20,7 @@ from vercel._internal.sandbox.errors import (
     SandboxRateLimitError,
     SandboxServerError,
 )
+from vercel.oidc.types import Credentials
 from vercel.sandbox import (
     APIError as PublicAPIError,
     SandboxAuthError as PublicSandboxAuthError,
@@ -40,10 +41,11 @@ class StaticTransport(BaseTransport):
         method: str,
         path: str,
         *,
-        params: dict[str, Any] | None = None,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
         body: RequestBody = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
     ) -> httpx.Response:
@@ -64,13 +66,15 @@ def _make_response(
     )
 
 
+async def _fake_credentials_factory() -> Credentials:
+    return Credentials(token="test-token", project_id="", team_id="")
+
+
 def _make_request_client(response: httpx.Response) -> SandboxRequestClient:
-    request_client = RequestClient(
+    return SandboxRequestClient(
         transport=StaticTransport(response),
-        token="test-token",
-        sleep_fn=lambda _seconds: None,
+        credentials_factory=_fake_credentials_factory,
     )
-    return SandboxRequestClient(request_client=request_client)
 
 
 def test_public_error_hierarchy_is_exposed() -> None:

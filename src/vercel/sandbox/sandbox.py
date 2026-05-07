@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import builtins
 import time
-import warnings
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,58 +9,51 @@ from os import PathLike
 from typing import Any
 
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.sandbox import (
+    AsyncSandboxOpsClient,
+    SandboxNotFoundError,
+    SyncSandboxOpsClient,
+)
 from vercel._internal.sandbox.constants import (
     DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
     DEFAULT_SANDBOX_WAIT_TIMEOUT,
 )
-from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
-from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
     ApiNetworkPolicy,
     CommandResponse,
     GitSource,
     NetworkPolicy,
     Resources,
-    ResourcesInput,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
     SandboxStatus,
     SnapshotSource,
     Source,
-    SourceInput,
     TarballSource,
     WriteFile,
     parse_resources,
     parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
+from vercel._internal.sandbox.snapshot import SnapshotExpiration
 from vercel._internal.time import (
     MILLISECOND,
     SECOND,
     coerce_duration,
     to_seconds_float,
 )
+from vercel.oidc import Credentials, get_credentials
 
-from ..oidc import Credentials, get_credentials
-from .command import (
-    AsyncCommand,
-    AsyncCommandFinished,
-    Command,
-    CommandFinished,
-)
-from .pty.session import AsyncPTYSession
+from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
+from .pty import AsyncPTYSession
 from .pty.shell import start_interactive_shell
-from .snapshot import (
-    AsyncSnapshot,
-    Snapshot as SnapshotClass,
-    SnapshotExpiration,
-)
+from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
 
 
 def _parse_create_inputs(
     *,
-    source: SourceInput | None,
-    resources: ResourcesInput | None,
+    source: Source | Mapping[str, Any] | None = None,
+    resources: Resources | Mapping[str, Any] | None = None,
 ) -> tuple[Source | None, Resources | None]:
     _warn_deprecated_create_mapping("source", source)
     _warn_deprecated_create_mapping("resources", resources)
@@ -71,27 +63,29 @@ def _parse_create_inputs(
 def _warn_deprecated_create_mapping(name: str, value: object | None) -> None:
     deprecated_models = (GitSource, TarballSource, SnapshotSource, Resources)
     if isinstance(value, Mapping) and not isinstance(value, deprecated_models):
-        replacement = _deprecated_create_mapping_replacement(name, value)
+        import warnings
+
         warnings.warn(
             f"Passing a raw mapping for Sandbox.create(..., {name}=...) is deprecated; "
-            f"pass a typed {replacement} model instead.",
+            f"pass a typed {_deprecated_create_mapping_replacement(name, value)} model instead.",
             DeprecationWarning,
-            stacklevel=4,
+            stacklevel=3,
         )
 
 
 def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) -> str:
     if name == "resources":
         return "Resources"
-    if name == "source":
-        source_type = value.get("type")
-        if source_type == "git":
-            return "GitSource"
-        if source_type == "tarball":
-            return "TarballSource"
-        if source_type == "snapshot":
-            return "SnapshotSource"
-        return "Source"
+    if "type" in value:
+        match value["type"]:
+            case "git":
+                return "GitSource"
+            case "tarball":
+                return "TarballSource"
+            case "snapshot":
+                return "SnapshotSource"
+            case _:
+                return "Source"
     return name
 
 
@@ -100,6 +94,7 @@ class AsyncSandbox:
     client: AsyncSandboxOpsClient
     sandbox: SandboxModel
     routes: list[dict[str, Any]]
+    credentials: Credentials | None = None
 
     @property
     def sandbox_id(self) -> str:
@@ -169,9 +164,10 @@ class AsyncSandbox:
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = AsyncSandboxOpsClient()
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=creds.project_id,
+            credentials=creds,
             source=parsed_source,
             ports=ports,
             timeout=timeout,
@@ -185,6 +181,7 @@ class AsyncSandbox:
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
+            credentials=creds,
         )
 
     @staticmethod
@@ -196,12 +193,15 @@ class AsyncSandbox:
         team_id: str | None = None,
     ) -> AsyncSandbox:
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp: SandboxAndRoutesResponse = await client.get_sandbox(sandbox_id=sandbox_id)
+        client = AsyncSandboxOpsClient()
+        resp: SandboxAndRoutesResponse = await client.get_sandbox(
+            sandbox_id=sandbox_id, credentials=creds
+        )
         return AsyncSandbox(
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
+            credentials=creds,
         )
 
     @staticmethod
@@ -246,10 +246,11 @@ class AsyncSandbox:
 
         async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
             current_params = params
-            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            async with AsyncSandboxOpsClient() as client:
                 while True:
                     response = await client.list_sandboxes(
                         project_id=current_params.project_id,
+                        credentials=creds,
                         limit=current_params.request_limit,
                         since=current_params.since,
                         until=current_params.until,
@@ -273,7 +274,9 @@ class AsyncSandbox:
 
     async def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
-        resp = await self.client.get_sandbox(sandbox_id=self.sandbox.id)
+        resp = await self.client.get_sandbox(
+            sandbox_id=self.sandbox.id, credentials=self.credentials
+        )
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
 
@@ -281,6 +284,7 @@ class AsyncSandbox:
         response = await self.client.update_network_policy(
             sandbox_id=self.sandbox.id,
             network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
+            credentials=self.credentials,
         )
         self.sandbox = response.sandbox
         updated_network_policy = self.sandbox.network_policy
@@ -332,9 +336,16 @@ class AsyncSandbox:
         raise ValueError(f"No route for port {port}")
 
     async def get_command(self, cmd_id: str) -> AsyncCommand:
-        resp = await self.client.get_command(sandbox_id=self.sandbox.id, cmd_id=cmd_id)
+        resp = await self.client.get_command(
+            sandbox_id=self.sandbox.id, cmd_id=cmd_id, credentials=self.credentials
+        )
         assert isinstance(resp, CommandResponse)
-        return AsyncCommand(client=self.client, sandbox_id=self.sandbox.id, cmd=resp.command)
+        return AsyncCommand(
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=resp.command,
+            credentials=self.credentials,
+        )
 
     async def run_command(
         self,
@@ -352,9 +363,13 @@ class AsyncSandbox:
             cwd=cwd,
             env=env or {},
             sudo=sudo,
+            credentials=self.credentials,
         )
         command = AsyncCommand(
-            client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
+            credentials=self.credentials,
         )
         # Wait for completion
         return await command.wait()
@@ -375,13 +390,19 @@ class AsyncSandbox:
             cwd=cwd,
             env=env or {},
             sudo=sudo,
+            credentials=self.credentials,
         )
         return AsyncCommand(
-            client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
+            credentials=self.credentials,
         )
 
     async def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
-        await self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+        await self.client.mk_dir(
+            sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
+        )
 
     async def iter_file(
         self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
@@ -391,11 +412,14 @@ class AsyncSandbox:
             path=path,
             cwd=cwd,
             chunk_size=chunk_size,
+            credentials=self.credentials,
         )
 
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
         try:
-            return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+            return await self.client.read_file(
+                sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
+            )
         except SandboxNotFoundError:
             return None
 
@@ -415,6 +439,7 @@ class AsyncSandbox:
             cwd=cwd,
             create_parents=create_parents,
             chunk_size=chunk_size,
+            credentials=self.credentials,
         )
 
     async def write_files(self, files: builtins.list[WriteFile]) -> None:
@@ -423,6 +448,7 @@ class AsyncSandbox:
             cwd=self.sandbox.cwd,
             extract_dir="/",
             files=files,
+            credentials=self.credentials,
         )
 
     async def stop(
@@ -446,7 +472,9 @@ class AsyncSandbox:
             TimeoutError: If ``blocking=True`` and the sandbox does not reach
                 ``"stopped"`` within *timeout*.
         """
-        response = await self.client.stop_sandbox(sandbox_id=self.sandbox.id)
+        response = await self.client.stop_sandbox(
+            sandbox_id=self.sandbox.id, credentials=self.credentials
+        )
         self.sandbox = response.sandbox
         if not blocking:
             return
@@ -464,7 +492,9 @@ class AsyncSandbox:
                 extend the timeout by.
         """
         delta = coerce_duration(duration, MILLISECOND)
-        response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=delta)
+        response = await self.client.extend_timeout(
+            sandbox_id=self.sandbox.id, duration=delta, credentials=self.credentials
+        )
         self.sandbox = response.sandbox
 
     async def snapshot(
@@ -488,9 +518,12 @@ class AsyncSandbox:
         response = await self.client.create_snapshot(
             sandbox_id=self.sandbox.id,
             expiration=normalized_expiration,
+            credentials=self.credentials,
         )
         self.sandbox = response.sandbox
-        return AsyncSnapshot(client=self.client, snapshot=response.snapshot)
+        return AsyncSnapshot(
+            client=self.client, snapshot=response.snapshot, credentials=self.credentials
+        )
 
     async def shell(
         self,
@@ -580,6 +613,7 @@ class Sandbox:
     client: SyncSandboxOpsClient
     sandbox: SandboxModel
     routes: list[dict[str, Any]]
+    credentials: Credentials | None = None
 
     @property
     def sandbox_id(self) -> str:
@@ -597,8 +631,6 @@ class Sandbox:
     @property
     def interactive_port(self) -> int | None:
         """Port for interactive PTY connections.
-
-        Returns None if the sandbox was not created with interactive=True.
 
         Note: For interactive shell sessions, use AsyncSandbox instead.
         """
@@ -652,10 +684,11 @@ class Sandbox:
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = SyncSandboxOpsClient()
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
                 project_id=creds.project_id,
+                credentials=creds,
                 source=parsed_source,
                 ports=ports,
                 timeout=timeout,
@@ -670,6 +703,7 @@ class Sandbox:
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
+            credentials=creds,
         )
 
     @staticmethod
@@ -681,12 +715,15 @@ class Sandbox:
         team_id: str | None = None,
     ) -> Sandbox:
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp: SandboxAndRoutesResponse = iter_coroutine(client.get_sandbox(sandbox_id=sandbox_id))
+        client = SyncSandboxOpsClient()
+        resp: SandboxAndRoutesResponse = iter_coroutine(
+            client.get_sandbox(sandbox_id=sandbox_id, credentials=creds)
+        )
         return Sandbox(
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
+            credentials=creds,
         )
 
     @staticmethod
@@ -731,11 +768,12 @@ class Sandbox:
 
         def iter_sandboxes() -> Iterator[SandboxModel]:
             current_params = params
-            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            with SyncSandboxOpsClient() as client:
                 while True:
                     response = iter_coroutine(
                         client.list_sandboxes(
                             project_id=current_params.project_id,
+                            credentials=creds,
                             limit=current_params.request_limit,
                             since=current_params.since,
                             until=current_params.until,
@@ -759,7 +797,9 @@ class Sandbox:
 
     def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
-        resp = iter_coroutine(self.client.get_sandbox(sandbox_id=self.sandbox.id))
+        resp = iter_coroutine(
+            self.client.get_sandbox(sandbox_id=self.sandbox.id, credentials=self.credentials)
+        )
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
 
@@ -768,6 +808,7 @@ class Sandbox:
             self.client.update_network_policy(
                 sandbox_id=self.sandbox.id,
                 network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
+                credentials=self.credentials,
             )
         )
         self.sandbox = response.sandbox
@@ -817,9 +858,18 @@ class Sandbox:
         raise ValueError(f"No route for port {port}")
 
     def get_command(self, cmd_id: str) -> Command:
-        resp = iter_coroutine(self.client.get_command(sandbox_id=self.sandbox.id, cmd_id=cmd_id))
+        resp = iter_coroutine(
+            self.client.get_command(
+                sandbox_id=self.sandbox.id, cmd_id=cmd_id, credentials=self.credentials
+            )
+        )
         assert isinstance(resp, CommandResponse)
-        return Command(client=self.client, sandbox_id=self.sandbox.id, cmd=resp.command)
+        return Command(
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=resp.command,
+            credentials=self.credentials,
+        )
 
     def run_command(
         self,
@@ -838,10 +888,14 @@ class Sandbox:
                 cwd=cwd,
                 env=env or {},
                 sudo=sudo,
+                credentials=self.credentials,
             )
         )
         command = Command(
-            client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
+            credentials=self.credentials,
         )
         return command.wait()
 
@@ -862,12 +916,22 @@ class Sandbox:
                 cwd=cwd,
                 env=env or {},
                 sudo=sudo,
+                credentials=self.credentials,
             )
         )
-        return Command(client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command)
+        return Command(
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
+            credentials=self.credentials,
+        )
 
     def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
-        iter_coroutine(self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
+        iter_coroutine(
+            self.client.mk_dir(
+                sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
+            )
+        )
 
     def iter_file(
         self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
@@ -877,12 +941,15 @@ class Sandbox:
             path=path,
             cwd=cwd,
             chunk_size=chunk_size,
+            credentials=self.credentials,
         )
 
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
         try:
             return iter_coroutine(
-                self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
+                self.client.read_file(
+                    sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
+                )
             )
         except SandboxNotFoundError:
             return None
@@ -904,6 +971,7 @@ class Sandbox:
                 cwd=cwd,
                 create_parents=create_parents,
                 chunk_size=chunk_size,
+                credentials=self.credentials,
             )
         )
 
@@ -914,6 +982,7 @@ class Sandbox:
                 cwd=self.sandbox.cwd,
                 extract_dir="/",
                 files=files,
+                credentials=self.credentials,
             )
         )
 
@@ -938,7 +1007,9 @@ class Sandbox:
             TimeoutError: If ``blocking=True`` and the sandbox does not reach
                 ``"stopped"`` within *timeout*.
         """
-        response = iter_coroutine(self.client.stop_sandbox(sandbox_id=self.sandbox.id))
+        response = iter_coroutine(
+            self.client.stop_sandbox(sandbox_id=self.sandbox.id, credentials=self.credentials)
+        )
         self.sandbox = response.sandbox
         if not blocking:
             return
@@ -957,7 +1028,9 @@ class Sandbox:
         """
         delta = coerce_duration(duration, MILLISECOND)
         response = iter_coroutine(
-            self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=delta)
+            self.client.extend_timeout(
+                sandbox_id=self.sandbox.id, duration=delta, credentials=self.credentials
+            )
         )
         self.sandbox = response.sandbox
 
@@ -983,10 +1056,13 @@ class Sandbox:
             self.client.create_snapshot(
                 sandbox_id=self.sandbox.id,
                 expiration=normalized_expiration,
+                credentials=self.credentials,
             )
         )
         self.sandbox = response.sandbox
-        return SnapshotClass(client=self.client, snapshot=response.snapshot)
+        return SnapshotClass(
+            client=self.client, snapshot=response.snapshot, credentials=self.credentials
+        )
 
     def __enter__(self) -> Sandbox:
         return self

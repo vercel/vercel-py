@@ -109,9 +109,7 @@ def test_parse_resources_drops_unknown_keys() -> None:
 
 
 class _RecordingSyncSandboxOpsClient:
-    def __init__(self, *, team_id: str, token: str) -> None:
-        self.team_id = team_id
-        self.token = token
+    def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
     async def create_sandbox(self, **kwargs: object) -> SandboxAndRoutesResponse:
@@ -140,7 +138,7 @@ class _RecordingSyncSandboxOpsClient:
 def test_sandbox_create_warns_for_mapping_source_and_resources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _RecordingSyncSandboxOpsClient(team_id="team_123", token="token_123")
+    client = _RecordingSyncSandboxOpsClient()
     monkeypatch.setattr(
         sandbox_module,
         "get_credentials",
@@ -168,6 +166,9 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
     assert client.calls == [
         {
             "project_id": "project_123",
+            "credentials": Credentials(
+                token="token_123", project_id="project_123", team_id="team_123"
+            ),
             "source": GitSource(type="git", url="https://github.com/vercel/vercel-py"),
             "ports": None,
             "timeout": None,
@@ -183,7 +184,7 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
 def test_sandbox_create_does_not_warn_for_typed_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _RecordingSyncSandboxOpsClient(team_id="team_123", token="token_123")
+    client = _RecordingSyncSandboxOpsClient()
     monkeypatch.setattr(
         sandbox_module,
         "get_credentials",
