@@ -14,7 +14,6 @@ from vercel._internal.sandbox.models import (
     CommandFinishedResponse,
     LogLine,
 )
-from vercel.oidc.types import Credentials
 
 
 @dataclass
@@ -22,7 +21,6 @@ class AsyncCommand:
     client: AsyncSandboxOpsClient
     sandbox_id: str
     cmd: CommandModel
-    credentials: Credentials | None
 
     @property
     def cmd_id(self) -> str:
@@ -38,7 +36,8 @@ class AsyncCommand:
 
     async def logs(self) -> AsyncGenerator[LogLine, None]:
         async for log in self.client.get_logs(
-            sandbox_id=self.sandbox_id, cmd_id=self.cmd.id, credentials=self.credentials
+            sandbox_id=self.sandbox_id,
+            cmd_id=self.cmd.id,
         ):
             yield log
 
@@ -47,7 +46,6 @@ class AsyncCommand:
             sandbox_id=self.sandbox_id,
             cmd_id=self.cmd.id,
             wait=True,
-            credentials=self.credentials,
         )
         assert isinstance(resp, CommandFinishedResponse)
         return AsyncCommandFinished(
@@ -55,7 +53,6 @@ class AsyncCommand:
             sandbox_id=self.sandbox_id,
             cmd=resp.command,
             exit_code=resp.command.exit_code,
-            credentials=self.credentials,
         )
 
     async def output(self, stream: str = "both") -> str:
@@ -77,7 +74,6 @@ class AsyncCommand:
                 sandbox_id=self.sandbox_id,
                 command_id=self.cmd.id,
                 signal=signal,
-                credentials=self.credentials,
             )
         except SandboxNotFoundError:
             # Command may already have exited; ignore 404s
@@ -100,7 +96,6 @@ class Command:
     client: SyncSandboxOpsClient
     sandbox_id: str
     cmd: CommandModel
-    credentials: Credentials | None
 
     @property
     def cmd_id(self) -> str:
@@ -116,7 +111,8 @@ class Command:
 
     def logs(self) -> Generator[LogLine, None, None]:
         yield from self.client.get_logs(
-            sandbox_id=self.sandbox_id, cmd_id=self.cmd.id, credentials=self.credentials
+            sandbox_id=self.sandbox_id,
+            cmd_id=self.cmd.id,
         )
 
     def wait(self) -> CommandFinished:
@@ -125,7 +121,6 @@ class Command:
                 sandbox_id=self.sandbox_id,
                 cmd_id=self.cmd.id,
                 wait=True,
-                credentials=self.credentials,
             )
         )
         assert isinstance(resp, CommandFinishedResponse)
@@ -134,7 +129,6 @@ class Command:
             sandbox_id=self.sandbox_id,
             cmd=resp.command,
             exit_code=resp.command.exit_code,
-            credentials=self.credentials,
         )
 
     def output(self, stream: str = "both") -> str:
@@ -157,7 +151,6 @@ class Command:
                     sandbox_id=self.sandbox_id,
                     command_id=self.cmd.id,
                     signal=signal,
-                    credentials=self.credentials,
                 )
             )
         except SandboxNotFoundError:

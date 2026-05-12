@@ -43,7 +43,7 @@ def auto_multipart_upload(
     )
     part_size = validate_part_size(part_size)
 
-    create_response = iter_coroutine(client.create_multipart_upload(path, headers))
+    create_response = iter_coroutine(client.create_multipart_upload(path, headers, token=token))
     session = MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
@@ -59,7 +59,7 @@ def auto_multipart_upload(
         part_size=part_size,
         total=total,
         on_upload_progress=on_upload_progress,
-        upload_part_fn=lambda **kwargs: iter_coroutine(client.upload_part(**kwargs)),
+        upload_part_fn=lambda **kwargs: iter_coroutine(client.upload_part(**kwargs, token=token)),
     )
     ordered_parts = order_uploaded_parts(parts)
 
@@ -70,6 +70,7 @@ def auto_multipart_upload(
             path=session.path,
             headers=session.headers,
             parts=ordered_parts,
+            token=token,
         )
     )
     return shape_complete_upload_result(complete_response)
@@ -102,7 +103,7 @@ async def auto_multipart_upload_async(
     )
     part_size = validate_part_size(part_size)
 
-    create_response = await client.create_multipart_upload(path, headers)
+    create_response = await client.create_multipart_upload(path, headers, token=token)
     session = MultipartUploadSession(
         upload_id=create_response["uploadId"],
         key=create_response["key"],
@@ -118,7 +119,7 @@ async def auto_multipart_upload_async(
         part_size=part_size,
         total=total,
         on_upload_progress=on_upload_progress,
-        upload_part_fn=client.upload_part,
+        upload_part_fn=lambda **kwargs: client.upload_part(**kwargs, token=token),
     )
     ordered_parts = order_uploaded_parts(parts)
 
@@ -128,5 +129,6 @@ async def auto_multipart_upload_async(
         path=session.path,
         headers=session.headers,
         parts=ordered_parts,
+        token=token,
     )
     return shape_complete_upload_result(complete_response)

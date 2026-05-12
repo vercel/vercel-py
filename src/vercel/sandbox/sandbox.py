@@ -42,7 +42,6 @@ from vercel._internal.time import (
     coerce_duration,
     to_seconds_float,
 )
-from vercel.oidc import Credentials, get_credentials
 
 from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
 from .pty import AsyncPTYSession
@@ -94,7 +93,6 @@ class AsyncSandbox:
     client: AsyncSandboxOpsClient
     sandbox: SandboxModel
     routes: list[dict[str, Any]]
-    credentials: Credentials | None = None
 
     @property
     def sandbox_id(self) -> str:
@@ -136,7 +134,6 @@ class AsyncSandbox:
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
-        team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -149,9 +146,9 @@ class AsyncSandbox:
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
-            token: API token (uses OIDC if not provided).
-            project_id: Project ID (uses OIDC if not provided).
-            team_id: Team ID (uses OIDC if not provided).
+            token: Per-call API token override. Not stored on the returned handle.
+            project_id: Project ID used as create scope. Uses configured
+                credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
             env: Default environment variables for the sandbox. These are inherited
@@ -163,11 +160,13 @@ class AsyncSandbox:
             Created AsyncSandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient()
+        client = AsyncSandboxOpsClient(default_token=token)
+        create_project_id = project_id
+        if create_project_id is None:
+            create_project_id = (await client.resolve_credentials()).project_id
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
-            project_id=creds.project_id,
-            credentials=creds,
+            project_id=create_project_id,
+            token=token,
             source=parsed_source,
             ports=ports,
             timeout=timeout,
@@ -181,7 +180,6 @@ class AsyncSandbox:
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
-            credentials=creds,
         )
 
     @staticmethod
@@ -190,18 +188,16 @@ class AsyncSandbox:
         sandbox_id: str,
         token: str | None = None,
         project_id: str | None = None,
-        team_id: str | None = None,
     ) -> AsyncSandbox:
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient()
+        client = AsyncSandboxOpsClient(default_token=token)
         resp: SandboxAndRoutesResponse = await client.get_sandbox(
-            sandbox_id=sandbox_id, credentials=creds
+            sandbox_id=sandbox_id,
+            token=token,
         )
         return AsyncSandbox(
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
-            credentials=creds,
         )
 
     @staticmethod
@@ -213,7 +209,6 @@ class AsyncSandbox:
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
-        team_id: str | None = None,
     ) -> AsyncIterator[SandboxModel]:
         """List sandboxes as an async iterable of sandbox models.
 
@@ -227,30 +222,30 @@ class AsyncSandbox:
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
-            token: API token. Uses configured credentials when omitted.
-            project_id: Project ID used for credential resolution and as the
-                sandbox list scope. Uses configured credentials when omitted.
-            team_id: Team ID scope for the sandbox API.
+            token: Per-page API token override. Not stored on yielded models.
+            project_id: Project ID used as the list endpoint scope. Uses
+                configured credentials when omitted.
 
         Returns:
             An async iterable of typed sandbox results.
         """
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        params = SandboxListParams(
-            project_id=creds.project_id,
-            limit=limit,
-            internal_page_size=_internal_page_size,
-            since=since,
-            until=until,
-        )
 
         async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
-            current_params = params
             async with AsyncSandboxOpsClient() as client:
+                list_project_id = project_id
+                if list_project_id is None:
+                    list_project_id = (await client.resolve_credentials()).project_id
+                current_params = SandboxListParams(
+                    project_id=list_project_id,
+                    limit=limit,
+                    internal_page_size=_internal_page_size,
+                    since=since,
+                    until=until,
+                )
                 while True:
                     response = await client.list_sandboxes(
                         project_id=current_params.project_id,
-                        credentials=creds,
+                        token=token,
                         limit=current_params.request_limit,
                         since=current_params.since,
                         until=current_params.until,
@@ -274,9 +269,7 @@ class AsyncSandbox:
 
     async def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
-        resp = await self.client.get_sandbox(
-            sandbox_id=self.sandbox.id, credentials=self.credentials
-        )
+        resp = await self.client.get_sandbox(sandbox_id=self.sandbox.id)
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
 
@@ -284,7 +277,6 @@ class AsyncSandbox:
         response = await self.client.update_network_policy(
             sandbox_id=self.sandbox.id,
             network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
-            credentials=self.credentials,
         )
         self.sandbox = response.sandbox
         updated_network_policy = self.sandbox.network_policy
@@ -337,14 +329,14 @@ class AsyncSandbox:
 
     async def get_command(self, cmd_id: str) -> AsyncCommand:
         resp = await self.client.get_command(
-            sandbox_id=self.sandbox.id, cmd_id=cmd_id, credentials=self.credentials
+            sandbox_id=self.sandbox.id,
+            cmd_id=cmd_id,
         )
         assert isinstance(resp, CommandResponse)
         return AsyncCommand(
             client=self.client,
             sandbox_id=self.sandbox.id,
             cmd=resp.command,
-            credentials=self.credentials,
         )
 
     async def run_command(
@@ -363,13 +355,11 @@ class AsyncSandbox:
             cwd=cwd,
             env=env or {},
             sudo=sudo,
-            credentials=self.credentials,
         )
         command = AsyncCommand(
             client=self.client,
             sandbox_id=self.sandbox.id,
             cmd=command_response.command,
-            credentials=self.credentials,
         )
         # Wait for completion
         return await command.wait()
@@ -390,19 +380,15 @@ class AsyncSandbox:
             cwd=cwd,
             env=env or {},
             sudo=sudo,
-            credentials=self.credentials,
         )
         return AsyncCommand(
             client=self.client,
             sandbox_id=self.sandbox.id,
             cmd=command_response.command,
-            credentials=self.credentials,
         )
 
     async def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
-        await self.client.mk_dir(
-            sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
-        )
+        await self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
 
     async def iter_file(
         self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
@@ -412,14 +398,11 @@ class AsyncSandbox:
             path=path,
             cwd=cwd,
             chunk_size=chunk_size,
-            credentials=self.credentials,
         )
 
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
         try:
-            return await self.client.read_file(
-                sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
-            )
+            return await self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
         except SandboxNotFoundError:
             return None
 
@@ -439,7 +422,6 @@ class AsyncSandbox:
             cwd=cwd,
             create_parents=create_parents,
             chunk_size=chunk_size,
-            credentials=self.credentials,
         )
 
     async def write_files(self, files: builtins.list[WriteFile]) -> None:
@@ -448,7 +430,6 @@ class AsyncSandbox:
             cwd=self.sandbox.cwd,
             extract_dir="/",
             files=files,
-            credentials=self.credentials,
         )
 
     async def stop(
@@ -472,9 +453,7 @@ class AsyncSandbox:
             TimeoutError: If ``blocking=True`` and the sandbox does not reach
                 ``"stopped"`` within *timeout*.
         """
-        response = await self.client.stop_sandbox(
-            sandbox_id=self.sandbox.id, credentials=self.credentials
-        )
+        response = await self.client.stop_sandbox(sandbox_id=self.sandbox.id)
         self.sandbox = response.sandbox
         if not blocking:
             return
@@ -492,9 +471,7 @@ class AsyncSandbox:
                 extend the timeout by.
         """
         delta = coerce_duration(duration, MILLISECOND)
-        response = await self.client.extend_timeout(
-            sandbox_id=self.sandbox.id, duration=delta, credentials=self.credentials
-        )
+        response = await self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=delta)
         self.sandbox = response.sandbox
 
     async def snapshot(
@@ -518,12 +495,9 @@ class AsyncSandbox:
         response = await self.client.create_snapshot(
             sandbox_id=self.sandbox.id,
             expiration=normalized_expiration,
-            credentials=self.credentials,
         )
         self.sandbox = response.sandbox
-        return AsyncSnapshot(
-            client=self.client, snapshot=response.snapshot, credentials=self.credentials
-        )
+        return AsyncSnapshot(client=self.client, snapshot=response.snapshot)
 
     async def shell(
         self,
@@ -613,7 +587,6 @@ class Sandbox:
     client: SyncSandboxOpsClient
     sandbox: SandboxModel
     routes: list[dict[str, Any]]
-    credentials: Credentials | None = None
 
     @property
     def sandbox_id(self) -> str:
@@ -655,7 +628,6 @@ class Sandbox:
         runtime: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
-        team_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -668,9 +640,9 @@ class Sandbox:
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
-            token: API token (uses OIDC if not provided).
-            project_id: Project ID (uses OIDC if not provided).
-            team_id: Team ID (uses OIDC if not provided).
+            token: Per-call API token override. Not stored on the returned handle.
+            project_id: Project ID used as create scope. Uses configured
+                credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
                 Note: For interactive shell sessions, use AsyncSandbox instead.
@@ -683,12 +655,14 @@ class Sandbox:
             Created Sandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient()
+        client = SyncSandboxOpsClient(default_token=token)
+        create_project_id = project_id
+        if create_project_id is None:
+            create_project_id = iter_coroutine(client.resolve_credentials()).project_id
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
-                project_id=creds.project_id,
-                credentials=creds,
+                project_id=create_project_id,
+                token=token,
                 source=parsed_source,
                 ports=ports,
                 timeout=timeout,
@@ -703,7 +677,6 @@ class Sandbox:
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
-            credentials=creds,
         )
 
     @staticmethod
@@ -712,18 +685,18 @@ class Sandbox:
         sandbox_id: str,
         token: str | None = None,
         project_id: str | None = None,
-        team_id: str | None = None,
     ) -> Sandbox:
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient()
+        client = SyncSandboxOpsClient(default_token=token)
         resp: SandboxAndRoutesResponse = iter_coroutine(
-            client.get_sandbox(sandbox_id=sandbox_id, credentials=creds)
+            client.get_sandbox(
+                sandbox_id=sandbox_id,
+                token=token,
+            )
         )
         return Sandbox(
             client=client,
             sandbox=resp.sandbox,
             routes=[r.model_dump() for r in resp.routes],
-            credentials=creds,
         )
 
     @staticmethod
@@ -735,7 +708,6 @@ class Sandbox:
         until: datetime | int | None = None,
         token: str | None = None,
         project_id: str | None = None,
-        team_id: str | None = None,
     ) -> Iterator[SandboxModel]:
         """List sandboxes as an iterable of sandbox models.
 
@@ -749,31 +721,31 @@ class Sandbox:
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
-            token: API token. Uses configured credentials when omitted.
-            project_id: Project ID used for credential resolution and as the
-                sandbox list scope. Uses configured credentials when omitted.
-            team_id: Team ID scope for the sandbox API.
+            token: Per-page API token override. Not stored on yielded models.
+            project_id: Project ID used as the list endpoint scope. Uses
+                configured credentials when omitted.
 
         Returns:
             An iterable of typed sandbox results.
         """
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        params = SandboxListParams(
-            project_id=creds.project_id,
-            limit=limit,
-            internal_page_size=_internal_page_size,
-            since=since,
-            until=until,
-        )
 
         def iter_sandboxes() -> Iterator[SandboxModel]:
-            current_params = params
             with SyncSandboxOpsClient() as client:
+                list_project_id = project_id
+                if list_project_id is None:
+                    list_project_id = iter_coroutine(client.resolve_credentials()).project_id
+                current_params = SandboxListParams(
+                    project_id=list_project_id,
+                    limit=limit,
+                    internal_page_size=_internal_page_size,
+                    since=since,
+                    until=until,
+                )
                 while True:
                     response = iter_coroutine(
                         client.list_sandboxes(
                             project_id=current_params.project_id,
-                            credentials=creds,
+                            token=token,
                             limit=current_params.request_limit,
                             since=current_params.since,
                             until=current_params.until,
@@ -797,9 +769,7 @@ class Sandbox:
 
     def refresh(self) -> None:
         """Re-fetch this sandbox's state from the API, updating in place."""
-        resp = iter_coroutine(
-            self.client.get_sandbox(sandbox_id=self.sandbox.id, credentials=self.credentials)
-        )
+        resp = iter_coroutine(self.client.get_sandbox(sandbox_id=self.sandbox.id))
         self.sandbox = resp.sandbox
         self.routes = [r.model_dump() for r in resp.routes]
 
@@ -808,7 +778,6 @@ class Sandbox:
             self.client.update_network_policy(
                 sandbox_id=self.sandbox.id,
                 network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
-                credentials=self.credentials,
             )
         )
         self.sandbox = response.sandbox
@@ -860,7 +829,8 @@ class Sandbox:
     def get_command(self, cmd_id: str) -> Command:
         resp = iter_coroutine(
             self.client.get_command(
-                sandbox_id=self.sandbox.id, cmd_id=cmd_id, credentials=self.credentials
+                sandbox_id=self.sandbox.id,
+                cmd_id=cmd_id,
             )
         )
         assert isinstance(resp, CommandResponse)
@@ -868,7 +838,6 @@ class Sandbox:
             client=self.client,
             sandbox_id=self.sandbox.id,
             cmd=resp.command,
-            credentials=self.credentials,
         )
 
     def run_command(
@@ -888,14 +857,12 @@ class Sandbox:
                 cwd=cwd,
                 env=env or {},
                 sudo=sudo,
-                credentials=self.credentials,
             )
         )
         command = Command(
             client=self.client,
             sandbox_id=self.sandbox.id,
             cmd=command_response.command,
-            credentials=self.credentials,
         )
         return command.wait()
 
@@ -916,22 +883,16 @@ class Sandbox:
                 cwd=cwd,
                 env=env or {},
                 sudo=sudo,
-                credentials=self.credentials,
             )
         )
         return Command(
             client=self.client,
             sandbox_id=self.sandbox.id,
             cmd=command_response.command,
-            credentials=self.credentials,
         )
 
     def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
-        iter_coroutine(
-            self.client.mk_dir(
-                sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
-            )
-        )
+        iter_coroutine(self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd))
 
     def iter_file(
         self, path: str, *, cwd: str | None = None, chunk_size: int = 65536
@@ -941,15 +902,12 @@ class Sandbox:
             path=path,
             cwd=cwd,
             chunk_size=chunk_size,
-            credentials=self.credentials,
         )
 
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes | None:
         try:
             return iter_coroutine(
-                self.client.read_file(
-                    sandbox_id=self.sandbox.id, path=path, cwd=cwd, credentials=self.credentials
-                )
+                self.client.read_file(sandbox_id=self.sandbox.id, path=path, cwd=cwd)
             )
         except SandboxNotFoundError:
             return None
@@ -971,7 +929,6 @@ class Sandbox:
                 cwd=cwd,
                 create_parents=create_parents,
                 chunk_size=chunk_size,
-                credentials=self.credentials,
             )
         )
 
@@ -982,7 +939,6 @@ class Sandbox:
                 cwd=self.sandbox.cwd,
                 extract_dir="/",
                 files=files,
-                credentials=self.credentials,
             )
         )
 
@@ -1007,9 +963,7 @@ class Sandbox:
             TimeoutError: If ``blocking=True`` and the sandbox does not reach
                 ``"stopped"`` within *timeout*.
         """
-        response = iter_coroutine(
-            self.client.stop_sandbox(sandbox_id=self.sandbox.id, credentials=self.credentials)
-        )
+        response = iter_coroutine(self.client.stop_sandbox(sandbox_id=self.sandbox.id))
         self.sandbox = response.sandbox
         if not blocking:
             return
@@ -1028,9 +982,7 @@ class Sandbox:
         """
         delta = coerce_duration(duration, MILLISECOND)
         response = iter_coroutine(
-            self.client.extend_timeout(
-                sandbox_id=self.sandbox.id, duration=delta, credentials=self.credentials
-            )
+            self.client.extend_timeout(sandbox_id=self.sandbox.id, duration=delta)
         )
         self.sandbox = response.sandbox
 
@@ -1056,13 +1008,10 @@ class Sandbox:
             self.client.create_snapshot(
                 sandbox_id=self.sandbox.id,
                 expiration=normalized_expiration,
-                credentials=self.credentials,
             )
         )
         self.sandbox = response.sandbox
-        return SnapshotClass(
-            client=self.client, snapshot=response.snapshot, credentials=self.credentials
-        )
+        return SnapshotClass(client=self.client, snapshot=response.snapshot)
 
     def __enter__(self) -> Sandbox:
         return self

@@ -6,7 +6,7 @@ This example shows how to use the async versions of the projects API functions.
 It performs a full CRUD cycle: list projects, create a project, update it, and delete it.
 
 Requirements:
-- VERCEL_TOKEN environment variable set
+- VERCEL_TOKEN or VERCEL_OIDC_TOKEN environment variable set
 - Optional: VERCEL_TEAM_ID for team-scoped operations
 
 Usage:
@@ -30,10 +30,10 @@ async def main() -> None:
     print("=" * 50)
 
     # Check if we have a token
-    token = os.getenv("VERCEL_TOKEN")
+    token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
     if not token:
-        print("❌ Error: VERCEL_TOKEN environment variable is required")
-        print("   Set it with: export VERCEL_TOKEN=your_token_here")
+        print("❌ Error: VERCEL_TOKEN or VERCEL_OIDC_TOKEN environment variable is required")
+        print("   Set it with: export VERCEL_OIDC_TOKEN=your_token_here")
         return
 
     team_id = os.getenv("VERCEL_TEAM_ID")
@@ -48,7 +48,7 @@ async def main() -> None:
     try:
         # 1. List existing projects
         print("\n1️⃣ Listing existing projects...")
-        projects_response = await get_projects(team_id=team_id)
+        projects_response = await get_projects(token=token, team_id=team_id)
         projects = projects_response.get("projects", [])
         print(f"   Found {len(projects)} existing projects")
 
@@ -67,6 +67,7 @@ async def main() -> None:
                 "framework": "nextjs",
                 "publicSource": False,
             },
+            token=token,
             team_id=team_id,
         )
 
@@ -84,6 +85,7 @@ async def main() -> None:
                 "outputDirectory": ".next",
                 "installCommand": "npm install",
             },
+            token=token,
             team_id=team_id,
         )
 
@@ -92,7 +94,7 @@ async def main() -> None:
 
         # 4. Get projects again to verify our project is there
         print("\n4️⃣ Verifying project appears in list...")
-        projects_response = await get_projects(team_id=team_id)
+        projects_response = await get_projects(token=token, team_id=team_id)
         projects = projects_response.get("projects", [])
 
         our_project = next((p for p in projects if p.get("id") == project_id), None)
@@ -105,14 +107,16 @@ async def main() -> None:
 
     except Exception as e:
         print(f"\n❌ Error: {e}")
-        print("   Make sure your VERCEL_TOKEN is valid and has the necessary permissions")
+        print(
+            "   Make sure your VERCEL_TOKEN or VERCEL_OIDC_TOKEN is valid and has the necessary permissions"
+        )
 
     finally:
         # 5. Clean up - delete the test project if it was created
         if project_id:
             print("\n5️⃣ Cleaning up - deleting test project...")
             try:
-                await delete_project(project_id, team_id=team_id)
+                await delete_project(project_id, token=token, team_id=team_id)
                 print(f"   ✅ Deleted project: {project_name}")
             except Exception as cleanup_error:
                 print(f"   ⚠️  Failed to delete project: {cleanup_error}")

@@ -90,7 +90,7 @@ class TestStreamingErrorsSync:
                     client.get_logs(
                         sandbox_id=SANDBOX_ID,
                         cmd_id=CMD_ID,
-                        credentials=TEST_CREDENTIALS,
+                        token=TEST_CREDENTIALS.token,
                     )
                 )
         finally:
@@ -140,7 +140,7 @@ class TestStreamingErrorsAsync:
                 async for _ in client.get_logs(
                     sandbox_id=SANDBOX_ID,
                     cmd_id=CMD_ID,
-                    credentials=TEST_CREDENTIALS,
+                    token=TEST_CREDENTIALS.token,
                 ):
                     pass
         finally:

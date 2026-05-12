@@ -14,6 +14,9 @@ of the client instance. Prefer `with BlobClient()` or
 `async with AsyncBlobClient()`, or call `close()` / `aclose()` explicitly when
 done.
 
+All multipart APIs use `BLOB_READ_WRITE_TOKEN` by default and accept `token=`
+per operation when explicit credentials are needed.
+
 ## Async Client
 
 ```python
@@ -49,6 +52,67 @@ async def main() -> None:
             content_type="image/png",
         )
         await client.download_file(uploaded.url, "/tmp/user-123.png", overwrite=True)
+```
+
+## Multipart Uploads
+
+For large files, use the automatic helper when you want the SDK to handle part
+creation, upload, and completion:
+
+```python
+from vercel.blob import auto_multipart_upload, auto_multipart_upload_async
+
+result = auto_multipart_upload(
+    "large-file.bin",
+    large_data,
+    part_size=8 * 1024 * 1024,
+    # token="vercel_blob_rw_...",  # optional; otherwise uses the env token
+)
+
+result = await auto_multipart_upload_async(
+    "large-file.bin",
+    large_data,
+    # token="vercel_blob_rw_...",  # optional; otherwise uses the env token
+)
+```
+
+Use the uploader pattern when you want to control how parts are created and
+scheduled:
+
+```python
+from vercel.blob import BlobClient
+
+
+with BlobClient() as client:
+    uploader = client.create_multipart_uploader(
+        "large-file.bin",
+        content_type="application/octet-stream",
+        # token="vercel_blob_rw_...",  # optional per operation
+    )
+    parts = [uploader.upload_part(i, chunk) for i, chunk in enumerate(chunks, start=1)]
+    result = uploader.complete(parts)
+```
+
+For manual multipart uploads, pass `token=` to create, each part upload, and
+complete when using explicit credentials:
+
+```python
+from vercel.blob import create_multipart_upload, upload_part, complete_multipart_upload
+
+created = create_multipart_upload("large-file.bin")
+part = upload_part(
+    "large-file.bin",
+    chunk,
+    upload_id=created.upload_id,
+    key=created.key,
+    part_number=1,
+)
+result = complete_multipart_upload(
+    "large-file.bin",
+    [part],
+    upload_id=created.upload_id,
+    key=created.key,
+)
 ```
 
 ## Sync Client

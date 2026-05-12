@@ -9,7 +9,7 @@ import pytest
 _is_ci = bool(os.getenv("CI"))
 _has_credentials = bool(
     os.getenv("BLOB_READ_WRITE_TOKEN")
-    and os.getenv("VERCEL_TOKEN")
+    and (os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN"))
     and os.getenv("VERCEL_PROJECT_ID")
     and os.getenv("VERCEL_TEAM_ID")
 )
@@ -24,7 +24,10 @@ _example_files = (
 
 @pytest.mark.skipif(
     not _is_ci and not _has_credentials,
-    reason="Requires BLOB_READ_WRITE_TOKEN, VERCEL_TOKEN, VERCEL_PROJECT_ID, and VERCEL_TEAM_ID",
+    reason=(
+        "Requires BLOB_READ_WRITE_TOKEN, VERCEL_TOKEN or VERCEL_OIDC_TOKEN, "
+        "VERCEL_PROJECT_ID, and VERCEL_TEAM_ID"
+    ),
 )
 @pytest.mark.parametrize("script_path", _example_files, ids=lambda p: p.name)
 def test_example(script_path: Path) -> None:

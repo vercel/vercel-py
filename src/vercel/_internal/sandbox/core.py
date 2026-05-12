@@ -115,31 +115,36 @@ class SandboxRequestClient:
         *,
         transport: BaseTransport,
         credentials_factory: CredentialsFactory,
+        default_token: str | None = None,
     ) -> None:
         self._transport = transport
         self._credentials_factory = credentials_factory
+        self._default_token = default_token
 
-    async def resolve_credentials(self, credentials: Credentials | None = None) -> Credentials:
-        if credentials is not None:
-            return credentials
-        return await self._credentials_factory()
+    async def resolve_token(self, token: str | None = None) -> str:
+        if token is not None:
+            return token
+        if self._default_token is not None:
+            return self._default_token
+        credentials = await self._credentials_factory()
+        return credentials.token
 
     async def request(
         self,
         method: str,
         path: str,
         *,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         headers: dict[str, str] | None = None,
         params: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        resolved = await self.resolve_credentials(credentials)
+        resolved_token = await self.resolve_token(token)
         response = await self._transport.send(
             method,
             path,
-            token=resolved.token,
+            token=resolved_token,
             headers=headers,
             params=params,
             body=body,
@@ -160,7 +165,7 @@ class SandboxRequestClient:
         method: str,
         path: str,
         *,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         headers: dict[str, str] | None = None,
         params: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
@@ -172,7 +177,7 @@ class SandboxRequestClient:
         r = await self.request(
             method,
             path,
-            credentials=credentials,
+            token=token,
             headers=headers,
             params=params,
             body=body,
@@ -277,34 +282,44 @@ class BaseSandboxOpsClient:
         self._request_client = request_client
         self._filesystem_client = filesystem_client
 
+    async def resolve_credentials(self) -> Credentials:
+        return await self._request_client._credentials_factory()
+
     async def _get(
         self,
         path: str,
         *,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         params: RequestQuery | None = None,
     ) -> JSONValue:
         return await self._request_client.request_json(
-            "GET", path, credentials=credentials, params=params
+            "GET",
+            path,
+            token=token,
+            params=params,
         )
 
     async def _post(
         self,
         path: str,
         *,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> JSONValue:
         return await self._request_client.request_json(
-            "POST", path, credentials=credentials, body=body, stream=stream
+            "POST",
+            path,
+            token=token,
+            body=body,
+            stream=stream,
         )
 
     async def create_sandbox(
         self,
         *,
         project_id: str,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         ports: list[int] | None = None,
         source: Source | None = None,
         timeout: int | timedelta | None = None,
@@ -325,20 +340,30 @@ class BaseSandboxOpsClient:
             interactive=True if interactive else None,
             env=env,
         ).model_dump(by_alias=True, exclude_none=True)
-        data = await self._post("/v1/sandboxes", body=JSONBody(body), credentials=credentials)
+        data = await self._post(
+            "/v1/sandboxes",
+            token=token,
+            body=JSONBody(body),
+        )
         return SandboxAndRoutesResponse.model_validate(data)
 
     async def get_sandbox(
-        self, *, sandbox_id: str, credentials: Credentials | None = None
+        self,
+        *,
+        sandbox_id: str,
+        token: str | None = None,
     ) -> SandboxAndRoutesResponse:
-        data = await self._get(f"/v1/sandboxes/{sandbox_id}", credentials=credentials)
+        data = await self._get(
+            f"/v1/sandboxes/{sandbox_id}",
+            token=token,
+        )
         return SandboxAndRoutesResponse.model_validate(data)
 
     async def list_sandboxes(
         self,
         *,
         project_id: str | None = None,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         limit: int | None = None,
         since: int | None = None,
         until: int | None = None,
@@ -349,11 +374,9 @@ class BaseSandboxOpsClient:
             "since": since,
             "until": until,
         }
-        if credentials is not None and credentials.team_id:
-            params["teamId"] = credentials.team_id
         data = await self._get(
             "/v1/sandboxes",
-            credentials=credentials,
+            token=token,
             params={k: v for k, v in params.items() if v is not None},
         )
         return SandboxesResponse.model_validate(data)
@@ -362,12 +385,12 @@ class BaseSandboxOpsClient:
         self,
         *,
         sandbox_id: str,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         network_policy: ApiNetworkPolicy,
     ) -> SandboxResponse:
         data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/network-policy",
-            credentials=credentials,
+            token=token,
             body=JSONBody(network_policy.model_dump(by_alias=True, exclude_none=True)),
         )
         return SandboxResponse.model_validate(data)
@@ -376,7 +399,7 @@ class BaseSandboxOpsClient:
         self,
         *,
         sandbox_id: str,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         command: str,
         args: list[str],
         cwd: str | None = None,
@@ -393,7 +416,7 @@ class BaseSandboxOpsClient:
             body["cwd"] = cwd
         data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/cmd",
-            credentials=credentials,
+            token=token,
             body=JSONBody(body),
         )
         return CommandResponse.model_validate(data)
@@ -404,11 +427,11 @@ class BaseSandboxOpsClient:
         sandbox_id: str,
         cmd_id: str,
         wait: bool = False,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> CommandResponse | CommandFinishedResponse:
         data = await self._get(
             f"/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}",
-            credentials=credentials,
+            token=token,
             params={"wait": "true"} if wait else None,
         )
         if wait:
@@ -416,9 +439,15 @@ class BaseSandboxOpsClient:
         return CommandResponse.model_validate(data)
 
     async def stop_sandbox(
-        self, *, sandbox_id: str, credentials: Credentials | None = None
+        self,
+        *,
+        sandbox_id: str,
+        token: str | None = None,
     ) -> SandboxResponse:
-        data = await self._post(f"/v1/sandboxes/{sandbox_id}/stop", credentials=credentials)
+        data = await self._post(
+            f"/v1/sandboxes/{sandbox_id}/stop",
+            token=token,
+        )
         return SandboxResponse.model_validate(data)
 
     async def mk_dir(
@@ -427,7 +456,7 @@ class BaseSandboxOpsClient:
         sandbox_id: str,
         path: str,
         cwd: str | None = None,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> None:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
@@ -435,7 +464,7 @@ class BaseSandboxOpsClient:
 
         await self._post(
             f"/v1/sandboxes/{sandbox_id}/fs/mkdir",
-            credentials=credentials,
+            token=token,
             body=JSONBody(body),
         )
 
@@ -445,7 +474,7 @@ class BaseSandboxOpsClient:
         sandbox_id: str,
         path: str,
         cwd: str | None = None,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> bytes:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
@@ -453,7 +482,7 @@ class BaseSandboxOpsClient:
         resp = await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/fs/read",
-            credentials=credentials,
+            token=token,
             body=JSONBody(body),
         )
         return resp.content
@@ -464,7 +493,7 @@ class BaseSandboxOpsClient:
         sandbox_id: str,
         path: str,
         cwd: str | None = None,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> httpx.Response:
         body: dict[str, Any] = {"path": path}
         if cwd is not None:
@@ -472,7 +501,7 @@ class BaseSandboxOpsClient:
         return await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/fs/read",
-            credentials=credentials,
+            token=token,
             body=JSONBody(body),
             stream=True,
         )
@@ -493,10 +522,13 @@ class BaseSandboxOpsClient:
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> AsyncIterator[AsyncIterator[bytes]]:
         response = await self._open_file_stream(
-            sandbox_id=sandbox_id, path=path, cwd=cwd, credentials=credentials
+            sandbox_id=sandbox_id,
+            path=path,
+            cwd=cwd,
+            token=token,
         )
 
         try:
@@ -513,7 +545,7 @@ class BaseSandboxOpsClient:
         cwd: str | None = None,
         create_parents: bool = False,
         chunk_size: int = 65536,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> str:
         if not remote_path:
             raise ValueError("remote_path is required")
@@ -530,7 +562,7 @@ class BaseSandboxOpsClient:
             path=remote_path,
             cwd=cwd,
             chunk_size=chunk_size,
-            credentials=credentials,
+            token=token,
         ) as stream:
             handle: FileHandle | None = None
             try:
@@ -557,13 +589,13 @@ class BaseSandboxOpsClient:
         files: list[WriteFile],
         extract_dir: str,
         cwd: str,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> None:
         payload = _build_tarball(files, cwd, extract_dir)
         await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/fs/write",
-            credentials=credentials,
+            token=token,
             headers={
                 "x-cwd": extract_dir,
             },
@@ -576,12 +608,12 @@ class BaseSandboxOpsClient:
         sandbox_id: str,
         command_id: str,
         signal: int = 15,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> None:
         await self._request_client.request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/cmd/{command_id}/kill",
-            credentials=credentials,
+            token=token,
             body=JSONBody({"signal": signal}),
         )
 
@@ -590,11 +622,11 @@ class BaseSandboxOpsClient:
         *,
         sandbox_id: str,
         duration: timedelta,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> SandboxResponse:
         data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/extend-timeout",
-            credentials=credentials,
+            token=token,
             body=JSONBody({"duration": to_ms_int(duration)}),
         )
         return SandboxResponse.model_validate(data)
@@ -604,27 +636,33 @@ class BaseSandboxOpsClient:
         *,
         sandbox_id: str,
         expiration: SnapshotExpiration | None = None,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> CreateSnapshotResponse:
         body = None if expiration is None else JSONBody({"expiration": int(expiration)})
         data = await self._post(
             f"/v1/sandboxes/{sandbox_id}/snapshot",
-            credentials=credentials,
+            token=token,
             body=body,
         )
         return CreateSnapshotResponse.model_validate(data)
 
     async def get_snapshot(
-        self, *, snapshot_id: str, credentials: Credentials | None = None
+        self,
+        *,
+        snapshot_id: str,
+        token: str | None = None,
     ) -> SnapshotResponse:
-        data = await self._get(f"/v1/sandboxes/snapshots/{snapshot_id}", credentials=credentials)
+        data = await self._get(
+            f"/v1/sandboxes/snapshots/{snapshot_id}",
+            token=token,
+        )
         return SnapshotResponse.model_validate(data)
 
     async def list_snapshots(
         self,
         *,
         project_id: str | None = None,
-        credentials: Credentials | None = None,
+        token: str | None = None,
         limit: int | None = None,
         since: int | None = None,
         until: int | None = None,
@@ -635,22 +673,23 @@ class BaseSandboxOpsClient:
             "since": since,
             "until": until,
         }
-        if credentials is not None and credentials.team_id:
-            params["teamId"] = credentials.team_id
         data = await self._get(
             "/v1/sandboxes/snapshots",
-            credentials=credentials,
+            token=token,
             params={k: v for k, v in params.items() if v is not None},
         )
         return SnapshotsResponse.model_validate(data)
 
     async def delete_snapshot(
-        self, *, snapshot_id: str, credentials: Credentials | None = None
+        self,
+        *,
+        snapshot_id: str,
+        token: str | None = None,
     ) -> SnapshotResponse:
         data = await self._request_client.request_json(
             "DELETE",
             f"/v1/sandboxes/snapshots/{snapshot_id}",
-            credentials=credentials,
+            token=token,
         )
         return SnapshotResponse.model_validate(data)
 
@@ -659,12 +698,12 @@ class BaseSandboxOpsClient:
         *,
         sandbox_id: str,
         cmd_id: str,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> httpx.Response:
         return await self._request_client.request(
             "GET",
             f"/v1/sandboxes/{sandbox_id}/cmd/{cmd_id}/logs",
-            credentials=credentials,
+            token=token,
             headers={"accept": "text/event-stream"},
             stream=True,
         )
@@ -681,6 +720,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
+        default_token: str | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -693,6 +733,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
             request_client=SandboxRequestClient(
                 transport=transport,
                 credentials_factory=_make_sandbox_credentials_factory(),
+                default_token=default_token,
             ),
             filesystem_client=filesystem_client or create_filesystem_client(),
         )
@@ -702,10 +743,14 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         sandbox_id: str,
         cmd_id: str,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> Generator[LogLine, None, None]:
         resp = iter_coroutine(
-            self._get_log_stream(sandbox_id=sandbox_id, cmd_id=cmd_id, credentials=credentials)
+            self._get_log_stream(
+                sandbox_id=sandbox_id,
+                cmd_id=cmd_id,
+                token=token,
+            )
         )
         try:
             for line in resp.iter_lines():
@@ -732,11 +777,14 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> Generator[bytes, None, None]:
         resp = iter_coroutine(
             self._open_file_stream(
-                sandbox_id=sandbox_id, path=path, cwd=cwd, credentials=credentials
+                sandbox_id=sandbox_id,
+                path=path,
+                cwd=cwd,
+                token=token,
             )
         )
 
@@ -783,6 +831,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
+        default_token: str | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -795,6 +844,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
             request_client=SandboxRequestClient(
                 transport=transport,
                 credentials_factory=_make_sandbox_credentials_factory(),
+                default_token=default_token,
             ),
             filesystem_client=filesystem_client or create_async_filesystem_client(),
         )
@@ -804,10 +854,12 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         sandbox_id: str,
         cmd_id: str,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> AsyncGenerator[LogLine, None]:
         resp = await self._get_log_stream(
-            sandbox_id=sandbox_id, cmd_id=cmd_id, credentials=credentials
+            sandbox_id=sandbox_id,
+            cmd_id=cmd_id,
+            token=token,
         )
         try:
             async for line in resp.aiter_lines():
@@ -834,10 +886,13 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         path: str,
         cwd: str | None = None,
         chunk_size: int = 65536,
-        credentials: Credentials | None = None,
+        token: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
         resp = await self._open_file_stream(
-            sandbox_id=sandbox_id, path=path, cwd=cwd, credentials=credentials
+            sandbox_id=sandbox_id,
+            path=path,
+            cwd=cwd,
+            token=token,
         )
 
         async def _iterate() -> AsyncGenerator[bytes, None]:
