@@ -11,7 +11,7 @@ from vercel.sandbox import AsyncSandbox
 
 async def main() -> None:
     async with await AsyncSandbox.create(timeout=60_000) as sandbox:
-        command = await sandbox.run_command("python --version")
+        command = await sandbox.run_command("python", ["--version"])
         print(await command.stdout())
 ```
 
