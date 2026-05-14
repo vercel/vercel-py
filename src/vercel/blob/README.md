@@ -15,8 +15,10 @@ of the client instance. Prefer `with BlobClient()` or
 `async with AsyncBlobClient()`, or call `close()` / `aclose()` explicitly when
 done.
 
-Multipart APIs follow the same credential rules. Operation-level tokens override
-client tokens.
+Multipart APIs follow the same credential rules. Client-created uploaders reuse
+the client's token source and resolve it for create, each part upload, and
+complete. A `token=` passed to `create_multipart_uploader(...)` pins that
+uploader to the provided token.
 
 ## Async Client
 
@@ -88,7 +90,7 @@ with BlobClient() as client:  # or BlobClient(token="...")
     uploader = client.create_multipart_uploader(
         "large-file.bin",
         content_type="application/octet-stream",
-        # token="vercel_blob_rw_...",  # optional per operation
+        # token="vercel_blob_rw_...",  # optional uploader token
     )
     parts = [uploader.upload_part(i, chunk) for i, chunk in enumerate(chunks, start=1)]
     result = uploader.complete(parts)

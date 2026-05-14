@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from os import PathLike
 from typing import Any
 
+from vercel._internal.auth import TokenProvider, static_token_provider
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import (
     AsyncSandboxOpsClient,
@@ -88,6 +89,19 @@ def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) 
     return name
 
 
+def _make_public_token_provider(
+    *,
+    token: str | TokenProvider | None,
+) -> TokenProvider | None:
+    if token is None:
+        return None
+    if isinstance(token, str):
+        return static_token_provider(token)
+    if not callable(token):
+        raise TypeError("token must be a string, TokenProvider, or None")
+    return token
+
+
 @dataclass
 class AsyncSandbox:
     client: AsyncSandboxOpsClient
@@ -132,7 +146,7 @@ class AsyncSandbox:
         timeout: int | timedelta | None = None,
         resources: Resources | None = None,
         runtime: str | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
@@ -146,7 +160,8 @@ class AsyncSandbox:
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
-            token: Per-call API token override. Not stored on the returned handle.
+            token: API token string or provider called for each API request
+                made by this sandbox handle.
             project_id: Project ID used as create scope. Uses configured
                 credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
@@ -160,13 +175,12 @@ class AsyncSandbox:
             Created AsyncSandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        client = AsyncSandboxOpsClient()
+        client = AsyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
         create_project_id = project_id
         if create_project_id is None:
             create_project_id = await client.resolve_project_id()
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=create_project_id,
-            token=token,
             source=parsed_source,
             ports=ports,
             timeout=timeout,
@@ -186,13 +200,12 @@ class AsyncSandbox:
     async def get(
         *,
         sandbox_id: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
     ) -> AsyncSandbox:
-        client = AsyncSandboxOpsClient()
+        client = AsyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
         resp: SandboxAndRoutesResponse = await client.get_sandbox(
             sandbox_id=sandbox_id,
-            token=token,
         )
         return AsyncSandbox(
             client=client,
@@ -207,7 +220,7 @@ class AsyncSandbox:
         _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
     ) -> AsyncIterator[SandboxModel]:
         """List sandboxes as an async iterable of sandbox models.
@@ -222,7 +235,8 @@ class AsyncSandbox:
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
-            token: Per-page API token override. Not stored on yielded models.
+            token: API token string or provider called for each list page
+                request.
             project_id: Project ID used as the list endpoint scope. Uses
                 configured credentials when omitted.
 
@@ -231,7 +245,9 @@ class AsyncSandbox:
         """
 
         async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
-            async with AsyncSandboxOpsClient() as client:
+            async with AsyncSandboxOpsClient(
+                token_provider=_make_public_token_provider(token=token)
+            ) as client:
                 list_project_id = project_id
                 if list_project_id is None:
                     list_project_id = await client.resolve_project_id()
@@ -245,7 +261,6 @@ class AsyncSandbox:
                 while True:
                     response = await client.list_sandboxes(
                         project_id=current_params.project_id,
-                        token=token,
                         limit=current_params.request_limit,
                         since=current_params.since,
                         until=current_params.until,
@@ -626,7 +641,7 @@ class Sandbox:
         timeout: int | timedelta | None = None,
         resources: Resources | None = None,
         runtime: str | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         interactive: bool = False,
         env: dict[str, str] | None = None,
@@ -640,7 +655,8 @@ class Sandbox:
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
             runtime: Runtime to use.
-            token: Per-call API token override. Not stored on the returned handle.
+            token: API token string or provider called for each API request
+                made by this sandbox handle.
             project_id: Project ID used as create scope. Uses configured
                 credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
@@ -655,14 +671,13 @@ class Sandbox:
             Created Sandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        client = SyncSandboxOpsClient()
+        client = SyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
         create_project_id = project_id
         if create_project_id is None:
             create_project_id = iter_coroutine(client.resolve_project_id())
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
                 project_id=create_project_id,
-                token=token,
                 source=parsed_source,
                 ports=ports,
                 timeout=timeout,
@@ -683,14 +698,13 @@ class Sandbox:
     def get(
         *,
         sandbox_id: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
     ) -> Sandbox:
-        client = SyncSandboxOpsClient()
+        client = SyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.get_sandbox(
                 sandbox_id=sandbox_id,
-                token=token,
             )
         )
         return Sandbox(
@@ -706,7 +720,7 @@ class Sandbox:
         _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
     ) -> Iterator[SandboxModel]:
         """List sandboxes as an iterable of sandbox models.
@@ -721,7 +735,8 @@ class Sandbox:
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
-            token: Per-page API token override. Not stored on yielded models.
+            token: API token string or provider called for each list page
+                request.
             project_id: Project ID used as the list endpoint scope. Uses
                 configured credentials when omitted.
 
@@ -730,7 +745,9 @@ class Sandbox:
         """
 
         def iter_sandboxes() -> Iterator[SandboxModel]:
-            with SyncSandboxOpsClient() as client:
+            with SyncSandboxOpsClient(
+                token_provider=_make_public_token_provider(token=token)
+            ) as client:
                 list_project_id = project_id
                 if list_project_id is None:
                     list_project_id = iter_coroutine(client.resolve_project_id())
@@ -745,7 +762,6 @@ class Sandbox:
                     response = iter_coroutine(
                         client.list_sandboxes(
                             project_id=current_params.project_id,
-                            token=token,
                             limit=current_params.request_limit,
                             since=current_params.since,
                             until=current_params.until,

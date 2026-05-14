@@ -1,4 +1,4 @@
-"""Small auth protocols shared by service-specific request clients."""
+"""Small auth helpers shared by service-specific request clients."""
 
 from __future__ import annotations
 
@@ -9,4 +9,14 @@ class TokenProvider(Protocol):
     async def __call__(self) -> str: ...
 
 
-__all__ = ["TokenProvider"]
+def static_token_provider(token: str) -> TokenProvider:
+    async def _provider() -> str:
+        return token
+
+    return _provider
+
+
+__all__ = [
+    "TokenProvider",
+    "static_token_provider",
+]

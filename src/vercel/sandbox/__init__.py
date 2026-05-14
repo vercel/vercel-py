@@ -1,3 +1,4 @@
+from vercel._internal.auth import TokenProvider
 from vercel._internal.sandbox import (
     APIError,
     SandboxAuthError,
@@ -42,6 +43,7 @@ __all__ = [
     "SandboxPermissionError",
     "SandboxRateLimitError",
     "SandboxServerError",
+    "TokenProvider",
     "AsyncSandbox",
     "AsyncSnapshot",
     "Sandbox",

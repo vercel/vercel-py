@@ -372,6 +372,9 @@ class MultipartClient:
     async def _request_api(self, *, token: str | None = None, **kwargs: Any) -> Any:
         return await self._request_client.request_api(token=token, **kwargs)
 
+    async def resolve_token(self, token: str | None = None) -> str:
+        return await self._request_client.resolve_token(token)
+
     async def create_multipart_upload(
         self,
         path: str,

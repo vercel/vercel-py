@@ -128,14 +128,22 @@ class SandboxRequestClient:
         *,
         transport: BaseTransport,
         token_provider: TokenProvider,
+        base_headers: dict[str, str] | None = None,
     ) -> None:
         self._transport = transport
         self._token_provider = token_provider
+        self._base_headers = dict(base_headers or {})
 
     async def resolve_token(self, token: str | None = None) -> str:
         if token is not None:
             return token
         return await self._token_provider()
+
+    def _merge_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
+        merged = dict(self._base_headers)
+        if headers:
+            merged.update(headers)
+        return merged
 
     async def request(
         self,
@@ -153,7 +161,7 @@ class SandboxRequestClient:
             method,
             path,
             token=resolved_token,
-            headers=headers,
+            headers=self._merge_headers(headers),
             params=params,
             body=body,
             stream=stream,
@@ -730,6 +738,8 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
+        token_provider: TokenProvider | None = None,
+        project_id_provider: ProjectIdProvider | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -741,10 +751,11 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         super().__init__(
             request_client=SandboxRequestClient(
                 transport=transport,
-                token_provider=_make_sandbox_token_provider(),
+                token_provider=token_provider or _make_sandbox_token_provider(),
+                base_headers={"user-agent": USER_AGENT},
             ),
             filesystem_client=filesystem_client or create_filesystem_client(),
-            project_id_provider=_make_sandbox_project_id_provider(),
+            project_id_provider=project_id_provider or _make_sandbox_project_id_provider(),
         )
 
     def get_logs(
@@ -840,6 +851,8 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
+        token_provider: TokenProvider | None = None,
+        project_id_provider: ProjectIdProvider | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -851,10 +864,11 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         super().__init__(
             request_client=SandboxRequestClient(
                 transport=transport,
-                token_provider=_make_sandbox_token_provider(),
+                token_provider=token_provider or _make_sandbox_token_provider(),
+                base_headers={"user-agent": USER_AGENT},
             ),
             filesystem_client=filesystem_client or create_async_filesystem_client(),
-            project_id_provider=_make_sandbox_project_id_provider(),
+            project_id_provider=project_id_provider or _make_sandbox_project_id_provider(),
         )
 
     async def get_logs(

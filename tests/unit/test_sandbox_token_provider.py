@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import inspect
-from dataclasses import fields
+from collections.abc import Callable
 from typing import Any, cast
 
 import httpx
-from pytest import MonkeyPatch
+import respx
 
 from vercel._internal.fs import create_filesystem_client
 from vercel._internal.http.transport import BaseTransport
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.core import BaseSandboxOpsClient, SandboxRequestClient
-from vercel.sandbox.command import AsyncCommand, Command
 from vercel.sandbox.sandbox import AsyncSandbox, Sandbox
 from vercel.sandbox.snapshot import AsyncSnapshot, Snapshot
+
+SANDBOX_API_BASE = "https://api.vercel.com"
 
 
 class RecordingTransport(BaseTransport):
@@ -91,6 +91,16 @@ def _snapshot_payload(snapshot_id: str = "snap_1", *, status: str = "created") -
     }
 
 
+def _record_auth_response(
+    auth_headers: list[str | None], response: dict[str, Any]
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth_headers.append(request.headers.get("authorization"))
+        return httpx.Response(200, json=response)
+
+    return handler
+
+
 async def test_request_client_resolves_fresh_token_for_each_default_request() -> None:
     calls = 0
 
@@ -148,6 +158,26 @@ async def test_request_client_token_override_is_per_call_only() -> None:
         "pinned-token",
         "fallback-token",
     ]
+
+
+async def test_request_client_merges_user_agent_base_header() -> None:
+    async def provider() -> str:
+        return "token"
+
+    transport = RecordingTransport([{"ok": True}])
+    client = SandboxRequestClient(
+        transport=transport,
+        token_provider=provider,
+        base_headers={"user-agent": "vercel/sandbox/test"},
+    )
+
+    await client.request_json("POST", "/one", headers={"x-custom": "1"})
+
+    assert transport.requests[0]["headers"] == {
+        "user-agent": "vercel/sandbox/test",
+        "x-custom": "1",
+        "content-type": "application/json",
+    }
 
 
 def test_sync_handles_use_token_provider_after_override_call() -> None:
@@ -260,26 +290,140 @@ async def test_async_handles_use_token_provider_after_override_call() -> None:
     ]
 
 
-def test_public_facade_surfaces_do_not_store_credentials() -> None:
-    for cls in (Sandbox, AsyncSandbox, Command, AsyncCommand, Snapshot, AsyncSnapshot):
-        assert "credentials" not in {field.name for field in fields(cls)}
+@respx.mock
+def test_public_sync_sandbox_reuses_token_provider_for_handle_requests() -> None:
+    auth_headers: list[str | None] = []
+    calls = 0
 
+    async def provider() -> str:
+        nonlocal calls
+        calls += 1
+        return f"provider-{calls}"
 
-async def test_public_facade_signatures_do_not_expose_team_id() -> None:
-    callables = (
-        Sandbox.create,
-        Sandbox.get,
-        Sandbox.list,
-        AsyncSandbox.create,
-        AsyncSandbox.get,
-        AsyncSandbox.list,
-        Snapshot.get,
-        Snapshot.list,
-        AsyncSnapshot.get,
-        AsyncSnapshot.list,
+    respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        side_effect=_record_auth_response(
+            auth_headers, {"sandbox": _sandbox_payload(), "routes": []}
+        )
     )
-    for fn in callables:
-        assert "team_id" not in inspect.signature(fn).parameters
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/sbx_1").mock(
+        side_effect=_record_auth_response(
+            auth_headers, {"sandbox": _sandbox_payload(), "routes": []}
+        )
+    )
+    respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/sbx_1/cmd").mock(
+        side_effect=_record_auth_response(auth_headers, {"command": _command_payload()})
+    )
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/sbx_1/cmd/cmd_1").mock(
+        side_effect=_record_auth_response(auth_headers, {"command": _command_payload(exit_code=0)})
+    )
+
+    sandbox = Sandbox.create(token=provider, project_id="project")
+    sandbox.refresh()
+    command = sandbox.run_command_detached("echo")
+    command.wait()
+    sandbox.client.close()
+
+    assert calls == 4
+    assert auth_headers == [
+        "Bearer provider-1",
+        "Bearer provider-2",
+        "Bearer provider-3",
+        "Bearer provider-4",
+    ]
+
+
+@respx.mock
+async def test_public_async_sandbox_reuses_token_provider_for_handle_requests() -> None:
+    auth_headers: list[str | None] = []
+    calls = 0
+
+    async def provider() -> str:
+        nonlocal calls
+        calls += 1
+        return f"provider-{calls}"
+
+    respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        side_effect=_record_auth_response(
+            auth_headers, {"sandbox": _sandbox_payload(), "routes": []}
+        )
+    )
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/sbx_1").mock(
+        side_effect=_record_auth_response(
+            auth_headers, {"sandbox": _sandbox_payload(), "routes": []}
+        )
+    )
+    respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes/sbx_1/cmd").mock(
+        side_effect=_record_auth_response(auth_headers, {"command": _command_payload()})
+    )
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/sbx_1/cmd/cmd_1").mock(
+        side_effect=_record_auth_response(auth_headers, {"command": _command_payload(exit_code=0)})
+    )
+
+    sandbox = await AsyncSandbox.create(token=provider, project_id="project")
+    await sandbox.refresh()
+    command = await sandbox.run_command_detached("echo")
+    await command.wait()
+    await sandbox.client.aclose()
+
+    assert calls == 4
+    assert auth_headers == [
+        "Bearer provider-1",
+        "Bearer provider-2",
+        "Bearer provider-3",
+        "Bearer provider-4",
+    ]
+
+
+@respx.mock
+def test_public_lookup_and_list_methods_use_token_provider() -> None:
+    auth_headers: list[str | None] = []
+    calls = 0
+
+    async def provider() -> str:
+        nonlocal calls
+        calls += 1
+        return f"provider-{calls}"
+
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/sbx_1").mock(
+        side_effect=_record_auth_response(
+            auth_headers, {"sandbox": _sandbox_payload(), "routes": []}
+        )
+    )
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        side_effect=_record_auth_response(
+            auth_headers,
+            {"sandboxes": [_sandbox_payload()], "pagination": {"count": 1, "next": None}},
+        )
+    )
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots/snap_1").mock(
+        side_effect=_record_auth_response(auth_headers, {"snapshot": _snapshot_payload()})
+    )
+    respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(
+        side_effect=_record_auth_response(
+            auth_headers,
+            {"snapshots": [_snapshot_payload()], "pagination": {"count": 1, "next": None}},
+        )
+    )
+
+    sandbox = Sandbox.get(sandbox_id="sbx_1", token=provider)
+    sandboxes = list(Sandbox.list(token=provider, project_id="project"))
+    snapshot = Snapshot.get(snapshot_id="snap_1", token=provider)
+    snapshots = list(Snapshot.list(token=provider, project_id="project"))
+
+    sandbox.client.close()
+    snapshot.client.close()
+
+    assert sandbox.sandbox_id == "sbx_1"
+    assert [item.id for item in sandboxes] == ["sbx_1"]
+    assert snapshot.snapshot_id == "snap_1"
+    assert [item.id for item in snapshots] == ["snap_1"]
+    assert calls == 4
+    assert auth_headers == [
+        "Bearer provider-1",
+        "Bearer provider-2",
+        "Bearer provider-3",
+        "Bearer provider-4",
+    ]
 
 
 async def test_list_sandboxes_omits_team_id_query_param() -> None:
@@ -316,127 +460,3 @@ async def test_list_snapshots_omits_team_id_query_param() -> None:
     await ops.list_snapshots(project_id="project", limit=10)
 
     assert transport.requests[0]["params"] == {"project": "project", "limit": 10}
-
-
-def test_sandbox_create_uses_fresh_credentials_without_storing(
-    monkeypatch: MonkeyPatch,
-) -> None:
-    import vercel.sandbox.sandbox as sandbox_module
-    from vercel._internal.sandbox.models import (
-        Sandbox as SandboxModel,
-        SandboxAndRoutesResponse,
-        SandboxStatus,
-    )
-
-    class RecordingClient:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
-
-        async def resolve_project_id(self) -> str:
-            self.calls.append({"method": "resolve_project_id"})
-            return "fresh-project"
-
-        async def create_sandbox(self, **kwargs: Any) -> SandboxAndRoutesResponse:
-            self.calls.append({"method": "create_sandbox", **kwargs})
-            return SandboxAndRoutesResponse(
-                sandbox=SandboxModel(
-                    id="sbx_1",
-                    memory=1024,
-                    vcpus=1,
-                    region="iad1",
-                    runtime="node22",
-                    timeout=300_000,
-                    status=SandboxStatus.RUNNING,
-                    requestedAt=1,
-                    createdAt=1,
-                    cwd="/vercel/sandbox",
-                    updatedAt=1,
-                ),
-                routes=[],
-            )
-
-    client = RecordingClient()
-    constructor_kwargs: list[dict[str, Any]] = []
-
-    def make_client(**kwargs: Any) -> RecordingClient:
-        constructor_kwargs.append(kwargs)
-        return client
-
-    monkeypatch.setattr(sandbox_module, "SyncSandboxOpsClient", make_client)
-
-    sandbox = Sandbox.create(token="pinned-token")
-
-    assert "credentials" not in sandbox.__dict__
-    assert constructor_kwargs == [{}]
-    assert client.calls == [
-        {"method": "resolve_project_id"},
-        {
-            "method": "create_sandbox",
-            "project_id": "fresh-project",
-            "token": "pinned-token",
-            "source": None,
-            "ports": None,
-            "timeout": None,
-            "resources": None,
-            "runtime": None,
-            "interactive": False,
-            "env": None,
-            "network_policy": None,
-        },
-    ]
-
-
-async def test_sync_sandbox_list_resolves_fresh_auth_per_page(
-    monkeypatch: MonkeyPatch,
-) -> None:
-    import vercel.sandbox.sandbox as sandbox_module
-    from vercel._internal.sandbox.models import Pagination, SandboxesResponse
-
-    class RecordingClient:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
-
-        def __enter__(self) -> RecordingClient:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            pass
-
-        async def resolve_project_id(self) -> str:
-            self.calls.append({"method": "resolve_project_id"})
-            return "fixed-project"
-
-        async def list_sandboxes(self, **kwargs: Any) -> SandboxesResponse:
-            self.calls.append({"method": "list_sandboxes", **kwargs})
-            page_count = len([call for call in self.calls if call["method"] == "list_sandboxes"])
-            next_cursor = 10 if page_count == 1 else None
-            return SandboxesResponse(
-                sandboxes=[],
-                pagination=Pagination(count=0, next=next_cursor),
-            )
-
-    client = RecordingClient()
-    monkeypatch.setattr(sandbox_module, "SyncSandboxOpsClient", lambda **_: client)
-
-    sandboxes = Sandbox.list(token="pinned", _internal_page_size=1)
-    assert list(sandboxes) == []
-
-    assert client.calls == [
-        {"method": "resolve_project_id"},
-        {
-            "method": "list_sandboxes",
-            "project_id": "fixed-project",
-            "token": "pinned",
-            "limit": 1,
-            "since": None,
-            "until": None,
-        },
-        {
-            "method": "list_sandboxes",
-            "project_id": "fixed-project",
-            "token": "pinned",
-            "limit": 1,
-            "since": None,
-            "until": 9,
-        },
-    ]

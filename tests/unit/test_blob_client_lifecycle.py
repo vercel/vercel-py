@@ -85,8 +85,10 @@ class TestBlobClientLifecycle:
 
     def test_sync_client_multipart_uploader_uses_owned_request_api(self) -> None:
         actions: list[str] = []
+        tokens: list[str | None] = []
 
         async def request_api(**kwargs):
+            tokens.append(kwargs["token"])
             action = kwargs["headers"]["x-mpu-action"]
             actions.append(action)
             if action == "create":
@@ -105,16 +107,22 @@ class TestBlobClientLifecycle:
 
         mock_request_client = MagicMock()
         mock_request_client.request_api = AsyncMock(side_effect=request_api)
+        mock_request_client.resolve_token = AsyncMock(
+            side_effect=["create_token", "part_token", "complete_token"]
+        )
         mock_ops_client = MagicMock()
         mock_ops_client._request_client = mock_request_client
 
-        with patch("vercel.blob.client.SyncBlobOpsClient", return_value=mock_ops_client):
-            client = BlobClient()
-            uploader = client.create_multipart_uploader("folder/client-mpu.bin", token="test_token")
+        with patch("vercel.blob.client.SyncBlobOpsClient", return_value=mock_ops_client) as ctor:
+            client = BlobClient(token="client_token")
+            uploader = client.create_multipart_uploader("folder/client-mpu.bin")
             part = uploader.upload_part(1, b"chunk")
             result = uploader.complete([part])
 
+        ctor.assert_called_once_with(token="client_token")
         assert actions == ["create", "upload", "complete"]
+        assert tokens == ["create_token", "part_token", "complete_token"]
+        assert mock_request_client.resolve_token.await_count == 3
         assert mock_request_client.request_api.await_count == 3
         assert result.pathname == "folder/client-mpu.bin"
 
@@ -181,8 +189,10 @@ class TestBlobClientLifecycle:
     @pytest.mark.asyncio
     async def test_async_client_multipart_uploader_uses_owned_request_api(self) -> None:
         actions: list[str] = []
+        tokens: list[str | None] = []
 
         async def request_api(**kwargs):
+            tokens.append(kwargs["token"])
             action = kwargs["headers"]["x-mpu-action"]
             actions.append(action)
             if action == "create":
@@ -202,17 +212,21 @@ class TestBlobClientLifecycle:
 
         mock_request_client = MagicMock()
         mock_request_client.request_api = AsyncMock(side_effect=request_api)
+        mock_request_client.resolve_token = AsyncMock(
+            side_effect=["create_token", "part_token", "complete_token"]
+        )
         mock_ops_client = MagicMock()
         mock_ops_client._request_client = mock_request_client
 
-        with patch("vercel.blob.client.AsyncBlobOpsClient", return_value=mock_ops_client):
-            client = AsyncBlobClient()
-            uploader = await client.create_multipart_uploader(
-                "folder/client-mpu-async.bin", token="test_token"
-            )
+        with patch("vercel.blob.client.AsyncBlobOpsClient", return_value=mock_ops_client) as ctor:
+            client = AsyncBlobClient(token="client_token")
+            uploader = await client.create_multipart_uploader("folder/client-mpu-async.bin")
             part = await uploader.upload_part(1, b"chunk")
             result = await uploader.complete([part])
 
+        ctor.assert_called_once_with(token="client_token")
         assert actions == ["create", "upload", "complete"]
+        assert tokens == ["create_token", "part_token", "complete_token"]
+        assert mock_request_client.resolve_token.await_count == 3
         assert mock_request_client.request_api.await_count == 3
         assert result.pathname == "folder/client-mpu-async.bin"

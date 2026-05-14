@@ -7,9 +7,10 @@ files, streams logs, and manages snapshots.
 
 Sandbox APIs resolve credentials from the request/OIDC context or
 `VERCEL_OIDC_TOKEN`, falling back to `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, and
-`VERCEL_TEAM_ID`. Pass `token=` to individual calls and `project_id=` to
-create/list calls when explicit credentials or scope are needed. Tokens are not
-stored on returned sandbox handles.
+`VERCEL_TEAM_ID`. Pass `token=` as a string or `TokenProvider` and `project_id=`
+when explicit credentials or scope are needed. Returned sandbox and snapshot
+handles reuse the token provider for follow-up API requests without storing raw
+credentials on the public handle.
 
 ## Async Sandbox
 
