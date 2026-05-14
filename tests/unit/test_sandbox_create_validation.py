@@ -13,7 +13,6 @@ from vercel._internal.sandbox.models import (
     parse_resources,
     parse_source,
 )
-from vercel.oidc.types import Credentials
 from vercel.sandbox import SandboxValidationError
 from vercel.sandbox.sandbox import Sandbox as SyncSandbox
 
@@ -112,9 +111,9 @@ class _RecordingSyncSandboxOpsClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def resolve_credentials(self) -> Credentials:
-        self.calls.append({"method": "resolve_credentials"})
-        return Credentials(token="token_123", project_id="project_123", team_id="team_123")
+    async def resolve_project_id(self) -> str:
+        self.calls.append({"method": "resolve_project_id"})
+        return "project_123"
 
     async def create_sandbox(self, **kwargs: object) -> SandboxAndRoutesResponse:
         self.calls.append(kwargs)
@@ -161,7 +160,7 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
     ]
     assert client.calls == [
         {
-            "method": "resolve_credentials",
+            "method": "resolve_project_id",
         },
         {
             "project_id": "project_123",

@@ -11,6 +11,7 @@ without leading slash - the result will be the same.
 
 from datetime import timedelta
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -270,3 +271,79 @@ class TestApiUrlPatterns:
             assert route.called
         finally:
             transport.close()
+
+
+class TestFollowRedirects:
+    @respx.mock
+    def test_sync_false_overrides_client_default(self):
+        base_url = "https://redirect.example.com"
+        respx.get(f"{base_url}/start").mock(
+            return_value=Response(307, headers={"location": f"{base_url}/done"})
+        )
+        target = respx.get(f"{base_url}/done").mock(return_value=Response(200))
+
+        transport = SyncTransport(httpx.Client(base_url=base_url, follow_redirects=True))
+        try:
+            response = iter_coroutine(transport.send("GET", "/start", follow_redirects=False))
+        finally:
+            transport.close()
+
+        assert response.status_code == 307
+        assert not target.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_false_overrides_client_default(self):
+        base_url = "https://redirect.example.com"
+        respx.get(f"{base_url}/start").mock(
+            return_value=Response(307, headers={"location": f"{base_url}/done"})
+        )
+        target = respx.get(f"{base_url}/done").mock(return_value=Response(200))
+
+        transport = AsyncTransport(httpx.AsyncClient(base_url=base_url, follow_redirects=True))
+        try:
+            response = await transport.send("GET", "/start", follow_redirects=False)
+        finally:
+            await transport.aclose()
+
+        assert response.status_code == 307
+        assert not target.called
+
+
+class TestBearerInjection:
+    @respx.mock
+    def test_sync_transport_injects_bearer_token(self):
+        base_url = "https://auth.example.com"
+
+        def handler(request):
+            assert request.headers["authorization"] == "Bearer transport-token"
+            return Response(200, json={"ok": True})
+
+        route = respx.get(f"{base_url}/auth").mock(side_effect=handler)
+        transport = SyncTransport(httpx.Client(base_url=base_url))
+        try:
+            response = iter_coroutine(transport.send("GET", "/auth", token="transport-token"))
+        finally:
+            transport.close()
+
+        assert response.status_code == 200
+        assert route.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_transport_injects_bearer_token(self):
+        base_url = "https://auth.example.com"
+
+        def handler(request):
+            assert request.headers["authorization"] == "Bearer transport-token"
+            return Response(200, json={"ok": True})
+
+        route = respx.get(f"{base_url}/auth").mock(side_effect=handler)
+        transport = AsyncTransport(httpx.AsyncClient(base_url=base_url))
+        try:
+            response = await transport.send("GET", "/auth", token="transport-token")
+        finally:
+            await transport.aclose()
+
+        assert response.status_code == 200
+        assert route.called

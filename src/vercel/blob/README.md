@@ -6,16 +6,17 @@ folder, delete, and multipart helpers.
 ## Credentials
 
 By default, Blob clients and module-level helpers read `BLOB_READ_WRITE_TOKEN`
-from the environment when making a request. To override the environment token,
-pass `token=` to the operation that needs it.
+from the environment when making a request. To pin a token to a client, pass
+`token=` to `BlobClient(...)` or `AsyncBlobClient(...)`. To override the client
+or environment token for one request, pass `token=` to that operation.
 
 `BlobClient` and `AsyncBlobClient` keep a long-lived HTTP transport for the life
 of the client instance. Prefer `with BlobClient()` or
 `async with AsyncBlobClient()`, or call `close()` / `aclose()` explicitly when
 done.
 
-All multipart APIs use `BLOB_READ_WRITE_TOKEN` by default and accept `token=`
-per operation when explicit credentials are needed.
+Multipart APIs follow the same credential rules. Operation-level tokens override
+client tokens.
 
 ## Async Client
 
@@ -24,7 +25,7 @@ from vercel.blob import AsyncBlobClient
 
 
 async def main() -> None:
-    async with AsyncBlobClient() as client:
+    async with AsyncBlobClient() as client:  # or AsyncBlobClient(token="...")
         uploaded = await client.put(
             "avatars/user-123.txt",
             b"hello",
@@ -44,7 +45,7 @@ from vercel.blob import AsyncBlobClient
 
 
 async def main() -> None:
-    async with AsyncBlobClient() as client:
+    async with AsyncBlobClient() as client:  # or AsyncBlobClient(token="...")
         uploaded = await client.upload_file(
             "./avatar.png",
             "avatars/user-123.png",
@@ -83,7 +84,7 @@ scheduled:
 from vercel.blob import BlobClient
 
 
-with BlobClient() as client:
+with BlobClient() as client:  # or BlobClient(token="...")
     uploader = client.create_multipart_uploader(
         "large-file.bin",
         content_type="application/octet-stream",
@@ -121,7 +122,7 @@ result = complete_multipart_upload(
 from vercel.blob import BlobClient
 
 
-with BlobClient() as client:
+with BlobClient() as client:  # or BlobClient(token="...")
     uploaded = client.put(
         "avatars/user-123.txt",
         b"hello",
@@ -134,5 +135,5 @@ with BlobClient() as client:
 ```
 
 Use `BlobClient` or sync functions in `vercel.blob` for synchronous code. Pass
-`token=` to individual operations when you need to use a token other than the
-environment token.
+`token=` to a client or individual operations when you need to use a token other
+than the environment token.

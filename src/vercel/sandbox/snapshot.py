@@ -62,7 +62,7 @@ class AsyncSnapshot:
         project_id: str | None = None,
     ) -> AsyncSnapshot:
         """Retrieve an existing snapshot by ID."""
-        client = AsyncSandboxOpsClient(default_token=token)
+        client = AsyncSandboxOpsClient()
         resp = await client.get_snapshot(
             snapshot_id=snapshot_id,
             token=token,
@@ -90,7 +90,7 @@ class AsyncSnapshot:
             async with AsyncSandboxOpsClient() as client:
                 list_project_id = project_id
                 if list_project_id is None:
-                    list_project_id = (await client.resolve_credentials()).project_id
+                    list_project_id = await client.resolve_project_id()
                 current_params = SnapshotListParams(
                     project_id=list_project_id,
                     limit=limit,
@@ -174,7 +174,7 @@ class Snapshot:
         project_id: str | None = None,
     ) -> Snapshot:
         """Retrieve an existing snapshot by ID."""
-        client = SyncSandboxOpsClient(default_token=token)
+        client = SyncSandboxOpsClient()
         resp = iter_coroutine(
             client.get_snapshot(
                 snapshot_id=snapshot_id,
@@ -204,7 +204,7 @@ class Snapshot:
             with SyncSandboxOpsClient() as client:
                 list_project_id = project_id
                 if list_project_id is None:
-                    list_project_id = iter_coroutine(client.resolve_credentials()).project_id
+                    list_project_id = iter_coroutine(client.resolve_project_id())
                 current_params = SnapshotListParams(
                     project_id=list_project_id,
                     limit=limit,

@@ -8,22 +8,19 @@ import httpx
 import pytest
 
 from vercel._internal.blob.core import BlobRequestClient, _add_authorization_header
-from vercel.oidc.types import Credentials
 
 TOKEN = "test_token_123"
-FACTORY_TOKEN = "factory_token_456"
+PROVIDER_TOKEN = "provider_token_456"
 
 
 def _make_request_client(
     *,
-    credentials_factory: AsyncMock | None = None,
+    token_provider: AsyncMock | None = None,
 ) -> tuple[BlobRequestClient, AsyncMock, AsyncMock]:
     send = AsyncMock(return_value=httpx.Response(200, json={"pathname": "test.txt"}))
     mock_transport = Mock()
     mock_transport.send = send
-    factory = credentials_factory or AsyncMock(
-        return_value=Credentials(token=FACTORY_TOKEN, project_id="", team_id="")
-    )
+    provider = token_provider or AsyncMock(return_value=PROVIDER_TOKEN)
     client = BlobRequestClient(
         transport=mock_transport,
         retry=MagicMock(
@@ -34,26 +31,25 @@ def _make_request_client(
             retry_on_network_error=False,
         ),
         sleep_fn=lambda _: None,
-        credentials_factory=factory,
+        token_provider=provider,
     )
-    return client, factory, send
+    return client, provider, send
 
 
 @pytest.mark.asyncio
 async def test_resolve_token_with_explicit_token() -> None:
-    client, factory, _ = _make_request_client()
+    client, provider, _ = _make_request_client()
     result = await client.resolve_token(TOKEN)
     assert result == TOKEN
-    # factory should not be invoked when token is explicit
-    factory.assert_not_awaited()
+    provider.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_resolve_token_without_token_uses_factory() -> None:
-    client, factory, _ = _make_request_client()
+async def test_resolve_token_without_token_uses_provider() -> None:
+    client, provider, _ = _make_request_client()
     result = await client.resolve_token(None)
-    assert result == FACTORY_TOKEN
-    factory.assert_awaited_once()
+    assert result == PROVIDER_TOKEN
+    provider.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -79,7 +75,7 @@ async def test_request_api_sends_override_authorization_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_api_sends_factory_token_authorization_header() -> None:
+async def test_request_api_sends_provider_token_authorization_header() -> None:
     client, _, send = _make_request_client()
     with patch("vercel._internal.blob.core.get_api_url", return_value="https://api.example.com/"):
         with patch("vercel._internal.blob.core.make_request_id", return_value="req-1"):
@@ -97,7 +93,7 @@ async def test_request_api_sends_factory_token_authorization_header() -> None:
     assert send.await_args is not None
     call_kwargs = send.await_args.kwargs
     headers = call_kwargs["headers"]
-    assert headers["authorization"] == f"Bearer {FACTORY_TOKEN}"
+    assert headers["authorization"] == f"Bearer {PROVIDER_TOKEN}"
 
 
 class TestAddAuthorizationHeader:

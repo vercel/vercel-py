@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 
+from vercel._internal.auth import TokenProvider
 from vercel._internal.blob import (
     PutHeaders,
     StreamingBodyWithProgress,
@@ -81,7 +82,6 @@ from vercel._internal.http.retry import RetryPolicy, SleepFn
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.polyfills import UTC
 from vercel._internal.telemetry.tracker import track
-from vercel.oidc.types import Credentials, CredentialsFactory
 
 BlobProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]
@@ -429,7 +429,7 @@ class BlobRequestClient:
     _sleep_fn: SleepFn
     _await_progress_callback: bool
     _async_content: bool
-    _credentials_factory: CredentialsFactory
+    _token_provider: TokenProvider
 
     def __init__(
         self,
@@ -437,7 +437,7 @@ class BlobRequestClient:
         transport: BaseTransport,
         retry: RetryPolicy,
         sleep_fn: SleepFn,
-        credentials_factory: CredentialsFactory,
+        token_provider: TokenProvider,
         await_progress_callback: bool = True,
         async_content: bool = True,
     ) -> None:
@@ -446,13 +446,12 @@ class BlobRequestClient:
         self._sleep_fn = sleep_fn
         self._await_progress_callback = await_progress_callback
         self._async_content = async_content
-        self._credentials_factory = credentials_factory
+        self._token_provider = token_provider
 
     async def resolve_token(self, token: str | None = None) -> str:
         if token is not None:
             return token
-        credentials = await self._credentials_factory()
-        return credentials.token
+        return await self._token_provider()
 
     @property
     def transport(self) -> BaseTransport:
@@ -635,19 +634,17 @@ def _get_blob_token(maybe_explicit_token: str | None = None) -> str:
     return blob_token
 
 
-def _make_blob_credentials_factory() -> CredentialsFactory:
-    from vercel.oidc.types import Credentials
+def _make_blob_token_provider(token: str | None = None) -> TokenProvider:
+    async def _provider() -> str:
+        return _get_blob_token(token)
 
-    async def _factory() -> Credentials:
-        resolved = _get_blob_token()
-        return Credentials(token=resolved, project_id="", team_id="")
-
-    return _factory
+    return _provider
 
 
 def create_sync_request_client(
     *,
     timeout: timedelta = timedelta(seconds=30.0),
+    token: str | None = None,
 ) -> BlobRequestClient:
     retry_policy = RetryPolicy(
         retries=get_retries(),
@@ -662,7 +659,7 @@ def create_sync_request_client(
     http_client = create_base_client(transport_options)
     return BlobRequestClient(
         transport=SyncTransport(http_client),
-        credentials_factory=_make_blob_credentials_factory(),
+        token_provider=_make_blob_token_provider(token),
         retry=retry_policy,
         sleep_fn=time.sleep,
         await_progress_callback=False,
@@ -673,6 +670,7 @@ def create_sync_request_client(
 def create_async_request_client(
     *,
     timeout: timedelta = timedelta(seconds=30.0),
+    token: str | None = None,
 ) -> BlobRequestClient:
     import asyncio
 
@@ -692,7 +690,7 @@ def create_async_request_client(
     http_client = create_base_async_client(transport_options)
     return BlobRequestClient(
         transport=AsyncTransport(http_client),
-        credentials_factory=_make_blob_credentials_factory(),
+        token_provider=_make_blob_token_provider(token),
         retry=retry_policy,
         sleep_fn=asyncio.sleep,
         await_progress_callback=True,
@@ -1157,8 +1155,10 @@ class BaseBlobOpsClient:
 
 
 class SyncBlobOpsClient(BaseBlobOpsClient):
-    def __init__(self, *, timeout: timedelta = timedelta(seconds=30)) -> None:
-        request_client = create_sync_request_client(timeout=timeout)
+    def __init__(
+        self, *, timeout: timedelta = timedelta(seconds=30), token: str | None = None
+    ) -> None:
+        request_client = create_sync_request_client(timeout=timeout, token=token)
         multipart_client = MultipartClient(request_client)
         super().__init__(
             request_client=request_client,
@@ -1256,8 +1256,10 @@ class SyncBlobOpsClient(BaseBlobOpsClient):
 
 
 class AsyncBlobOpsClient(BaseBlobOpsClient):
-    def __init__(self, *, timeout: timedelta = timedelta(seconds=30)) -> None:
-        request_client = create_async_request_client(timeout=timeout)
+    def __init__(
+        self, *, timeout: timedelta = timedelta(seconds=30), token: str | None = None
+    ) -> None:
+        request_client = create_async_request_client(timeout=timeout, token=token)
         multipart_client = MultipartClient(request_client)
         super().__init__(
             request_client=request_client,

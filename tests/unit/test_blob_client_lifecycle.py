@@ -39,7 +39,7 @@ class TestBlobClientLifecycle:
             client.list_objects()
 
         assert ctor.call_count == 1
-        ctor.assert_called_once_with()
+        ctor.assert_called_once_with(token=None)
         mock_ops_client.head_blob.assert_awaited_once_with("file.txt", token=None)
         mock_ops_client.list_objects.assert_called_once_with(
             limit=None, prefix=None, cursor=None, mode=None, token=None
@@ -59,6 +59,14 @@ class TestBlobClientLifecycle:
         mock_ops_client.list_objects.assert_called_once_with(
             limit=None, prefix=None, cursor=None, mode=None, token="per_call_token"
         )
+
+    def test_sync_client_accepts_client_token(self) -> None:
+        mock_ops_client = MagicMock()
+
+        with patch("vercel.blob.client.SyncBlobOpsClient", return_value=mock_ops_client) as ctor:
+            BlobClient(token="client_token")
+
+        ctor.assert_called_once_with(token="client_token")
 
     def test_sync_close_is_idempotent_and_blocks_use_after_close(self) -> None:
         mock_ops_client = MagicMock()
@@ -122,7 +130,7 @@ class TestBlobClientLifecycle:
             await client.list_objects()
 
         assert ctor.call_count == 1
-        ctor.assert_called_once_with()
+        ctor.assert_called_once_with(token=None)
         mock_ops_client.head_blob.assert_awaited_once_with("file.txt", token=None)
         mock_ops_client.list_objects.assert_awaited_once_with(
             limit=None, prefix=None, cursor=None, mode=None, token=None
@@ -143,6 +151,15 @@ class TestBlobClientLifecycle:
         mock_ops_client.list_objects.assert_awaited_once_with(
             limit=None, prefix=None, cursor=None, mode=None, token="per_call_token"
         )
+
+    @pytest.mark.asyncio
+    async def test_async_client_accepts_client_token(self) -> None:
+        mock_ops_client = MagicMock()
+
+        with patch("vercel.blob.client.AsyncBlobOpsClient", return_value=mock_ops_client) as ctor:
+            AsyncBlobClient(token="client_token")
+
+        ctor.assert_called_once_with(token="client_token")
 
     @pytest.mark.asyncio
     async def test_async_close_is_idempotent_and_blocks_use_after_close(self) -> None:

@@ -1115,6 +1115,42 @@ class TestBlobClient:
         assert result.size == 13
 
     @respx.mock
+    def test_blob_client_uses_client_token(self, mock_env_clear, mock_blob_head_response):
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+
+        client = BlobClient(token="client_token")
+        client.head("https://blob.vercel-storage.com/test.txt")
+
+        assert route.calls.last.request.headers["authorization"] == "Bearer client_token"
+
+    @respx.mock
+    def test_blob_client_operation_token_overrides_client_token(
+        self, mock_env_clear, mock_blob_head_response
+    ):
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+
+        client = BlobClient(token="client_token")
+        client.head("https://blob.vercel-storage.com/test.txt", token="operation_token")
+
+        assert route.calls.last.request.headers["authorization"] == "Bearer operation_token"
+
+    @respx.mock
+    def test_blob_client_uses_env_token(self, mock_env_clear, monkeypatch, mock_blob_head_response):
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+        monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "env_token")
+
+        client = BlobClient()
+        client.head("https://blob.vercel-storage.com/test.txt")
+
+        assert route.calls.last.request.headers["authorization"] == "Bearer env_token"
+
+    @respx.mock
     def test_blob_client_delete(self, mock_env_clear):
         """Test BlobClient delete method."""
         route = respx.post(f"{BLOB_API_BASE}/delete").mock(
@@ -1293,6 +1329,49 @@ class TestBlobClient:
 
         assert route.called
         assert result.size == 13
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_uses_client_token(
+        self, mock_env_clear, mock_blob_head_response
+    ):
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+
+        client = AsyncBlobClient(token="client_token")
+        await client.head("https://blob.vercel-storage.com/test.txt")
+
+        assert route.calls.last.request.headers["authorization"] == "Bearer client_token"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_operation_token_overrides_client_token(
+        self, mock_env_clear, mock_blob_head_response
+    ):
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+
+        client = AsyncBlobClient(token="client_token")
+        await client.head("https://blob.vercel-storage.com/test.txt", token="operation_token")
+
+        assert route.calls.last.request.headers["authorization"] == "Bearer operation_token"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_blob_client_uses_env_token(
+        self, mock_env_clear, monkeypatch, mock_blob_head_response
+    ):
+        route = respx.get(BLOB_API_BASE).mock(
+            return_value=httpx.Response(200, json=mock_blob_head_response)
+        )
+        monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "env_token")
+
+        client = AsyncBlobClient()
+        await client.head("https://blob.vercel-storage.com/test.txt")
+
+        assert route.calls.last.request.headers["authorization"] == "Bearer env_token"
 
     @respx.mock
     @pytest.mark.asyncio

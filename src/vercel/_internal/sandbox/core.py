@@ -18,10 +18,11 @@ from collections.abc import AsyncGenerator, AsyncIterator, Generator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from importlib.metadata import version as _pkg_version
-from typing import Any, TypeAlias, cast
+from typing import Any, Protocol, TypeAlias, cast
 
 import httpx
 
+from vercel._internal.auth import TokenProvider
 from vercel._internal.fs import (
     FileHandle,
     FilesystemClient,
@@ -67,7 +68,6 @@ from vercel._internal.sandbox.models import (
 )
 from vercel._internal.sandbox.snapshot import SnapshotExpiration
 from vercel._internal.time import to_ms_int
-from vercel.oidc.types import Credentials, CredentialsFactory
 
 try:
     VERSION = _pkg_version("vercel")
@@ -85,17 +85,30 @@ RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
 
 
 # ---------------------------------------------------------------------------
-# Credentials factory helper
+# Auth helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_sandbox_credentials_factory() -> CredentialsFactory:
+class ProjectIdProvider(Protocol):
+    async def __call__(self) -> str: ...
+
+
+def _make_sandbox_token_provider() -> TokenProvider:
     from vercel.oidc import get_credentials
 
-    async def _factory() -> Credentials:
-        return get_credentials()
+    async def _provider() -> str:
+        return get_credentials().token
 
-    return _factory
+    return _provider
+
+
+def _make_sandbox_project_id_provider() -> ProjectIdProvider:
+    from vercel.oidc import get_credentials
+
+    async def _provider() -> str:
+        return get_credentials().project_id
+
+    return _provider
 
 
 # ---------------------------------------------------------------------------
@@ -114,20 +127,15 @@ class SandboxRequestClient:
         self,
         *,
         transport: BaseTransport,
-        credentials_factory: CredentialsFactory,
-        default_token: str | None = None,
+        token_provider: TokenProvider,
     ) -> None:
         self._transport = transport
-        self._credentials_factory = credentials_factory
-        self._default_token = default_token
+        self._token_provider = token_provider
 
     async def resolve_token(self, token: str | None = None) -> str:
         if token is not None:
             return token
-        if self._default_token is not None:
-            return self._default_token
-        credentials = await self._credentials_factory()
-        return credentials.token
+        return await self._token_provider()
 
     async def request(
         self,
@@ -278,12 +286,14 @@ class BaseSandboxOpsClient:
         *,
         request_client: SandboxRequestClient,
         filesystem_client: FilesystemClient[Any],
+        project_id_provider: ProjectIdProvider | None = None,
     ) -> None:
         self._request_client = request_client
         self._filesystem_client = filesystem_client
+        self._project_id_provider = project_id_provider or _make_sandbox_project_id_provider()
 
-    async def resolve_credentials(self) -> Credentials:
-        return await self._request_client._credentials_factory()
+    async def resolve_project_id(self) -> str:
+        return await self._project_id_provider()
 
     async def _get(
         self,
@@ -720,7 +730,6 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
-        default_token: str | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -732,10 +741,10 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         super().__init__(
             request_client=SandboxRequestClient(
                 transport=transport,
-                credentials_factory=_make_sandbox_credentials_factory(),
-                default_token=default_token,
+                token_provider=_make_sandbox_token_provider(),
             ),
             filesystem_client=filesystem_client or create_filesystem_client(),
+            project_id_provider=_make_sandbox_project_id_provider(),
         )
 
     def get_logs(
@@ -831,7 +840,6 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
-        default_token: str | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -843,10 +851,10 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         super().__init__(
             request_client=SandboxRequestClient(
                 transport=transport,
-                credentials_factory=_make_sandbox_credentials_factory(),
-                default_token=default_token,
+                token_provider=_make_sandbox_token_provider(),
             ),
             filesystem_client=filesystem_client or create_async_filesystem_client(),
+            project_id_provider=_make_sandbox_project_id_provider(),
         )
 
     async def get_logs(

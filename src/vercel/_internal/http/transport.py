@@ -6,6 +6,7 @@ import abc
 import json
 from dataclasses import dataclass
 from datetime import timedelta
+from types import TracebackType
 from typing import Any
 
 import httpx
@@ -151,7 +152,11 @@ class SyncTransport(BaseTransport):
             method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
         )
         return self._client.send(
-            request, stream=stream, follow_redirects=follow_redirects or USE_CLIENT_DEFAULT
+            request,
+            stream=stream,
+            follow_redirects=follow_redirects
+            if follow_redirects is not None
+            else USE_CLIENT_DEFAULT,
         )
 
     def close(self) -> None:
@@ -160,7 +165,12 @@ class SyncTransport(BaseTransport):
     def __enter__(self) -> SyncTransport:
         return self
 
-    def __exit__(self) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
 
@@ -187,7 +197,11 @@ class AsyncTransport(BaseTransport):
             method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
         )
         return await self._client.send(
-            request, stream=stream, follow_redirects=follow_redirects or USE_CLIENT_DEFAULT
+            request,
+            stream=stream,
+            follow_redirects=follow_redirects
+            if follow_redirects is not None
+            else USE_CLIENT_DEFAULT,
         )
 
     async def aclose(self) -> None:
@@ -196,7 +210,12 @@ class AsyncTransport(BaseTransport):
     async def __aenter__(self) -> AsyncTransport:
         return self
 
-    async def __aexit__(self) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         await self.aclose()
 
 

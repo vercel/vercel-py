@@ -160,10 +160,10 @@ class AsyncSandbox:
             Created AsyncSandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        client = AsyncSandboxOpsClient(default_token=token)
+        client = AsyncSandboxOpsClient()
         create_project_id = project_id
         if create_project_id is None:
-            create_project_id = (await client.resolve_credentials()).project_id
+            create_project_id = await client.resolve_project_id()
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
             project_id=create_project_id,
             token=token,
@@ -189,7 +189,7 @@ class AsyncSandbox:
         token: str | None = None,
         project_id: str | None = None,
     ) -> AsyncSandbox:
-        client = AsyncSandboxOpsClient(default_token=token)
+        client = AsyncSandboxOpsClient()
         resp: SandboxAndRoutesResponse = await client.get_sandbox(
             sandbox_id=sandbox_id,
             token=token,
@@ -234,7 +234,7 @@ class AsyncSandbox:
             async with AsyncSandboxOpsClient() as client:
                 list_project_id = project_id
                 if list_project_id is None:
-                    list_project_id = (await client.resolve_credentials()).project_id
+                    list_project_id = await client.resolve_project_id()
                 current_params = SandboxListParams(
                     project_id=list_project_id,
                     limit=limit,
@@ -655,10 +655,10 @@ class Sandbox:
             Created Sandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        client = SyncSandboxOpsClient(default_token=token)
+        client = SyncSandboxOpsClient()
         create_project_id = project_id
         if create_project_id is None:
-            create_project_id = iter_coroutine(client.resolve_credentials()).project_id
+            create_project_id = iter_coroutine(client.resolve_project_id())
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
                 project_id=create_project_id,
@@ -686,7 +686,7 @@ class Sandbox:
         token: str | None = None,
         project_id: str | None = None,
     ) -> Sandbox:
-        client = SyncSandboxOpsClient(default_token=token)
+        client = SyncSandboxOpsClient()
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.get_sandbox(
                 sandbox_id=sandbox_id,
@@ -733,7 +733,7 @@ class Sandbox:
             with SyncSandboxOpsClient() as client:
                 list_project_id = project_id
                 if list_project_id is None:
-                    list_project_id = iter_coroutine(client.resolve_credentials()).project_id
+                    list_project_id = iter_coroutine(client.resolve_project_id())
                 current_params = SandboxListParams(
                     project_id=list_project_id,
                     limit=limit,

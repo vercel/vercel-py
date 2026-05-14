@@ -20,7 +20,6 @@ from vercel._internal.sandbox.errors import (
     SandboxRateLimitError,
     SandboxServerError,
 )
-from vercel.oidc.types import Credentials
 from vercel.sandbox import (
     APIError as PublicAPIError,
     SandboxAuthError as PublicSandboxAuthError,
@@ -66,14 +65,14 @@ def _make_response(
     )
 
 
-async def _fake_credentials_factory() -> Credentials:
-    return Credentials(token="test-token", project_id="", team_id="")
+async def _fake_token_provider() -> str:
+    return "test-token"
 
 
 def _make_request_client(response: httpx.Response) -> SandboxRequestClient:
     return SandboxRequestClient(
         transport=StaticTransport(response),
-        credentials_factory=_fake_credentials_factory,
+        token_provider=_fake_token_provider,
     )
 
 
