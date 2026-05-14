@@ -1,6 +1,13 @@
+# Project tools
+
+- `uv` for package management, virtual environment construction, and running scripts
+- `ruff` for linting and formatting
+- `mypy` for type checking
+
 # Scripts
 
 - `./scripts/test.sh` — Run all tests including lint and typecheck (excludes example tests). Accepts extra pytest args.
+  Example: `./scripts/test.sh -q tests/unit/test_filesystem.py`
 - `./scripts/test-examples.sh` — Run example tests in parallel. Accepts extra pytest args.
 - `./scripts/lint.sh` — Run lint tests only (ruff check + format). Accepts extra pytest args.
 - `./scripts/typecheck.sh` — Run typecheck tests only (mypy + module imports). Accepts extra pytest args.
