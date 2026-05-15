@@ -15,10 +15,11 @@ of the client instance. Prefer `with BlobClient()` or
 `async with AsyncBlobClient()`, or call `close()` / `aclose()` explicitly when
 done.
 
-Multipart APIs follow the same credential rules. Client-created uploaders reuse
-the client's token source and resolve it for create, each part upload, and
-complete. A `token=` passed to `create_multipart_uploader(...)` pins that
-uploader to the provided token.
+Module-level multipart helpers read `BLOB_READ_WRITE_TOKEN` by default and
+accept a string `token=` override. Client-created uploaders reuse the client's
+token source and resolve it for create, each part upload, and complete. A
+`token=` passed to `create_multipart_uploader(...)` pins that uploader to the
+provided token.
 
 ## Async Client
 
@@ -80,7 +81,8 @@ result = await auto_multipart_upload_async(
 ```
 
 Use the uploader pattern when you want to control how parts are created and
-scheduled:
+scheduled. Uploaders default `add_random_suffix=True`; pass
+`add_random_suffix=False` when the final pathname should exactly match `path`.
 
 ```python
 from vercel.blob import BlobClient

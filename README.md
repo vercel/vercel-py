@@ -22,8 +22,9 @@ uv add vercel
 Configure the credentials via environment variables based on your app's needs:
 
 - `BLOB_READ_WRITE_TOKEN` for Vercel Blob
-- `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, and `VERCEL_TEAM_ID` for Vercel API
-  clients
+- `VERCEL_TOKEN` for Vercel API clients such as deployments and projects
+- `VERCEL_PROJECT_ID` and `VERCEL_TEAM_ID` for helpers that resolve
+  project-scoped credentials, such as Sandbox
 - `VERCEL_OIDC_TOKEN` for local OIDC testing. On Vercel, OIDC helpers can read
   the request token after you register request headers with
   `vercel.headers.set_headers()`.
