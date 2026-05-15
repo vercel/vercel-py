@@ -19,6 +19,7 @@ from vercel._internal.sandbox.constants import (
     DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
     DEFAULT_SANDBOX_WAIT_TIMEOUT,
 )
+from vercel._internal.sandbox.core import make_public_sandbox_project_id_provider
 from vercel._internal.sandbox.models import (
     ApiNetworkPolicy,
     CommandResponse,
@@ -175,7 +176,10 @@ class AsyncSandbox:
             Created AsyncSandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        client = AsyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
+        client = AsyncSandboxOpsClient(
+            token_provider=_make_public_token_provider(token=token),
+            project_id_provider=make_public_sandbox_project_id_provider(token),
+        )
         create_project_id = project_id
         if create_project_id is None:
             create_project_id = await client.resolve_project_id()
@@ -246,7 +250,8 @@ class AsyncSandbox:
 
         async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
             async with AsyncSandboxOpsClient(
-                token_provider=_make_public_token_provider(token=token)
+                token_provider=_make_public_token_provider(token=token),
+                project_id_provider=make_public_sandbox_project_id_provider(token),
             ) as client:
                 list_project_id = project_id
                 if list_project_id is None:
@@ -671,7 +676,10 @@ class Sandbox:
             Created Sandbox instance.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        client = SyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
+        client = SyncSandboxOpsClient(
+            token_provider=_make_public_token_provider(token=token),
+            project_id_provider=make_public_sandbox_project_id_provider(token),
+        )
         create_project_id = project_id
         if create_project_id is None:
             create_project_id = iter_coroutine(client.resolve_project_id())
@@ -746,7 +754,8 @@ class Sandbox:
 
         def iter_sandboxes() -> Iterator[SandboxModel]:
             with SyncSandboxOpsClient(
-                token_provider=_make_public_token_provider(token=token)
+                token_provider=_make_public_token_provider(token=token),
+                project_id_provider=make_public_sandbox_project_id_provider(token),
             ) as client:
                 list_project_id = project_id
                 if list_project_id is None:

@@ -164,7 +164,6 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
         },
         {
             "project_id": "project_123",
-            "token": None,
             "source": GitSource(type="git", url="https://github.com/vercel/vercel-py"),
             "ports": None,
             "timeout": None,

@@ -111,6 +111,34 @@ def _make_sandbox_project_id_provider() -> ProjectIdProvider:
     return _provider
 
 
+def make_public_sandbox_project_id_provider(
+    token: str | TokenProvider | None,
+) -> ProjectIdProvider | None:
+    match token:
+        case None:
+            return None
+        case str() as resolved_token:
+
+            async def _static_project_id_provider() -> str:
+                from vercel.oidc import get_credentials
+
+                return get_credentials(token=resolved_token).project_id
+
+            return _static_project_id_provider
+        case _ if callable(token):
+            token_provider = cast(TokenProvider, token)
+
+            async def _dynamic_project_id_provider() -> str:
+                from vercel.oidc import get_credentials
+
+                resolved_token = await token_provider()
+                return get_credentials(token=resolved_token).project_id
+
+            return _dynamic_project_id_provider
+        case _:
+            raise TypeError("token must be a string, TokenProvider, or None")
+
+
 # ---------------------------------------------------------------------------
 # Request client — error handling + request_json convenience
 # ---------------------------------------------------------------------------
@@ -952,4 +980,5 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
 __all__ = [
     "SyncSandboxOpsClient",
     "AsyncSandboxOpsClient",
+    "make_public_sandbox_project_id_provider",
 ]

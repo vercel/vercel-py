@@ -116,11 +116,21 @@ class BaseTransport(abc.ABC):
             case RawBody():
                 content = body.data
 
+        if timeout is not None:
+            return self._client.build_request(
+                method,
+                _normalize_path(path),
+                params=params,
+                timeout=httpx.Timeout(to_seconds_float(timeout)),
+                headers=headers,
+                json=json,
+                content=content,
+            )
+
         return self._client.build_request(
             method,
             _normalize_path(path),
             params=params,
-            timeout=httpx.Timeout(to_seconds_float(timeout)) if timeout else None,
             headers=headers,
             json=json,
             content=content,

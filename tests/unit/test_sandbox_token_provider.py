@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -99,6 +100,11 @@ def _record_auth_response(
         return httpx.Response(200, json=response)
 
     return handler
+
+
+def _set_project_env(monkeypatch: Any) -> None:
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_from_env")
+    monkeypatch.setenv("VERCEL_TEAM_ID", "team_from_env")
 
 
 async def test_request_client_resolves_fresh_token_for_each_default_request() -> None:
@@ -460,3 +466,124 @@ async def test_list_snapshots_omits_team_id_query_param() -> None:
     await ops.list_snapshots(project_id="project", limit=10)
 
     assert transport.requests[0]["params"] == {"project": "project", "limit": 10}
+
+
+@respx.mock
+def test_public_sync_create_uses_explicit_token_for_default_project_id(
+    mock_env_clear: None, monkeypatch: Any
+) -> None:
+    _set_project_env(monkeypatch)
+    route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        return_value=httpx.Response(200, json={"sandbox": _sandbox_payload(), "routes": []})
+    )
+
+    sandbox = Sandbox.create(token="tok")
+    sandbox.client.close()
+
+    request = route.calls.last.request
+    assert request.headers["authorization"] == "Bearer tok"
+    assert json.loads(request.content)["projectId"] == "prj_from_env"
+
+
+@respx.mock
+async def test_public_async_create_uses_explicit_token_for_default_project_id(
+    mock_env_clear: None, monkeypatch: Any
+) -> None:
+    _set_project_env(monkeypatch)
+    route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        return_value=httpx.Response(200, json={"sandbox": _sandbox_payload(), "routes": []})
+    )
+
+    sandbox = await AsyncSandbox.create(token="tok")
+    await sandbox.client.aclose()
+
+    request = route.calls.last.request
+    assert request.headers["authorization"] == "Bearer tok"
+    assert json.loads(request.content)["projectId"] == "prj_from_env"
+
+
+@respx.mock
+async def test_public_token_provider_resolves_default_project_id(
+    mock_env_clear: None, monkeypatch: Any
+) -> None:
+    _set_project_env(monkeypatch)
+    calls = 0
+
+    async def provider() -> str:
+        nonlocal calls
+        calls += 1
+        return f"tok-{calls}"
+
+    route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        return_value=httpx.Response(200, json={"sandbox": _sandbox_payload(), "routes": []})
+    )
+
+    sandbox = await AsyncSandbox.create(token=provider)
+    await sandbox.client.aclose()
+
+    request = route.calls.last.request
+    assert calls == 2
+    assert request.headers["authorization"] == "Bearer tok-2"
+    assert json.loads(request.content)["projectId"] == "prj_from_env"
+
+
+@respx.mock
+def test_public_sync_lists_use_explicit_token_for_default_project_id(
+    mock_env_clear: None, monkeypatch: Any
+) -> None:
+    _set_project_env(monkeypatch)
+    sandbox_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sandboxes": [_sandbox_payload()], "pagination": {"count": 1, "next": None}},
+        )
+    )
+    snapshot_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(
+        return_value=httpx.Response(
+            200,
+            json={"snapshots": [_snapshot_payload()], "pagination": {"count": 1, "next": None}},
+        )
+    )
+
+    sandboxes = list(Sandbox.list(token="tok", limit=1))
+    snapshots = list(Snapshot.list(token="tok", limit=1))
+
+    sandbox_request = sandbox_route.calls.last.request
+    snapshot_request = snapshot_route.calls.last.request
+    assert [sandbox.id for sandbox in sandboxes] == ["sbx_1"]
+    assert [snapshot.id for snapshot in snapshots] == ["snap_1"]
+    assert sandbox_request.headers["authorization"] == "Bearer tok"
+    assert snapshot_request.headers["authorization"] == "Bearer tok"
+    assert sandbox_request.url.params["project"] == "prj_from_env"
+    assert snapshot_request.url.params["project"] == "prj_from_env"
+
+
+@respx.mock
+async def test_public_async_lists_use_explicit_token_for_default_project_id(
+    mock_env_clear: None, monkeypatch: Any
+) -> None:
+    _set_project_env(monkeypatch)
+    sandbox_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sandboxes": [_sandbox_payload()], "pagination": {"count": 1, "next": None}},
+        )
+    )
+    snapshot_route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes/snapshots").mock(
+        return_value=httpx.Response(
+            200,
+            json={"snapshots": [_snapshot_payload()], "pagination": {"count": 1, "next": None}},
+        )
+    )
+
+    sandboxes = [sandbox async for sandbox in AsyncSandbox.list(token="tok", limit=1)]
+    snapshots = [snapshot async for snapshot in AsyncSnapshot.list(token="tok", limit=1)]
+
+    sandbox_request = sandbox_route.calls.last.request
+    snapshot_request = snapshot_route.calls.last.request
+    assert [sandbox.id for sandbox in sandboxes] == ["sbx_1"]
+    assert [snapshot.id for snapshot in snapshots] == ["snap_1"]
+    assert sandbox_request.headers["authorization"] == "Bearer tok"
+    assert snapshot_request.headers["authorization"] == "Bearer tok"
+    assert sandbox_request.url.params["project"] == "prj_from_env"
+    assert snapshot_request.url.params["project"] == "prj_from_env"

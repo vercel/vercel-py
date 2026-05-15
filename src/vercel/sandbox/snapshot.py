@@ -9,6 +9,7 @@ from vercel._internal.auth import TokenProvider, static_token_provider
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.constants import MIN_SNAPSHOT_EXPIRATION
+from vercel._internal.sandbox.core import make_public_sandbox_project_id_provider
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
 from vercel._internal.sandbox.pagination import SnapshotListParams
 from vercel._internal.sandbox.snapshot import SnapshotExpiration as _SnapshotExpiration
@@ -101,7 +102,8 @@ class AsyncSnapshot:
 
         async def iter_snapshots() -> AsyncIterator[SnapshotModel]:
             async with AsyncSandboxOpsClient(
-                token_provider=_make_public_token_provider(token=token)
+                token_provider=_make_public_token_provider(token=token),
+                project_id_provider=make_public_sandbox_project_id_provider(token),
             ) as client:
                 list_project_id = project_id
                 if list_project_id is None:
@@ -215,7 +217,8 @@ class Snapshot:
 
         def iter_snapshots() -> Iterator[SnapshotModel]:
             with SyncSandboxOpsClient(
-                token_provider=_make_public_token_provider(token=token)
+                token_provider=_make_public_token_provider(token=token),
+                project_id_provider=make_public_sandbox_project_id_provider(token),
             ) as client:
                 list_project_id = project_id
                 if list_project_id is None:
