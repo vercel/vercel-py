@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-18T18:19:48.861924Z"
+exclude-newer = "2026-05-18T19:18:12.125745Z"
 exclude-newer-span = "P2D"
 
 [[package]]
@@ -1240,7 +1240,7 @@ wheels = [
 
 [[package]]
 name = "vercel"
-version = "0.5.8"
+version = "0.5.9"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
