@@ -44,7 +44,7 @@ dev = [
 [tool.uv]
 default-groups = ["dev"]
 package = true
-exclude-newer = "1 week"
+exclude-newer = "2 days"
 
 [tool.setuptools.packages.find]
 where = ["src"]
