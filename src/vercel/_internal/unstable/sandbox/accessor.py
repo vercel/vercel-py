@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import fields, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING, overload
 
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -10,8 +13,12 @@ from vercel._internal.unstable.sandbox.types import (
     Sandbox,
     SandboxCreateParams,
     SandboxError,
+    SandboxOperationTimeoutError,
     SandboxOptions,
+    SandboxTerminalStateError,
     SyncSandbox,
+    is_ready_for_create,
+    is_terminal_for_create,
 )
 
 if TYPE_CHECKING:
@@ -75,11 +82,54 @@ class SandboxAccessor:
     def _prepare(self) -> None:
         self._session._ensure_open()
 
-    async def create(self, params: SandboxCreateParams, *, wait: bool = False) -> Sandbox:
-        if wait:
-            raise SandboxError("sandbox create wait=True is not implemented yet")
+    async def create(
+        self,
+        params: SandboxCreateParams,
+        *,
+        wait: bool = False,
+        timeout: timedelta | None = None,
+    ) -> Sandbox:
         self._prepare()
-        sandbox = await self._get_ops_client().create(params)
+
+        async def _create_and_wait() -> Sandbox:
+            sandbox = await self._get_ops_client().create(params)
+            if not wait:
+                return sandbox
+            if sandbox.current_session is None:
+                raise SandboxError("sandbox create returned response with no session")
+            status = sandbox.current_session.status
+            if is_ready_for_create(status):
+                return sandbox
+            if is_terminal_for_create(status):
+                if status is None:
+                    raise SandboxError("unexpected None status in terminal state check")
+                raise SandboxTerminalStateError(
+                    f"sandbox create reached terminal state {status.value}"
+                )
+            while True:
+                await asyncio.sleep(1)
+                polled = await self._get_ops_client().get_sandbox(sandbox.name)
+                sandbox.current_session = polled.current_session
+                sandbox._raw = polled._raw
+                poll_status = polled.current_session.status if polled.current_session else None
+                if is_ready_for_create(poll_status):
+                    return sandbox
+                if is_terminal_for_create(poll_status):
+                    status_label = poll_status.value if poll_status else "unknown"
+                    raise SandboxTerminalStateError(
+                        f"sandbox create reached terminal state {status_label}"
+                    )
+
+        if timeout is not None:
+            try:
+                async with asyncio.timeout(timeout.total_seconds()):
+                    sandbox = await _create_and_wait()
+            except TimeoutError:
+                raise SandboxOperationTimeoutError(
+                    f"sandbox create exceeded timeout of {timeout.total_seconds()}s"
+                ) from None
+        else:
+            sandbox = await _create_and_wait()
         sandbox._session = self._session
         return sandbox
 
@@ -139,10 +189,32 @@ class SyncSandboxAccessor:
         self._session._ensure_open()
 
     def create(self, params: SandboxCreateParams, *, wait: bool = False) -> SyncSandbox:
-        if wait:
-            raise SandboxError("sandbox create wait=True is not implemented yet")
         self._prepare()
         sandbox = iter_coroutine(self._get_ops_client().create(params))
+        if wait:
+            if sandbox.current_session is None:
+                raise SandboxError("sandbox create returned response with no session")
+            status = sandbox.current_session.status
+            if not is_ready_for_create(status) and not is_terminal_for_create(status):
+                while True:
+                    time.sleep(1)
+                    polled = iter_coroutine(self._get_ops_client().get_sandbox(sandbox.name))
+                    sandbox.current_session = polled.current_session
+                    sandbox._raw = polled._raw
+                    poll_status = polled.current_session.status if polled.current_session else None
+                    if is_ready_for_create(poll_status):
+                        break
+                    if is_terminal_for_create(poll_status):
+                        status_label = poll_status.value if poll_status else "unknown"
+                        raise SandboxTerminalStateError(
+                            f"sandbox create reached terminal state {status_label}"
+                        )
+            elif is_terminal_for_create(status):
+                if status is None:
+                    raise SandboxError("unexpected None status in terminal state check")
+                raise SandboxTerminalStateError(
+                    f"sandbox create reached terminal state {status.value}"
+                )
         return SyncSandbox(
             name=sandbox.name,
             persistent=sandbox.persistent,

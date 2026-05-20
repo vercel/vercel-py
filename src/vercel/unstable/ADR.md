@@ -451,7 +451,7 @@ Sandbox creation is a named operation. After a cancelled `create(name=...)`,
 the sandbox may already exist server-side; a retry with the same name may
 return a conflict. Callers requiring at-least-once semantics should
 reconcile via `session.sandbox.get(name)` before retrying. A future
-`create_or_get(...)` upsert flow is planned to absorb this case.
+`get_or_create(...)` upsert flow is planned to absorb this case.
 
 Alternatives considered:
 
@@ -463,7 +463,7 @@ Rationale:
 Rollback inside the SDK is the wrong layer; users have varying ideas of
 what rollback means (delete, leave, mark for cleanup), and the SDK cannot
 tell them apart. Keeping cancellation honest about what was committed lets
-callers decide. A planned `create_or_get(...)` will smooth the most common
+callers decide. A planned `get_or_create(...)` will smooth the most common
 retry-after-cancel collision without changing this contract.
 
 ## Decision 18: Common Error Base
@@ -542,5 +542,8 @@ Costs:
 - Decide whether sync default-session context support is needed.
 - Decide which concepts, if any, graduate from domain packages to the curated
   top-level facade after reuse.
-- Decide whether `create_or_get(...)` (and analogous upserts for named
+- Decide whether `get_or_create(...)` (and analogous upserts for named
   resources) lands alongside the first sandbox release or as a follow-up.
+  **Resolution:** deferred until after the Sandbox MVP create deadline/wait
+  slices are complete; the reconciliation contract is now defined in
+  `.forward-roll/specs/unstable-sandbox-mvp.md`.

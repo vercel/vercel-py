@@ -153,10 +153,9 @@ async def test_default_bound_sandbox_create_delegates_to_effective_session(
 ) -> None:
     from tests.unstable.fake_sandbox_api import FakeSandboxAPI
     from vercel import unstable as vercel
-    from vercel._internal.sandbox.models import SandboxStatus
     from vercel._internal.unstable.sandbox.request_client import _USER_AGENT
     from vercel.unstable.auth import AccessTokenCredentials, StaticCredentialProvider
-    from vercel.unstable.sandbox import SandboxCreateParams, SandboxOptions
+    from vercel.unstable.sandbox import SandboxCreateParams, SandboxOptions, SandboxStatus
 
     api = FakeSandboxAPI()
     api.script_response(

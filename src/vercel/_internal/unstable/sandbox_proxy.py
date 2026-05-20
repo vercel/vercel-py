@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import overload
 
 from vercel._internal.unstable.default import get_default_session
@@ -41,11 +42,17 @@ class SandboxAccessorProxy:
             return SyncSandboxAccessor(session, options=self.options)
         raise TypeError("session must be Session or SyncSession")
 
-    async def create(self, params: SandboxCreateParams, *, wait: bool = False) -> Sandbox:
+    async def create(
+        self,
+        params: SandboxCreateParams,
+        *,
+        wait: bool = False,
+        timeout: timedelta | None = None,
+    ) -> Sandbox:
         """Create a sandbox through the effective default session."""
         session = get_default_session()
         accessor = session.sandbox.with_options(self.options)
-        return await accessor.create(params, wait=wait)
+        return await accessor.create(params, wait=wait, timeout=timeout)
 
 
 sandbox = SandboxAccessorProxy()

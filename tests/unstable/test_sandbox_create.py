@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from tests.unstable.fake_sandbox_api import FakeSandboxAPI
-from vercel._internal.sandbox.models import SandboxStatus
 from vercel._internal.unstable.errors import SessionClosedError
 from vercel._internal.unstable.sandbox.request_client import _USER_AGENT
 from vercel.unstable import Session, SyncSession, VercelError
@@ -16,7 +17,9 @@ from vercel.unstable.sandbox import (
     SandboxAPIError,
     SandboxCreateParams,
     SandboxError,
+    SandboxOperationTimeoutError,
     SandboxOptions,
+    SandboxStatus,
 )
 
 
@@ -559,8 +562,25 @@ async def test_create_omits_interactive_when_none(
     assert "__interactive" not in fake_sandbox_api.requests[0].body
 
 
-async def test_create_wait_true_is_deferred() -> None:
-    accessor = Session().sandbox.with_options(
+def replace_payload_id(payload: dict[str, object], sandbox_id: str) -> dict[str, object]:
+    session = dict(cast_dict(payload.get("session", {})))
+    session["id"] = sandbox_id
+    return {**payload, "session": session}
+
+
+def cast_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return value
+
+
+async def test_create_timeout_exceeded_raises_timeout_error(
+    fake_sandbox_api: FakeSandboxAPI,
+    sandbox_payload: dict[str, object],
+) -> None:
+    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload, delay=0.5)
+    session = Session()
+    session._sandbox_transport = fake_sandbox_api
+    accessor = session.sandbox.with_options(
         SandboxOptions(
             credential_provider=StaticCredentialProvider(
                 AccessTokenCredentials(
@@ -572,11 +592,77 @@ async def test_create_wait_true_is_deferred() -> None:
         )
     )
 
-    with pytest.raises(SandboxError, match="wait=True"):
-        await accessor.create(SandboxCreateParams(runtime="python3.12"), wait=True)
+    with pytest.raises(SandboxOperationTimeoutError) as raised:
+        await accessor.create(
+            SandboxCreateParams(runtime="python3.12"),
+            timeout=timedelta(seconds=0.1),
+        )
+
+    assert isinstance(raised.value, SandboxError)
+    assert isinstance(raised.value, VercelError)
+    assert len(fake_sandbox_api.requests) == 1
 
 
-def test_sync_create_wait_true_is_deferred(fake_sandbox_api: FakeSandboxAPI) -> None:
+async def test_create_timeout_not_exceeded_returns_handle(
+    fake_sandbox_api: FakeSandboxAPI,
+    sandbox_payload: dict[str, object],
+) -> None:
+    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
+    session = Session()
+    session._sandbox_transport = fake_sandbox_api
+    accessor = session.sandbox.with_options(
+        SandboxOptions(
+            credential_provider=StaticCredentialProvider(
+                AccessTokenCredentials(
+                    token="token",
+                    project_id="project_1",
+                    team_id="team_1",
+                )
+            )
+        )
+    )
+
+    sandbox = await accessor.create(
+        SandboxCreateParams(runtime="python3.12"),
+        timeout=timedelta(seconds=60),
+    )
+
+    assert sandbox.name == "my-sandbox"
+    assert sandbox.current_session is not None
+    assert sandbox.current_session.id == "sbx_test123"
+    assert len(fake_sandbox_api.requests) == 1
+
+
+async def test_create_without_timeout_works_normally(
+    fake_sandbox_api: FakeSandboxAPI,
+    sandbox_payload: dict[str, object],
+) -> None:
+    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
+    session = Session()
+    session._sandbox_transport = fake_sandbox_api
+    accessor = session.sandbox.with_options(
+        SandboxOptions(
+            credential_provider=StaticCredentialProvider(
+                AccessTokenCredentials(
+                    token="token",
+                    project_id="project_1",
+                    team_id="team_1",
+                )
+            )
+        )
+    )
+
+    sandbox = await accessor.create(SandboxCreateParams(runtime="python3.12"))
+
+    assert sandbox.name == "my-sandbox"
+    assert sandbox.current_session is not None
+    assert sandbox.current_session.id == "sbx_test123"
+    assert len(fake_sandbox_api.requests) == 1
+
+
+def test_sync_create_has_no_timeout_parameter(
+    fake_sandbox_api: FakeSandboxAPI,
+) -> None:
     session = SyncSession()
     session._sandbox_transport = fake_sandbox_api
     accessor = session.sandbox.with_options(
@@ -591,18 +677,7 @@ def test_sync_create_wait_true_is_deferred(fake_sandbox_api: FakeSandboxAPI) -> 
         )
     )
 
-    with pytest.raises(SandboxError, match="wait=True"):
-        accessor.create(SandboxCreateParams(runtime="python3.12"), wait=True)
+    import inspect
 
-    assert fake_sandbox_api.requests == []
-
-
-def replace_payload_id(payload: dict[str, object], sandbox_id: str) -> dict[str, object]:
-    session = dict(cast_dict(payload.get("session", {})))
-    session["id"] = sandbox_id
-    return {**payload, "session": session}
-
-
-def cast_dict(value: object) -> dict[str, object]:
-    assert isinstance(value, dict)
-    return value
+    sig = inspect.signature(accessor.create)
+    assert "timeout" not in sig.parameters

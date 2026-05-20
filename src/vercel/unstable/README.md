@@ -866,7 +866,7 @@ Sandbox creation is a named operation. After a cancelled
 `create(SandboxCreateParams(name=...))`, the sandbox may already exist
 server-side, and a retry with the same name may return a conflict. Callers
 requiring at-least-once semantics should reconcile via
-`session.sandbox.get(name=...)` before retrying. A future `create_or_get(...)`
+`session.sandbox.get(name=...)` before retrying. A future `get_or_create(...)`
 upsert flow is planned to absorb this case.
 
 ## Observability
@@ -979,7 +979,7 @@ more than a single target status.
 - Whether context-local defaults need sync equivalents.
 - Whether any auth or wait concepts should later be promoted to the top-level
   facade after more than one service uses them unchanged.
-- Whether `create_or_get(...)` and analogous upserts for named resources land
+- Whether `get_or_create(...)` and analogous upserts for named resources land
   alongside the first sandbox release or as follow-ups.
 - Whether method-level `timeout` includes streamed iterator consumption after a
   method returns an iterator, or only work performed before the method returns.

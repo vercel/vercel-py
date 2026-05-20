@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -26,12 +27,14 @@ class ScriptedSandboxResponse:
     status_code: int = 200
     json: Mapping[str, Any] | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
+    delay: float | None = None
 
 
 class FakeSandboxAPI(BaseTransport):
     def __init__(self) -> None:
         self.requests: list[RecordedSandboxRequest] = []
         self._responses: deque[ScriptedSandboxResponse] = deque()
+        self._path_responses: dict[str, deque[ScriptedSandboxResponse]] = {}
 
     def script_response(
         self,
@@ -39,12 +42,35 @@ class FakeSandboxAPI(BaseTransport):
         status_code: int = 200,
         json: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        delay: float | None = None,
     ) -> None:
         self._responses.append(
             ScriptedSandboxResponse(
                 status_code=status_code,
                 json=json,
                 headers=headers or {},
+                delay=delay,
+            )
+        )
+
+    def script_response_for_path(
+        self,
+        path: str,
+        *,
+        status_code: int = 200,
+        json: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+        delay: float | None = None,
+    ) -> None:
+        key = path.lstrip("/")
+        if key not in self._path_responses:
+            self._path_responses[key] = deque()
+        self._path_responses[key].append(
+            ScriptedSandboxResponse(
+                status_code=status_code,
+                json=json,
+                headers=headers or {},
+                delay=delay,
             )
         )
 
@@ -70,7 +96,18 @@ class FakeSandboxAPI(BaseTransport):
                 body=_record_body(body),
             )
         )
-        response = self._responses.popleft() if self._responses else ScriptedSandboxResponse()
+        lookup_key = path.lstrip("/")
+        path_deque = self._path_responses.get(lookup_key)
+        if path_deque:
+            response = path_deque.popleft()
+        else:
+            response = self._responses.popleft() if self._responses else ScriptedSandboxResponse()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if response.delay is not None and loop is not None:
+            await asyncio.sleep(response.delay)
         request = httpx.Request(method, f"https://sandbox.vercel.com/{path.lstrip('/')}")
         return httpx.Response(
             response.status_code,

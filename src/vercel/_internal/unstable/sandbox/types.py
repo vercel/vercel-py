@@ -6,8 +6,9 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from vercel._internal.polyfills import StrEnum
 from vercel._internal.sandbox.errors import APIError as StableSandboxAPIError
-from vercel._internal.sandbox.models import NetworkPolicy, Resources, SandboxStatus, Source
+from vercel._internal.sandbox.models import NetworkPolicy, Resources, Source
 from vercel._internal.unstable.errors import VercelError
 from vercel._internal.unstable.sandbox_errors import (
     normalize_retry_after,
@@ -25,6 +26,16 @@ if TYPE_CHECKING:
 
 class SandboxError(VercelError):
     """Base class for unstable Sandbox errors."""
+
+
+class SandboxStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    ABORTED = "aborted"
+    SNAPSHOTTING = "snapshotting"
 
 
 class SandboxAPIError(SandboxError):
@@ -110,6 +121,27 @@ class Session:
     source_snapshot_id: str | None = None
     active_cpu_duration_ms: int | None = None
     network_transfer: int | None = None
+
+
+def is_ready_for_create(status: SandboxStatus | None) -> bool:
+    """Return True if the sandbox has reached the RUNNING state."""
+    return status is not None and status == SandboxStatus.RUNNING
+
+
+def is_terminal_for_create(status: SandboxStatus | None) -> bool:
+    """Return True if the sandbox has reached a terminal failure state.
+
+    Terminal states cannot transition to RUNNING, so a create that reaches
+    them has definitively failed.
+    """
+    if status is None:
+        return False
+    return status in {
+        SandboxStatus.FAILED,
+        SandboxStatus.ABORTED,
+        SandboxStatus.STOPPED,
+        SandboxStatus.STOPPING,
+    }
 
 
 @dataclass(slots=True)
