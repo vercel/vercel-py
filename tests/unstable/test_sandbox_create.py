@@ -71,6 +71,32 @@ def _sandbox_options() -> SandboxOptions:
     )
 
 
+class _RotatingCredentialProvider:
+    def __init__(self) -> None:
+        self._count = 0
+
+    async def resolve(self) -> AccessTokenCredentials:
+        self._count += 1
+        return AccessTokenCredentials(
+            token=f"token_{self._count}",
+            project_id="project_1",
+            team_id="team_1",
+        )
+
+
+class _SyncRotatingCredentialProvider:
+    def __init__(self) -> None:
+        self._count = 0
+
+    def resolve(self) -> AccessTokenCredentials:
+        self._count += 1
+        return AccessTokenCredentials(
+            token=f"token_{self._count}",
+            project_id="project_1",
+            team_id="team_1",
+        )
+
+
 async def test_create_sends_authenticated_payload_and_returns_handle(
     fake_sandbox_api: FakeSandboxAPI,
     sandbox_payload: dict[str, object],
@@ -140,6 +166,27 @@ async def test_create_sends_authenticated_payload_and_returns_handle(
     }
 
 
+async def test_create_resolves_credentials_for_each_request(
+    fake_sandbox_api: FakeSandboxAPI,
+    sandbox_payload: dict[str, object],
+) -> None:
+    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
+    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
+    session = Session()
+    fake_sandbox_api.install(session)
+    accessor = session.sandbox.with_options(
+        SandboxOptions(credential_provider=_RotatingCredentialProvider())
+    )
+
+    await accessor.create(SandboxCreateParams(runtime="python3.13", name="my-sandbox"))
+    await accessor.create(SandboxCreateParams(runtime="python3.13", name="my-sandbox"))
+
+    assert [request.headers["authorization"] for request in fake_sandbox_api.requests] == [
+        "Bearer token_1",
+        "Bearer token_2",
+    ]
+
+
 def test_sync_create_returns_handle_smoke(
     fake_sandbox_api: FakeSandboxAPI,
     sandbox_payload: dict[str, object],
@@ -165,6 +212,27 @@ def test_sync_create_returns_handle_smoke(
     assert sandbox.current_session is not None
     assert sandbox.current_session.status == SandboxStatus.RUNNING
     assert fake_sandbox_api.requests[0].method == "POST"
+
+
+def test_sync_create_resolves_credentials_for_each_request(
+    fake_sandbox_api: FakeSandboxAPI,
+    sandbox_payload: dict[str, object],
+) -> None:
+    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
+    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
+    session = SyncSession()
+    fake_sandbox_api.install(session)
+    accessor = session.sandbox.with_options(
+        SandboxOptions(credential_provider=_SyncRotatingCredentialProvider())
+    )
+
+    accessor.create(SandboxCreateParams(runtime="python3.13", name="my-sandbox"))
+    accessor.create(SandboxCreateParams(runtime="python3.13", name="my-sandbox"))
+
+    assert [request.headers["authorization"] for request in fake_sandbox_api.requests] == [
+        "Bearer token_1",
+        "Bearer token_2",
+    ]
 
 
 async def test_create_maps_v2_response_shape(fake_sandbox_api: FakeSandboxAPI) -> None:

@@ -39,7 +39,6 @@ class Session:
         self._sandbox_accessor: SandboxAccessor | None = None
         self._transport: AsyncTransport | None = None
         self._close_hooks: list[Callable[[], Awaitable[None]]] = []
-        self._initialized = False
         self._closed = False
         self._owns_transport = False
 
@@ -51,8 +50,14 @@ class Session:
             self._sandbox_accessor = SandboxAccessor(self)
         return self._sandbox_accessor
 
+    @property
+    def _is_initialized(self) -> bool:
+        return self._settings is not None and self._transport is not None
+
     async def initialize(self) -> None:
         self._ensure_open()
+        if self._is_initialized:
+            return
         if self._settings is None:
             self._settings = load_session_settings(default_session_setting_sources(self.options))
         if self._transport is None:
@@ -67,7 +72,6 @@ class Session:
             )
             self._transport = AsyncTransport(create_base_async_client(transport_options))
             self._owns_transport = True
-        self._initialized = True
 
     async def aclose(self) -> None:
         if self._closed:
@@ -105,7 +109,6 @@ class SyncSession:
         self._sandbox_accessor: SyncSandboxAccessor | None = None
         self._transport: SyncTransport | None = None
         self._close_hooks: list[Callable[[], None]] = []
-        self._initialized = False
         self._closed = False
         self._owns_transport = False
 
@@ -117,8 +120,14 @@ class SyncSession:
             self._sandbox_accessor = SyncSandboxAccessor(self)
         return self._sandbox_accessor
 
+    @property
+    def _is_initialized(self) -> bool:
+        return self._settings is not None and self._transport is not None
+
     def initialize(self) -> None:
         self._ensure_open()
+        if self._is_initialized:
+            return
         if self._settings is None:
             self._settings = load_session_settings(default_session_setting_sources(self.options))
         if self._transport is None:
@@ -133,7 +142,6 @@ class SyncSession:
             )
             self._transport = SyncTransport(create_base_client(transport_options))
             self._owns_transport = True
-        self._initialized = True
 
     def close(self) -> None:
         if self._closed:

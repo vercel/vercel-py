@@ -55,6 +55,7 @@ class SandboxAccessor:
 
     def __init__(self, session: Session, *, options: SandboxOptions | None = None) -> None:
         self._session = session
+        self._api_client: SandboxApiClient | None = None
         self.options = options
 
     def with_options(self, options: SandboxOptions | None = None) -> SandboxAccessor:
@@ -73,8 +74,7 @@ class SandboxAccessor:
         wait: bool = False,
         timeout: timedelta | None = None,
     ) -> Sandbox:
-        await self._session.initialize()
-        api_client = self._create_api_client()
+        api_client = await self._get_api_client()
 
         async def _create() -> Sandbox:
             return await create_sandbox_with_wait(
@@ -100,17 +100,20 @@ class SandboxAccessor:
         sandbox._session = self._session
         return sandbox
 
-    def _create_api_client(self) -> SandboxApiClient:
+    async def _get_api_client(self) -> SandboxApiClient:
+        await self._session.initialize()
         if self._session._transport is None:
             raise AssertionError("session transport is not initialized")
-        return SandboxApiClient(
-            transport=self._session._transport,
-            credentials_resolver=create_sandbox_credentials_resolver(self.options),
-            sleep_fn=anyio.sleep,
-            api_url=self.options.api_url if self.options is not None else None,
-            request_timeout=self.options.request_timeout if self.options is not None else None,
-            retry_attempts=self.options.retry_attempts if self.options is not None else None,
-        )
+        if self._api_client is None:
+            self._api_client = SandboxApiClient(
+                transport=self._session._transport,
+                credentials_resolver=create_sandbox_credentials_resolver(self.options),
+                sleep_fn=anyio.sleep,
+                api_url=self.options.api_url if self.options is not None else None,
+                request_timeout=self.options.request_timeout if self.options is not None else None,
+                retry_attempts=self.options.retry_attempts if self.options is not None else None,
+            )
+        return self._api_client
 
 
 class SyncSandboxAccessor:
@@ -118,6 +121,7 @@ class SyncSandboxAccessor:
 
     def __init__(self, session: SyncSession, *, options: SandboxOptions | None = None) -> None:
         self._session = session
+        self._api_client: SandboxApiClient | None = None
         self.options = options
 
     def with_options(self, options: SandboxOptions | None = None) -> SyncSandboxAccessor:
@@ -136,8 +140,7 @@ class SyncSandboxAccessor:
         wait: bool = False,
         timeout: timedelta | None = None,
     ) -> SyncSandbox:
-        self._session.initialize()
-        api_client = self._create_api_client()
+        api_client = self._get_api_client()
         sandbox = iter_coroutine(
             create_sandbox_with_wait(
                 api_client,
@@ -158,17 +161,20 @@ class SyncSandboxAccessor:
             _raw=sandbox._raw,
         )
 
-    def _create_api_client(self) -> SandboxApiClient:
+    def _get_api_client(self) -> SandboxApiClient:
+        self._session.initialize()
         if self._session._transport is None:
             raise AssertionError("session transport is not initialized")
-        return SandboxApiClient(
-            transport=self._session._transport,
-            credentials_resolver=create_sync_sandbox_credentials_resolver(self.options),
-            sleep_fn=time.sleep,
-            api_url=self.options.api_url if self.options is not None else None,
-            request_timeout=self.options.request_timeout if self.options is not None else None,
-            retry_attempts=self.options.retry_attempts if self.options is not None else None,
-        )
+        if self._api_client is None:
+            self._api_client = SandboxApiClient(
+                transport=self._session._transport,
+                credentials_resolver=create_sync_sandbox_credentials_resolver(self.options),
+                sleep_fn=time.sleep,
+                api_url=self.options.api_url if self.options is not None else None,
+                request_timeout=self.options.request_timeout if self.options is not None else None,
+                retry_attempts=self.options.retry_attempts if self.options is not None else None,
+            )
+        return self._api_client
 
 
 __all__ = [
