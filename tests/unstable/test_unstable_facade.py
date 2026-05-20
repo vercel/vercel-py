@@ -4,11 +4,7 @@ from collections.abc import Generator
 
 import pytest
 
-from vercel._internal.unstable.default import (
-    DefaultSessionReconfigurationError,
-    _default_session_ctx,
-    _fallback_session,
-)
+from vercel._internal.unstable.default import DefaultSessionReconfigurationError
 from vercel._internal.unstable.errors import VercelError
 from vercel.unstable import Session, SessionOptions
 from vercel.unstable.testing import reset_default_session
@@ -43,7 +39,7 @@ def test_unstable_domain_and_auth_types_construct_without_credentials() -> None:
 
     assert StaticCredentialProvider(access_token).credentials is access_token
     assert StaticCredentialProvider(oidc).credentials is oidc
-    assert SandboxCreateParams(runtime="python3.12").runtime == "python3.12"
+    assert SandboxCreateParams(runtime="python3.13").runtime == "python3.13"
     assert SandboxOptions(team_id="team_123").team_id == "team_123"
     assert SandboxStatus.RUNNING.value == "running"
 
@@ -125,7 +121,8 @@ async def test_use_session_does_not_close_bound_session() -> None:
     async with vercel.use_session(session):
         pass
 
-    assert not session._closed
+    await session.initialize()
+    await session.aclose()
 
 
 async def test_reset_default_session_clears_fallback_and_context() -> None:
@@ -136,9 +133,8 @@ async def test_reset_default_session_clears_fallback_and_context() -> None:
 
     async with vercel.use_session(explicit):
         reset_default_session()
-        assert _default_session_ctx.get() is None
+        assert vercel.get_default_session() is not explicit
 
-    assert _fallback_session is None
     assert vercel.get_default_session() is not fallback
 
 
@@ -148,12 +144,10 @@ def test_reset_default_session_is_not_in_unstable_all() -> None:
     assert "reset_default_session" not in unstable.__all__
 
 
-async def test_default_bound_sandbox_create_delegates_to_effective_session(
-    fake_sandbox_api: object,
-) -> None:
+async def test_default_bound_sandbox_create_delegates_to_effective_session() -> None:
     from tests.unstable.fake_sandbox_api import FakeSandboxAPI
     from vercel import unstable as vercel
-    from vercel._internal.unstable.sandbox.request_client import _USER_AGENT
+    from vercel._internal.unstable.sandbox.api_client import _USER_AGENT
     from vercel.unstable.auth import AccessTokenCredentials, StaticCredentialProvider
     from vercel.unstable.sandbox import SandboxCreateParams, SandboxOptions, SandboxStatus
 
@@ -170,7 +164,7 @@ async def test_default_bound_sandbox_create_delegates_to_effective_session(
                 "memory": 1024,
                 "vcpus": 2,
                 "region": "iad1",
-                "runtime": "python3.12",
+                "runtime": "python3.13",
                 "timeout": 300000,
                 "status": "running",
                 "requestedAt": 1,
@@ -181,7 +175,7 @@ async def test_default_bound_sandbox_create_delegates_to_effective_session(
         },
     )
     session = vercel.get_default_session()
-    session._sandbox_transport = api
+    api.install(session)
 
     sandbox = await vercel.sandbox.with_options(
         SandboxOptions(
@@ -194,7 +188,7 @@ async def test_default_bound_sandbox_create_delegates_to_effective_session(
             )
         )
     ).create(
-        SandboxCreateParams(runtime="python3.12", ports=[], interactive=False),
+        SandboxCreateParams(runtime="python3.13", ports=[], interactive=False),
         wait=False,
     )
 
@@ -211,11 +205,37 @@ async def test_default_bound_sandbox_create_delegates_to_effective_session(
     assert request.headers["user-agent"] == _USER_AGENT
 
 
-def test_default_bound_proxy_with_session_returns_accessor() -> None:
+async def test_default_bound_proxy_with_session_returns_accessor() -> None:
+    from tests.unstable.fake_sandbox_api import FakeSandboxAPI
     from vercel import unstable as vercel
-    from vercel.unstable.sandbox import SandboxOptions
+    from vercel.unstable.auth import AccessTokenCredentials, StaticCredentialProvider
+    from vercel.unstable.sandbox import SandboxCreateParams, SandboxOptions
 
+    api = FakeSandboxAPI()
+    api.script_response(
+        status_code=201,
+        json={
+            "sandbox": {"name": "explicit-sandbox", "persistent": False},
+            "session": {"id": "sbx_explicit", "status": "running"},
+            "routes": [],
+        },
+    )
     explicit = Session()
-    accessor = vercel.sandbox.with_options(SandboxOptions(team_id="team_1")).with_session(explicit)
+    api.install(explicit)
 
-    assert accessor._session is explicit
+    accessor = vercel.sandbox.with_options(
+        SandboxOptions(
+            credential_provider=StaticCredentialProvider(
+                AccessTokenCredentials(
+                    token="token_explicit",
+                    project_id="project_explicit",
+                    team_id="team_explicit",
+                )
+            )
+        )
+    ).with_session(explicit)
+
+    created = await accessor.create(SandboxCreateParams(runtime="python3.13"))
+
+    assert created.name == "explicit-sandbox"
+    assert api.requests[0].headers["authorization"] == "Bearer token_explicit"

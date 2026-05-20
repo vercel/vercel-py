@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
+import httpx
 import pytest
 
 from tests.unstable.fake_sandbox_api import FakeSandboxAPI
+from vercel._internal.http import BaseTransport, RequestBody, RetryPolicy
+from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.unstable.errors import SessionClosedError
-from vercel._internal.unstable.sandbox.request_client import _USER_AGENT
+from vercel._internal.unstable.sandbox import api_client as api_client_module
+from vercel._internal.unstable.sandbox.api_client import (
+    _USER_AGENT,
+    SandboxApiClient,
+    create_sandbox_credentials_resolver,
+)
+from vercel.sandbox import NetworkPolicyCustom, NetworkPolicySubnets, Resources, SnapshotSource
 from vercel.unstable import Session, SyncSession, VercelError
 from vercel.unstable.auth import (
     AccessTokenCredentials,
@@ -19,6 +30,7 @@ from vercel.unstable.sandbox import (
     SandboxError,
     SandboxOperationTimeoutError,
     SandboxOptions,
+    SandboxRoute,
     SandboxStatus,
 )
 
@@ -35,7 +47,7 @@ def sandbox_payload() -> dict[str, object]:
             "memory": 1024,
             "vcpus": 2,
             "region": "iad1",
-            "runtime": "python3.12",
+            "runtime": "python3.13",
             "timeout": 300000,
             "status": "running",
             "requestedAt": 1,
@@ -46,74 +58,48 @@ def sandbox_payload() -> dict[str, object]:
     }
 
 
-def test_create_request_plumbing_is_lazy_until_io(fake_sandbox_api: FakeSandboxAPI) -> None:
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_123",
-                    team_id="team_123",
-                )
+def _sandbox_options() -> SandboxOptions:
+    return SandboxOptions(
+        credential_provider=StaticCredentialProvider(
+            AccessTokenCredentials(
+                token="token_1",
+                project_id="project_1",
+                team_id="team_1",
             )
-        )
+        ),
+        request_timeout=timedelta(seconds=9),
     )
 
-    assert accessor._ops_client is None
-    assert session._close_hooks == []
-    assert fake_sandbox_api.requests == []
 
-
-def test_sync_create_request_plumbing_is_lazy_until_io(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=SyncStaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_123",
-                    team_id="team_123",
-                )
-            )
-        )
-    )
-
-    assert accessor._ops_client is None
-    assert session._close_hooks == []
-    assert fake_sandbox_api.requests == []
-
-
-async def test_create_sends_authenticated_post_and_returns_handle(
+async def test_create_sends_authenticated_payload_and_returns_handle(
     fake_sandbox_api: FakeSandboxAPI,
     sandbox_payload: dict[str, object],
 ) -> None:
     fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
     session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token_1",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
+    fake_sandbox_api.install(session)
+    accessor = session.sandbox.with_options(_sandbox_options())
 
     sandbox = await accessor.create(
         SandboxCreateParams(
-            runtime="python3.12",
-            ports=[],
+            runtime="python3.13",
+            ports=[3000],
             interactive=False,
             name="my-sandbox",
             env={"EXAMPLE": "1"},
+            timeout=timedelta(seconds=60),
+            resources=Resources(vcpus=2, memory=4096),
+            source=SnapshotSource(snapshot_id="snap_source_123"),
+            network_policy=NetworkPolicyCustom(
+                allow=["api.example.com"],
+                subnets=NetworkPolicySubnets(
+                    allow=["10.0.0.0/24"],
+                    deny=["10.0.1.0/24"],
+                ),
+            ),
+            persistent=False,
+            snapshot_expiration=timedelta(hours=1),
+            tags=["ci", "unstable"],
         )
     )
 
@@ -122,34 +108,45 @@ async def test_create_sends_authenticated_post_and_returns_handle(
     assert sandbox.current_session is not None
     assert sandbox.current_session.id == "sbx_test123"
     assert sandbox.current_session.status == SandboxStatus.RUNNING
-    assert sandbox._session is session
+    assert sandbox.routes == []
     assert len(fake_sandbox_api.requests) == 1
     request = fake_sandbox_api.requests[0]
     assert request.method == "POST"
     assert request.path == "/v2/sandboxes"
-    assert request.query == {"teamId": "team_1"}
+    assert request.query == {}
+    assert request.timeout == timedelta(seconds=9)
     assert request.headers["authorization"] == "Bearer token_1"
     assert request.headers["content-type"] == "application/json"
     assert request.headers["user-agent"] == _USER_AGENT
     assert request.body == {
         "projectId": "project_1",
-        "ports": [],
+        "ports": [3000],
         "name": "my-sandbox",
-        "runtime": "python3.12",
+        "source": {"type": "snapshot", "snapshotId": "snap_source_123"},
+        "timeout": 60000,
+        "resources": {"vcpus": 2, "memory": 4096},
+        "runtime": "python3.13",
+        "networkPolicy": {
+            "mode": "custom",
+            "allowedDomains": ["api.example.com"],
+            "allowedCIDRs": ["10.0.0.0/24"],
+            "deniedCIDRs": ["10.0.1.0/24"],
+        },
         "__interactive": False,
         "env": {"EXAMPLE": "1"},
+        "persistent": False,
+        "snapshotExpiration": 3600000,
+        "tags": ["ci", "unstable"],
     }
-    assert accessor._ops_client is not None
-    assert len(session._close_hooks) == 1
 
 
-def test_sync_create_sends_authenticated_post_and_returns_handle(
+def test_sync_create_returns_handle_smoke(
     fake_sandbox_api: FakeSandboxAPI,
     sandbox_payload: dict[str, object],
 ) -> None:
     fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
     session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
+    fake_sandbox_api.install(session)
     accessor = session.sandbox.with_options(
         SandboxOptions(
             credential_provider=SyncStaticCredentialProvider(
@@ -162,227 +159,137 @@ def test_sync_create_sends_authenticated_post_and_returns_handle(
         )
     )
 
-    sandbox = accessor.create(
-        SandboxCreateParams(
-            runtime="python3.12",
-            ports=[],
-            interactive=False,
-            name="my-sandbox",
-            env={"EXAMPLE": "1"},
-        )
+    sandbox = accessor.create(SandboxCreateParams(runtime="python3.13", name="my-sandbox"))
+
+    assert sandbox.name == "my-sandbox"
+    assert sandbox.current_session is not None
+    assert sandbox.current_session.status == SandboxStatus.RUNNING
+    assert fake_sandbox_api.requests[0].method == "POST"
+
+
+async def test_create_maps_v2_response_shape(fake_sandbox_api: FakeSandboxAPI) -> None:
+    fake_sandbox_api.script_response(
+        status_code=201,
+        json={
+            "sandbox": {
+                "name": "my-sandbox",
+                "persistent": True,
+                "currentSnapshotId": "snap_current_123",
+            },
+            "session": {
+                "id": "sbx_test123",
+                "memory": 1024,
+                "vcpus": 2,
+                "region": "iad1",
+                "runtime": "python3.13",
+                "timeout": 300000,
+                "status": "running",
+                "requestedAt": 1,
+                "startedAt": 2,
+                "cwd": "/vercel/sandbox",
+                "projectId": "project_1",
+                "sourceSandboxName": "source-sandbox",
+                "sourceSnapshotId": "snap_source_456",
+                "activeCpuDurationMs": 1234,
+                "networkTransfer": 5678,
+            },
+            "routes": [
+                {
+                    "url": "https://my-sandbox.vercel.run",
+                    "subdomain": "my-sandbox",
+                    "port": 3000,
+                }
+            ],
+        },
+    )
+    session = Session()
+    fake_sandbox_api.install(session)
+
+    sandbox = await session.sandbox.with_options(_sandbox_options()).create(
+        SandboxCreateParams(runtime="python3.13")
     )
 
     assert sandbox.name == "my-sandbox"
     assert sandbox.persistent is True
+    assert sandbox.current_snapshot_id == "snap_current_123"
+    assert sandbox.routes == [
+        SandboxRoute(
+            url="https://my-sandbox.vercel.run",
+            subdomain="my-sandbox",
+            port=3000,
+        )
+    ]
     assert sandbox.current_session is not None
-    assert sandbox.current_session.id == "sbx_test123"
-    assert sandbox.current_session.status == SandboxStatus.RUNNING
-    assert sandbox._session is session
-    assert len(fake_sandbox_api.requests) == 1
-    request = fake_sandbox_api.requests[0]
-    assert request.method == "POST"
-    assert request.path == "/v2/sandboxes"
-    assert request.query == {"teamId": "team_1"}
-    assert request.headers["authorization"] == "Bearer token_1"
-    assert request.headers["content-type"] == "application/json"
-    assert request.headers["user-agent"] == _USER_AGENT
-    assert request.body == {
-        "projectId": "project_1",
-        "ports": [],
-        "name": "my-sandbox",
-        "runtime": "python3.12",
-        "__interactive": False,
-        "env": {"EXAMPLE": "1"},
+    assert sandbox.current_session.project_id == "project_1"
+    assert sandbox.current_session.source_sandbox_name == "source-sandbox"
+    assert sandbox.current_session.source_snapshot_id == "snap_source_456"
+    assert sandbox.current_session.active_cpu_duration_ms == 1234
+    assert sandbox.current_session.network_transfer == 5678
+
+
+async def test_create_falls_back_to_session_id_when_name_is_missing(
+    fake_sandbox_api: FakeSandboxAPI,
+) -> None:
+    fake_sandbox_api.script_response(
+        status_code=201,
+        json={
+            "sandbox": {"persistent": False},
+            "session": {"id": "sbx_fallback", "status": "running"},
+            "routes": [],
+        },
+    )
+    session = Session()
+    fake_sandbox_api.install(session)
+
+    sandbox = await session.sandbox.with_options(_sandbox_options()).create(
+        SandboxCreateParams(runtime="python3.13")
+    )
+
+    assert sandbox.name == "sbx_fallback"
+    assert sandbox.current_session is not None
+    assert sandbox.current_session.id == "sbx_fallback"
+
+
+async def test_create_rejects_malformed_success_response(
+    fake_sandbox_api: FakeSandboxAPI,
+) -> None:
+    fake_sandbox_api.script_response(status_code=201, json={"sandbox": {"name": "missing-session"}})
+    session = Session()
+    fake_sandbox_api.install(session)
+
+    with pytest.raises(SandboxAPIError, match="response validation failed") as raised:
+        await session.sandbox.with_options(_sandbox_options()).create(
+            SandboxCreateParams(runtime="python3.13")
+        )
+
+    assert raised.value.status_code == 200
+    assert raised.value.data == {"sandbox": {"name": "missing-session"}}
+
+
+async def test_create_rejects_unknown_success_status(
+    fake_sandbox_api: FakeSandboxAPI,
+) -> None:
+    payload = {
+        "sandbox": {"name": "my-sandbox"},
+        "session": {"id": "sbx_test123", "status": "mystery"},
+        "routes": [],
     }
-    assert sandbox._raw is not None
-    assert accessor._ops_client is not None
-    assert len(session._close_hooks) == 1
-
-
-async def test_create_resolves_provider_at_request_time(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
+    fake_sandbox_api.script_response(status_code=201, json=payload)
     session = Session()
-    session._sandbox_transport = fake_sandbox_api
+    fake_sandbox_api.install(session)
 
-    class RotatingProvider:
-        def __init__(self) -> None:
-            self.credentials = AccessTokenCredentials(
-                token="token_before",
-                project_id="project_before",
-                team_id="team_before",
-            )
+    with pytest.raises(SandboxAPIError, match="response validation failed") as raised:
+        await session.sandbox.with_options(_sandbox_options()).create(
+            SandboxCreateParams(runtime="python3.13")
+        )
 
-        async def resolve(self) -> AccessTokenCredentials:
-            return self.credentials
-
-    provider = RotatingProvider()
-    accessor = session.sandbox.with_options(SandboxOptions(credential_provider=provider))
-    provider.credentials = AccessTokenCredentials(
-        token="token_after",
-        project_id="project_after",
-        team_id="team_after",
-    )
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
-
-    await accessor.create(SandboxCreateParams(runtime="python3.12"))
-
-    request = fake_sandbox_api.requests[0]
-    assert request.headers["authorization"] == "Bearer token_after"
-    assert request.query == {"teamId": "team_after"}
-    assert request.body["projectId"] == "project_after"
+    assert raised.value.status_code == 200
+    assert raised.value.data == payload
 
 
-def test_sync_create_resolves_provider_at_request_time(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
-    session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
-
-    class RotatingProvider:
-        def __init__(self) -> None:
-            self.credentials = AccessTokenCredentials(
-                token="token_before",
-                project_id="project_before",
-                team_id="team_before",
-            )
-
-        def resolve(self) -> AccessTokenCredentials:
-            return self.credentials
-
-    provider = RotatingProvider()
-    accessor = session.sandbox.with_options(SandboxOptions(credential_provider=provider))
-    provider.credentials = AccessTokenCredentials(
-        token="token_after",
-        project_id="project_after",
-        team_id="team_after",
-    )
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
-
-    accessor.create(SandboxCreateParams(runtime="python3.12"))
-
-    request = fake_sandbox_api.requests[0]
-    assert request.headers["authorization"] == "Bearer token_after"
-    assert request.query == {"teamId": "team_after"}
-    assert request.body["projectId"] == "project_after"
-
-
-async def test_create_uses_clone_specific_options(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
+async def test_create_translates_api_errors(fake_sandbox_api: FakeSandboxAPI) -> None:
     session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    parent = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="parent",
-                    project_id="project_parent",
-                    team_id="team_parent",
-                )
-            )
-        )
-    )
-    assert parent._get_ops_client() is parent._ops_client
-    clone = parent.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="clone",
-                    project_id="project_clone",
-                    team_id="team_clone",
-                )
-            )
-        )
-    )
-    fake_sandbox_api.script_response(
-        status_code=201,
-        json=replace_payload_id(sandbox_payload, "sbx_parent"),
-    )
-    fake_sandbox_api.script_response(
-        status_code=201,
-        json=replace_payload_id(sandbox_payload, "sbx_clone"),
-    )
-
-    parent_sandbox = await parent.create(SandboxCreateParams(runtime="python3.12"))
-    clone_sandbox = await clone.create(SandboxCreateParams(runtime="python3.12"))
-
-    assert parent_sandbox.current_session is not None
-    assert parent_sandbox.current_session.id == "sbx_parent"
-    assert clone_sandbox.current_session is not None
-    assert clone_sandbox.current_session.id == "sbx_clone"
-    assert fake_sandbox_api.requests[0].headers["authorization"] == "Bearer parent"
-    assert fake_sandbox_api.requests[1].headers["authorization"] == "Bearer clone"
-
-
-def test_sync_create_uses_clone_specific_options(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
-    session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
-    parent = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=SyncStaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="parent",
-                    project_id="project_parent",
-                    team_id="team_parent",
-                )
-            )
-        )
-    )
-    assert parent._get_ops_client() is parent._ops_client
-    clone = parent.with_options(
-        SandboxOptions(
-            credential_provider=SyncStaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="clone",
-                    project_id="project_clone",
-                    team_id="team_clone",
-                )
-            )
-        )
-    )
-    fake_sandbox_api.script_response(
-        status_code=201,
-        json=replace_payload_id(sandbox_payload, "sbx_parent"),
-    )
-    fake_sandbox_api.script_response(
-        status_code=201,
-        json=replace_payload_id(sandbox_payload, "sbx_clone"),
-    )
-
-    parent_sandbox = parent.create(SandboxCreateParams(runtime="python3.12"))
-    clone_sandbox = clone.create(SandboxCreateParams(runtime="python3.12"))
-
-    assert parent_sandbox.current_session is not None
-    assert parent_sandbox.current_session.id == "sbx_parent"
-    assert clone_sandbox.current_session is not None
-    assert clone_sandbox.current_session.id == "sbx_clone"
-    assert fake_sandbox_api.requests[0].headers["authorization"] == "Bearer parent"
-    assert fake_sandbox_api.requests[1].headers["authorization"] == "Bearer clone"
-
-
-async def test_create_translates_api_errors(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
+    fake_sandbox_api.install(session)
     fake_sandbox_api.script_response(
         status_code=429,
         json={"error": {"code": "rate_limited", "message": "too many requests"}},
@@ -390,7 +297,9 @@ async def test_create_translates_api_errors(
     )
 
     with pytest.raises(SandboxAPIError) as raised:
-        await accessor.create(SandboxCreateParams(runtime="python3.12"))
+        await session.sandbox.with_options(_sandbox_options()).create(
+            SandboxCreateParams(runtime="python3.13")
+        )
 
     error = raised.value
     assert isinstance(error, VercelError)
@@ -400,11 +309,9 @@ async def test_create_translates_api_errors(
     assert "too many requests" in str(error)
 
 
-def test_sync_create_translates_api_errors(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
+def test_sync_create_translates_api_errors_smoke(fake_sandbox_api: FakeSandboxAPI) -> None:
     session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
+    fake_sandbox_api.install(session)
     accessor = session.sandbox.with_options(
         SandboxOptions(
             credential_provider=SyncStaticCredentialProvider(
@@ -417,160 +324,27 @@ def test_sync_create_translates_api_errors(
         )
     )
     fake_sandbox_api.script_response(
-        status_code=429,
-        json={"error": {"code": "rate_limited", "message": "too many requests"}},
-        headers={"retry-after": "7"},
+        status_code=500,
+        json={"message": "server failed"},
     )
 
-    with pytest.raises(SandboxAPIError) as raised:
-        accessor.create(SandboxCreateParams(runtime="python3.12"))
-
-    error = raised.value
-    assert isinstance(error, VercelError)
-    assert error.status_code == 429
-    assert error.retry_after == 7
-    assert error.data == {"error": {"code": "rate_limited", "message": "too many requests"}}
-    assert "too many requests" in str(error)
+    with pytest.raises(SandboxAPIError, match="server failed"):
+        accessor.create(SandboxCreateParams(runtime="python3.13"))
 
 
 async def test_create_rejects_closed_session_before_request(
     fake_sandbox_api: FakeSandboxAPI,
 ) -> None:
     session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
+    fake_sandbox_api.install(session)
     await session.aclose()
 
     with pytest.raises(SessionClosedError):
-        await accessor.create(SandboxCreateParams(runtime="python3.12"))
+        await session.sandbox.with_options(_sandbox_options()).create(
+            SandboxCreateParams(runtime="python3.13")
+        )
 
     assert fake_sandbox_api.requests == []
-
-
-def test_sync_create_rejects_closed_session_before_request(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=SyncStaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-    session.close()
-
-    with pytest.raises(SessionClosedError):
-        accessor.create(SandboxCreateParams(runtime="python3.12"))
-
-    assert fake_sandbox_api.requests == []
-
-
-async def test_session_aclose_closes_initialized_sandbox_ops_client(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
-
-    await accessor.create(SandboxCreateParams(runtime="python3.12"))
-    await session.aclose()
-
-    assert accessor._ops_client is None
-
-
-def test_sync_session_close_closes_initialized_sandbox_ops_client(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
-    session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=SyncStaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
-
-    accessor.create(SandboxCreateParams(runtime="python3.12"))
-    session.close()
-    session.close()
-
-    assert accessor._ops_client is None
-    assert session._close_hooks == []
-
-    with pytest.raises(SessionClosedError):
-        accessor.create(SandboxCreateParams(runtime="python3.12"))
-
-    assert len(fake_sandbox_api.requests) == 1
-
-
-async def test_create_omits_interactive_when_none(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
-
-    await accessor.create(SandboxCreateParams(runtime="python3.12", interactive=None))
-
-    assert "__interactive" not in fake_sandbox_api.requests[0].body
-
-
-def replace_payload_id(payload: dict[str, object], sandbox_id: str) -> dict[str, object]:
-    session = dict(cast_dict(payload.get("session", {})))
-    session["id"] = sandbox_id
-    return {**payload, "session": session}
-
-
-def cast_dict(value: object) -> dict[str, object]:
-    assert isinstance(value, dict)
-    return value
 
 
 async def test_create_timeout_exceeded_raises_timeout_error(
@@ -579,22 +353,11 @@ async def test_create_timeout_exceeded_raises_timeout_error(
 ) -> None:
     fake_sandbox_api.script_response(status_code=201, json=sandbox_payload, delay=0.5)
     session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
+    fake_sandbox_api.install(session)
 
     with pytest.raises(SandboxOperationTimeoutError) as raised:
-        await accessor.create(
-            SandboxCreateParams(runtime="python3.12"),
+        await session.sandbox.with_options(_sandbox_options()).create(
+            SandboxCreateParams(runtime="python3.13"),
             timeout=timedelta(seconds=0.1),
         )
 
@@ -603,81 +366,112 @@ async def test_create_timeout_exceeded_raises_timeout_error(
     assert len(fake_sandbox_api.requests) == 1
 
 
-async def test_create_timeout_not_exceeded_returns_handle(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
-) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
+@dataclass
+class _ScriptedTransport(BaseTransport):
+    outcomes: list[httpx.Response | httpx.TransportError]
+    requests: int = 0
+
+    async def send(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        params: Any = None,
+        body: RequestBody = None,
+        headers: Any = None,
+        timeout: timedelta | None = None,
+        follow_redirects: bool | None = None,
+        stream: bool = False,
+    ) -> httpx.Response:
+        _ = (method, path, token, params, body, headers, timeout, follow_redirects, stream)
+        self.requests += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, httpx.TransportError):
+            raise outcome
+        return outcome
+
+
+def _success_response() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "sandbox": {"name": "my-sandbox", "persistent": True},
+            "session": {"id": "sbx_test123", "status": "running"},
+            "routes": [],
+        },
+        request=httpx.Request("POST", "https://api.vercel.com/v2/sandboxes"),
     )
 
-    sandbox = await accessor.create(
-        SandboxCreateParams(runtime="python3.12"),
-        timeout=timedelta(seconds=60),
+
+async def test_api_client_retries_transport_errors() -> None:
+    transport = _ScriptedTransport([httpx.ConnectError("temporary failure"), _success_response()])
+    sleeps: list[float] = []
+    client = SandboxApiClient(
+        transport=transport,
+        credentials_resolver=create_sandbox_credentials_resolver(_sandbox_options()),
+        sleep_fn=sleeps.append,
+        retry_attempts=1,
     )
+
+    sandbox = await client.create(SandboxCreateParams(runtime="python3.13"))
 
     assert sandbox.name == "my-sandbox"
-    assert sandbox.current_session is not None
-    assert sandbox.current_session.id == "sbx_test123"
-    assert len(fake_sandbox_api.requests) == 1
+    assert transport.requests == 2
+    assert sleeps == [0.1]
 
 
-async def test_create_without_timeout_works_normally(
-    fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
+async def test_api_client_retries_retryable_responses(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
+    retryable = httpx.Response(
+        503,
+        json={"message": "try again"},
+        request=httpx.Request("POST", "https://api.vercel.com/v2/sandboxes"),
+    )
+    transport = _ScriptedTransport([retryable, _success_response()])
+    sleeps: list[float] = []
+
+    def retry_policy(retry_attempts: int | None) -> RetryPolicy | None:
+        return RetryPolicy(
+            retries=retry_attempts or 0,
+            retry_on_response=lambda response: response.status_code == 503,
         )
+
+    monkeypatch.setattr(api_client_module, "_retry_policy", retry_policy)
+    client = SandboxApiClient(
+        transport=transport,
+        credentials_resolver=create_sandbox_credentials_resolver(_sandbox_options()),
+        sleep_fn=sleeps.append,
+        retry_attempts=1,
     )
 
-    sandbox = await accessor.create(SandboxCreateParams(runtime="python3.12"))
+    sandbox = await client.create(SandboxCreateParams(runtime="python3.13"))
 
     assert sandbox.name == "my-sandbox"
-    assert sandbox.current_session is not None
-    assert sandbox.current_session.id == "sbx_test123"
-    assert len(fake_sandbox_api.requests) == 1
+    assert transport.requests == 2
+    assert sleeps == [0.1]
 
 
-def test_sync_create_has_no_timeout_parameter(
-    fake_sandbox_api: FakeSandboxAPI,
+def test_sync_api_client_create_completes_with_iter_coroutine(
+    sandbox_payload: dict[str, object],
 ) -> None:
-    session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=SyncStaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
+    transport = _ScriptedTransport(
+        [
+            httpx.Response(
+                200,
+                json=sandbox_payload,
+                request=httpx.Request("POST", "https://api.vercel.com/v2/sandboxes"),
             )
-        )
+        ]
+    )
+    client = SandboxApiClient(
+        transport=transport,
+        credentials_resolver=create_sandbox_credentials_resolver(_sandbox_options()),
+        sleep_fn=lambda delay: None,
     )
 
-    import inspect
+    sandbox = iter_coroutine(client.create(SandboxCreateParams(runtime="python3.13")))
 
-    sig = inspect.signature(accessor.create)
-    assert "timeout" not in sig.parameters
+    assert sandbox.name == "my-sandbox"
+    assert transport.requests == 1

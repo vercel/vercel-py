@@ -16,9 +16,9 @@ async def test_fake_sandbox_api_records_requests_and_returns_scripted_responses(
     response = await fake_sandbox_api.send(
         "post",
         "/v2/sandboxes",
+        token="token",
         params={"teamId": "team_123"},
-        headers={"authorization": "Bearer token"},
-        body=JSONBody({"runtime": "python3.12"}),
+        body=JSONBody({"runtime": "python3.13"}),
     )
 
     assert response.status_code == 202
@@ -29,5 +29,8 @@ async def test_fake_sandbox_api_records_requests_and_returns_scripted_responses(
     assert request.method == "POST"
     assert request.path == "/v2/sandboxes"
     assert request.query == {"teamId": "team_123"}
-    assert request.headers == {"authorization": "Bearer token"}
-    assert request.body == {"runtime": "python3.12"}
+    assert request.headers == {
+        "authorization": "Bearer token",
+        "content-type": "application/json",
+    }
+    assert request.body == {"runtime": "python3.13"}

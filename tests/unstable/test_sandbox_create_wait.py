@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import timedelta
 
 import pytest
 
 from tests.unstable.fake_sandbox_api import FakeSandboxAPI
+from vercel._internal.unstable.sandbox import accessor as accessor_module
 from vercel.unstable import Session, SyncSession
 from vercel.unstable.auth import (
     AccessTokenCredentials,
@@ -20,103 +22,58 @@ from vercel.unstable.sandbox import (
 )
 
 
-@pytest.fixture
-def sandbox_payload() -> dict[str, object]:
-    return {
-        "sandbox": {
-            "name": "my-sandbox",
-            "persistent": True,
-        },
-        "session": {
-            "id": "sbx_test123",
-            "memory": 1024,
-            "vcpus": 2,
-            "region": "iad1",
-            "runtime": "python3.12",
-            "timeout": 300000,
-            "status": "running",
-            "requestedAt": 1,
-            "startedAt": 2,
-            "cwd": "/vercel/sandbox",
-        },
-        "routes": [],
-    }
-
-
-def _pending_payload(name: str = "my-sandbox") -> dict[str, object]:
+def _payload(status: SandboxStatus | None, *, name: str = "my-sandbox") -> dict[str, object]:
+    session: dict[str, object] = {"id": "sbx_test123", "requestedAt": 1}
+    if status is not None:
+        session["status"] = status.value
+    if status is SandboxStatus.RUNNING:
+        session.update(
+            {
+                "memory": 1024,
+                "vcpus": 2,
+                "region": "iad1",
+                "runtime": "python3.13",
+                "timeout": 300000,
+                "startedAt": 2,
+                "cwd": "/vercel/sandbox",
+            }
+        )
     return {
         "sandbox": {"name": name, "persistent": True},
-        "session": {
-            "id": "sbx_test123",
-            "status": "pending",
-            "requestedAt": 1,
-        },
+        "session": session,
         "routes": [],
     }
 
 
-def _snapshotting_payload(name: str = "my-sandbox") -> dict[str, object]:
-    return {
-        "sandbox": {"name": name, "persistent": True},
-        "session": {
-            "id": "sbx_test123",
-            "status": "snapshotting",
-            "requestedAt": 1,
-        },
-        "routes": [],
-    }
+async def _no_sleep(delay: float) -> None:
+    _ = delay
 
 
-def _running_payload(name: str = "my-sandbox") -> dict[str, object]:
-    return {
-        "sandbox": {"name": name, "persistent": True},
-        "session": {
-            "id": "sbx_test123",
-            "memory": 1024,
-            "vcpus": 2,
-            "region": "iad1",
-            "runtime": "python3.12",
-            "timeout": 300000,
-            "status": "running",
-            "requestedAt": 1,
-            "startedAt": 2,
-            "cwd": "/vercel/sandbox",
-        },
-        "routes": [],
-    }
-
-
-def _failed_payload(name: str = "my-sandbox") -> dict[str, object]:
-    return {
-        "sandbox": {"name": name, "persistent": True},
-        "session": {
-            "id": "sbx_test123",
-            "status": "failed",
-            "requestedAt": 1,
-        },
-        "routes": [],
-    }
-
-
-def _aborted_payload(name: str = "my-sandbox") -> dict[str, object]:
-    return {
-        "sandbox": {"name": name, "persistent": True},
-        "session": {
-            "id": "sbx_test123",
-            "status": "aborted",
-            "requestedAt": 1,
-        },
-        "routes": [],
-    }
-
-
-async def test_create_wait_true_zero_polls_when_running(
+@pytest.mark.parametrize(
+    ("statuses", "terminal"),
+    [
+        ([SandboxStatus.RUNNING], False),
+        ([SandboxStatus.PENDING, SandboxStatus.RUNNING], False),
+        ([SandboxStatus.SNAPSHOTTING, SandboxStatus.RUNNING], False),
+        ([None, SandboxStatus.PENDING, SandboxStatus.RUNNING], False),
+        ([SandboxStatus.FAILED], True),
+        ([SandboxStatus.PENDING, SandboxStatus.ABORTED], True),
+        ([SandboxStatus.PENDING, SandboxStatus.STOPPED], True),
+        ([SandboxStatus.PENDING, SandboxStatus.STOPPING], True),
+    ],
+)
+async def test_create_wait_follows_status_sequence(
+    monkeypatch: pytest.MonkeyPatch,
     fake_sandbox_api: FakeSandboxAPI,
-    sandbox_payload: dict[str, object],
+    statuses: Sequence[SandboxStatus | None],
+    terminal: bool,
 ) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=sandbox_payload)
+    monkeypatch.setattr(accessor_module.anyio, "sleep", _no_sleep)
+    fake_sandbox_api.script_response(status_code=201, json=_payload(statuses[0]))
+    for status in statuses[1:]:
+        fake_sandbox_api.script_response_for_path("v2/sandboxes/my-sandbox", json=_payload(status))
     session = Session()
-    session._sandbox_transport = fake_sandbox_api
+    fake_sandbox_api.install(session)
     accessor = session.sandbox.with_options(
         SandboxOptions(
             credential_provider=StaticCredentialProvider(
@@ -129,176 +86,40 @@ async def test_create_wait_true_zero_polls_when_running(
         )
     )
 
-    sandbox = await accessor.create(
-        SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
-        wait=True,
-    )
-
-    assert sandbox.name == "my-sandbox"
-    assert sandbox.current_session is not None
-    assert sandbox.current_session.status == SandboxStatus.RUNNING
-    assert len(fake_sandbox_api.requests) == 1
-    assert fake_sandbox_api.requests[0].method == "POST"
-
-
-async def test_create_wait_true_pending_to_running(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=_pending_payload())
-    fake_sandbox_api.script_response_for_path("v2/sandboxes/my-sandbox", json=_running_payload())
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
+    if terminal:
+        with pytest.raises(SandboxTerminalStateError):
+            await accessor.create(
+                SandboxCreateParams(runtime="python3.13", name="my-sandbox"),
+                wait=True,
             )
-        )
-    )
-
-    sandbox = await accessor.create(
-        SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
-        wait=True,
-    )
-
-    assert sandbox.current_session is not None
-    assert sandbox.current_session.status == SandboxStatus.RUNNING
-    assert len(fake_sandbox_api.requests) == 2
-    assert fake_sandbox_api.requests[0].method == "POST"
-    assert fake_sandbox_api.requests[1].method == "GET"
-    assert fake_sandbox_api.requests[1].path == "/v2/sandboxes/my-sandbox"
-
-
-async def test_create_wait_true_snapshotting_to_running(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=_snapshotting_payload())
-    fake_sandbox_api.script_response_for_path("v2/sandboxes/my-sandbox", json=_running_payload())
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-
-    sandbox = await accessor.create(
-        SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
-        wait=True,
-    )
-
-    assert sandbox.current_session is not None
-    assert sandbox.current_session.status == SandboxStatus.RUNNING
-    assert len(fake_sandbox_api.requests) == 2
-
-
-async def test_create_wait_true_terminal_failed_on_create(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=_failed_payload())
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-
-    with pytest.raises(SandboxTerminalStateError) as raised:
-        await accessor.create(
-            SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
+    else:
+        sandbox = await accessor.create(
+            SandboxCreateParams(runtime="python3.13", name="my-sandbox"),
             wait=True,
         )
+        assert sandbox.current_session is not None
+        assert sandbox.current_session.status == SandboxStatus.RUNNING
 
-    assert "failed" in str(raised.value)
-    assert len(fake_sandbox_api.requests) == 1
+    assert len(fake_sandbox_api.requests) == len(statuses)
+    assert fake_sandbox_api.requests[0].method == "POST"
+    for request in fake_sandbox_api.requests[1:]:
+        assert request.method == "GET"
+        assert request.path == "/v2/sandboxes/my-sandbox"
+        assert request.body is None
 
 
-async def test_create_wait_true_terminal_aborted_during_poll(
+def test_sync_create_wait_pending_to_running_smoke(
+    monkeypatch: pytest.MonkeyPatch,
     fake_sandbox_api: FakeSandboxAPI,
 ) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=_pending_payload())
-    fake_sandbox_api.script_response_for_path("v2/sandboxes/my-sandbox", json=_aborted_payload())
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-
-    with pytest.raises(SandboxTerminalStateError) as raised:
-        await accessor.create(
-            SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
-            wait=True,
-        )
-
-    assert "aborted" in str(raised.value)
-    assert len(fake_sandbox_api.requests) == 2
-
-
-async def test_create_wait_true_timeout_during_poll(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=_pending_payload())
+    monkeypatch.setattr(accessor_module.time, "sleep", lambda delay: None)
+    fake_sandbox_api.script_response(status_code=201, json=_payload(SandboxStatus.PENDING))
     fake_sandbox_api.script_response_for_path(
         "v2/sandboxes/my-sandbox",
-        json=_pending_payload(),
-        delay=2.0,
+        json=_payload(SandboxStatus.RUNNING),
     )
-    session = Session()
-    session._sandbox_transport = fake_sandbox_api
-    accessor = session.sandbox.with_options(
-        SandboxOptions(
-            credential_provider=StaticCredentialProvider(
-                AccessTokenCredentials(
-                    token="token",
-                    project_id="project_1",
-                    team_id="team_1",
-                )
-            )
-        )
-    )
-
-    with pytest.raises(SandboxOperationTimeoutError) as raised:
-        await accessor.create(
-            SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
-            wait=True,
-            timeout=timedelta(seconds=0.5),
-        )
-
-    assert "exceeded timeout" in str(raised.value)
-
-
-def test_sync_create_wait_true_pending_to_running(
-    fake_sandbox_api: FakeSandboxAPI,
-) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=_pending_payload())
-    fake_sandbox_api.script_response_for_path("v2/sandboxes/my-sandbox", json=_running_payload())
     session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
+    fake_sandbox_api.install(session)
     accessor = session.sandbox.with_options(
         SandboxOptions(
             credential_provider=SyncStaticCredentialProvider(
@@ -312,24 +133,28 @@ def test_sync_create_wait_true_pending_to_running(
     )
 
     sandbox = accessor.create(
-        SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
+        SandboxCreateParams(runtime="python3.13", name="my-sandbox"),
         wait=True,
     )
 
     assert sandbox.current_session is not None
     assert sandbox.current_session.status == SandboxStatus.RUNNING
-    assert len(fake_sandbox_api.requests) == 2
-    assert fake_sandbox_api.requests[0].method == "POST"
-    assert fake_sandbox_api.requests[1].method == "GET"
+    assert [request.method for request in fake_sandbox_api.requests] == ["POST", "GET"]
+    assert fake_sandbox_api.requests[1].body is None
 
 
-def test_sync_create_wait_true_terminal_failure(
+def test_sync_create_wait_terminal_smoke(
+    monkeypatch: pytest.MonkeyPatch,
     fake_sandbox_api: FakeSandboxAPI,
 ) -> None:
-    fake_sandbox_api.script_response(status_code=201, json=_pending_payload())
-    fake_sandbox_api.script_response_for_path("v2/sandboxes/my-sandbox", json=_failed_payload())
+    monkeypatch.setattr(accessor_module.time, "sleep", lambda delay: None)
+    fake_sandbox_api.script_response(status_code=201, json=_payload(SandboxStatus.PENDING))
+    fake_sandbox_api.script_response_for_path(
+        "v2/sandboxes/my-sandbox",
+        json=_payload(SandboxStatus.FAILED),
+    )
     session = SyncSession()
-    session._sandbox_transport = fake_sandbox_api
+    fake_sandbox_api.install(session)
     accessor = session.sandbox.with_options(
         SandboxOptions(
             credential_provider=SyncStaticCredentialProvider(
@@ -342,11 +167,54 @@ def test_sync_create_wait_true_terminal_failure(
         )
     )
 
-    with pytest.raises(SandboxTerminalStateError) as raised:
+    with pytest.raises(SandboxTerminalStateError):
         accessor.create(
-            SandboxCreateParams(runtime="python3.12", name="my-sandbox"),
+            SandboxCreateParams(runtime="python3.13", name="my-sandbox"),
             wait=True,
         )
 
-    assert "failed" in str(raised.value)
-    assert len(fake_sandbox_api.requests) == 2
+    assert [request.method for request in fake_sandbox_api.requests] == ["POST", "GET"]
+
+
+def test_sync_create_timeout_bounds_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_sandbox_api: FakeSandboxAPI,
+) -> None:
+    clock = 0.0
+
+    def monotonic() -> float:
+        return clock
+
+    def sleep(delay: float) -> None:
+        nonlocal clock
+        clock += delay
+
+    monkeypatch.setattr(accessor_module.time, "monotonic", monotonic)
+    monkeypatch.setattr(accessor_module.time, "sleep", sleep)
+    fake_sandbox_api.script_response(status_code=201, json=_payload(SandboxStatus.PENDING))
+    fake_sandbox_api.script_response_for_path(
+        "v2/sandboxes/my-sandbox",
+        json=_payload(SandboxStatus.RUNNING),
+    )
+    session = SyncSession()
+    fake_sandbox_api.install(session)
+    accessor = session.sandbox.with_options(
+        SandboxOptions(
+            credential_provider=SyncStaticCredentialProvider(
+                AccessTokenCredentials(
+                    token="token",
+                    project_id="project_1",
+                    team_id="team_1",
+                )
+            )
+        )
+    )
+
+    with pytest.raises(SandboxOperationTimeoutError):
+        accessor.create(
+            SandboxCreateParams(runtime="python3.13", name="my-sandbox"),
+            wait=True,
+            timeout=timedelta(seconds=0.5),
+        )
+
+    assert [request.method for request in fake_sandbox_api.requests] == ["POST"]

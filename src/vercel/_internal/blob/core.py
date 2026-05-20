@@ -672,7 +672,7 @@ def create_async_request_client(
     timeout: timedelta = timedelta(seconds=30.0),
     token: str | None = None,
 ) -> BlobRequestClient:
-    import asyncio
+    import anyio
 
     from vercel._internal.http.httpx import create_base_async_client
     from vercel._internal.http.transport import AsyncTransport
@@ -692,7 +692,7 @@ def create_async_request_client(
         transport=AsyncTransport(http_client),
         token_provider=_make_blob_token_provider(token),
         retry=retry_policy,
-        sleep_fn=asyncio.sleep,
+        sleep_fn=anyio.sleep,
         await_progress_callback=True,
         async_content=True,
     )

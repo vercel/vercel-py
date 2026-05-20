@@ -25,6 +25,11 @@ class SessionOptionsLike(Protocol):
         """Explicit client pool size override, or `None` when unset."""
         ...
 
+    @property
+    def http2(self) -> bool | None:
+        """Explicit HTTP/2 override, or `None` when unset."""
+        ...
+
 
 class SessionSettings(BaseModel):
     """Resolved session runtime settings."""
@@ -32,14 +37,17 @@ class SessionSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     client_pool_size: int = Field(gt=0)
+    http2: bool = False
 
 
-_SESSION_SETTING_FIELDS = ("client_pool_size",)
+_SESSION_SETTING_FIELDS = ("client_pool_size", "http2")
 _ENVIRONMENT_FIELDS = {
     "client_pool_size": "VERCEL_CLIENT_POOL_SIZE",
+    "http2": "VERCEL_HTTP2",
 }
 _DEFAULT_SETTINGS = {
     "client_pool_size": 10,
+    "http2": False,
 }
 
 
@@ -48,8 +56,10 @@ def default_session_setting_sources(options: SessionOptionsLike) -> tuple[Settin
 
     return (
         ExplicitSettingsSource(
-            {"client_pool_size": options.client_pool_size},
-            name="session options",
+            {
+                "client_pool_size": options.client_pool_size,
+                "http2": options.http2,
+            },
         ),
         EnvironmentSettingsSource(_ENVIRONMENT_FIELDS),
         DefaultsSettingsSource(_DEFAULT_SETTINGS, name="sdk defaults"),

@@ -4,20 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import overload
 
 from vercel._internal.unstable.default import get_default_session
 from vercel._internal.unstable.sandbox.accessor import (
     SandboxAccessor,
-    SyncSandboxAccessor,
     merge_sandbox_options,
 )
-from vercel._internal.unstable.sandbox.types import (
-    Sandbox,
-    SandboxCreateParams,
-    SandboxOptions,
-)
-from vercel._internal.unstable.session import Session, SyncSession
+from vercel._internal.unstable.sandbox.models import Sandbox
+from vercel._internal.unstable.sandbox.options import SandboxOptions
+from vercel._internal.unstable.sandbox.params import SandboxCreateParams
+from vercel._internal.unstable.session import Session
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,18 +25,8 @@ class SandboxAccessorProxy:
     def with_options(self, options: SandboxOptions | None = None) -> SandboxAccessorProxy:
         return SandboxAccessorProxy(options=merge_sandbox_options(self.options, options))
 
-    @overload
-    def with_session(self, session: Session) -> SandboxAccessor: ...
-
-    @overload
-    def with_session(self, session: SyncSession) -> SyncSandboxAccessor: ...
-
-    def with_session(self, session: Session | SyncSession) -> SandboxAccessor | SyncSandboxAccessor:
-        if isinstance(session, Session):
-            return SandboxAccessor(session, options=self.options)
-        if isinstance(session, SyncSession):
-            return SyncSandboxAccessor(session, options=self.options)
-        raise TypeError("session must be Session or SyncSession")
+    def with_session(self, session: Session) -> SandboxAccessor:
+        return SandboxAccessor(session, options=self.options)
 
     async def create(
         self,

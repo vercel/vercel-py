@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import inspect
 import os
 import time
 import uuid
@@ -8,6 +8,8 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any, Protocol, TypedDict
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+import anyio
 
 
 def get_download_url(blob_url: str) -> str:
@@ -256,8 +258,7 @@ class StreamingBodyWithProgress:
             result = self._on_progress(
                 UploadProgressEvent(loaded=self._loaded, total=total, percentage=percentage)
             )
-            # Check if the callback is async
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
 
     async def __aiter__(self):  # type: ignore[override]
@@ -282,7 +283,7 @@ class StreamingBodyWithProgress:
                 self._loaded += len(chunk)
                 await self._emit_progress_async()
                 yield bytes(chunk)
-                await asyncio.sleep(0)
+                await anyio.sleep(0)
             return
         # assume iterable of bytes
         for chunk in self._source:  # type: ignore[assignment]
@@ -291,7 +292,7 @@ class StreamingBodyWithProgress:
             self._loaded += len(chunk)
             await self._emit_progress_async()
             yield bytes(chunk)
-            await asyncio.sleep(0)
+            await anyio.sleep(0)
 
     async def _yield_bytes_async(self, data: bytes):
         view = memoryview(data)
@@ -303,7 +304,7 @@ class StreamingBodyWithProgress:
             self._loaded += len(chunk)
             await self._emit_progress_async()
             yield chunk.tobytes()
-            await asyncio.sleep(0)
+            await anyio.sleep(0)
 
 
 def make_request_id(store_id: str) -> str:

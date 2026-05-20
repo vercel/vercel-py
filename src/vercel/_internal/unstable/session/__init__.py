@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from vercel._internal.http import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT, TransportOptions
 from vercel._internal.unstable.errors import SessionClosedError
 from vercel._internal.unstable.session.settings import (
     SessionSettings,
@@ -14,7 +15,7 @@ from vercel._internal.unstable.session.settings import (
 )
 
 if TYPE_CHECKING:
-    from vercel._internal.http.transport import BaseTransport
+    from vercel._internal.http.transport import AsyncTransport, SyncTransport
     from vercel._internal.unstable.sandbox.accessor import (
         SandboxAccessor,
         SyncSandboxAccessor,
@@ -26,6 +27,7 @@ class SessionOptions:
     """Session-level runtime options."""
 
     client_pool_size: int | None = None
+    http2: bool | None = None
 
 
 class Session:
@@ -35,10 +37,11 @@ class Session:
         self.options = options or SessionOptions()
         self._settings: SessionSettings | None = None
         self._sandbox_accessor: SandboxAccessor | None = None
-        self._sandbox_transport: BaseTransport | None = None
+        self._transport: AsyncTransport | None = None
         self._close_hooks: list[Callable[[], Awaitable[None]]] = []
         self._initialized = False
         self._closed = False
+        self._owns_transport = False
 
     @property
     def sandbox(self) -> SandboxAccessor:
@@ -52,6 +55,18 @@ class Session:
         self._ensure_open()
         if self._settings is None:
             self._settings = load_session_settings(default_session_setting_sources(self.options))
+        if self._transport is None:
+            from vercel._internal.http import create_base_async_client
+            from vercel._internal.http.transport import AsyncTransport
+
+            transport_options = TransportOptions(
+                timeout=DEFAULT_TIMEOUT,
+                base_url=DEFAULT_API_BASE_URL,
+                max_connections=self._settings.client_pool_size,
+                enable_http2=self._settings.http2,
+            )
+            self._transport = AsyncTransport(create_base_async_client(transport_options))
+            self._owns_transport = True
         self._initialized = True
 
     async def aclose(self) -> None:
@@ -61,6 +76,10 @@ class Session:
         for close_hook in self._close_hooks:
             await close_hook()
         self._close_hooks.clear()
+        if self._owns_transport and self._transport is not None:
+            await self._transport.aclose()
+            self._transport = None
+            self._owns_transport = False
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -84,10 +103,11 @@ class SyncSession:
         self.options = options or SessionOptions()
         self._settings: SessionSettings | None = None
         self._sandbox_accessor: SyncSandboxAccessor | None = None
-        self._sandbox_transport: BaseTransport | None = None
+        self._transport: SyncTransport | None = None
         self._close_hooks: list[Callable[[], None]] = []
         self._initialized = False
         self._closed = False
+        self._owns_transport = False
 
     @property
     def sandbox(self) -> SyncSandboxAccessor:
@@ -101,6 +121,18 @@ class SyncSession:
         self._ensure_open()
         if self._settings is None:
             self._settings = load_session_settings(default_session_setting_sources(self.options))
+        if self._transport is None:
+            from vercel._internal.http import create_base_client
+            from vercel._internal.http.transport import SyncTransport
+
+            transport_options = TransportOptions(
+                timeout=DEFAULT_TIMEOUT,
+                base_url=DEFAULT_API_BASE_URL,
+                max_connections=self._settings.client_pool_size,
+                enable_http2=self._settings.http2,
+            )
+            self._transport = SyncTransport(create_base_client(transport_options))
+            self._owns_transport = True
         self._initialized = True
 
     def close(self) -> None:
@@ -110,6 +142,10 @@ class SyncSession:
         for close_hook in self._close_hooks:
             close_hook()
         self._close_hooks.clear()
+        if self._owns_transport and self._transport is not None:
+            self._transport.close()
+            self._transport = None
+            self._owns_transport = False
 
     def _ensure_open(self) -> None:
         if self._closed:

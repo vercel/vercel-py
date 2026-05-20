@@ -6,11 +6,24 @@ import asyncio
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
-from vercel._internal.http.transport import BaseTransport, BytesBody, JSONBody, RawBody, RequestBody
+from vercel._internal.http.transport import (
+    BaseTransport,
+    BytesBody,
+    HeaderTypes,
+    JSONBody,
+    QueryParamTypes,
+    RawBody,
+    RequestBody,
+)
+
+if TYPE_CHECKING:
+    from vercel._internal.http.transport import AsyncTransport, SyncTransport
+    from vercel._internal.unstable.session import Session, SyncSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +33,7 @@ class RecordedSandboxRequest:
     headers: Mapping[str, str]
     query: Mapping[str, Any]
     body: Any
+    timeout: timedelta | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,11 +44,50 @@ class ScriptedSandboxResponse:
     delay: float | None = None
 
 
+def _normalize_path_for_lookup(path: str) -> str:
+    if path.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(path)
+        return parsed.path or "/"
+    return path
+
+
+def _record_headers(
+    headers: HeaderTypes | None,
+    *,
+    token: str | None,
+    body: RequestBody,
+) -> Mapping[str, str]:
+    request_headers = httpx.Headers(headers)
+    if token is not None:
+        request_headers.setdefault("authorization", f"Bearer {token}")
+    if isinstance(body, JSONBody):
+        request_headers.setdefault("content-type", "application/json")
+    elif isinstance(body, BytesBody):
+        request_headers.setdefault("content-type", body.content_type)
+    return dict(request_headers.multi_items())
+
+
+def _record_query(params: QueryParamTypes | None) -> Mapping[str, Any]:
+    if params is None:
+        return {}
+    return dict(httpx.QueryParams(params).multi_items())
+
+
 class FakeSandboxAPI(BaseTransport):
     def __init__(self) -> None:
         self.requests: list[RecordedSandboxRequest] = []
         self._responses: deque[ScriptedSandboxResponse] = deque()
         self._path_responses: dict[str, deque[ScriptedSandboxResponse]] = {}
+
+    def install(self, session: Session | SyncSession) -> None:
+        from vercel._internal.unstable.session import Session
+
+        if isinstance(session, Session):
+            session._transport = cast("AsyncTransport", self)
+        else:
+            session._transport = cast("SyncTransport", self)
 
     def script_response(
         self,
@@ -79,24 +132,27 @@ class FakeSandboxAPI(BaseTransport):
         method: str,
         path: str,
         *,
-        params: dict[str, Any] | None = None,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
         body: RequestBody = None,
-        headers: dict[str, str] | None = None,
-        timeout: float | None = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
     ) -> httpx.Response:
         _ = (timeout, follow_redirects, stream)
+        normalized = _normalize_path_for_lookup(path)
         self.requests.append(
             RecordedSandboxRequest(
                 method=method.upper(),
-                path=path,
-                headers=headers or {},
-                query=params or {},
+                path=normalized,
+                headers=_record_headers(headers, token=token, body=body),
+                query=_record_query(params),
                 body=_record_body(body),
+                timeout=timeout,
             )
         )
-        lookup_key = path.lstrip("/")
+        lookup_key = normalized.lstrip("/")
         path_deque = self._path_responses.get(lookup_key)
         if path_deque:
             response = path_deque.popleft()
@@ -108,7 +164,7 @@ class FakeSandboxAPI(BaseTransport):
             loop = None
         if response.delay is not None and loop is not None:
             await asyncio.sleep(response.delay)
-        request = httpx.Request(method, f"https://sandbox.vercel.com/{path.lstrip('/')}")
+        request = httpx.Request(method, f"https://sandbox.vercel.com/{normalized.lstrip('/')}")
         return httpx.Response(
             response.status_code,
             json=response.json,
