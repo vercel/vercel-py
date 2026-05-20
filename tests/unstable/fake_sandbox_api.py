@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from vercel._internal.http.transport import BytesBody, JSONBody, RawBody, RequestBody
+from vercel._internal.http.transport import BaseTransport, BytesBody, JSONBody, RawBody, RequestBody
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +28,7 @@ class ScriptedSandboxResponse:
     headers: Mapping[str, str] = field(default_factory=dict)
 
 
-class FakeSandboxAPI:
+class FakeSandboxAPI(BaseTransport):
     def __init__(self) -> None:
         self.requests: list[RecordedSandboxRequest] = []
         self._responses: deque[ScriptedSandboxResponse] = deque()
@@ -78,6 +78,9 @@ class FakeSandboxAPI:
             headers=response.headers,
             request=request,
         )
+
+    async def aclose(self) -> None:
+        pass
 
 
 def _record_body(body: RequestBody) -> Any:

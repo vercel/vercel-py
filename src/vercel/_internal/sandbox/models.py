@@ -453,6 +453,7 @@ ResourcesInput: TypeAlias = Resources | Mapping[str, Any]
 
 class CreateSandboxRequest(_CreateModel):
     project_id: StrictStr = Field(serialization_alias="projectId")
+    name: StrictStr | None = None
     ports: list[int] | None = None
     source: Source | None = None
     timeout: int | timedelta | None = None
@@ -548,6 +549,7 @@ class Sandbox(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
+    name: str | None = None
     memory: int
     vcpus: int
     region: str

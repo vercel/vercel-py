@@ -14,10 +14,13 @@ from vercel._internal.unstable.sandbox_errors import (
     sandbox_api_error_context,
 )
 
-from .auth import SandboxCredentialProvider
+from .auth import SandboxCredentialProvider, SyncSandboxCredentialProvider
 
 if TYPE_CHECKING:
-    from vercel._internal.unstable.session import Session, SyncSession
+    from vercel._internal.unstable.session import (
+        Session as _SdkSession,
+        SyncSession as _SdkSyncSession,
+    )
 
 
 class SandboxError(VercelError):
@@ -65,6 +68,7 @@ class SandboxTerminalStateError(SandboxError):
 @dataclass(frozen=True, slots=True)
 class SandboxCreateParams:
     runtime: str | None = None
+    name: str | None = None
     source: Source | None = None
     ports: list[int] | None = None
     timeout: timedelta | None = None
@@ -72,6 +76,9 @@ class SandboxCreateParams:
     interactive: bool | None = None
     env: dict[str, str] | None = None
     network_policy: NetworkPolicy | None = None
+    persistent: bool | None = None
+    snapshot_expiration: timedelta | None = None
+    tags: list[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,22 +88,49 @@ class SandboxOptions:
     project_id: str | None = None
     request_timeout: timedelta | None = None
     retry_attempts: int | None = None
-    credential_provider: SandboxCredentialProvider | None = None
+    credential_provider: SandboxCredentialProvider | SyncSandboxCredentialProvider | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Session:
+    """V2 runtime session attached to a named Sandbox."""
+
+    id: str
+    status: SandboxStatus | None = None
+    memory: int | None = None
+    vcpus: int | None = None
+    region: str | None = None
+    runtime: str | None = None
+    timeout: int | timedelta | None = None
+    requested_at: int | None = None
+    started_at: int | None = None
+    cwd: str | None = None
+    project_id: str | None = None
+    source_sandbox_name: str | None = None
+    source_snapshot_id: str | None = None
+    active_cpu_duration_ms: int | None = None
+    network_transfer: int | None = None
 
 
 @dataclass(slots=True)
 class Sandbox:
-    id: str
-    status: SandboxStatus | None = None
-    _session: Session | None = field(default=None, repr=False, compare=False)
+    name: str
+    persistent: bool | None = None
+    current_snapshot_id: str | None = None
+    current_session: Session | None = None
+    routes: list[Any] | None = None
+    _session: _SdkSession | None = field(default=None, repr=False, compare=False)
     _raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
 class SyncSandbox:
-    id: str
-    status: SandboxStatus | None = None
-    _session: SyncSession | None = field(default=None, repr=False, compare=False)
+    name: str
+    persistent: bool | None = None
+    current_snapshot_id: str | None = None
+    current_session: Session | None = None
+    routes: list[Any] | None = None
+    _session: _SdkSyncSession | None = field(default=None, repr=False, compare=False)
     _raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
@@ -104,7 +138,7 @@ class SyncSandbox:
 class Snapshot:
     id: str
     sandbox_id: str | None = None
-    _session: Session | None = field(default=None, repr=False, compare=False)
+    _session: _SdkSession | None = field(default=None, repr=False, compare=False)
     _raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
@@ -112,7 +146,7 @@ class Snapshot:
 class SyncSnapshot:
     id: str
     sandbox_id: str | None = None
-    _session: SyncSession | None = field(default=None, repr=False, compare=False)
+    _session: _SdkSyncSession | None = field(default=None, repr=False, compare=False)
     _raw: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
@@ -125,6 +159,7 @@ __all__ = [
     "SandboxOperationTimeoutError",
     "SandboxStatus",
     "SandboxTerminalStateError",
+    "Session",
     "Snapshot",
     "SyncSandbox",
     "SyncSnapshot",

@@ -114,7 +114,7 @@ async def create_sandbox(request: Request):
             SandboxCreateParams(runtime="python3.12"),
             timeout=timedelta(seconds=90),
         )
-        return {"id": sandbox.id}
+        return {"name": sandbox.name}
 ```
 
 The top-level Sandbox accessor is singular because the product name is Vercel
@@ -194,7 +194,11 @@ concepts:
 - `VercelError`
 - default-bound accessors such as `sandbox` and `resources`
 
-Domain-specific types stay in domain packages:
+Domain-specific types stay in domain packages. A repeated class name is allowed
+when the module boundary carries the distinction; for example,
+`vercel.unstable.Session` is the SDK lifecycle session, while
+`vercel.unstable.sandbox.Session` is a Sandbox runtime session returned by the
+Sandbox API and normally reached through `sandbox.current_session`:
 
 ```python
 from vercel.unstable.sandbox import (
@@ -202,6 +206,7 @@ from vercel.unstable.sandbox import (
     SandboxCreateParams,
     SandboxOptions,
     SandboxStatus,
+    Session as SandboxRuntimeSession,
     Snapshot,
 )
 ```
@@ -542,15 +547,15 @@ may provide repeated behavior configuration across many calls, but per-method
 kwargs are enough for the first unstable surface.
 
 Simple retrieval selectors may remain keyword-shaped rather than requiring a
-params object:
+params object. For v2 Sandbox, `name` selects the named/persistent sandbox
+identity. Runtime session IDs belong to the attached
+`vercel.unstable.sandbox.Session` and session-scoped operations, not to the
+primary `Sandbox` handle identity:
 
 ```python
-sandbox = await session.sandbox.get(id="sbx_123")
 sandbox = await session.sandbox.get(name="preview-db")
+session_id = sandbox.current_session.id
 ```
-
-When a service supports multiple identifiers, exactly one selector must be
-provided. For Sandbox, `id` and `name` are mutually exclusive.
 
 Options merging should use an explicit unset sentinel internally. Omitted values
 inherit. `None` is a real value only for fields whose type allows it. The unset
@@ -659,18 +664,26 @@ Service objects should be custom behavioral handles. A `Sandbox` is not just a
 Pydantic model; it is a handle to a remote object with actions, lifecycle
 methods, cached state, and related service methods.
 
-Handles may keep remote state in a private typed model:
+Handles may keep remote state in private typed models:
 
 ```python
 class Sandbox:
     _state: _SandboxState | None
 
     @property
-    def id(self) -> str: ...
+    def name(self) -> str: ...
+
+    @property
+    def current_session(self) -> vercel.unstable.sandbox.Session: ...
 
     @property
     def status(self) -> SandboxStatus: ...
 ```
+
+The sandbox-domain `Session` type intentionally relies on the module boundary
+instead of a stuttering public name such as `SandboxSession`. It must not be
+re-exported from the top-level `vercel.unstable` facade; examples that import
+both session types should alias at least one of them.
 
 Expose stable first-class properties for commonly used fields. Avoid requiring
 users to dig through `.data` for the main workflow.
@@ -680,7 +693,6 @@ Directly constructed handles are keyword-only and may be partially loaded:
 ```python
 from vercel.unstable.sandbox import Sandbox, Snapshot
 
-sandbox = Sandbox(id="sbx_123")
 sandbox = Sandbox(name="preview-db")
 snapshot = Snapshot(id="snap_123")
 ```
@@ -704,7 +716,7 @@ Sandbox is the first proving ground for this design.
 `refresh()` updates the object in place and returns `self`:
 
 ```python
-sandbox = await session.sandbox.get(id="sbx_123")
+sandbox = await session.sandbox.get(name="preview-db")
 await sandbox.refresh()
 ```
 
@@ -870,9 +882,10 @@ Tracing uses OpenTelemetry. Spans are emitted lazily, only when
 `opentelemetry-api` is importable in the user's environment. Span names and
 attributes follow OTel semantic conventions where they exist.
 
-Span attributes describe the operation (sandbox id, region, runtime, and
-similar fields), not SDK plumbing. Session identity is intentionally not part
-of span data: two sessions that differ only in pool size or lazy state are
+Span attributes describe the operation (sandbox name, session id, region,
+runtime, and similar fields), not SDK plumbing. Session identity is
+intentionally not part of span data: two sessions that differ only in pool size
+or lazy state are
 indistinguishable in traces. If a use case for opt-in span scoping by
 deployment unit emerges, it can be added later without changing existing
 instrumentation.

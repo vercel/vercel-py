@@ -23,7 +23,7 @@ def test_unstable_error_hierarchy_inherits_from_vercel_error() -> None:
 
 
 def test_sandbox_api_error_translation_preserves_context() -> None:
-    request = httpx.Request("POST", "https://api.vercel.test/v1/sandboxes")
+    request = httpx.Request("POST", "https://api.vercel.test/v2/sandboxes")
     response = httpx.Response(429, request=request, headers={"retry-after": "120"})
     stable_error = SandboxRateLimitError(
         response,
@@ -57,7 +57,7 @@ def test_sandbox_api_error_translation_handles_non_rate_limit_errors() -> None:
 
 
 def test_sandbox_api_error_translation_ignores_non_numeric_retry_after() -> None:
-    request = httpx.Request("POST", "https://api.vercel.test/v1/sandboxes")
+    request = httpx.Request("POST", "https://api.vercel.test/v2/sandboxes")
     response = httpx.Response(429, request=request, headers={"retry-after": "tomorrow"})
     stable_error = SandboxRateLimitError(
         response,

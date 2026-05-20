@@ -49,18 +49,28 @@ Domain types stay in domain packages:
 - `vercel.unstable.resources`
 - `vercel.unstable.testing`
 
+A domain package may reuse a top-level class name when the module boundary is
+the semantic distinction. In particular, `vercel.unstable.Session` is the SDK
+lifecycle session, while `vercel.unstable.sandbox.Session` is the Sandbox
+runtime session returned by the v2 Sandbox API. The sandbox-domain `Session`
+must not be re-exported from `vercel.unstable`; callers that need both names in
+one file should alias explicitly.
+
 Alternatives considered:
 
 - re-export every experimental service API from `vercel.unstable`
 - make subpackages the only public import path
 - expose everything available for convenience
+- call the Sandbox runtime session `SandboxSession`
 
 Rationale:
 
 The top-level namespace should communicate the new API model, not become a
 grab bag. Domain-specific types such as `SandboxStatus`, `SandboxOptions`,
 and credential providers should remain near their domain until multiple
-services prove they need the exact same abstraction.
+services prove they need the exact same abstraction. The module-qualified
+`vercel.unstable.sandbox.Session` name avoids public stutter while keeping the
+SDK lifecycle session and Sandbox runtime session distinguishable.
 
 ## Decision 3: Session Model
 
@@ -341,8 +351,9 @@ lifecycle methods, so they should not be plain Pydantic response models.
 ## Decision 14: Sandbox Object State
 
 Decision: `Sandbox` objects are stable handles with explicit mutable cached
-state.
-
+state. A `Sandbox` represents the v2 named/persistent sandbox identity and
+carries an attached `vercel.unstable.sandbox.Session` for the current runtime
+VM state.
 Properties read cached state only and never perform hidden I/O. Methods such as
 `refresh()` perform explicit I/O, update the object in place, and return `self`.
 
@@ -485,10 +496,10 @@ Tracing uses OpenTelemetry. Spans are emitted lazily, only when
 `opentelemetry-api` is importable in the user's environment. Span names and
 attributes follow OTel semantic conventions where they exist.
 
-Span attributes describe the operation (sandbox id, region, runtime, and
-similar fields), not SDK plumbing. Session identity is intentionally not
-part of span data: two sessions that differ only in pool size or lazy state
-are indistinguishable in traces.
+Span attributes describe the operation (sandbox name, session id, region,
+runtime, and similar fields), not SDK plumbing. SDK session identity is
+intentionally not part of span data: two SDK sessions that differ only in pool
+size or lazy state are indistinguishable in traces.
 
 Alternatives considered:
 
