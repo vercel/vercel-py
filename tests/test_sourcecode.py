@@ -98,6 +98,7 @@ class TestTypecheck(unittest.TestCase):
             "vercel.headers",
             "vercel.oidc",
             "vercel.sandbox",
+            "vercel.unstable",
         ]
         for module in modules:
             try:
