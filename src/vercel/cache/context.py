@@ -15,6 +15,12 @@ _cv_purge: ContextVar[PurgeAPI | None] = ContextVar("vercel_purge", default=None
 _cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar("vercel_headers", default=None)
 
 
+class _Unset: ...
+
+
+UNSET = _Unset()
+
+
 @dataclass
 class _ContextSnapshot:
     wait_until: Callable[[Awaitable[object]], None] | None
@@ -36,21 +42,21 @@ def get_context() -> _ContextSnapshot:
 
 def set_context(
     *,
-    wait_until: Callable[[Awaitable[object]], None] | None = None,
-    cache: object | None = None,
-    async_cache: object | None = None,
-    purge: PurgeAPI | None = None,
-    headers: Mapping[str, str] | None = None,
+    wait_until: Callable[[Awaitable[object]], None] | None | _Unset = UNSET,
+    cache: object | None | _Unset = UNSET,
+    async_cache: object | None | _Unset = UNSET,
+    purge: PurgeAPI | None | _Unset = UNSET,
+    headers: Mapping[str, str] | None | _Unset = UNSET,
 ) -> None:
-    if wait_until is not None:
+    if not isinstance(wait_until, _Unset):
         _cv_wait_until.set(wait_until)
-    if cache is not None:
+    if not isinstance(cache, _Unset):
         _cv_cache.set(cache)
-    if async_cache is not None:
+    if not isinstance(async_cache, _Unset):
         _cv_async_cache.set(async_cache)
-    if purge is not None:
+    if not isinstance(purge, _Unset):
         _cv_purge.set(purge)
-    if headers is not None:
+    if not isinstance(headers, _Unset):
         _cv_headers.set(headers)
 
 
