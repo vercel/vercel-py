@@ -76,13 +76,40 @@ class AsyncRuntimeCache(AsyncCache):
         return await resolve_cache(sync=False).contains(self._make_key(key))
 
 
+@overload
+def get_cache(
+    *,
+    key_hash_function: Callable[[str], str] | None = ...,
+    namespace: str | None = ...,
+    namespace_separator: str | None = ...,
+    sync: Literal[True] = ...,
+) -> RuntimeCache: ...
+
+
+@overload
+def get_cache(
+    *,
+    key_hash_function: Callable[[str], str] | None = ...,
+    namespace: str | None = ...,
+    namespace_separator: str | None = ...,
+    sync: Literal[False],
+) -> AsyncRuntimeCache: ...
+
+
 def get_cache(
     *,
     key_hash_function: Callable[[str], str] | None = None,
     namespace: str | None = None,
     namespace_separator: str | None = None,
-) -> RuntimeCache:
-    return RuntimeCache(
+    sync: bool = True,
+) -> RuntimeCache | AsyncRuntimeCache:
+    if sync:
+        return RuntimeCache(
+            key_hash_function=key_hash_function,
+            namespace=namespace,
+            namespace_separator=namespace_separator,
+        )
+    return AsyncRuntimeCache(
         key_hash_function=key_hash_function,
         namespace=namespace,
         namespace_separator=namespace_separator,
@@ -157,7 +184,12 @@ def resolve_cache(sync: Literal[False]) -> AsyncCache: ...
 
 def resolve_cache(sync: bool = True) -> Cache | AsyncCache:
     ctx = get_context()
-    cache = getattr(ctx, "cache", None)
-    if cache is not None:
-        return cast(Cache, cache) if sync else cast(AsyncCache, cache)
+    if sync:
+        cache = getattr(ctx, "cache", None)
+        if cache is not None:
+            return cast(Cache, cache)
+    else:
+        cache = getattr(ctx, "async_cache", None)
+        if cache is not None:
+            return cast(AsyncCache, cache)
     return _get_cache_implementation(os.getenv("SUSPENSE_CACHE_DEBUG") == "true", sync)
