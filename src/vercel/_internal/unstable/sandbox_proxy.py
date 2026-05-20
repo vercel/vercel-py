@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from vercel._internal.unstable.sandbox.types import SandboxOptions
 from vercel._internal.unstable.session import Session, SyncSession
-from vercel.unstable.sandbox import SandboxOptions
 
 
 @dataclass(frozen=True, slots=True)

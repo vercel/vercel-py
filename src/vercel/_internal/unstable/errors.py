@@ -35,3 +35,15 @@ class SettingsValidationError(SettingsError):
         super().__init__(message)
         self.field = field
         self.source = source
+
+
+class AuthError(VercelError):
+    """Base class for unstable auth and credential-provider errors."""
+
+
+class CredentialResolutionError(AuthError):
+    """Raised when credentials cannot be resolved for an authenticated request."""
+
+
+class CredentialProviderError(AuthError):
+    """Raised when a credential provider fails or returns unsupported credentials."""

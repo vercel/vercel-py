@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-
-def reset_default_session() -> None:
-    """Reset default-session state for tests."""
-    raise NotImplementedError("default-session reset will be implemented in Slice 07")
-
+from vercel._internal.unstable.testing import reset_default_session
 
 __all__ = ["reset_default_session"]

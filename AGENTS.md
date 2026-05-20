@@ -21,3 +21,10 @@
 - Explain what changed and why.
 - Do not list file-by-file changes that are obvious from the diff.
 - Do not include any `Co-authored-by:` line.
+
+# Code Organization
+
+- Put implementation in `src/vercel/_internal/...`.
+- Treat public packages as API composition points: import internal implementations and re-export only the names that are intentionally public.
+- Do not export helpers, adapters, aliases, or implementation dependencies from a public package just because another module needs them.
+- Internal modules should import reusable code from `_internal`, not from public `vercel.*` facade packages.

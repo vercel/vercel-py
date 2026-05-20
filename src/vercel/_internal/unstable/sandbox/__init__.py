@@ -1,4 +1,4 @@
-"""Public composition point for unstable Sandbox APIs."""
+"""Internal Sandbox implementation for unstable APIs."""
 
 from __future__ import annotations
 
