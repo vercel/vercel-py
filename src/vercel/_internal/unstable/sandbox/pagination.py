@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vercel._internal.unstable.sandbox.models import Sandbox, SandboxRuntimeSession
+    from vercel._internal.unstable.sandbox.models import Sandbox, SandboxRuntimeSession, Snapshot
 
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50
+MAX_QUERY_SNAPSHOTS_PAGE_SIZE = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +20,12 @@ class QuerySandboxesPage:
 @dataclass(frozen=True, slots=True)
 class QuerySessionsPage:
     sessions: list["SandboxRuntimeSession"]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class QuerySnapshotsPage:
+    snapshots: list["Snapshot"]
     next_cursor: str | None
 
 
@@ -72,11 +79,39 @@ class QuerySessionsParams:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class QuerySnapshotsParams:
+    page_size: int | None = None
+    cursor: str | None = None
+
+    def __init__(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+    ) -> None:
+        if page_size is not None and not 1 <= page_size <= MAX_QUERY_SNAPSHOTS_PAGE_SIZE:
+            raise ValueError(
+                f"query_snapshots page_size must be between 1 and {MAX_QUERY_SNAPSHOTS_PAGE_SIZE}"
+            )
+        object.__setattr__(self, "page_size", page_size)
+        object.__setattr__(self, "cursor", cursor)
+
+    def with_cursor(self, cursor: str) -> "QuerySnapshotsParams":
+        return QuerySnapshotsParams(
+            page_size=self.page_size,
+            cursor=cursor,
+        )
+
+
 __all__ = [
     "MAX_QUERY_SANDBOXES_PAGE_SIZE",
     "MAX_QUERY_SESSIONS_PAGE_SIZE",
+    "MAX_QUERY_SNAPSHOTS_PAGE_SIZE",
     "QuerySandboxesPage",
     "QuerySandboxesParams",
     "QuerySessionsPage",
     "QuerySessionsParams",
+    "QuerySnapshotsPage",
+    "QuerySnapshotsParams",
 ]

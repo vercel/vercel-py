@@ -22,10 +22,12 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxRuntimeSession,
     SandboxSource,
     SandboxStatus,
+    Snapshot,
     SnapshotRetention,
     SyncSandbox,
     SyncSandboxCommand,
     SyncSandboxRuntimeSession,
+    SyncSnapshot,
     TagFilter,
     WriteFile,
 )
@@ -35,6 +37,8 @@ from vercel._internal.unstable.sandbox.pagination import (
     QuerySandboxesParams,
     QuerySessionsPage,
     QuerySessionsParams,
+    QuerySnapshotsPage,
+    QuerySnapshotsParams,
 )
 from vercel._internal.unstable.session import AliveToken
 
@@ -124,6 +128,15 @@ class SandboxService:
             sdk_session=self._sdk_session,
         )
         return command
+
+    def _bind_snapshot(self, snapshot: Snapshot) -> Snapshot:
+        if self._sync_handles:
+            snapshot = cast(Snapshot, SyncSnapshot.model_validate(snapshot.model_dump()))
+        snapshot._bind_alive_tokens(
+            session_token=self._alive_token,
+            sdk_session=self._sdk_session,
+        )
+        return snapshot
 
     async def _wait_for_ready_sandbox(
         self,
@@ -453,6 +466,84 @@ class SandboxService:
             network_policy=network_policy,
         )
         return self._bind_runtime_session(response.to_runtime_session())
+
+    async def create_snapshot(
+        self,
+        *,
+        session_id: str,
+        expiration: DurationInput = None,
+    ) -> tuple[Snapshot, SandboxRuntimeSession]:
+        self._alive_token.raise_if_invalid()
+        response = await self._api_client.create_snapshot(
+            session_id=session_id,
+            expiration=expiration,
+        )
+        snapshot, session = response.to_snapshot_and_session()
+        return self._bind_snapshot(snapshot), self._bind_runtime_session(session)
+
+    async def query_snapshots_page(
+        self,
+        *,
+        project_id: str | None = None,
+        name: str | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> QuerySnapshotsPage:
+        self._alive_token.raise_if_invalid()
+        response = await self._api_client.query_snapshots(
+            project_id=project_id,
+            name=name,
+            limit=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+        return QuerySnapshotsPage(
+            snapshots=[self._bind_snapshot(snapshot) for snapshot in response.snapshots],
+            next_cursor=response.pagination.next if response.pagination is not None else None,
+        )
+
+    def query_snapshots(
+        self,
+        *,
+        project_id: str | None = None,
+        name: str | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> AsyncIterator[Snapshot]:
+        async def iter_snapshots() -> AsyncIterator[Snapshot]:
+            current_params = QuerySnapshotsParams(
+                page_size=page_size,
+                cursor=cursor,
+            )
+            while True:
+                page = await self.query_snapshots_page(
+                    project_id=project_id,
+                    name=name,
+                    page_size=current_params.page_size,
+                    cursor=current_params.cursor,
+                    sort_order=sort_order,
+                )
+                for snapshot in page.snapshots:
+                    yield snapshot
+                if page.next_cursor is None:
+                    return
+                if not page.snapshots:
+                    return
+                current_params = current_params.with_cursor(page.next_cursor)
+
+        return iter_snapshots()
+
+    async def get_snapshot(self, *, snapshot_id: str) -> Snapshot:
+        self._alive_token.raise_if_invalid()
+        response = await self._api_client.get_snapshot(snapshot_id=snapshot_id)
+        return self._bind_snapshot(response.to_snapshot())
+
+    async def delete_snapshot(self, *, snapshot_id: str) -> Snapshot:
+        self._alive_token.raise_if_invalid()
+        response = await self._api_client.delete_snapshot(snapshot_id=snapshot_id)
+        return self._bind_snapshot(response.to_snapshot())
 
     async def _run_command(
         self,

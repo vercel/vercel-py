@@ -22,6 +22,7 @@ from vercel.unstable.sandbox import (
     SandboxServiceOptions,
     SandboxSource,
     SandboxStatus,
+    Snapshot,
     SnapshotRetention,
     SnapshotSource,
     TagFilter,
@@ -88,6 +89,29 @@ def _command_response(
             "sessionId": session_id,
             "exitCode": exit_code,
             "startedAt": 1,
+        }
+    }
+
+
+def _snapshot_response(
+    *,
+    snapshot_id: str = "snap_123",
+    session_id: str = "sbx_123",
+    status: str = "created",
+) -> dict[str, object]:
+    return {
+        "snapshot": {
+            "id": snapshot_id,
+            "sourceSessionId": session_id,
+            "region": "iad1",
+            "status": status,
+            "sizeBytes": 1024,
+            "expiresAt": 1_800_000_000_000,
+            "createdAt": 1_700_000_000_000,
+            "updatedAt": 1_700_000_000_001,
+            "lastUsedAt": 1_700_000_000_002,
+            "creationMethod": "manual",
+            "parentId": None,
         }
     }
 
@@ -955,6 +979,108 @@ async def test_session_controls_and_sandbox_update_public_flow(
 
 
 @respx.mock
+async def test_snapshot_restore_public_flow(mock_env_clear: None) -> None:
+    create_requests: list[dict[str, object]] = []
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        create_requests.append(body)
+        name = str(body["name"])
+        return httpx.Response(200, json=_sandbox_response(name=name))
+
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
+    write_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/write").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    snapshot_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                **_snapshot_response(snapshot_id="snap_restore"),
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"],
+            },
+        )
+    )
+    list_route = respx.get("https://sandbox.test/v2/sandboxes/snapshots").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "snapshots": [_snapshot_response(snapshot_id="snap_restore")["snapshot"]],
+                "pagination": {"count": 1, "next": None},
+            },
+        )
+    )
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/snapshots/snap_restore").mock(
+        return_value=httpx.Response(200, json=_snapshot_response(snapshot_id="snap_restore"))
+    )
+    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
+        return_value=httpx.Response(200, content=b"from snapshot\n")
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/snapshots/snap_restore").mock(
+        return_value=httpx.Response(
+            200,
+            json=_snapshot_response(snapshot_id="snap_restore", status="deleted"),
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        base = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        await base.write_files([WriteFile(path="state.txt", content="from snapshot\n")])
+        created = await base.snapshot(expiration=0)
+        assert base.current_session is not None
+        with pytest.raises(SandboxInvalidHandleError):
+            await base.current_session.run_command("python", ["--version"])
+
+        restored = await sandbox.create_sandbox(
+            name="restored",
+            runtime="python3.13",
+            source=SnapshotSource(snapshot_id=created.id),
+        )
+        assert await restored.read_text("state.txt") == "from snapshot\n"
+
+        listed_from_handle = await base.list_snapshots(page_size=10)
+        listed_from_module = [
+            item
+            async for item in sandbox.query_snapshots(
+                project_id="prj_123",
+                name="preview",
+                page_size=10,
+            )
+        ]
+        fetched = await sandbox.get_snapshot(snapshot_id=created.id)
+        deleted = await created.delete()
+        with pytest.raises(SandboxInvalidHandleError):
+            await created.delete()
+
+    assert create_route.call_count == 2
+    assert create_requests[1]["source"] == {"type": "snapshot", "snapshotId": "snap_restore"}
+    assert write_route.called
+    assert json.loads(snapshot_route.calls.last.request.content) == {"expiration": 0}
+    assert [snapshot.id for snapshot in listed_from_handle] == ["snap_restore"]
+    assert [snapshot.id for snapshot in listed_from_module] == ["snap_restore"]
+    assert isinstance(fetched, Snapshot)
+    assert fetched.id == "snap_restore"
+    assert deleted.status == "deleted"
+    assert [dict(call.request.url.params) for call in list_route.calls] == [
+        {
+            "teamId": "team_123",
+            "project": "prj_123",
+            "name": "preview",
+            "limit": "10",
+        },
+        {
+            "teamId": "team_123",
+            "project": "prj_123",
+            "name": "preview",
+            "limit": "10",
+        },
+    ]
+    assert get_route.called
+    assert read_route.called
+    assert delete_route.called
+
+
+@respx.mock
 def test_sync_session_controls_and_sandbox_update_public_flow(
     mock_env_clear: None,
 ) -> None:
@@ -990,6 +1116,65 @@ def test_sync_session_controls_and_sandbox_update_public_flow(
         {"duration": 120000},
         {"duration": 30000},
     ]
+
+
+@respx.mock
+def test_sync_snapshot_create_list_get_delete_parity(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    snapshot_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                **_snapshot_response(snapshot_id="snap_sync"),
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"],
+            },
+        )
+    )
+    list_route = respx.get("https://sandbox.test/v2/sandboxes/snapshots").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "snapshots": [_snapshot_response(snapshot_id="snap_sync")["snapshot"]],
+                "pagination": {"count": 1, "next": None},
+            },
+        )
+    )
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/snapshots/snap_sync").mock(
+        return_value=httpx.Response(200, json=_snapshot_response(snapshot_id="snap_sync"))
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/snapshots/snap_sync").mock(
+        return_value=httpx.Response(
+            200,
+            json=_snapshot_response(snapshot_id="snap_sync", status="deleted"),
+        )
+    )
+
+    with vercel.session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        created = handle.snapshot(expiration=0)
+        assert handle.current_session is not None
+        with pytest.raises(SandboxInvalidHandleError):
+            handle.current_session.run_command("python", ["--version"])
+        listed = handle.list_snapshots(page_size=10)
+        project_listed = list(
+            sandbox_sync.query_snapshots(project_id="prj_123", name="preview", page_size=10)
+        )
+        fetched = sandbox_sync.get_snapshot(snapshot_id=created.id)
+        deleted = created.delete()
+        with pytest.raises(SandboxInvalidHandleError):
+            created.delete()
+
+    assert created.id == "snap_sync"
+    assert [snapshot.id for snapshot in listed] == ["snap_sync"]
+    assert [snapshot.id for snapshot in project_listed] == ["snap_sync"]
+    assert fetched.id == "snap_sync"
+    assert deleted.status == "deleted"
+    assert json.loads(snapshot_route.calls.last.request.content) == {"expiration": 0}
+    assert list_route.call_count == 2
+    assert get_route.called
+    assert delete_route.called
 
 
 @respx.mock

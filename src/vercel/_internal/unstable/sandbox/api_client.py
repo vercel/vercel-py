@@ -28,6 +28,8 @@ from vercel._internal.unstable.sandbox.models import (
     CommandResponse,
     CommandsResponse,
     CreateSandboxRequest,
+    CreateSnapshotRequest,
+    CreateSnapshotResponse,
     DurationInput,
     ExtendTimeoutRequest,
     FilesystemPathRequest,
@@ -37,6 +39,7 @@ from vercel._internal.unstable.sandbox.models import (
     MkdirRequest,
     QuerySandboxesRequest,
     QuerySessionsRequest,
+    QuerySnapshotsRequest,
     RunCommandRequest,
     RuntimeSessionResponse,
     RuntimeSessionsResponse,
@@ -44,7 +47,9 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxResources,
     SandboxResponse,
     SandboxSource,
+    SnapshotResponse,
     SnapshotRetention,
+    SnapshotsResponse,
     TagFilter,
     UpdateSandboxRequest,
     WriteFile,
@@ -540,6 +545,68 @@ class SandboxApiClient:
             body=network_policy,
         )
         return _validate_response(RuntimeSessionResponse, data)
+
+    async def create_snapshot(
+        self,
+        *,
+        session_id: str,
+        expiration: DurationInput = None,
+    ) -> CreateSnapshotResponse:
+        credentials = await self._resolve_credentials()
+        body: JSONValue | None = None
+        if expiration is not None:
+            request = CreateSnapshotRequest(expiration=expiration)
+            body = request.to_api_dict()
+        data = await self._request_json(
+            "POST",
+            format_url_path("v2/sandboxes/sessions/{session_id}/snapshot", session_id=session_id),
+            credentials=credentials,
+            body=body,
+        )
+        return _validate_response(CreateSnapshotResponse, data)
+
+    async def query_snapshots(
+        self,
+        *,
+        project_id: str | None = None,
+        name: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> SnapshotsResponse:
+        credentials = await self._resolve_credentials()
+        request = QuerySnapshotsRequest(
+            project_id=project_id or credentials.project_id,
+            name=name,
+            limit=limit,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+        data = await self._request_json(
+            "GET",
+            "v2/sandboxes/snapshots",
+            credentials=credentials,
+            params=request.to_api_dict(),
+        )
+        return _validate_response(SnapshotsResponse, data)
+
+    async def get_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
+        credentials = await self._resolve_credentials()
+        data = await self._request_json(
+            "GET",
+            format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
+            credentials=credentials,
+        )
+        return _validate_response(SnapshotResponse, data)
+
+    async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
+        credentials = await self._resolve_credentials()
+        data = await self._request_json(
+            "DELETE",
+            format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
+            credentials=credentials,
+        )
+        return _validate_response(SnapshotResponse, data)
 
     async def run_command(
         self,

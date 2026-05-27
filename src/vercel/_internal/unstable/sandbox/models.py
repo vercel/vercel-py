@@ -274,6 +274,32 @@ class QuerySessionsRequest(_ApiRequestModel):
     )
 
 
+class QuerySnapshotsRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="project")
+    name: str | None = None
+    limit: int | None = None
+    cursor: str | None = None
+    sort_order: str | None = Field(
+        default=None,
+        serialization_alias="sortOrder",
+    )
+
+
+class CreateSnapshotRequest(_ApiRequestModel):
+    expiration: DurationInput = None
+
+    @field_validator("expiration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta | None:
+        return _duration_to_milliseconds(value)
+
+    @field_serializer("expiration")
+    def _serialize_duration(self, value: timedelta | None) -> int | None:
+        if value is None:
+            return None
+        return to_ms_int(value)
+
+
 class ExtendTimeoutRequest(_ApiRequestModel):
     duration: DurationInput
 
@@ -563,6 +589,105 @@ class RuntimeSessionsResponse(_ApiModel):
     pagination: "Pagination | None" = None
 
 
+class BaseSnapshot(_ApiModel):
+    _session_alive_token: AliveToken | None = PrivateAttr(default=None)
+    _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
+    _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
+
+    id: str
+    source_session_id: str = Field(
+        validation_alias=AliasChoices("source_session_id", "sourceSessionId"),
+        serialization_alias="sourceSessionId",
+    )
+    region: str
+    status: Literal["created", "deleted", "failed"]
+    size_bytes: int = Field(
+        validation_alias=AliasChoices("size_bytes", "sizeBytes"),
+        serialization_alias="sizeBytes",
+    )
+    expires_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("expires_at", "expiresAt"),
+        serialization_alias="expiresAt",
+    )
+    created_at: int = Field(
+        validation_alias=AliasChoices("created_at", "createdAt"),
+        serialization_alias="createdAt",
+    )
+    updated_at: int = Field(
+        validation_alias=AliasChoices("updated_at", "updatedAt"),
+        serialization_alias="updatedAt",
+    )
+    last_used_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("last_used_at", "lastUsedAt"),
+        serialization_alias="lastUsedAt",
+    )
+    creation_method: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("creation_method", "creationMethod"),
+        serialization_alias="creationMethod",
+    )
+    parent_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("parent_id", "parentId"),
+        serialization_alias="parentId",
+    )
+
+    def _bind_alive_tokens(
+        self,
+        *,
+        session_token: AliveToken,
+        sdk_session: "SdkSession | None" = None,
+    ) -> None:
+        self._session_alive_token = session_token
+        if sdk_session is not None:
+            self._sdk_session = sdk_session
+
+    def _raise_if_invalid(self) -> None:
+        if self._session_alive_token is None:
+            raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
+        if not self._handle_alive_token.is_alive:
+            raise SandboxInvalidHandleError("Snapshot handle is no longer valid")
+        if not self._session_alive_token.is_alive:
+            raise SandboxInvalidHandleError("Snapshot handle is no longer valid")
+
+    def _require_sandbox_service(self) -> "SandboxService":
+        self._raise_if_invalid()
+        if self._sdk_session is None:
+            raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
+        return self._sdk_session.sandbox_service()
+
+    def _require_sync_sandbox_service(self) -> "SandboxService":
+        self._raise_if_invalid()
+        if self._sdk_session is None:
+            raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
+        return self._sdk_session.sync_sandbox_service()
+
+    def _invalidate_handle(self) -> None:
+        self._handle_alive_token.invalidate()
+
+
+class Snapshot(BaseSnapshot):
+    """A Sandbox v2 filesystem snapshot bound to an async SDK session."""
+
+    async def delete(self) -> "Snapshot":
+        service = self._require_sandbox_service()
+        deleted = await service.delete_snapshot(snapshot_id=self.id)
+        self._invalidate_handle()
+        return deleted
+
+
+class SyncSnapshot(BaseSnapshot):
+    """Synchronous mirror of `Snapshot`."""
+
+    def delete(self) -> "SyncSnapshot":
+        service = self._require_sync_sandbox_service()
+        deleted = iter_coroutine(service.delete_snapshot(snapshot_id=self.id))
+        self._invalidate_handle()
+        return cast(SyncSnapshot, deleted)
+
+
 class BaseSandboxRuntimeSession(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
     _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
@@ -798,6 +923,16 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
             encoding=encoding,
         )
 
+    async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
+        service = self._require_sandbox_service()
+        snapshot, session = await service.create_snapshot(
+            session_id=self.id,
+            expiration=expiration,
+        )
+        if session.status is not SandboxStatus.RUNNING:
+            self._invalidate_handle()
+        return snapshot
+
     def command_logs(self, command_id: str) -> AsyncIterator[SandboxCommandLog]:
         service = self._require_sandbox_service()
         return service.command_logs(
@@ -1014,6 +1149,18 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 encoding=encoding,
             )
         )
+
+    def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
+        service = self._require_sync_sandbox_service()
+        snapshot, session = iter_coroutine(
+            service.create_snapshot(
+                session_id=self.id,
+                expiration=expiration,
+            )
+        )
+        if session.status is not SandboxStatus.RUNNING:
+            self._invalidate_handle()
+        return cast(SyncSnapshot, snapshot)
 
     def command_logs(self, command_id: str) -> Iterator[SandboxCommandLog]:
         service = self._require_sync_sandbox_service()
@@ -1262,6 +1409,23 @@ class Sandbox(BaseSandbox):
         )
         return page.sessions
 
+    async def list_snapshots(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> list[Snapshot]:
+        service = self._require_sandbox_service()
+        page = await service.query_snapshots_page(
+            project_id=self.project_id,
+            name=self.name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+        return page.snapshots
+
     async def extend_execution_time_limit(
         self,
         duration: DurationInput,
@@ -1327,6 +1491,16 @@ class Sandbox(BaseSandbox):
             cwd=self._write_files_cwd(cwd),
             encoding=encoding,
         )
+
+    async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
+        service = self._require_sandbox_service()
+        snapshot, session = await service.create_snapshot(
+            session_id=self.current_session_id,
+            expiration=expiration,
+        )
+        if self.current_session is not None and session.status is not SandboxStatus.RUNNING:
+            self.current_session._invalidate_handle()
+        return snapshot
 
     async def destroy(self) -> "Sandbox":
         service = self._require_sandbox_service()
@@ -1516,6 +1690,25 @@ class SyncSandbox(BaseSandbox):
         )
         return cast(list[SyncSandboxRuntimeSession], page.sessions)
 
+    def list_snapshots(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> list[SyncSnapshot]:
+        service = self._require_sync_sandbox_service()
+        page = iter_coroutine(
+            service.query_snapshots_page(
+                project_id=self.project_id,
+                name=self.name,
+                page_size=page_size,
+                cursor=cursor,
+                sort_order=sort_order,
+            )
+        )
+        return cast(list[SyncSnapshot], page.snapshots)
+
     def extend_execution_time_limit(
         self,
         duration: DurationInput,
@@ -1599,6 +1792,18 @@ class SyncSandbox(BaseSandbox):
                 encoding=encoding,
             )
         )
+
+    def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
+        service = self._require_sync_sandbox_service()
+        snapshot, session = iter_coroutine(
+            service.create_snapshot(
+                session_id=self.current_session_id,
+                expiration=expiration,
+            )
+        )
+        if self.current_session is not None and session.status is not SandboxStatus.RUNNING:
+            self.current_session._invalidate_handle()
+        return cast(SyncSnapshot, snapshot)
 
     def destroy(self) -> "SyncSandbox":
         service = self._require_sync_sandbox_service()
@@ -1694,4 +1899,39 @@ class SandboxResponse(_ApiModel):
 
 class SandboxesResponse(_ApiModel):
     sandboxes: list[Sandbox]
+    pagination: Pagination | None = None
+
+
+class CreateSnapshotResponse(_ApiModel):
+    snapshot: Snapshot | None = None
+    session: SandboxRuntimeSession | None = None
+
+    def to_snapshot_and_session(self) -> tuple[Snapshot, SandboxRuntimeSession]:
+        if self.snapshot is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'snapshot'",
+                data=self.model_dump(by_alias=True),
+            )
+        if self.session is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'session'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.snapshot, self.session
+
+
+class SnapshotResponse(_ApiModel):
+    snapshot: Snapshot | None = None
+
+    def to_snapshot(self) -> Snapshot:
+        if self.snapshot is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'snapshot'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.snapshot
+
+
+class SnapshotsResponse(_ApiModel):
+    snapshots: list[Snapshot]
     pagination: Pagination | None = None

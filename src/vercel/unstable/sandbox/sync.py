@@ -28,6 +28,7 @@ from vercel._internal.unstable.sandbox.models import (
     SyncSandbox,
     SyncSandboxCommand,
     SyncSandboxRuntimeSession,
+    SyncSnapshot,
     TagFilter,
     TarballSource,
     WriteFile,
@@ -36,6 +37,7 @@ from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
 from vercel._internal.unstable.sandbox.pagination import (
     QuerySandboxesParams,
     QuerySessionsParams,
+    QuerySnapshotsParams,
 )
 
 
@@ -175,6 +177,50 @@ def query_sessions(
     return iter_sessions()
 
 
+def query_snapshots(
+    *,
+    project_id: str | None = None,
+    name: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+    sort_order: str | None = None,
+) -> Iterator[SyncSnapshot]:
+    service = get_active_session().sync_sandbox_service()
+
+    def iter_snapshots() -> Iterator[SyncSnapshot]:
+        current_params = QuerySnapshotsParams(
+            page_size=page_size,
+            cursor=cursor,
+        )
+        while True:
+            page = iter_coroutine(
+                service.query_snapshots_page(
+                    project_id=project_id,
+                    name=name,
+                    page_size=current_params.page_size,
+                    cursor=current_params.cursor,
+                    sort_order=sort_order,
+                )
+            )
+            yield from cast(list[SyncSnapshot], page.snapshots)
+            if page.next_cursor is None:
+                return
+            if not page.snapshots:
+                return
+            current_params = current_params.with_cursor(page.next_cursor)
+
+    return iter_snapshots()
+
+
+def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
+    return cast(
+        SyncSnapshot,
+        iter_coroutine(
+            get_active_session().sync_sandbox_service().get_snapshot(snapshot_id=snapshot_id)
+        ),
+    )
+
+
 __all__ = [
     "SandboxApiError",
     "SandboxCleanupError",
@@ -195,11 +241,14 @@ __all__ = [
     "SyncSandbox",
     "SyncSandboxCommand",
     "SyncSandboxRuntimeSession",
+    "SyncSnapshot",
     "TagFilter",
     "TarballSource",
     "WriteFile",
     "create_sandbox",
     "get_sandbox",
+    "get_snapshot",
     "query_sandboxes",
     "query_sessions",
+    "query_snapshots",
 ]

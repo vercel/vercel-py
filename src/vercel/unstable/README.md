@@ -151,6 +151,17 @@ async def main() -> None:
         first_five.append(item)
         if len(first_five) == 5:
             break
+
+    snapshot = await persistent.snapshot()
+    restored = await sandbox.create_sandbox(
+        runtime="python3.13",
+        name="restored-from-snapshot",
+        source=sandbox.SnapshotSource(snapshot_id=snapshot.id),
+    )
+    restored_snapshots = await restored.list_snapshots(page_size=10)
+    project_snapshots = [item async for item in sandbox.query_snapshots(page_size=10)]
+    fetched_snapshot = await sandbox.get_snapshot(snapshot_id=snapshot.id)
+    await fetched_snapshot.delete()
 ```
 
 ## Service Options
@@ -255,6 +266,14 @@ running session. Use `sandbox.query_sessions(...)` for project-level session
 listing and `Sandbox.list_sessions(...)` for sessions belonging to one named
 sandbox.
 
+`Sandbox.snapshot(...)` and `SandboxRuntimeSession.snapshot(...)` create a
+filesystem snapshot from the current session. The returned `Snapshot` can be
+used with `SnapshotSource(snapshot_id=...)` to create another sandbox.
+`sandbox.query_snapshots(...)` lists project snapshots,
+`Sandbox.list_snapshots(...)` filters by sandbox name, and
+`sandbox.get_snapshot(...)` fetches one snapshot by ID. `Snapshot.delete()`
+invalidates the deleted snapshot handle after the API confirms deletion.
+
 ## Handle Validity
 
 Handles carry an internal alive marker.
@@ -280,6 +299,12 @@ async with vercel.session(service_options=[...]):
 # `preview` is invalid as a Python handle.
 preview = await sandbox.get_sandbox(name="preview")
 ```
+
+Snapshot creation may stop the current runtime session. When `snapshot()`
+returns a non-running session from the API, the SDK invalidates the old
+runtime-session handle. The sandbox identity handle remains usable for
+sandbox-scoped operations such as `list_snapshots(...)`, `update(...)`, and
+`destroy()`.
 
 Invalid handle use raises `SandboxInvalidHandleError`.
 

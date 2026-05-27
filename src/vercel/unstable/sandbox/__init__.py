@@ -23,6 +23,7 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxRuntimeSession,
     SandboxSource,
     SandboxStatus,
+    Snapshot,
     SnapshotRetention,
     SnapshotSource,
     TagFilter,
@@ -136,6 +137,31 @@ def query_sessions(
     )
 
 
+def query_snapshots(
+    *,
+    project_id: str | None = None,
+    name: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+    sort_order: str | None = None,
+) -> AsyncIterator[Snapshot]:
+    return (
+        get_active_session()
+        .sandbox_service()
+        .query_snapshots(
+            project_id=project_id,
+            name=name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+    )
+
+
+async def get_snapshot(*, snapshot_id: str) -> Snapshot:
+    return await get_active_session().sandbox_service().get_snapshot(snapshot_id=snapshot_id)
+
+
 __all__ = [
     "Sandbox",
     "SandboxApiError",
@@ -153,6 +179,7 @@ __all__ = [
     "SandboxStatus",
     "SandboxTerminalStateError",
     "GitSource",
+    "Snapshot",
     "SnapshotRetention",
     "SnapshotSource",
     "TagFilter",
@@ -160,7 +187,9 @@ __all__ = [
     "WriteFile",
     "create_sandbox",
     "get_sandbox",
+    "get_snapshot",
     "query_sandboxes",
     "query_sessions",
+    "query_snapshots",
     "sync",
 ]
