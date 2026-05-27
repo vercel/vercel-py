@@ -16,6 +16,8 @@ status.
   as-is or create a scoped override with `vercel.session(...)`.
 - Service configuration lives on the SDK session through
   `service_options=[...]`.
+- Each service has a default options object, so simple calls work without a
+  configured session; scoped options replace that default for the service.
 - Endpoint calls use direct keyword arguments, not public `*Param` dataclasses.
 - Service methods avoid complex retry, timeout, and polling policy. Compose
   those outside the call.
@@ -33,7 +35,13 @@ import asyncio
 from vercel import unstable as vercel
 from vercel.unstable import sandbox
 from vercel.unstable.blob import BlobServiceOptions
-from vercel.unstable.sandbox import SandboxServiceOptions
+from vercel.unstable.sandbox import (
+    GitSource,
+    SandboxResources,
+    SandboxServiceOptions,
+    SnapshotRetention,
+    TagFilter,
+)
 
 
 async def main() -> None:
@@ -71,9 +79,16 @@ async def main() -> None:
         preview = await sandbox.create_sandbox(
             runtime="python3.13",
             name="preview",
+            source=GitSource(url="https://github.com/vercel/vercel-py"),
+            execution_time_limit=timedelta(minutes=5),
+            resources=SandboxResources(vcpus=2, memory=4096),
             # Platform-side retention for sandbox-owned snapshots/state.
             # This is not an SDK operation timeout.
             snapshot_expiration=timedelta(minutes=20),
+            snapshot_retention=SnapshotRetention(
+                count=3,
+                expiration=timedelta(days=1),
+            ),
         )
 
         # Nested sessions inherit unspecified settings from the active session.
@@ -123,7 +138,19 @@ async def main() -> None:
     surviving_session = await persistent.session()
     await surviving_session.run_command("python", ["--version"])
 
-    sandboxes = await sandbox.query_sandboxes()
+    sandboxes = [
+        item
+        async for item in sandbox.query_sandboxes(
+            page_size=20,
+            tags=[TagFilter(key="env", value="preview")]
+        )
+    ]
+
+    first_five = []
+    async for item in sandbox.query_sandboxes(page_size=10):
+        first_five.append(item)
+        if len(first_five) == 5:
+            break
 ```
 
 ## Service Options
@@ -198,8 +225,35 @@ async with sandbox_.session() as runtime_session:
     ...
 ```
 
-Context manager exit awaits cleanup and surfaces cleanup failures. To keep a
+Context manager exit awaits cleanup. Cleanup failures raise
+`SandboxCleanupError`, whose `cause` points at the underlying failure. To keep a
 sandbox or sandbox runtime session around, do not use its context manager.
+
+Explicit cleanup uses the same ownership rules:
+
+```python
+sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
+runtime_session = await sandbox_.session()
+await runtime_session.stop()
+await sandbox_.destroy()
+```
+
+Sandbox identity methods such as `session()`, `run_command(...)`,
+`start_command(...)`, `update(...)`, `list_sessions(...)`,
+`extend_execution_time_limit(...)`, `update_network_policy(...)`, and
+`destroy()` live on `Sandbox`. Session-scoped methods such as
+`run_command(...)`, `start_command(...)`, `refresh()`,
+`extend_execution_time_limit(...)`, `update_network_policy(...)`, and `stop()`
+live on `SandboxRuntimeSession`. Low-level endpoint composition, response
+binding, and polling stay inside the internal Sandbox service layer.
+
+`Sandbox.update(...)` changes named sandbox defaults for future sessions, such
+as runtime, resources, ports, tags, snapshot expiration, and persistence.
+`SandboxRuntimeSession.update_network_policy(...)` and
+`SandboxRuntimeSession.extend_execution_time_limit(...)` change the currently
+running session. Use `sandbox.query_sessions(...)` for project-level session
+listing and `Sandbox.list_sessions(...)` for sessions belonging to one named
+sandbox.
 
 ## Handle Validity
 
@@ -209,6 +263,7 @@ A handle is valid only while:
 
 - its owning SDK session is alive
 - its own context-managed remote resource has not exited
+- explicit cleanup such as `destroy()` or `stop()` has not succeeded
 
 Handles created inside `vercel.session(...)` are invalidated when that session
 context exits. The remote resource may still exist, but the old Python handle is
@@ -226,7 +281,7 @@ async with vercel.session(service_options=[...]):
 preview = await sandbox.get_sandbox(name="preview")
 ```
 
-The exact invalid-handle exception name is not frozen yet.
+Invalid handle use raises `SandboxInvalidHandleError`.
 
 ## Sync Mirror
 
@@ -234,6 +289,8 @@ The async API is the primary API. Sync support mirrors the service shape inside
 each domain package.
 
 ```python
+from itertools import islice
+
 from vercel import unstable as vercel
 from vercel.unstable.sandbox import SandboxServiceOptions
 from vercel.unstable.sandbox import sync as sandbox
@@ -251,6 +308,8 @@ with vercel.session(
 
     with sandbox_.session() as session:
         session.run_command("python", ["--version"])
+
+    first_five = list(islice(sandbox.query_sandboxes(page_size=10), 5))
 ```
 
 The sync mirror follows the same session resolution, service option, waiting,
@@ -260,6 +319,12 @@ cleanup, and handle invalidation rules as the async API.
 
 All unstable SDK exceptions inherit from `vercel.unstable.VercelError`.
 
-Domain-specific errors inherit from domain bases such as `SandboxError`.
-Terminal sandbox states, API failures, cleanup failures, and invalid handle use
-raise typed SDK errors. Exact names can evolve while the namespace is unstable.
+Session errors inherit from `VercelSessionError`. Domain-specific Sandbox
+errors inherit from `SandboxError`.
+
+Sandbox terminal states raise `SandboxTerminalStateError`. Sandbox v2 API
+failures raise `SandboxApiError`, which exposes `status_code`, `data`, and
+`code` when the API returns an `{ "error": { "code": ... } }` envelope.
+Malformed successful API responses raise `SandboxResponseError`. Cleanup
+failures raise `SandboxCleanupError`, and invalid handle use raises
+`SandboxInvalidHandleError`.

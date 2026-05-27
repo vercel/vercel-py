@@ -1,7 +1,11 @@
 """Pydantic codecs and public handles for Sandbox v2 data."""
 
+import signal as signal_module
+from collections.abc import AsyncIterator, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from types import TracebackType
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 from pydantic import (
     AliasChoices,
@@ -14,9 +18,11 @@ from pydantic import (
     field_validator,
 )
 
+from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.polyfills import StrEnum
 from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
 from vercel._internal.unstable.sandbox.errors import (
+    SandboxCleanupError,
     SandboxInvalidHandleError,
     SandboxResponseError,
 )
@@ -24,11 +30,20 @@ from vercel._internal.unstable.session import AliveToken
 
 if TYPE_CHECKING:
     from vercel._internal.unstable.sandbox.operations import CreateRuntimeSessionOperation
+    from vercel._internal.unstable.sandbox.service import SandboxService
     from vercel._internal.unstable.session import SdkSession
 
 JSONValue: TypeAlias = PydanticJsonValue
 JSONObject: TypeAlias = dict[str, JSONValue]
 DurationInput: TypeAlias = int | float | timedelta | None
+_COMMAND_NOT_ATTACHED = "Sandbox command handle is not attached to an SDK session"
+
+
+@dataclass(frozen=True, slots=True)
+class WriteFile:
+    path: str
+    content: str | bytes
+    mode: int | None = None
 
 
 class SandboxStatus(StrEnum):
@@ -59,7 +74,72 @@ def _duration_to_milliseconds(value: object) -> timedelta | None:
     return parse_duration(value, MILLISECOND)
 
 
-def _dump_response_sandbox(sandbox: "Sandbox") -> JSONObject:
+class GitSource(_ApiRequestModel):
+    """Git repository source for creating a sandbox."""
+
+    type: Literal["git"] = "git"
+    url: str
+    depth: int | None = None
+    revision: str | None = None
+    username: str | None = None
+    password: str | None = None
+
+
+class TarballSource(_ApiRequestModel):
+    """Tarball URL source for creating a sandbox."""
+
+    type: Literal["tarball"] = "tarball"
+    url: str
+
+
+class SnapshotSource(_ApiRequestModel):
+    """Snapshot source for creating a sandbox."""
+
+    type: Literal["snapshot"] = "snapshot"
+    snapshot_id: str = Field(serialization_alias="snapshotId")
+
+
+SandboxSource: TypeAlias = GitSource | TarballSource | SnapshotSource
+
+
+class SandboxResources(_ApiRequestModel):
+    """CPU and memory request values for sandbox creation."""
+
+    vcpus: int | None = None
+    memory: int | None = None
+
+
+class SnapshotRetention(_ApiRequestModel):
+    """Snapshot retention policy for sandboxes created from a sandbox."""
+
+    count: int
+    expiration: DurationInput = None
+    delete_evicted: bool = Field(default=True, serialization_alias="deleteEvicted")
+
+    @field_validator("expiration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta | None:
+        return _duration_to_milliseconds(value)
+
+    @field_serializer("expiration")
+    def _serialize_duration(self, value: DurationInput) -> int | None:
+        duration = parse_duration(value, MILLISECOND)
+        if duration is None:
+            return None
+        return to_ms_int(duration)
+
+
+class TagFilter(_ApiRequestModel):
+    """Exact-match sandbox tag query filter."""
+
+    key: str
+    value: str
+
+    def to_query_value(self) -> str:
+        return f"{self.key}:{self.value}"
+
+
+def _dump_response_sandbox(sandbox: "BaseSandbox") -> JSONObject:
     return cast(
         JSONObject,
         sandbox.model_dump(
@@ -74,10 +154,10 @@ class CreateSandboxRequest(_ApiRequestModel):
     project_id: str = Field(serialization_alias="projectId")
     name: str | None = None
     runtime: str | None = None
-    source: JSONValue | None = None
+    source: SandboxSource | None = None
     ports: list[int] | None = None
     timeout: timedelta | None = None
-    resources: JSONValue | None = None
+    resources: SandboxResources | None = None
     persistent: bool | None = None
     network_policy: JSONValue | None = Field(
         default=None,
@@ -89,7 +169,7 @@ class CreateSandboxRequest(_ApiRequestModel):
         default=None,
         serialization_alias="snapshotExpiration",
     )
-    keep_last_snapshots: JSONValue | None = Field(
+    keep_last_snapshots: SnapshotRetention | None = Field(
         default=None,
         serialization_alias="keepLastSnapshots",
     )
@@ -106,8 +186,44 @@ class CreateSandboxRequest(_ApiRequestModel):
         return to_ms_int(value)
 
 
+class UpdateSandboxRequest(_ApiRequestModel):
+    runtime: str | None = None
+    ports: list[int] | None = None
+    timeout: timedelta | None = None
+    resources: SandboxResources | None = None
+    persistent: bool | None = None
+    network_policy: JSONValue | None = Field(
+        default=None,
+        serialization_alias="networkPolicy",
+    )
+    env: dict[str, str] | None = None
+    tags: dict[str, str] | None = None
+    snapshot_expiration: timedelta | None = Field(
+        default=None,
+        serialization_alias="snapshotExpiration",
+    )
+    keep_last_snapshots: SnapshotRetention | None = Field(
+        default=None,
+        serialization_alias="keepLastSnapshots",
+    )
+    current_snapshot_id: str | None = Field(
+        default=None,
+        serialization_alias="currentSnapshotId",
+    )
+
+    @field_validator("timeout", "snapshot_expiration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta | None:
+        return _duration_to_milliseconds(value)
+
+    @field_serializer("timeout", "snapshot_expiration")
+    def _serialize_duration(self, value: timedelta | None) -> int | None:
+        if value is None:
+            return None
+        return to_ms_int(value)
+
+
 class GetSandboxRequest(_ApiRequestModel):
-    name: str
     project_id: str = Field(serialization_alias="projectId")
     resume: bool = True
     include_system_routes: bool | None = Field(
@@ -138,16 +254,60 @@ class QuerySandboxesRequest(_ApiRequestModel):
         default=None,
         serialization_alias="namePrefix",
     )
-    tags: str | list[str] | None = None
+    tags: Sequence[TagFilter] | None = None
+
+    @field_serializer("tags")
+    def _serialize_tags(self, value: Sequence[TagFilter] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return [tag.to_query_value() for tag in value]
 
 
-class DestroySandboxRequest(_ApiRequestModel):
-    name: str
-    project_id: str = Field(serialization_alias="projectId")
+class QuerySessionsRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="project")
+    name: str | None = None
+    limit: int | None = None
+    cursor: str | None = None
+    sort_order: str | None = Field(
+        default=None,
+        serialization_alias="sortOrder",
+    )
 
 
-class DestroyRuntimeSessionRequest(_ApiRequestModel):
-    session_id: str = Field(serialization_alias="sessionId")
+class ExtendTimeoutRequest(_ApiRequestModel):
+    duration: DurationInput
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta:
+        duration = parse_duration(value, MILLISECOND)
+        if duration is None:
+            raise TypeError("duration is required")
+        return duration
+
+    @field_serializer("duration")
+    def _serialize_duration(self, value: DurationInput) -> int:
+        duration = parse_duration(value, MILLISECOND)
+        if duration is None:
+            raise TypeError("duration is required")
+        return to_ms_int(duration)
+
+
+class RunCommandRequest(_ApiRequestModel):
+    command: str
+    args: list[str] | None = None
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    sudo: bool | None = None
+
+
+class FilesystemPathRequest(_ApiRequestModel):
+    path: str
+    cwd: str | None = None
+
+
+class MkdirRequest(FilesystemPathRequest):
+    recursive: bool = True
 
 
 class SandboxRoute(_ApiModel):
@@ -157,9 +317,257 @@ class SandboxRoute(_ApiModel):
     system: bool = False
 
 
-class SandboxRuntimeSession(_ApiModel):
+def _signal_number(value: int | str | signal_module.Signals | None) -> int:
+    if value is None:
+        return int(signal_module.Signals.SIGTERM)
+    if isinstance(value, signal_module.Signals):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    normalized = value.upper()
+    if not normalized.startswith("SIG"):
+        normalized = f"SIG{normalized}"
+    try:
+        return int(signal_module.Signals[normalized])
+    except KeyError as exc:
+        raise ValueError(f"Unknown signal: {value!r}") from exc
+
+
+class SandboxCommandLog(_ApiModel):
+    """One streamed command output event."""
+
+    data: str
+    stream: Literal["unspecified", "stdin", "stdout", "stderr", "error"]
+
+
+class BaseSandboxCommand(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
-    _resource_alive_token: AliveToken | None = PrivateAttr(default=None)
+    _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
+    _stdout_cache: str | None = PrivateAttr(default=None)
+    _stderr_cache: str | None = PrivateAttr(default=None)
+
+    id: str
+    name: str
+    args: list[str]
+    cwd: str
+    session_id: str = Field(
+        validation_alias=AliasChoices("session_id", "sessionId"),
+        serialization_alias="sessionId",
+    )
+    exit_code: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("exit_code", "exitCode"),
+        serialization_alias="exitCode",
+    )
+    started_at: int = Field(
+        validation_alias=AliasChoices("started_at", "startedAt"),
+        serialization_alias="startedAt",
+    )
+
+    @property
+    def status(self) -> Literal["running", "exited"]:
+        return "running" if self.exit_code is None else "exited"
+
+    def _bind_alive_tokens(
+        self,
+        *,
+        session_token: AliveToken,
+        sdk_session: "SdkSession | None" = None,
+    ) -> None:
+        self._session_alive_token = session_token
+        if sdk_session is not None:
+            self._sdk_session = sdk_session
+
+    def _raise_if_invalid(self) -> None:
+        if self._session_alive_token is None:
+            raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
+        if not self._session_alive_token.is_alive:
+            raise SandboxInvalidHandleError("Sandbox command handle is no longer valid")
+
+    def _require_sandbox_service(self) -> "SandboxService":
+        self._raise_if_invalid()
+        if self._sdk_session is None:
+            raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
+        return self._sdk_session.sandbox_service()
+
+    def _require_sync_sandbox_service(self) -> "SandboxService":
+        self._raise_if_invalid()
+        if self._sdk_session is None:
+            raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
+        return self._sdk_session.sync_sandbox_service()
+
+
+class SandboxCommand(BaseSandboxCommand):
+    """A command handle bound to an async SDK session."""
+
+    async def refresh(self, *, wait: bool = False) -> "SandboxCommand":
+        service = self._require_sandbox_service()
+        return await service.get_command(
+            session_id=self.session_id,
+            command_id=self.id,
+            wait=wait,
+        )
+
+    async def wait(self) -> "SandboxCommand":
+        return await self.refresh(wait=True)
+
+    async def kill(
+        self,
+        signal: int | str | signal_module.Signals | None = None,
+    ) -> "SandboxCommand":
+        service = self._require_sandbox_service()
+        return await service.kill_command(
+            session_id=self.session_id,
+            command_id=self.id,
+            signal=_signal_number(signal),
+        )
+
+    def logs(self) -> AsyncIterator[SandboxCommandLog]:
+        service = self._require_sandbox_service()
+        return service.command_logs(
+            session_id=self.session_id,
+            command_id=self.id,
+        )
+
+    async def output(self, stream: Literal["stdout", "stderr", "both"] = "both") -> str:
+        stdout = ""
+        stderr = ""
+        async for line in self.logs():
+            if line.stream == "stdout":
+                stdout += line.data
+            elif line.stream == "stderr":
+                stderr += line.data
+        self._stdout_cache = stdout
+        self._stderr_cache = stderr
+        if stream == "stdout":
+            return stdout
+        if stream == "stderr":
+            return stderr
+        return stdout + stderr
+
+    async def stdout(self) -> str:
+        return await self.output("stdout")
+
+    async def stderr(self) -> str:
+        return await self.output("stderr")
+
+
+class SyncSandboxCommand(BaseSandboxCommand):
+    """Synchronous mirror of `SandboxCommand`."""
+
+    def refresh(self, *, wait: bool = False) -> "SyncSandboxCommand":
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.get_command(
+                    session_id=self.session_id,
+                    command_id=self.id,
+                    wait=wait,
+                )
+            ),
+        )
+
+    def wait(self) -> "SyncSandboxCommand":
+        return self.refresh(wait=True)
+
+    def kill(
+        self,
+        signal: int | str | signal_module.Signals | None = None,
+    ) -> "SyncSandboxCommand":
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.kill_command(
+                    session_id=self.session_id,
+                    command_id=self.id,
+                    signal=_signal_number(signal),
+                )
+            ),
+        )
+
+    def logs(self) -> Iterator[SandboxCommandLog]:
+        service = self._require_sync_sandbox_service()
+        response = iter_coroutine(
+            service.command_logs_response(
+                session_id=self.session_id,
+                command_id=self.id,
+            )
+        )
+
+        def iter_logs() -> Iterator[SandboxCommandLog]:
+            try:
+                for line in response.iter_lines():
+                    if line:
+                        yield SandboxCommandLog.model_validate_json(line)
+            finally:
+                response.close()
+
+        return iter_logs()
+
+    def output(self, stream: Literal["stdout", "stderr", "both"] = "both") -> str:
+        stdout = ""
+        stderr = ""
+        for line in self.logs():
+            if line.stream == "stdout":
+                stdout += line.data
+            elif line.stream == "stderr":
+                stderr += line.data
+        self._stdout_cache = stdout
+        self._stderr_cache = stderr
+        if stream == "stdout":
+            return stdout
+        if stream == "stderr":
+            return stderr
+        return stdout + stderr
+
+    def stdout(self) -> str:
+        return self.output("stdout")
+
+    def stderr(self) -> str:
+        return self.output("stderr")
+
+
+class CommandResponse(_ApiModel):
+    command: SandboxCommand | None = None
+
+    def to_command(self) -> SandboxCommand:
+        if self.command is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'command'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.command
+
+
+class CommandsResponse(_ApiModel):
+    commands: list[SandboxCommand]
+
+
+class RuntimeSessionResponse(_ApiModel):
+    session: "SandboxRuntimeSession | None" = None
+    routes: list[SandboxRoute] = Field(default_factory=list)
+
+    def to_runtime_session(self) -> "SandboxRuntimeSession":
+        if self.session is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'session'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.session
+
+
+class RuntimeSessionsResponse(_ApiModel):
+    sessions: list["SandboxRuntimeSession"]
+    pagination: "Pagination | None" = None
+
+
+class BaseSandboxRuntimeSession(_ApiModel):
+    _session_alive_token: AliveToken | None = PrivateAttr(default=None)
+    _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
+    _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
+    _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
 
     id: str
     sandbox_name: str | None = Field(
@@ -178,7 +586,16 @@ class SandboxRuntimeSession(_ApiModel):
     region: str | None = None
     memory: int | None = None
     vcpus: int | None = None
-    timeout: int | None = None
+    execution_time_limit: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("execution_time_limit", "timeout"),
+        serialization_alias="timeout",
+    )
+    network_policy: JSONValue | None = Field(
+        default=None,
+        validation_alias=AliasChoices("network_policy", "networkPolicy"),
+        serialization_alias="networkPolicy",
+    )
     requested_at: int | None = Field(
         default=None,
         validation_alias=AliasChoices("requested_at", "requestedAt"),
@@ -200,32 +617,434 @@ class SandboxRuntimeSession(_ApiModel):
         *,
         session_token: AliveToken,
         resource_token: AliveToken | None = None,
+        sdk_session: "SdkSession | None" = None,
     ) -> None:
         self._session_alive_token = session_token
+        if sdk_session is not None:
+            self._sdk_session = sdk_session
         if resource_token is not None:
-            self._resource_alive_token = resource_token
+            self._attach_resource_token(resource_token)
 
     def _attach_resource_token(self, resource_token: AliveToken) -> None:
-        self._resource_alive_token = resource_token
+        self._resource_alive_tokens.add(resource_token)
 
     def _raise_if_invalid(self) -> None:
         if self._session_alive_token is None:
             raise SandboxInvalidHandleError(
                 "Sandbox runtime-session handle is not attached to an SDK session"
             )
+        if not self._handle_alive_token.is_alive:
+            raise SandboxInvalidHandleError("Sandbox runtime-session handle is no longer valid")
         if not self._session_alive_token.is_alive:
             raise SandboxInvalidHandleError("Sandbox runtime-session handle is no longer valid")
-        if self._resource_alive_token is not None and not self._resource_alive_token.is_alive:
+        if any(not token.is_alive for token in self._resource_alive_tokens):
             raise SandboxInvalidHandleError("Sandbox runtime-session handle is no longer valid")
 
-    async def run_command(self, command: str, args: list[str] | None = None) -> Any:
+    def _require_sandbox_service(self) -> "SandboxService":
         self._raise_if_invalid()
-        raise NotImplementedError("Sandbox runtime-session commands are not implemented yet")
+        if self._sdk_session is None:
+            raise SandboxInvalidHandleError(
+                "Sandbox runtime-session handle is not attached to an SDK session"
+            )
+        return self._sdk_session.sandbox_service()
+
+    def _require_sync_sandbox_service(self) -> "SandboxService":
+        self._raise_if_invalid()
+        if self._sdk_session is None:
+            raise SandboxInvalidHandleError(
+                "Sandbox runtime-session handle is not attached to an SDK session"
+            )
+        return self._sdk_session.sync_sandbox_service()
+
+    def _invalidate_handle(self) -> None:
+        self._handle_alive_token.invalidate()
+
+    def _write_files_cwd(self, cwd: str | None) -> str:
+        return cwd or self.cwd or "/vercel/sandbox"
 
 
-class Sandbox(_ApiModel):
+class SandboxRuntimeSession(BaseSandboxRuntimeSession):
+    """A running Sandbox v2 session bound to an SDK session.
+
+    Session-scoped behavior such as commands and stop operations belongs on this
+    handle. The handle becomes invalid after its SDK session closes, its owning
+    resource context exits, or `stop()` succeeds.
+    """
+
+    async def run_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SandboxCommand:
+        service = self._require_sandbox_service()
+        return await service.run_command(
+            session_id=self.id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+        )
+
+    async def start_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SandboxCommand:
+        service = self._require_sandbox_service()
+        return await service.start_command(
+            session_id=self.id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+        )
+
+    async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
+        service = self._require_sandbox_service()
+        return await service.get_command(
+            session_id=self.id,
+            command_id=command_id,
+            wait=wait,
+        )
+
+    async def query_commands(self) -> list[SandboxCommand]:
+        service = self._require_sandbox_service()
+        return await service.query_commands(session_id=self.id)
+
+    async def refresh(
+        self,
+        *,
+        include_system_routes: bool | None = None,
+    ) -> "SandboxRuntimeSession":
+        service = self._require_sandbox_service()
+        return await service.get_runtime_session(
+            session_id=self.id,
+            include_system_routes=include_system_routes,
+        )
+
+    async def extend_execution_time_limit(
+        self,
+        duration: DurationInput,
+    ) -> "SandboxRuntimeSession":
+        service = self._require_sandbox_service()
+        return await service.extend_runtime_session_timeout(
+            session_id=self.id,
+            duration=duration,
+        )
+
+    async def update_network_policy(self, network_policy: JSONValue) -> "SandboxRuntimeSession":
+        service = self._require_sandbox_service()
+        return await service.update_runtime_session_network_policy(
+            session_id=self.id,
+            network_policy=network_policy,
+        )
+
+    async def mkdir(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        recursive: bool = True,
+    ) -> None:
+        service = self._require_sandbox_service()
+        await service.mkdir(
+            session_id=self.id,
+            path=path,
+            cwd=cwd,
+            recursive=recursive,
+        )
+
+    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
+        service = self._require_sandbox_service()
+        return await service.read_file(
+            session_id=self.id,
+            path=path,
+            cwd=cwd,
+        )
+
+    async def read_text(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+    ) -> str:
+        content = await self.read_file(path, cwd=cwd)
+        return content.decode(encoding, errors=errors)
+
+    async def write_files(
+        self,
+        files: Sequence[WriteFile],
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+    ) -> None:
+        service = self._require_sandbox_service()
+        await service.write_files(
+            session_id=self.id,
+            files=files,
+            cwd=self._write_files_cwd(cwd),
+            encoding=encoding,
+        )
+
+    def command_logs(self, command_id: str) -> AsyncIterator[SandboxCommandLog]:
+        service = self._require_sandbox_service()
+        return service.command_logs(
+            session_id=self.id,
+            command_id=command_id,
+        )
+
+    async def stop(self) -> "SandboxRuntimeSession":
+        service = self._require_sandbox_service()
+        stopped = await service.stop_runtime_session(
+            session_id=self.id,
+        )
+        self._invalidate_handle()
+        return stopped
+
+
+class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
+    """Synchronous mirror of `SandboxRuntimeSession`."""
+
+    _context_resource_token: AliveToken | None = PrivateAttr(default=None)
+
+    def __enter__(self) -> "SyncSandboxRuntimeSession":
+        self._raise_if_invalid()
+        if self._context_resource_token is None:
+            self._context_resource_token = AliveToken()
+            self._attach_resource_token(self._context_resource_token)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        service = self._require_sync_sandbox_service()
+
+        try:
+            iter_coroutine(service.destroy_runtime_session(session_id=self.id))
+        except Exception as exc:
+            raise SandboxCleanupError(
+                f"Failed to clean up sandbox runtime session {self.id!r}",
+                resource_type="sandbox_runtime_session",
+                resource_id=self.id,
+                cause=exc,
+            ) from exc
+        if self._context_resource_token is not None:
+            self._context_resource_token.invalidate()
+        return None
+
+    def run_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SyncSandboxCommand:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.run_command(
+                    session_id=self.id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                )
+            ),
+        )
+
+    def start_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SyncSandboxCommand:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.start_command(
+                    session_id=self.id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                )
+            ),
+        )
+
+    def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.get_command(
+                    session_id=self.id,
+                    command_id=command_id,
+                    wait=wait,
+                )
+            ),
+        )
+
+    def query_commands(self) -> list[SyncSandboxCommand]:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            list[SyncSandboxCommand],
+            iter_coroutine(service.query_commands(session_id=self.id)),
+        )
+
+    def refresh(
+        self,
+        *,
+        include_system_routes: bool | None = None,
+    ) -> "SyncSandboxRuntimeSession":
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxRuntimeSession,
+            iter_coroutine(
+                service.get_runtime_session(
+                    session_id=self.id,
+                    include_system_routes=include_system_routes,
+                )
+            ),
+        )
+
+    def extend_execution_time_limit(
+        self,
+        duration: DurationInput,
+    ) -> "SyncSandboxRuntimeSession":
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxRuntimeSession,
+            iter_coroutine(
+                service.extend_runtime_session_timeout(
+                    session_id=self.id,
+                    duration=duration,
+                )
+            ),
+        )
+
+    def update_network_policy(self, network_policy: JSONValue) -> "SyncSandboxRuntimeSession":
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxRuntimeSession,
+            iter_coroutine(
+                service.update_runtime_session_network_policy(
+                    session_id=self.id,
+                    network_policy=network_policy,
+                )
+            ),
+        )
+
+    def mkdir(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        recursive: bool = True,
+    ) -> None:
+        service = self._require_sync_sandbox_service()
+        iter_coroutine(
+            service.mkdir(
+                session_id=self.id,
+                path=path,
+                cwd=cwd,
+                recursive=recursive,
+            )
+        )
+
+    def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            bytes,
+            iter_coroutine(
+                service.read_file(
+                    session_id=self.id,
+                    path=path,
+                    cwd=cwd,
+                )
+            ),
+        )
+
+    def read_text(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+    ) -> str:
+        return self.read_file(path, cwd=cwd).decode(encoding, errors=errors)
+
+    def write_files(
+        self,
+        files: Sequence[WriteFile],
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+    ) -> None:
+        service = self._require_sync_sandbox_service()
+        iter_coroutine(
+            service.write_files(
+                session_id=self.id,
+                files=files,
+                cwd=self._write_files_cwd(cwd),
+                encoding=encoding,
+            )
+        )
+
+    def command_logs(self, command_id: str) -> Iterator[SandboxCommandLog]:
+        service = self._require_sync_sandbox_service()
+        response = iter_coroutine(
+            service.command_logs_response(
+                session_id=self.id,
+                command_id=command_id,
+            )
+        )
+
+        def iter_logs() -> Iterator[SandboxCommandLog]:
+            try:
+                for line in response.iter_lines():
+                    if line:
+                        yield SandboxCommandLog.model_validate_json(line)
+            finally:
+                response.close()
+
+        return iter_logs()
+
+    def stop(self) -> "SyncSandboxRuntimeSession":
+        service = self._require_sync_sandbox_service()
+        stopped = iter_coroutine(service.stop_runtime_session(session_id=self.id))
+        self._invalidate_handle()
+        return cast(SyncSandboxRuntimeSession, stopped)
+
+
+class BaseSandbox(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
-    _resource_alive_token: AliveToken | None = PrivateAttr(default=None)
+    _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
+    _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
     _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
 
     name: str
@@ -250,7 +1069,16 @@ class Sandbox(_ApiModel):
     region: str | None = None
     memory: int | None = None
     vcpus: int | None = None
-    timeout: int | None = None
+    execution_time_limit: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("execution_time_limit", "timeout"),
+        serialization_alias="timeout",
+    )
+    network_policy: JSONValue | None = Field(
+        default=None,
+        validation_alias=AliasChoices("network_policy", "networkPolicy"),
+        serialization_alias="networkPolicy",
+    )
     snapshot_expiration: int | None = Field(
         default=None,
         validation_alias=AliasChoices("snapshot_expiration", "snapshotExpiration"),
@@ -273,7 +1101,7 @@ class Sandbox(_ApiModel):
     )
     tags: dict[str, str] | None = None
     routes: tuple[SandboxRoute, ...] = ()
-    current_session: SandboxRuntimeSession | None = None
+    current_session: BaseSandboxRuntimeSession | None = None
     raw: JSONObject | None = None
 
     def _bind_alive_tokens(
@@ -287,41 +1115,538 @@ class Sandbox(_ApiModel):
         if sdk_session is not None:
             self._sdk_session = sdk_session
         if resource_token is not None:
-            self._resource_alive_token = resource_token
+            self._attach_resource_token(resource_token)
         if self.current_session is not None:
             self.current_session._bind_alive_tokens(
                 session_token=session_token,
                 resource_token=resource_token,
             )
+            if sdk_session is not None:
+                self.current_session._sdk_session = sdk_session
 
     def _attach_resource_token(self, resource_token: AliveToken) -> None:
-        self._resource_alive_token = resource_token
+        self._resource_alive_tokens.add(resource_token)
         if self.current_session is not None:
             self.current_session._bind_alive_tokens(
                 session_token=self._session_alive_token or resource_token,
                 resource_token=resource_token,
+                sdk_session=self._sdk_session,
             )
+
+    def _attach_resource_tokens_to_runtime_session(
+        self, runtime_session: BaseSandboxRuntimeSession
+    ) -> None:
+        for resource_token in self._resource_alive_tokens:
+            runtime_session._attach_resource_token(resource_token)
 
     def _raise_if_invalid(self) -> None:
         if self._session_alive_token is None:
             raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
+        if not self._handle_alive_token.is_alive:
+            raise SandboxInvalidHandleError("Sandbox handle is no longer valid")
         if not self._session_alive_token.is_alive:
             raise SandboxInvalidHandleError("Sandbox handle is no longer valid")
-        if self._resource_alive_token is not None and not self._resource_alive_token.is_alive:
+        if any(not token.is_alive for token in self._resource_alive_tokens):
             raise SandboxInvalidHandleError("Sandbox handle is no longer valid")
 
-    def session(self) -> "CreateRuntimeSessionOperation":
+    def _require_sdk_session(self) -> "SdkSession":
         self._raise_if_invalid()
         if self._sdk_session is None:
             raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
+        return self._sdk_session
+
+    def _require_sandbox_service(self) -> "SandboxService":
+        return self._require_sdk_session().sandbox_service()
+
+    def _require_sync_sandbox_service(self) -> "SandboxService":
+        return self._require_sdk_session().sync_sandbox_service()
+
+    def _invalidate_handle(self) -> None:
+        self._handle_alive_token.invalidate()
+        if self.current_session is not None:
+            self.current_session._invalidate_handle()
+
+    def _write_files_cwd(self, cwd: str | None) -> str:
+        if cwd is not None:
+            return cwd
+        if self.current_session is not None and self.current_session.cwd is not None:
+            return self.current_session.cwd
+        return self.cwd or "/vercel/sandbox"
+
+
+class Sandbox(BaseSandbox):
+    """A Sandbox v2 handle bound to an SDK session.
+
+    Sandbox identity behavior such as creating sessions, running commands on the
+    current session, and destroying the sandbox belongs here. The handle becomes
+    invalid after its SDK session closes, its context manager exits, or
+    `destroy()` succeeds.
+    """
+
+    current_session: SandboxRuntimeSession | None = None
+
+    def session(self) -> "CreateRuntimeSessionOperation":
+        """Create or resume a runtime session for this sandbox."""
+        sdk_session = self._require_sdk_session()
 
         from vercel._internal.unstable.sandbox.operations import create_runtime_session_operation
 
-        return create_runtime_session_operation(sandbox=self, session=self._sdk_session)
+        return create_runtime_session_operation(sandbox=self, session=sdk_session)
 
-    async def run_command(self, command: str, args: list[str] | None = None) -> Any:
+    async def run_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SandboxCommand:
+        service = self._require_sandbox_service()
+        return await service.run_command(
+            session_id=self.current_session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+        )
+
+    async def start_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SandboxCommand:
+        service = self._require_sandbox_service()
+        return await service.start_command(
+            session_id=self.current_session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+        )
+
+    async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
+        service = self._require_sandbox_service()
+        return await service.get_command(
+            session_id=self.current_session_id,
+            command_id=command_id,
+            wait=wait,
+        )
+
+    async def query_commands(self) -> list[SandboxCommand]:
+        service = self._require_sandbox_service()
+        return await service.query_commands(
+            session_id=self.current_session_id,
+        )
+
+    async def list_sessions(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> list[SandboxRuntimeSession]:
+        service = self._require_sandbox_service()
+        page = await service.query_sessions_page(
+            project_id=self.project_id,
+            name=self.name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+        return page.sessions
+
+    async def extend_execution_time_limit(
+        self,
+        duration: DurationInput,
+    ) -> SandboxRuntimeSession:
+        service = self._require_sandbox_service()
+        return await service.extend_runtime_session_timeout(
+            session_id=self.current_session_id,
+            duration=duration,
+        )
+
+    async def update_network_policy(self, network_policy: JSONValue) -> SandboxRuntimeSession:
+        service = self._require_sandbox_service()
+        return await service.update_runtime_session_network_policy(
+            session_id=self.current_session_id,
+            network_policy=network_policy,
+        )
+
+    async def mkdir(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        recursive: bool = True,
+    ) -> None:
+        service = self._require_sandbox_service()
+        await service.mkdir(
+            session_id=self.current_session_id,
+            path=path,
+            cwd=cwd,
+            recursive=recursive,
+        )
+
+    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
+        service = self._require_sandbox_service()
+        return await service.read_file(
+            session_id=self.current_session_id,
+            path=path,
+            cwd=cwd,
+        )
+
+    async def read_text(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+    ) -> str:
+        content = await self.read_file(path, cwd=cwd)
+        return content.decode(encoding, errors=errors)
+
+    async def write_files(
+        self,
+        files: Sequence[WriteFile],
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+    ) -> None:
+        service = self._require_sandbox_service()
+        await service.write_files(
+            session_id=self.current_session_id,
+            files=files,
+            cwd=self._write_files_cwd(cwd),
+            encoding=encoding,
+        )
+
+    async def destroy(self) -> "Sandbox":
+        service = self._require_sandbox_service()
+        destroyed = await service.destroy_sandbox(
+            name=self.name,
+            project_id=self.project_id,
+        )
+        self._invalidate_handle()
+        return destroyed
+
+    async def update(
+        self,
+        *,
+        runtime: str | None = None,
+        ports: list[int] | None = None,
+        execution_time_limit: DurationInput = None,
+        resources: SandboxResources | None = None,
+        persistent: bool | None = None,
+        network_policy: JSONValue | None = None,
+        env: dict[str, str] | None = None,
+        tags: dict[str, str] | None = None,
+        snapshot_expiration: DurationInput = None,
+        snapshot_retention: SnapshotRetention | None = None,
+        current_snapshot_id: str | None = None,
+    ) -> "Sandbox":
+        service = self._require_sandbox_service()
+        return await service.update_sandbox(
+            name=self.name,
+            project_id=self.project_id,
+            runtime=runtime,
+            ports=ports,
+            execution_time_limit=execution_time_limit,
+            resources=resources,
+            persistent=persistent,
+            network_policy=network_policy,
+            env=env,
+            tags=tags,
+            snapshot_expiration=snapshot_expiration,
+            snapshot_retention=snapshot_retention,
+            current_snapshot_id=current_snapshot_id,
+        )
+
+
+class SyncSandbox(BaseSandbox):
+    """Synchronous mirror of `Sandbox`."""
+
+    current_session: SyncSandboxRuntimeSession | None = None
+    _context_resource_token: AliveToken | None = PrivateAttr(default=None)
+
+    def __enter__(self) -> "SyncSandbox":
         self._raise_if_invalid()
-        raise NotImplementedError("Sandbox commands are not implemented yet")
+        if self._context_resource_token is None:
+            self._context_resource_token = AliveToken()
+            self._attach_resource_token(self._context_resource_token)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        service = self._require_sync_sandbox_service()
+
+        try:
+            iter_coroutine(
+                service.destroy_sandbox(
+                    name=self.name,
+                    project_id=self.project_id,
+                )
+            )
+        except Exception as exc:
+            raise SandboxCleanupError(
+                f"Failed to clean up sandbox {self.name!r}",
+                resource_type="sandbox",
+                resource_id=self.name,
+                cause=exc,
+            ) from exc
+        if self._context_resource_token is not None:
+            self._context_resource_token.invalidate()
+        return None
+
+    def session(self) -> SyncSandboxRuntimeSession:
+        """Create or resume a runtime session for this sandbox."""
+        service = self._require_sync_sandbox_service()
+
+        runtime_session = cast(
+            SyncSandboxRuntimeSession,
+            iter_coroutine(
+                service.create_runtime_session(
+                    name=self.name,
+                    project_id=self.project_id,
+                )
+            ),
+        )
+        self._attach_resource_tokens_to_runtime_session(runtime_session)
+        return runtime_session
+
+    def run_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SyncSandboxCommand:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.run_command(
+                    session_id=self.current_session_id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                )
+            ),
+        )
+
+    def start_command(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        sudo: bool = False,
+    ) -> SyncSandboxCommand:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.start_command(
+                    session_id=self.current_session_id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                )
+            ),
+        )
+
+    def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxCommand,
+            iter_coroutine(
+                service.get_command(
+                    session_id=self.current_session_id,
+                    command_id=command_id,
+                    wait=wait,
+                )
+            ),
+        )
+
+    def query_commands(self) -> list[SyncSandboxCommand]:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            list[SyncSandboxCommand],
+            iter_coroutine(
+                service.query_commands(
+                    session_id=self.current_session_id,
+                )
+            ),
+        )
+
+    def list_sessions(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+        sort_order: str | None = None,
+    ) -> list[SyncSandboxRuntimeSession]:
+        service = self._require_sync_sandbox_service()
+        page = iter_coroutine(
+            service.query_sessions_page(
+                project_id=self.project_id,
+                name=self.name,
+                page_size=page_size,
+                cursor=cursor,
+                sort_order=sort_order,
+            )
+        )
+        return cast(list[SyncSandboxRuntimeSession], page.sessions)
+
+    def extend_execution_time_limit(
+        self,
+        duration: DurationInput,
+    ) -> SyncSandboxRuntimeSession:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxRuntimeSession,
+            iter_coroutine(
+                service.extend_runtime_session_timeout(
+                    session_id=self.current_session_id,
+                    duration=duration,
+                )
+            ),
+        )
+
+    def update_network_policy(self, network_policy: JSONValue) -> SyncSandboxRuntimeSession:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandboxRuntimeSession,
+            iter_coroutine(
+                service.update_runtime_session_network_policy(
+                    session_id=self.current_session_id,
+                    network_policy=network_policy,
+                )
+            ),
+        )
+
+    def mkdir(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        recursive: bool = True,
+    ) -> None:
+        service = self._require_sync_sandbox_service()
+        iter_coroutine(
+            service.mkdir(
+                session_id=self.current_session_id,
+                path=path,
+                cwd=cwd,
+                recursive=recursive,
+            )
+        )
+
+    def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
+        service = self._require_sync_sandbox_service()
+        return cast(
+            bytes,
+            iter_coroutine(
+                service.read_file(
+                    session_id=self.current_session_id,
+                    path=path,
+                    cwd=cwd,
+                )
+            ),
+        )
+
+    def read_text(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+    ) -> str:
+        return self.read_file(path, cwd=cwd).decode(encoding, errors=errors)
+
+    def write_files(
+        self,
+        files: Sequence[WriteFile],
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+    ) -> None:
+        service = self._require_sync_sandbox_service()
+        iter_coroutine(
+            service.write_files(
+                session_id=self.current_session_id,
+                files=files,
+                cwd=self._write_files_cwd(cwd),
+                encoding=encoding,
+            )
+        )
+
+    def destroy(self) -> "SyncSandbox":
+        service = self._require_sync_sandbox_service()
+        destroyed = iter_coroutine(
+            service.destroy_sandbox(
+                name=self.name,
+                project_id=self.project_id,
+            )
+        )
+        self._invalidate_handle()
+        return cast(SyncSandbox, destroyed)
+
+    def update(
+        self,
+        *,
+        runtime: str | None = None,
+        ports: list[int] | None = None,
+        execution_time_limit: DurationInput = None,
+        resources: SandboxResources | None = None,
+        persistent: bool | None = None,
+        network_policy: JSONValue | None = None,
+        env: dict[str, str] | None = None,
+        tags: dict[str, str] | None = None,
+        snapshot_expiration: DurationInput = None,
+        snapshot_retention: SnapshotRetention | None = None,
+        current_snapshot_id: str | None = None,
+    ) -> "SyncSandbox":
+        service = self._require_sync_sandbox_service()
+        return cast(
+            SyncSandbox,
+            iter_coroutine(
+                service.update_sandbox(
+                    name=self.name,
+                    project_id=self.project_id,
+                    runtime=runtime,
+                    ports=ports,
+                    execution_time_limit=execution_time_limit,
+                    resources=resources,
+                    persistent=persistent,
+                    network_policy=network_policy,
+                    env=env,
+                    tags=tags,
+                    snapshot_expiration=snapshot_expiration,
+                    snapshot_retention=snapshot_retention,
+                    current_snapshot_id=current_snapshot_id,
+                )
+            ),
+        )
 
 
 class Pagination(_ApiModel):
@@ -351,7 +1676,16 @@ class SandboxResponse(_ApiModel):
         if self.session is not None:
             if self.sandbox.project_id is None and self.session.project_id is not None:
                 updates["project_id"] = self.session.project_id
-            for name in ("runtime", "status", "cwd", "region", "memory", "vcpus", "timeout"):
+            for name in (
+                "runtime",
+                "status",
+                "cwd",
+                "region",
+                "memory",
+                "vcpus",
+                "execution_time_limit",
+                "network_policy",
+            ):
                 if getattr(self.sandbox, name) is None:
                     updates[name] = getattr(self.session, name)
 

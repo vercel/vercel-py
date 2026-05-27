@@ -1,6 +1,7 @@
 """SDK session skeleton for the experimental public API."""
 
 import inspect
+import time
 from collections.abc import Awaitable, Mapping, Sequence
 from contextvars import Token
 from types import TracebackType
@@ -48,7 +49,7 @@ class SdkSession:
         self._service_options = dict(service_options or {})
         self._settings = dict(settings or {})
         self._alive_token = alive_token or AliveToken()
-        self._service_cache: dict[type[object], object] = {}
+        self._service_cache: dict[object, object] = {}
 
     @classmethod
     def default(cls) -> "SdkSession":
@@ -117,6 +118,8 @@ class SdkSession:
         if cached is not None:
             return cast(SandboxService, cached)
 
+        # Each service owns a default options object so simple module-level
+        # calls work without requiring a configured session.
         options = self.get_service_option(SandboxServiceOptions)
         if options is None:
             options = SandboxServiceOptions()
@@ -139,6 +142,55 @@ class SdkSession:
             sdk_session=self,
         )
         self._service_cache[SandboxService] = service
+        return service
+
+    def sync_sandbox_service(self) -> "SandboxService":
+        self.check_alive()
+
+        from vercel._internal.http import (
+            DEFAULT_TIMEOUT,
+            SyncTransport,
+            TransportOptions,
+            create_base_client,
+        )
+        from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
+        from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+        from vercel._internal.unstable.sandbox.service import SandboxService
+
+        cache_key = (SandboxService, "sync")
+        cached = self._service_cache.get(cache_key)
+        if cached is not None:
+            return cast(SandboxService, cached)
+
+        # Keep sync parity with the async service: missing options mean the
+        # service's default options object, not an absent service.
+        options = self.get_service_option(SandboxServiceOptions)
+        if options is None:
+            options = SandboxServiceOptions()
+
+        async def sync_sleep(seconds: float) -> None:
+            time.sleep(seconds)
+
+        transport_options = TransportOptions(
+            timeout=DEFAULT_TIMEOUT,
+            base_url=options.base_url,
+            max_connections=100,
+            enable_http2=False,
+        )
+        api_client = SandboxApiClient(
+            base_url=options.base_url,
+            credentials_factory=options.credentials_factory,
+            transport=SyncTransport(create_base_client(transport_options)),
+        )
+        service = SandboxService(
+            api_client=api_client,
+            alive_token=self._alive_token,
+            options=options,
+            sdk_session=self,
+            sleep=sync_sleep,
+            sync_handles=True,
+        )
+        self._service_cache[cache_key] = service
         return service
 
     def close(self) -> None:

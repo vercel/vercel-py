@@ -1,9 +1,13 @@
 """Sync mirror for the experimental Sandbox SDK surface."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from typing import cast
 
+from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.unstable.context import get_active_session
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
+    SandboxCleanupError,
     SandboxCredentialsError,
     SandboxError,
     SandboxInvalidHandleError,
@@ -12,12 +16,27 @@ from vercel._internal.unstable.sandbox.errors import (
 )
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
+    GitSource,
     JSONValue,
-    Sandbox,
-    SandboxRuntimeSession,
+    SandboxCommand,
+    SandboxCommandLog,
+    SandboxResources,
+    SandboxSource,
     SandboxStatus,
+    SnapshotRetention,
+    SnapshotSource,
+    SyncSandbox,
+    SyncSandboxCommand,
+    SyncSandboxRuntimeSession,
+    TagFilter,
+    TarballSource,
+    WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+from vercel._internal.unstable.sandbox.pagination import (
+    QuerySandboxesParams,
+    QuerySessionsParams,
+)
 
 
 def create_sandbox(
@@ -25,18 +44,39 @@ def create_sandbox(
     project_id: str | None = None,
     name: str | None = None,
     runtime: str | None = None,
-    source: JSONValue | None = None,
+    source: SandboxSource | None = None,
     ports: list[int] | None = None,
-    timeout: DurationInput = None,
-    resources: JSONValue | None = None,
+    execution_time_limit: DurationInput = None,
+    resources: SandboxResources | None = None,
     persistent: bool | None = None,
     network_policy: JSONValue | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: DurationInput = None,
-    keep_last_snapshots: JSONValue | None = None,
-) -> Sandbox:
-    raise NotImplementedError("sandbox.sync.create_sandbox(...) is not implemented yet")
+    snapshot_retention: SnapshotRetention | None = None,
+) -> SyncSandbox:
+    return cast(
+        SyncSandbox,
+        iter_coroutine(
+            get_active_session()
+            .sync_sandbox_service()
+            .create_sandbox(
+                project_id=project_id,
+                name=name,
+                runtime=runtime,
+                source=source,
+                ports=ports,
+                execution_time_limit=execution_time_limit,
+                resources=resources,
+                persistent=persistent,
+                network_policy=network_policy,
+                env=env,
+                tags=tags,
+                snapshot_expiration=snapshot_expiration,
+                snapshot_retention=snapshot_retention,
+            )
+        ),
+    )
 
 
 def get_sandbox(
@@ -45,35 +85,121 @@ def get_sandbox(
     project_id: str | None = None,
     resume: bool = True,
     include_system_routes: bool | None = None,
-) -> Sandbox:
-    raise NotImplementedError("sandbox.sync.get_sandbox(...) is not implemented yet")
+) -> SyncSandbox:
+    return cast(
+        SyncSandbox,
+        iter_coroutine(
+            get_active_session()
+            .sync_sandbox_service()
+            .get_sandbox(
+                name=name,
+                project_id=project_id,
+                resume=resume,
+                include_system_routes=include_system_routes,
+            )
+        ),
+    )
 
 
 def query_sandboxes(
     *,
     project_id: str | None = None,
-    limit: int | None = None,
+    page_size: int | None = None,
     cursor: str | None = None,
     sort_by: str | None = None,
     sort_order: str | None = None,
     name_prefix: str | None = None,
-    tags: str | list[str] | None = None,
-) -> list[Sandbox]:
-    raise NotImplementedError("sandbox.sync.query_sandboxes(...) is not implemented yet")
+    tags: Sequence[TagFilter] | None = None,
+) -> Iterator[SyncSandbox]:
+    service = get_active_session().sync_sandbox_service()
+
+    def iter_sandboxes() -> Iterator[SyncSandbox]:
+        current_params = QuerySandboxesParams(
+            page_size=page_size,
+            cursor=cursor,
+        )
+        while True:
+            page = iter_coroutine(
+                service.query_sandboxes_page(
+                    project_id=project_id,
+                    page_size=current_params.page_size,
+                    cursor=current_params.cursor,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                    name_prefix=name_prefix,
+                    tags=tags,
+                )
+            )
+            yield from cast(list[SyncSandbox], page.sandboxes)
+            if page.next_cursor is None:
+                return
+            if not page.sandboxes:
+                return
+            current_params = current_params.with_cursor(page.next_cursor)
+
+    return iter_sandboxes()
+
+
+def query_sessions(
+    *,
+    project_id: str | None = None,
+    name: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+    sort_order: str | None = None,
+) -> Iterator[SyncSandboxRuntimeSession]:
+    service = get_active_session().sync_sandbox_service()
+
+    def iter_sessions() -> Iterator[SyncSandboxRuntimeSession]:
+        current_params = QuerySessionsParams(
+            page_size=page_size,
+            cursor=cursor,
+        )
+        while True:
+            page = iter_coroutine(
+                service.query_sessions_page(
+                    project_id=project_id,
+                    name=name,
+                    page_size=current_params.page_size,
+                    cursor=current_params.cursor,
+                    sort_order=sort_order,
+                )
+            )
+            yield from cast(list[SyncSandboxRuntimeSession], page.sessions)
+            if page.next_cursor is None:
+                return
+            if not page.sessions:
+                return
+            current_params = current_params.with_cursor(page.next_cursor)
+
+    return iter_sessions()
 
 
 __all__ = [
-    "Sandbox",
     "SandboxApiError",
+    "SandboxCleanupError",
+    "SandboxCommand",
+    "SandboxCommandLog",
     "SandboxCredentialsError",
     "SandboxError",
     "SandboxInvalidHandleError",
+    "SandboxResources",
     "SandboxResponseError",
-    "SandboxRuntimeSession",
     "SandboxServiceOptions",
+    "SandboxSource",
     "SandboxStatus",
     "SandboxTerminalStateError",
+    "GitSource",
+    "SnapshotRetention",
+    "SnapshotSource",
+    "SyncSandbox",
+    "SyncSandboxCommand",
+    "SyncSandboxRuntimeSession",
+    "TagFilter",
+    "TarballSource",
+    "WriteFile",
     "create_sandbox",
     "get_sandbox",
     "query_sandboxes",
+    "query_sessions",
 ]

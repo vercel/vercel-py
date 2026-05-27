@@ -1,10 +1,11 @@
 """Experimental Sandbox SDK surface."""
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 from vercel._internal.unstable.context import get_active_session
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
+    SandboxCleanupError,
     SandboxCredentialsError,
     SandboxError,
     SandboxInvalidHandleError,
@@ -13,10 +14,20 @@ from vercel._internal.unstable.sandbox.errors import (
 )
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
+    GitSource,
     JSONValue,
     Sandbox,
+    SandboxCommand,
+    SandboxCommandLog,
+    SandboxResources,
     SandboxRuntimeSession,
+    SandboxSource,
     SandboxStatus,
+    SnapshotRetention,
+    SnapshotSource,
+    TagFilter,
+    TarballSource,
+    WriteFile,
 )
 from vercel._internal.unstable.sandbox.operations import (
     CreateSandboxOperation,
@@ -32,16 +43,16 @@ def create_sandbox(
     project_id: str | None = None,
     name: str | None = None,
     runtime: str | None = None,
-    source: JSONValue | None = None,
+    source: SandboxSource | None = None,
     ports: list[int] | None = None,
-    timeout: DurationInput = None,
-    resources: JSONValue | None = None,
+    execution_time_limit: DurationInput = None,
+    resources: SandboxResources | None = None,
     persistent: bool | None = None,
     network_policy: JSONValue | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: DurationInput = None,
-    keep_last_snapshots: JSONValue | None = None,
+    snapshot_retention: SnapshotRetention | None = None,
 ) -> CreateSandboxOperation:
     return create_sandbox_operation(
         project_id=project_id,
@@ -49,14 +60,14 @@ def create_sandbox(
         runtime=runtime,
         source=source,
         ports=ports,
-        timeout=timeout,
+        execution_time_limit=execution_time_limit,
         resources=resources,
         persistent=persistent,
         network_policy=network_policy,
         env=env,
         tags=tags,
         snapshot_expiration=snapshot_expiration,
-        keep_last_snapshots=keep_last_snapshots,
+        snapshot_retention=snapshot_retention,
     )
 
 
@@ -79,22 +90,22 @@ async def get_sandbox(
     )
 
 
-async def query_sandboxes(
+def query_sandboxes(
     *,
     project_id: str | None = None,
-    limit: int | None = None,
+    page_size: int | None = None,
     cursor: str | None = None,
     sort_by: str | None = None,
     sort_order: str | None = None,
     name_prefix: str | None = None,
-    tags: str | list[str] | None = None,
-) -> list[Sandbox]:
+    tags: Sequence[TagFilter] | None = None,
+) -> AsyncIterator[Sandbox]:
     return (
-        await get_active_session()
+        get_active_session()
         .sandbox_service()
         .query_sandboxes(
             project_id=project_id,
-            limit=limit,
+            page_size=page_size,
             cursor=cursor,
             sort_by=sort_by,
             sort_order=sort_order,
@@ -104,19 +115,52 @@ async def query_sandboxes(
     )
 
 
+def query_sessions(
+    *,
+    project_id: str | None = None,
+    name: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+    sort_order: str | None = None,
+) -> AsyncIterator[SandboxRuntimeSession]:
+    return (
+        get_active_session()
+        .sandbox_service()
+        .query_sessions(
+            project_id=project_id,
+            name=name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
+        )
+    )
+
+
 __all__ = [
     "Sandbox",
     "SandboxApiError",
+    "SandboxCleanupError",
+    "SandboxCommand",
+    "SandboxCommandLog",
     "SandboxCredentialsError",
     "SandboxError",
     "SandboxInvalidHandleError",
+    "SandboxResources",
     "SandboxResponseError",
     "SandboxRuntimeSession",
     "SandboxServiceOptions",
+    "SandboxSource",
     "SandboxStatus",
     "SandboxTerminalStateError",
+    "GitSource",
+    "SnapshotRetention",
+    "SnapshotSource",
+    "TagFilter",
+    "TarballSource",
+    "WriteFile",
     "create_sandbox",
     "get_sandbox",
     "query_sandboxes",
+    "query_sessions",
     "sync",
 ]

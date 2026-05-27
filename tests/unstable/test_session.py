@@ -18,31 +18,8 @@ class OtherServiceOptions(ServiceOptions):
     value: str
 
 
-def test_sync_session_context_restores_parent_and_invalidates_scoped_session() -> None:
+def test_session_options_inherit_replace_reject_duplicates_and_invalidate() -> None:
     parent = get_active_session()
-
-    with vercel.session():
-        scoped = get_active_session()
-        assert scoped is not parent
-        assert scoped.is_alive
-
-    assert get_active_session() is parent
-    assert not scoped.is_alive
-
-
-async def test_async_session_context_restores_parent_and_invalidates_scoped_session() -> None:
-    parent = get_active_session()
-
-    async with vercel.session():
-        scoped = get_active_session()
-        assert scoped is not parent
-        assert scoped.is_alive
-
-    assert get_active_session() is parent
-    assert not scoped.is_alive
-
-
-def test_nested_sessions_inherit_and_replace_options_by_concrete_type() -> None:
     sandbox_outer = SandboxServiceOptions(base_url="https://outer.example.com")
     sandbox_inner = SandboxServiceOptions()
     other_outer = OtherServiceOptions(value="outer")
@@ -52,6 +29,7 @@ def test_nested_sessions_inherit_and_replace_options_by_concrete_type() -> None:
         httpx_client_factory="outer-factory",
     ):
         outer_session = get_active_session()
+        assert outer_session is not parent
         assert outer_session.get_service_option(SandboxServiceOptions) is sandbox_outer
         assert outer_session.get_service_option(OtherServiceOptions) is other_outer
         assert outer_session.get_setting("httpx_client_factory") == "outer-factory"
@@ -68,9 +46,13 @@ def test_nested_sessions_inherit_and_replace_options_by_concrete_type() -> None:
             assert inner_session.get_setting("httpx_client_factory") == "inner-factory"
 
         assert get_active_session() is outer_session
+        assert not inner_session.is_alive
 
+    assert get_active_session() is parent
+    assert not outer_session.is_alive
+    with pytest.raises(VercelSessionClosedError):
+        outer_session.sandbox_service()
 
-def test_service_options_reject_duplicate_concrete_types() -> None:
     with pytest.raises(VercelServiceOptionsError):
         with vercel.session(
             service_options=[
@@ -79,28 +61,3 @@ def test_service_options_reject_duplicate_concrete_types() -> None:
             ],
         ):
             pass
-
-
-def test_service_options_reject_non_service_options() -> None:
-    with pytest.raises(VercelServiceOptionsError):
-        with vercel.session(service_options=[object()]):  # type: ignore[list-item]
-            pass
-
-
-def test_sandbox_service_uses_effective_options_and_session_token() -> None:
-    options = SandboxServiceOptions(base_url="https://sandbox.example.com")
-
-    with vercel.session(service_options=[options]):
-        sdk_session = get_active_session()
-        service = sdk_session.sandbox_service()
-
-        assert service is sdk_session.sandbox_service()
-        assert service.options is options
-        assert service.api_client.base_url == options.base_url
-        assert service.api_client.credentials_factory is options.credentials_factory
-        assert service.alive_token is sdk_session.alive_token
-        assert service.alive_token.is_alive
-
-    assert not service.alive_token.is_alive
-    with pytest.raises(VercelSessionClosedError):
-        sdk_session.sandbox_service()

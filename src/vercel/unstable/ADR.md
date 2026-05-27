@@ -33,7 +33,7 @@ from vercel.unstable import sandbox
 
 sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
 sandbox_ = await sandbox.get_sandbox(name="preview")
-sandboxes = await sandbox.query_sandboxes()
+sandboxes = [item async for item in sandbox.query_sandboxes()]
 ```
 
 Endpoint input dataclasses such as `SandboxCreateParams` are not public API.
@@ -79,6 +79,10 @@ Values supplied to the nested context replace inherited values.
 Service option inheritance is by concrete option type. A nested
 `SandboxServiceOptions(...)` replaces the inherited `SandboxServiceOptions`
 object. Individual option fields do not merge.
+
+Every service also owns a default options object. If no scoped option is
+configured for a service, calls use that default rather than treating the
+service as unavailable.
 
 Rationale:
 
@@ -152,11 +156,14 @@ snapshots owned by the sandbox.
 sandbox_ = await sandbox.create_sandbox(
     runtime="python3.13",
     name="preview",
+    execution_time_limit=timedelta(minutes=5),
     snapshot_expiration=timedelta(minutes=20),
 )
 ```
 
-This value is remote sandbox data. It is not an SDK operation timeout.
+`snapshot_expiration` is remote sandbox data. It is not an SDK operation
+timeout. `execution_time_limit` is the public sandbox execution limit name and
+serializes to the backend `timeout` property.
 
 Rationale:
 
@@ -170,6 +177,7 @@ A handle is valid only while:
 
 - its owning SDK session is alive
 - its own context-managed remote resource has not exited
+- explicit cleanup such as `destroy()` or `stop()` has not succeeded
 
 Handles created inside a `vercel.session(...)` context are invalidated when that
 session context exits. The remote resource may still exist, but the old Python
@@ -177,6 +185,9 @@ handle is not usable.
 
 Context-managed sandboxes and sandbox runtime sessions invalidate their handles
 after cleanup.
+
+Explicit `Sandbox.destroy()` and `SandboxRuntimeSession.stop()` follow the same
+invalidation rule after successful remote cleanup.
 
 The design specifies the invalidation behavior but does not freeze the exact
 exception name yet.
@@ -209,12 +220,43 @@ async with sandbox_.session() as session:
 Context manager exit awaits cleanup and surfaces cleanup failures. Callers who
 want a sandbox or runtime session to survive should not use its context manager.
 
+The same remote cleanup can be requested explicitly with `Sandbox.destroy()` or
+`SandboxRuntimeSession.stop()`. Sandbox identity behavior belongs on `Sandbox`,
+session-scoped behavior belongs on `SandboxRuntimeSession`, and endpoint
+composition belongs in the internal Sandbox service.
+
 Rationale:
 
 The context manager syntax should mean scoped ownership. Awaiting cleanup makes
 the lifecycle deterministic and visible.
 
-## Decision 11: Domain-owned Sync Mirror
+## Decision 11: Sandbox Defaults vs Session Controls
+
+Named sandbox defaults and running session controls are separate public
+operations.
+
+`Sandbox.update(...)` changes persistent named sandbox configuration such as
+runtime, resources, ports, tags, snapshot expiration, retention, environment,
+and the current snapshot source. These values affect later session creation and
+named sandbox metadata.
+
+`SandboxRuntimeSession.extend_execution_time_limit(...)` and
+`SandboxRuntimeSession.update_network_policy(...)` target one running session.
+`Sandbox.extend_execution_time_limit(...)` and
+`Sandbox.update_network_policy(...)` are convenience methods for the sandbox's
+current session, not persistent default updates.
+
+Project-wide session listing is a module-level operation
+`sandbox.query_sessions(...)`; named sandbox-scoped listing lives on
+`Sandbox.list_sessions(...)`.
+
+Rationale:
+
+The v2 REST API has both named sandbox configuration and session-centered
+mutation routes. Keeping them distinct prevents a caller from accidentally
+assuming that a running-session change persists as a sandbox default.
+
+## Decision 12: Domain-owned Sync Mirror
 
 Async is the primary API. Sync support mirrors each domain inside that domain
 package.
@@ -239,9 +281,14 @@ Keeping sync under the domain package avoids cluttering async modules with
 
 All unstable SDK exceptions inherit from `vercel.unstable.VercelError`.
 
-Domain errors inherit from domain-specific bases such as `SandboxError`.
-Specific names for invalid handles and cleanup failures can evolve while the
-namespace remains unstable.
+Session errors inherit from `VercelSessionError`. Domain errors inherit from
+domain-specific bases such as `SandboxError`.
+
+Sandbox invalid handles raise `SandboxInvalidHandleError`. Sandbox context
+manager cleanup failures raise `SandboxCleanupError`; the error carries
+`resource_type`, `resource_id`, and the underlying `cause`. Sandbox v2 API
+errors raise `SandboxApiError`, which preserves `status_code`, structured
+`data`, and the v2 error `code` when available.
 
 Rationale:
 
@@ -269,7 +316,4 @@ Costs:
 
 ## Open Questions
 
-- Exact exception names for invalid handle use and cleanup failures.
-- Exact marker base class name for service options.
 - Exact transport/session option names beyond `httpx_client_factory`.
-- Exact ready and terminal state names for each sandbox operation.

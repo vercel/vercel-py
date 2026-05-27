@@ -33,6 +33,23 @@ class SandboxTerminalStateError(SandboxError):
         self.sandbox = sandbox
 
 
+class SandboxCleanupError(SandboxError):
+    """Raised when context-managed Sandbox resource cleanup fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resource_type: str,
+        resource_id: str,
+        cause: BaseException,
+    ) -> None:
+        super().__init__(message)
+        self.resource_type = resource_type
+        self.resource_id = resource_id
+        self.cause = cause
+
+
 class SandboxApiError(SandboxError):
     """Raised when the Sandbox v2 API returns an error response."""
 
@@ -47,6 +64,7 @@ class SandboxApiError(SandboxError):
         self.response = response
         self.status_code = response.status_code
         self.data = data
+        self.code = _extract_api_error_code(data)
 
 
 class SandboxResponseError(SandboxError):
@@ -59,3 +77,15 @@ class SandboxResponseError(SandboxError):
 
 class SandboxCredentialsError(SandboxError):
     """Raised when Sandbox credentials cannot be resolved."""
+
+
+def _extract_api_error_code(data: object | None) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    if not isinstance(code, str):
+        return None
+    return code

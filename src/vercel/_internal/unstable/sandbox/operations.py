@@ -7,11 +7,15 @@ from types import TracebackType
 from typing import Any
 
 from vercel._internal.unstable.context import get_active_session
+from vercel._internal.unstable.sandbox.errors import SandboxCleanupError
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     JSONValue,
     Sandbox,
+    SandboxResources,
     SandboxRuntimeSession,
+    SandboxSource,
+    SnapshotRetention,
 )
 from vercel._internal.unstable.session import AliveToken, SdkSession
 
@@ -21,16 +25,16 @@ class _CreateSandboxParams:
     project_id: str | None = None
     name: str | None = None
     runtime: str | None = None
-    source: JSONValue | None = None
+    source: SandboxSource | None = None
     ports: list[int] | None = None
-    timeout: DurationInput = None
-    resources: JSONValue | None = None
+    execution_time_limit: DurationInput = None
+    resources: SandboxResources | None = None
     persistent: bool | None = None
     network_policy: JSONValue | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
     snapshot_expiration: DurationInput = None
-    keep_last_snapshots: JSONValue | None = None
+    snapshot_retention: SnapshotRetention | None = None
 
 
 class CreateSandboxOperation:
@@ -54,14 +58,14 @@ class CreateSandboxOperation:
             runtime=self._params.runtime,
             source=self._params.source,
             ports=self._params.ports,
-            timeout=self._params.timeout,
+            execution_time_limit=self._params.execution_time_limit,
             resources=self._params.resources,
             persistent=self._params.persistent,
             network_policy=self._params.network_policy,
             env=self._params.env,
             tags=self._params.tags,
             snapshot_expiration=self._params.snapshot_expiration,
-            keep_last_snapshots=self._params.keep_last_snapshots,
+            snapshot_retention=self._params.snapshot_retention,
         )
 
     def __await__(self) -> Generator[Any, None, Sandbox]:
@@ -84,10 +88,18 @@ class CreateSandboxOperation:
         if self._handle is None or self._resource_token is None:
             return None
 
-        await self._session.sandbox_service().destroy_sandbox(
-            name=self._handle.name,
-            project_id=self._handle.project_id,
-        )
+        try:
+            await self._session.sandbox_service().destroy_sandbox(
+                name=self._handle.name,
+                project_id=self._handle.project_id,
+            )
+        except Exception as exc:
+            raise SandboxCleanupError(
+                f"Failed to clean up sandbox {self._handle.name!r}",
+                resource_type="sandbox",
+                resource_id=self._handle.name,
+                cause=exc,
+            ) from exc
         self._resource_token.invalidate()
         return None
 
@@ -117,10 +129,12 @@ class CreateRuntimeSessionOperation:
     async def _run_once(self) -> SandboxRuntimeSession:
         self._mark_consumed()
         self._sandbox._raise_if_invalid()
-        return await self._session.sandbox_service().create_runtime_session(
+        handle = await self._session.sandbox_service().create_runtime_session(
             name=self._sandbox.name,
             project_id=self._sandbox.project_id,
         )
+        self._sandbox._attach_resource_tokens_to_runtime_session(handle)
+        return handle
 
     def __await__(self) -> Generator[Any, None, SandboxRuntimeSession]:
         return self._run_once().__await__()
@@ -142,9 +156,17 @@ class CreateRuntimeSessionOperation:
         if self._handle is None or self._resource_token is None:
             return None
 
-        await self._session.sandbox_service().destroy_runtime_session(
-            session_id=self._handle.id,
-        )
+        try:
+            await self._session.sandbox_service().destroy_runtime_session(
+                session_id=self._handle.id,
+            )
+        except Exception as exc:
+            raise SandboxCleanupError(
+                f"Failed to clean up sandbox runtime session {self._handle.id!r}",
+                resource_type="sandbox_runtime_session",
+                resource_id=self._handle.id,
+                cause=exc,
+            ) from exc
         self._resource_token.invalidate()
         return None
 
@@ -154,16 +176,16 @@ def create_sandbox_operation(
     project_id: str | None = None,
     name: str | None = None,
     runtime: str | None = None,
-    source: JSONValue | None = None,
+    source: SandboxSource | None = None,
     ports: list[int] | None = None,
-    timeout: DurationInput = None,
-    resources: JSONValue | None = None,
+    execution_time_limit: DurationInput = None,
+    resources: SandboxResources | None = None,
     persistent: bool | None = None,
     network_policy: JSONValue | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: DurationInput = None,
-    keep_last_snapshots: JSONValue | None = None,
+    snapshot_retention: SnapshotRetention | None = None,
 ) -> CreateSandboxOperation:
     return CreateSandboxOperation(
         session=get_active_session(),
@@ -173,14 +195,14 @@ def create_sandbox_operation(
             runtime=runtime,
             source=source,
             ports=ports,
-            timeout=timeout,
+            execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
             env=env,
             tags=tags,
             snapshot_expiration=snapshot_expiration,
-            keep_last_snapshots=keep_last_snapshots,
+            snapshot_retention=snapshot_retention,
         ),
     )
 
