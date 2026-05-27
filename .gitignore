@@ -122,5 +122,3 @@ venv.bak/
 **/.env
 **/.env.*
 **/*.env
-
-uv.lock

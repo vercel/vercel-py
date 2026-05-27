@@ -10,14 +10,22 @@ _cv_wait_until: ContextVar[Callable[[Awaitable[object]], None] | None] = Context
     "vercel_wait_until", default=None
 )
 _cv_cache: ContextVar[object | None] = ContextVar("vercel_cache", default=None)
+_cv_async_cache: ContextVar[object | None] = ContextVar("vercel_async_cache", default=None)
 _cv_purge: ContextVar[PurgeAPI | None] = ContextVar("vercel_purge", default=None)
 _cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar("vercel_headers", default=None)
+
+
+class _Unset: ...
+
+
+UNSET = _Unset()
 
 
 @dataclass
 class _ContextSnapshot:
     wait_until: Callable[[Awaitable[object]], None] | None
     cache: object | None
+    async_cache: object | None
     purge: PurgeAPI | None
     headers: Mapping[str, str] | None
 
@@ -26,6 +34,7 @@ def get_context() -> _ContextSnapshot:
     return _ContextSnapshot(
         wait_until=_cv_wait_until.get(),
         cache=_cv_cache.get(),
+        async_cache=_cv_async_cache.get(),
         purge=_cv_purge.get(),
         headers=_cv_headers.get(),
     )
@@ -33,18 +42,21 @@ def get_context() -> _ContextSnapshot:
 
 def set_context(
     *,
-    wait_until: Callable[[Awaitable[object]], None] | None = None,
-    cache: object | None = None,
-    purge: PurgeAPI | None = None,
-    headers: Mapping[str, str] | None = None,
+    wait_until: Callable[[Awaitable[object]], None] | None | _Unset = UNSET,
+    cache: object | None | _Unset = UNSET,
+    async_cache: object | None | _Unset = UNSET,
+    purge: PurgeAPI | None | _Unset = UNSET,
+    headers: Mapping[str, str] | None | _Unset = UNSET,
 ) -> None:
-    if wait_until is not None:
+    if not isinstance(wait_until, _Unset):
         _cv_wait_until.set(wait_until)
-    if cache is not None:
+    if not isinstance(cache, _Unset):
         _cv_cache.set(cache)
-    if purge is not None:
+    if not isinstance(async_cache, _Unset):
+        _cv_async_cache.set(async_cache)
+    if not isinstance(purge, _Unset):
         _cv_purge.set(purge)
-    if headers is not None:
+    if not isinstance(headers, _Unset):
         _cv_headers.set(headers)
 
 

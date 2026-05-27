@@ -4,21 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vercel"
-version = "0.5.8"
+version = "0.5.9"
 description = "Python SDK for Vercel"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
-    "httpx>=0.27.0",
-    "pydantic>=2.7.0",
-    "anyio>=4.0.0",
-    "typing-extensions>=4.0.0 ; python_version < '3.11'",
-    "python-dotenv",
-    "websockets>=12.0",
-    "cbor2>=6.0",
-    "vercel-workers>=0.0.16 ; python_version >= '3.12'",
+    "httpx>=0.27.0,<1",
+    "pydantic>=2.7.0,<3",
+    "anyio>=4.0.0,<5",
+    "typing-extensions>=4.0.0,<5 ; python_version < '3.11'",
+    "python-dotenv>=1.0.0,<2",
+    "websockets>=12.0,<17",
+    "cbor2>=6.0,<7",
+    "vercel-workers>=0.0.16,<1 ; python_version >= '3.12'",
 ]
 
 [project.scripts]
@@ -28,22 +28,23 @@ sandbox = "vercel.sandbox.__main__:main"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.5.0",
-    "pytest>=7.0.0",
-    "pytest-asyncio",
-    "pytest-xdist",
-    "hypothesis>=6.0.0",
-    "respx>=0.21.0",
-    "uvloop",
+    "ruff>=0.5.0,<1",
+    "pytest>=7.0.0,<10",
+    "pytest-asyncio<2",
+    "pytest-xdist<4",
+    "hypothesis>=6.0.0,<7",
+    "respx>=0.21.0,<1",
+    "uvloop<1",
     "mypy>=1.20.2,<2",
-    "build",
-    "twine",
-    "zizmor>=1.24.1",
+    "build<2",
+    "twine<7",
+    "zizmor>=1.24.1,<2",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = true
+exclude-newer = "2 days"
 
 [tool.setuptools.packages.find]
 where = ["src"]
