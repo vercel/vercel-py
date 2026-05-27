@@ -1,0 +1,265 @@
+# `vercel.unstable`
+
+`vercel.unstable` is the design space for the next Vercel Python SDK API.
+Everything in this namespace may change without migration support.
+
+This document describes the intended SDK shape, not the current implementation
+status.
+
+## Design Summary
+
+- Most callers use module-level service functions such as
+  `sandbox.create_sandbox(...)`.
+- Service functions resolve their SDK session from `ContextVar` state, falling
+  back to the process default session.
+- There is no public "configure default session" API. Use the default session
+  as-is or create a scoped override with `vercel.session(...)`.
+- Service configuration lives on the SDK session through
+  `service_options=[...]`.
+- Endpoint calls use direct keyword arguments, not public `*Param` dataclasses.
+- Service methods avoid complex retry, timeout, and polling policy. Compose
+  those outside the call.
+- Handles are valid only while their owning SDK session and resource context
+  are alive.
+- Async is primary. Sync support mirrors each domain under that domain package,
+  for example `vercel.unstable.sandbox.sync`.
+
+## Primary Async Shape
+
+```python
+from datetime import timedelta
+import asyncio
+
+from vercel import unstable as vercel
+from vercel.unstable import sandbox
+from vercel.unstable.blob import BlobServiceOptions
+from vercel.unstable.sandbox import SandboxServiceOptions
+
+
+async def main() -> None:
+    # Most callers import a service module and call module-level functions.
+    # Calls use the active SDK session, or the process default session when no
+    # scoped override is active.
+    default_sandbox = await sandbox.create_sandbox(
+        runtime="python3.13",
+        name="default-session-preview",
+        snapshot_expiration=timedelta(minutes=20),
+    )
+
+    # Service methods do not expose complex timeout/retry policy.
+    # Compose operation policy outside the SDK call.
+    async with asyncio.timeout(90):
+        ready_sandbox = await sandbox.create_sandbox(
+            runtime="python3.13",
+            name="ready-or-terminal",
+        )
+
+        # create_sandbox always waits for ready or terminal.
+        # There is no wait=True / wait=False argument.
+        await ready_sandbox.run_command("python", ["--version"])
+
+    # vercel.session(...) creates a scoped SDK session override.
+    # It does not configure the process default session globally.
+    async with vercel.session(
+        httpx_client_factory=client_factory,
+        service_options=[
+            SandboxServiceOptions(base_url="https://sandbox-proxy.example.com"),
+            BlobServiceOptions(base_url="https://blob-proxy.example.com"),
+        ],
+    ):
+        # Endpoint inputs are keyword arguments, not *Param dataclasses.
+        preview = await sandbox.create_sandbox(
+            runtime="python3.13",
+            name="preview",
+            # Platform-side retention for sandbox-owned snapshots/state.
+            # This is not an SDK operation timeout.
+            snapshot_expiration=timedelta(minutes=20),
+        )
+
+        # Nested sessions inherit unspecified settings from the active session.
+        async with vercel.session(
+            service_options=[
+                # Replaces the inherited SandboxServiceOptions as a whole.
+                # Option objects replace by concrete type; fields do not merge.
+                SandboxServiceOptions(base_url="https://inner-proxy.example.com"),
+            ],
+        ):
+            inner = await sandbox.create_sandbox(
+                runtime="python3.13",
+                name="inner-preview",
+            )
+            await inner.run_command("python", ["--version"])
+
+        # `inner` was created by the nested SDK session.
+        # When that session exited, the Python handle was invalidated.
+        # The remote sandbox may still exist; reacquire a fresh handle.
+        inner = await sandbox.get_sandbox(name="inner-preview")
+
+    # `preview` was created by the outer scoped SDK session.
+    # That session has exited, so this handle is invalid too.
+    preview = await sandbox.get_sandbox(name="preview")
+
+    # A context-managed sandbox is destroyed on exit.
+    async with sandbox.create_sandbox(
+        runtime="python3.13",
+        name="scratch",
+    ) as scratch:
+        await scratch.run_command("python", ["--version"])
+
+    # `scratch` has been destroyed and its handle is invalid.
+
+    persistent = await sandbox.create_sandbox(
+        runtime="python3.13",
+        name="persistent",
+    )
+
+    # A context-managed sandbox runtime session is destroyed on exit.
+    # The sandbox survives; the runtime session handle does not.
+    async with persistent.session() as runtime_session:
+        await runtime_session.run_command("python", ["--version"])
+
+    # If you want a sandbox or runtime session to survive, do not use its
+    # context manager.
+    surviving_session = await persistent.session()
+    await surviving_session.run_command("python", ["--version"])
+
+    sandboxes = await sandbox.query_sandboxes()
+```
+
+## Service Options
+
+Service configuration belongs to the SDK session.
+
+```python
+from vercel import unstable as vercel
+from vercel.unstable.blob import BlobServiceOptions
+from vercel.unstable.sandbox import SandboxServiceOptions
+
+
+async with vercel.session(
+    service_options=[
+        SandboxServiceOptions(base_url="https://sandbox-proxy.example.com"),
+        BlobServiceOptions(base_url="https://blob-proxy.example.com"),
+    ],
+):
+    ...
+```
+
+Service option rules:
+
+- every service option class inherits from a common marker base
+- the session stores options in a map keyed by concrete type
+- a single `service_options` list may contain at most one option per concrete
+  type
+- nested sessions inherit options from the active session
+- nested sessions replace option objects by concrete type
+- option fields do not merge
+
+```python
+async with vercel.session(
+    service_options=[
+        SandboxServiceOptions(base_url="https://outer.example.com"),
+        BlobServiceOptions(base_url="https://blob.example.com"),
+    ],
+):
+    async with vercel.session(
+        service_options=[
+            # Replaces the whole inherited SandboxServiceOptions object.
+            SandboxServiceOptions(base_url="https://inner.example.com"),
+
+            # A second SandboxServiceOptions in this same list would be invalid.
+            # SandboxServiceOptions(base_url="https://other.example.com"),
+        ],
+    ):
+        ...
+```
+
+## Sandbox Lifecycle
+
+`sandbox.create_sandbox(...)` always waits until the sandbox reaches a ready
+state or a terminal state. Terminal states raise typed sandbox errors. Operation
+time limits are composed by the caller.
+
+```python
+async with asyncio.timeout(90):
+    sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
+```
+
+Context manager syntax means scoped remote ownership:
+
+```python
+# Destroys the sandbox on exit.
+async with sandbox.create_sandbox(runtime="python3.13") as sandbox_:
+    ...
+
+# Destroys the sandbox runtime session on exit.
+sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
+async with sandbox_.session() as runtime_session:
+    ...
+```
+
+Context manager exit awaits cleanup and surfaces cleanup failures. To keep a
+sandbox or sandbox runtime session around, do not use its context manager.
+
+## Handle Validity
+
+Handles carry an internal alive marker.
+
+A handle is valid only while:
+
+- its owning SDK session is alive
+- its own context-managed remote resource has not exited
+
+Handles created inside `vercel.session(...)` are invalidated when that session
+context exits. The remote resource may still exist, but the old Python handle is
+not usable. Reacquire a new handle through an active SDK session:
+
+```python
+from vercel import unstable as vercel
+from vercel.unstable import sandbox
+
+
+async with vercel.session(service_options=[...]):
+    preview = await sandbox.create_sandbox(runtime="python3.13", name="preview")
+
+# `preview` is invalid as a Python handle.
+preview = await sandbox.get_sandbox(name="preview")
+```
+
+The exact invalid-handle exception name is not frozen yet.
+
+## Sync Mirror
+
+The async API is the primary API. Sync support mirrors the service shape inside
+each domain package.
+
+```python
+from vercel import unstable as vercel
+from vercel.unstable.sandbox import SandboxServiceOptions
+from vercel.unstable.sandbox import sync as sandbox
+
+
+with vercel.session(
+    service_options=[
+        SandboxServiceOptions(base_url="https://sandbox-proxy.example.com"),
+    ],
+):
+    sandbox_ = sandbox.create_sandbox(
+        runtime="python3.13",
+        name="sync-preview",
+    )
+
+    with sandbox_.session() as session:
+        session.run_command("python", ["--version"])
+```
+
+The sync mirror follows the same session resolution, service option, waiting,
+cleanup, and handle invalidation rules as the async API.
+
+## Error Model
+
+All unstable SDK exceptions inherit from `vercel.unstable.VercelError`.
+
+Domain-specific errors inherit from domain bases such as `SandboxError`.
+Terminal sandbox states, API failures, cleanup failures, and invalid handle use
+raise typed SDK errors. Exact names can evolve while the namespace is unstable.

@@ -109,6 +109,9 @@ class TestTypecheck(unittest.TestCase):
             "vercel.headers",
             "vercel.oidc",
             "vercel.sandbox",
+            "vercel.unstable",
+            "vercel.unstable.sandbox",
+            "vercel.unstable.sandbox.sync",
         ]
         for module in modules:
             try:
