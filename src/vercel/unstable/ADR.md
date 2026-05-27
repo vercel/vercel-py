@@ -98,7 +98,6 @@ Service configuration belongs to the SDK session.
 async with vercel.session(
     service_options=[
         SandboxServiceOptions(base_url="https://sandbox-proxy.example.com"),
-        BlobServiceOptions(base_url="https://blob-proxy.example.com"),
     ],
 ):
     ...
@@ -277,7 +276,7 @@ Rationale:
 Keeping sync under the domain package avoids cluttering async modules with
 `*_sync` functions and avoids a separate top-level sync namespace.
 
-## Decision 12: Error Root
+## Decision 13: Error Root
 
 All unstable SDK exceptions inherit from `vercel.unstable.VercelError`.
 

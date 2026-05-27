@@ -3,8 +3,8 @@
 `vercel.unstable` is the design space for the next Vercel Python SDK API.
 Everything in this namespace may change without migration support.
 
-This document describes the intended SDK shape, not the current implementation
-status.
+This document describes the current unstable SDK shape. It is not a stable API
+contract.
 
 ## Design Summary
 
@@ -34,7 +34,6 @@ import asyncio
 
 from vercel import unstable as vercel
 from vercel.unstable import sandbox
-from vercel.unstable.blob import BlobServiceOptions
 from vercel.unstable.sandbox import (
     GitSource,
     SandboxResources,
@@ -72,7 +71,6 @@ async def main() -> None:
         httpx_client_factory=client_factory,
         service_options=[
             SandboxServiceOptions(base_url="https://sandbox-proxy.example.com"),
-            BlobServiceOptions(base_url="https://blob-proxy.example.com"),
         ],
     ):
         # Endpoint inputs are keyword arguments, not *Param dataclasses.
@@ -170,14 +168,12 @@ Service configuration belongs to the SDK session.
 
 ```python
 from vercel import unstable as vercel
-from vercel.unstable.blob import BlobServiceOptions
 from vercel.unstable.sandbox import SandboxServiceOptions
 
 
 async with vercel.session(
     service_options=[
         SandboxServiceOptions(base_url="https://sandbox-proxy.example.com"),
-        BlobServiceOptions(base_url="https://blob-proxy.example.com"),
     ],
 ):
     ...
@@ -197,7 +193,6 @@ Service option rules:
 async with vercel.session(
     service_options=[
         SandboxServiceOptions(base_url="https://outer.example.com"),
-        BlobServiceOptions(base_url="https://blob.example.com"),
     ],
 ):
     async with vercel.session(
@@ -254,9 +249,13 @@ Sandbox identity methods such as `session()`, `run_command(...)`,
 `extend_execution_time_limit(...)`, `update_network_policy(...)`, and
 `destroy()` live on `Sandbox`. Session-scoped methods such as
 `run_command(...)`, `start_command(...)`, `refresh()`,
+`get_command(...)`, `query_commands(...)`, `mkdir(...)`, `read_file(...)`,
+`read_text(...)`, `write_files(...)`, `snapshot(...)`,
 `extend_execution_time_limit(...)`, `update_network_policy(...)`, and `stop()`
-live on `SandboxRuntimeSession`. Low-level endpoint composition, response
-binding, and polling stay inside the internal Sandbox service layer.
+live on `SandboxRuntimeSession`. Command handles expose `wait()`, `kill()`,
+`logs()`, `output()`, `stdout()`, and `stderr()`. Low-level endpoint
+composition, response binding, and polling stay inside the internal Sandbox
+service layer.
 
 `Sandbox.update(...)` changes named sandbox defaults for future sessions, such
 as runtime, resources, ports, tags, snapshot expiration, and persistence.
@@ -316,29 +315,53 @@ each domain package.
 ```python
 from itertools import islice
 
+from vercel.unstable.sandbox import WriteFile
+from vercel.unstable.sandbox import sync as sandbox
+
+
+with sandbox.create_sandbox(
+    runtime="python3.13",
+    name="sync-preview",
+) as sandbox_:
+    sandbox_.write_files(
+        [
+            WriteFile(
+                path="hello.py",
+                content="print('hello from sync sandbox')\n",
+            )
+        ]
+    )
+    command = sandbox_.start_command("python", ["hello.py"])
+    for event in command.logs():
+        print(event.data, end="")
+    finished = command.wait()
+    assert finished.exit_code == 0
+
+    sessions = sandbox_.list_sessions(page_size=10)
+
+    first_five = list(islice(sandbox.query_sandboxes(page_size=10), 5))
+```
+
+Scoped service options work the same way in sync code:
+
+```python
 from vercel import unstable as vercel
 from vercel.unstable.sandbox import SandboxServiceOptions
 from vercel.unstable.sandbox import sync as sandbox
 
 
 with vercel.session(
-    service_options=[
-        SandboxServiceOptions(base_url="https://sandbox-proxy.example.com"),
-    ],
+    service_options=[SandboxServiceOptions(base_url="https://sandbox-proxy.example.com")],
 ):
-    sandbox_ = sandbox.create_sandbox(
+    sandbox.create_sandbox(
         runtime="python3.13",
         name="sync-preview",
     )
-
-    with sandbox_.session() as session:
-        session.run_command("python", ["--version"])
-
-    first_five = list(islice(sandbox.query_sandboxes(page_size=10), 5))
 ```
 
 The sync mirror follows the same session resolution, service option, waiting,
-cleanup, and handle invalidation rules as the async API.
+cleanup, and handle invalidation rules as the async API. Sync command log
+streaming is exposed as a normal Python iterator.
 
 ## Error Model
 
