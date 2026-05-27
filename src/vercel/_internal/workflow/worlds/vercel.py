@@ -4,6 +4,7 @@ import os
 import platform
 import traceback
 import urllib.parse
+from collections.abc import Mapping
 from typing import Any, TypeVar
 
 import cbor2
@@ -30,13 +31,13 @@ MAX_DELAY_SECONDS = float(
 T = TypeVar("T", bound=w.BaseModel)
 
 
-def _cbor_tag_hook(decoder: cbor2.CBORDecoder, tag: cbor2.CBORTag) -> Any:
+def _cbor_tag_hook(tag: cbor2.CBORTag, shareable: bool = False) -> Any:
     if tag.tag == 64:
         return tag.value
     return tag
 
 
-def _cbor_filter_undefined(decoder: cbor2.CBORDecoder, value: dict[str, Any]) -> dict[str, Any]:
+def _cbor_filter_undefined(value: Mapping[Any, Any], shareable: bool = False) -> dict[str, Any]:
     return {k: None if v is cbor2.undefined else v for k, v in value.items()}
 
 
