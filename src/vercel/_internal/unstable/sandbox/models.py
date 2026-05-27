@@ -368,6 +368,7 @@ class SandboxCommandLog(_ApiModel):
 
 class BaseSandboxCommand(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
+    _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
     _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
     _stdout_cache: str | None = PrivateAttr(default=None)
     _stderr_cache: str | None = PrivateAttr(default=None)
@@ -404,10 +405,19 @@ class BaseSandboxCommand(_ApiModel):
         if sdk_session is not None:
             self._sdk_session = sdk_session
 
+    def _attach_resource_token(self, resource_token: AliveToken) -> None:
+        self._resource_alive_tokens.add(resource_token)
+
+    def _attach_resource_tokens_to_command(self, command: "BaseSandboxCommand") -> None:
+        for resource_token in self._resource_alive_tokens:
+            command._attach_resource_token(resource_token)
+
     def _raise_if_invalid(self) -> None:
         if self._session_alive_token is None:
             raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
         if not self._session_alive_token.is_alive:
+            raise SandboxInvalidHandleError("Sandbox command handle is no longer valid")
+        if any(not token.is_alive for token in self._resource_alive_tokens):
             raise SandboxInvalidHandleError("Sandbox command handle is no longer valid")
 
     def _require_sandbox_service(self) -> "SandboxService":
@@ -428,11 +438,13 @@ class SandboxCommand(BaseSandboxCommand):
 
     async def refresh(self, *, wait: bool = False) -> "SandboxCommand":
         service = self._require_sandbox_service()
-        return await service.get_command(
+        command = await service.get_command(
             session_id=self.session_id,
             command_id=self.id,
             wait=wait,
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     async def wait(self) -> "SandboxCommand":
         return await self.refresh(wait=True)
@@ -442,18 +454,26 @@ class SandboxCommand(BaseSandboxCommand):
         signal: int | str | signal_module.Signals | None = None,
     ) -> "SandboxCommand":
         service = self._require_sandbox_service()
-        return await service.kill_command(
+        command = await service.kill_command(
             session_id=self.session_id,
             command_id=self.id,
             signal=_signal_number(signal),
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     def logs(self) -> AsyncIterator[SandboxCommandLog]:
         service = self._require_sandbox_service()
-        return service.command_logs(
-            session_id=self.session_id,
-            command_id=self.id,
-        )
+
+        async def iter_logs() -> AsyncIterator[SandboxCommandLog]:
+            self._raise_if_invalid()
+            async for line in service.command_logs(
+                session_id=self.session_id,
+                command_id=self.id,
+            ):
+                yield line
+
+        return iter_logs()
 
     async def output(self, stream: Literal["stdout", "stderr", "both"] = "both") -> str:
         stdout = ""
@@ -483,7 +503,7 @@ class SyncSandboxCommand(BaseSandboxCommand):
 
     def refresh(self, *, wait: bool = False) -> "SyncSandboxCommand":
         service = self._require_sync_sandbox_service()
-        return cast(
+        command = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.get_command(
@@ -493,6 +513,8 @@ class SyncSandboxCommand(BaseSandboxCommand):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     def wait(self) -> "SyncSandboxCommand":
         return self.refresh(wait=True)
@@ -502,7 +524,7 @@ class SyncSandboxCommand(BaseSandboxCommand):
         signal: int | str | signal_module.Signals | None = None,
     ) -> "SyncSandboxCommand":
         service = self._require_sync_sandbox_service()
-        return cast(
+        command = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.kill_command(
@@ -512,6 +534,8 @@ class SyncSandboxCommand(BaseSandboxCommand):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     def logs(self) -> Iterator[SandboxCommandLog]:
         service = self._require_sync_sandbox_service()
@@ -753,6 +777,10 @@ class BaseSandboxRuntimeSession(_ApiModel):
     def _attach_resource_token(self, resource_token: AliveToken) -> None:
         self._resource_alive_tokens.add(resource_token)
 
+    def _attach_resource_tokens_to_command(self, command: BaseSandboxCommand) -> None:
+        for resource_token in self._resource_alive_tokens:
+            command._attach_resource_token(resource_token)
+
     def _raise_if_invalid(self) -> None:
         if self._session_alive_token is None:
             raise SandboxInvalidHandleError(
@@ -806,7 +834,7 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        return await service.run_command(
+        command_handle = await service.run_command(
             session_id=self.id,
             command=command,
             args=args,
@@ -814,6 +842,8 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
             env=env,
             sudo=sudo,
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     async def start_command(
         self,
@@ -825,7 +855,7 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        return await service.start_command(
+        command_handle = await service.start_command(
             session_id=self.id,
             command=command,
             args=args,
@@ -833,18 +863,25 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
             env=env,
             sudo=sudo,
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
         service = self._require_sandbox_service()
-        return await service.get_command(
+        command = await service.get_command(
             session_id=self.id,
             command_id=command_id,
             wait=wait,
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     async def query_commands(self) -> list[SandboxCommand]:
         service = self._require_sandbox_service()
-        return await service.query_commands(session_id=self.id)
+        commands = await service.query_commands(session_id=self.id)
+        for command in commands:
+            self._attach_resource_tokens_to_command(command)
+        return commands
 
     async def refresh(
         self,
@@ -992,7 +1029,7 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        return cast(
+        command_handle = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.run_command(
@@ -1005,6 +1042,8 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     def start_command(
         self,
@@ -1016,7 +1055,7 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        return cast(
+        command_handle = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.start_command(
@@ -1029,10 +1068,12 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        return cast(
+        command = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.get_command(
@@ -1042,13 +1083,18 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     def query_commands(self) -> list[SyncSandboxCommand]:
         service = self._require_sync_sandbox_service()
-        return cast(
+        commands = cast(
             list[SyncSandboxCommand],
             iter_coroutine(service.query_commands(session_id=self.id)),
         )
+        for command in commands:
+            self._attach_resource_tokens_to_command(command)
+        return commands
 
     def refresh(
         self,
@@ -1286,6 +1332,10 @@ class BaseSandbox(_ApiModel):
         for resource_token in self._resource_alive_tokens:
             runtime_session._attach_resource_token(resource_token)
 
+    def _attach_resource_tokens_to_command(self, command: BaseSandboxCommand) -> None:
+        for resource_token in self._resource_alive_tokens:
+            command._attach_resource_token(resource_token)
+
     def _raise_if_invalid(self) -> None:
         if self._session_alive_token is None:
             raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
@@ -1350,7 +1400,7 @@ class Sandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        return await service.run_command(
+        command_handle = await service.run_command(
             session_id=self.current_session_id,
             command=command,
             args=args,
@@ -1358,6 +1408,8 @@ class Sandbox(BaseSandbox):
             env=env,
             sudo=sudo,
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     async def start_command(
         self,
@@ -1369,7 +1421,7 @@ class Sandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        return await service.start_command(
+        command_handle = await service.start_command(
             session_id=self.current_session_id,
             command=command,
             args=args,
@@ -1377,20 +1429,27 @@ class Sandbox(BaseSandbox):
             env=env,
             sudo=sudo,
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
         service = self._require_sandbox_service()
-        return await service.get_command(
+        command = await service.get_command(
             session_id=self.current_session_id,
             command_id=command_id,
             wait=wait,
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     async def query_commands(self) -> list[SandboxCommand]:
         service = self._require_sandbox_service()
-        return await service.query_commands(
+        commands = await service.query_commands(
             session_id=self.current_session_id,
         )
+        for command in commands:
+            self._attach_resource_tokens_to_command(command)
+        return commands
 
     async def list_sessions(
         self,
@@ -1609,7 +1668,7 @@ class SyncSandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        return cast(
+        command_handle = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.run_command(
@@ -1622,6 +1681,8 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     def start_command(
         self,
@@ -1633,7 +1694,7 @@ class SyncSandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        return cast(
+        command_handle = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.start_command(
@@ -1646,10 +1707,12 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command_handle)
+        return command_handle
 
     def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        return cast(
+        command = cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.get_command(
@@ -1659,10 +1722,12 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
+        self._attach_resource_tokens_to_command(command)
+        return command
 
     def query_commands(self) -> list[SyncSandboxCommand]:
         service = self._require_sync_sandbox_service()
-        return cast(
+        commands = cast(
             list[SyncSandboxCommand],
             iter_coroutine(
                 service.query_commands(
@@ -1670,6 +1735,9 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
+        for command in commands:
+            self._attach_resource_tokens_to_command(command)
+        return commands
 
     def list_sessions(
         self,
