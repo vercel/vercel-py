@@ -1,5 +1,7 @@
 import asyncio
 import datetime
+import json
+import math
 import os
 import platform
 import traceback
@@ -13,6 +15,7 @@ import pydantic
 
 from vercel._internal.polyfills import UTC
 from vercel.workers import client as vqs_client
+from vercel.workers.exceptions import DuplicateIdempotencyKeyError
 
 from .. import world as w
 
@@ -186,7 +189,7 @@ class VercelWorld(w.World):
         }
         headers = {}
         if delay_seconds is not None:
-            headers["Vqs-Delay-Seconds"] = str(delay_seconds)
+            headers["Vqs-Delay-Seconds"] = str(max(1, math.ceil(delay_seconds)))
         try:
             response = await vqs_client.send_async(
                 "".join(char if char.isalnum() or char in "-_" else "-" for char in queue_name),
@@ -202,7 +205,7 @@ class VercelWorld(w.World):
                 headers=self._headers | headers,
             )
             return response["messageId"]
-        except vqs_client.DuplicateIdempotencyKeyError:
+        except DuplicateIdempotencyKeyError:
             # Silently handle idempotency key conflicts - the message was already queued
             # This matches the behavior of world-local and world-postgres
             # Return a placeholder messageId since the original is not available from the error.
@@ -217,6 +220,11 @@ class VercelWorld(w.World):
         )
         async def async_handler(body: Any, meta: vqs_client.MessageMetadata) -> None:
             try:
+                if isinstance(body, (bytes, bytearray)):
+                    if body:
+                        body = json.loads(body)
+                    else:
+                        return  # empty body from delayed re-delivery; skip
                 if not isinstance(body, dict):
                     raise ValueError("Invalid message body: expected a JSON object")
                 if "payload" not in body:
@@ -258,8 +266,29 @@ class VercelWorld(w.World):
                     status=400,
                 )
             raw_body = await request.get_body()
+            # Build WSGI-style environ from request headers so that
+            # handle_queue_callback can detect v2beta callbacks correctly.
+            environ: dict[str, Any] = {"CONTENT_TYPE": content_type}
+            for hdr in (
+                "ce-type",
+                "ce-specversion",
+                "ce-source",
+                "ce-id",
+                "ce-time",
+                "ce-vqsmessageid",
+                "ce-vqsqueuename",
+                "ce-vqsconsumergroup",
+                "ce-vqsreceipthandle",
+                "ce-vqsdeliverycount",
+                "ce-vqscreatedat",
+                "ce-vqsexpiresat",
+                "ce-vqsregion",
+            ):
+                val = request.get_header(hdr)
+                if val is not None:
+                    environ["HTTP_" + hdr.upper().replace("-", "_")] = val
             status_code, headers, body = await asyncio.to_thread(
-                vqs_client.handle_queue_callback, raw_body
+                vqs_client.handle_queue_callback, raw_body, environ
             )
             return w.HTTPResponse(status_code, body, dict(headers))
 

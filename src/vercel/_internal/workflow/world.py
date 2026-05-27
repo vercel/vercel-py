@@ -441,6 +441,7 @@ class Hook(BaseModel):
     created_at: datetime = pydantic.Field(alias="createdAt")
     spec_version: int | None = pydantic.Field(default=None, alias="specVersion")
     is_webhook: bool | None = pydantic.Field(default=None, alias="isWebhook")
+    is_system: bool | None = pydantic.Field(default=None, alias="isSystem")
 
 
 class HookCreatedEventData(BaseModel):
