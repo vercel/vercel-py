@@ -9,6 +9,7 @@ from vercel._internal.unstable.errors import (
     VercelSessionClosedError,
 )
 from vercel._internal.unstable.options import ServiceOptions
+from vercel._internal.unstable.sandbox.options import DEFAULT_SANDBOX_API_BASE_URL
 from vercel.unstable.sandbox import SandboxServiceOptions
 
 
@@ -62,7 +63,7 @@ def test_nested_sessions_inherit_and_replace_options_by_concrete_type() -> None:
             inner_session = get_active_session()
             inner_sandbox_options = inner_session.get_service_option(SandboxServiceOptions)
             assert inner_sandbox_options is sandbox_inner
-            assert inner_sandbox_options.base_url is None
+            assert inner_sandbox_options.base_url == DEFAULT_SANDBOX_API_BASE_URL
             assert inner_session.get_service_option(OtherServiceOptions) is other_outer
             assert inner_session.get_setting("httpx_client_factory") == "inner-factory"
 
@@ -95,7 +96,8 @@ def test_sandbox_service_uses_effective_options_and_session_token() -> None:
 
         assert service is sdk_session.sandbox_service()
         assert service.options is options
-        assert service.api_client.options is options
+        assert service.api_client.base_url == options.base_url
+        assert service.api_client.credentials_factory is options.credentials_factory
         assert service.alive_token is sdk_session.alive_token
         assert service.alive_token.is_alive
 

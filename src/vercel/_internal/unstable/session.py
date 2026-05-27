@@ -103,6 +103,12 @@ class SdkSession:
     def sandbox_service(self) -> "SandboxService":
         self.check_alive()
 
+        from vercel._internal.http import (
+            DEFAULT_TIMEOUT,
+            AsyncTransport,
+            TransportOptions,
+            create_base_async_client,
+        )
         from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
         from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
         from vercel._internal.unstable.sandbox.service import SandboxService
@@ -115,11 +121,22 @@ class SdkSession:
         if options is None:
             options = SandboxServiceOptions()
 
-        api_client = SandboxApiClient(options=options)
+        transport_options = TransportOptions(
+            timeout=DEFAULT_TIMEOUT,
+            base_url=options.base_url,
+            max_connections=100,
+            enable_http2=False,
+        )
+        api_client = SandboxApiClient(
+            base_url=options.base_url,
+            credentials_factory=options.credentials_factory,
+            transport=AsyncTransport(create_base_async_client(transport_options)),
+        )
         service = SandboxService(
             api_client=api_client,
             alive_token=self._alive_token,
             options=options,
+            sdk_session=self,
         )
         self._service_cache[SandboxService] = service
         return service
