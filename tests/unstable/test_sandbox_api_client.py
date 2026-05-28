@@ -5,8 +5,13 @@ import pytest
 from httpx._types import HeaderTypes, QueryParamTypes
 
 from vercel._internal.http import BaseTransport, RequestBody
-from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
+from vercel._internal.unstable.sandbox.api_client import (
+    SandboxApiClient,
+    _CreateSandboxRequest,
+    _SandboxResponse,
+)
 from vercel._internal.unstable.sandbox.errors import SandboxResponseError
+from vercel._internal.unstable.sandbox.models import GitSource, SandboxResources
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
 from vercel._internal.url import format_url_path
 
@@ -62,3 +67,33 @@ def test_format_url_path_quotes_placeholder_values() -> None:
         name="name/with spaces",
         command_id="cmd?x=1",
     ) == ("v2/sandboxes/name%2Fwith%20spaces/cmd%3Fx%3D1")
+
+
+def test_private_create_request_serializes_public_values() -> None:
+    request = _CreateSandboxRequest(
+        project_id="prj_123",
+        source=GitSource(url="https://example.com/repository.git"),
+        timeout=timedelta(seconds=30),
+        resources=SandboxResources(vcpus=2),
+    )
+
+    assert request.to_api_dict() == {
+        "projectId": "prj_123",
+        "source": {"type": "git", "url": "https://example.com/repository.git"},
+        "timeout": 30000,
+        "resources": {"vcpus": 2},
+    }
+
+
+def test_private_sandbox_response_returns_validated_payload() -> None:
+    response = _SandboxResponse.model_validate(
+        {
+            "sandbox": {"name": "preview", "currentSessionId": "sbx_123"},
+            "session": {"id": "sbx_123", "timeout": 30000},
+        }
+    )
+
+    payload = response.to_sandbox()
+    assert payload.current_session is not None
+    assert payload.current_session.id == "sbx_123"
+    assert payload.execution_time_limit == 30000

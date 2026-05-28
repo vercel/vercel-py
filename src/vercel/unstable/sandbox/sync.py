@@ -14,21 +14,23 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxResponseError,
     SandboxTerminalStateError,
 )
+from vercel._internal.unstable.sandbox.handles import (
+    SandboxCommand,
+    SyncSandbox,
+    SyncSandboxCommand,
+    SyncSandboxRuntimeSession,
+    SyncSnapshot,
+)
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     GitSource,
     JSONValue,
-    SandboxCommand,
     SandboxCommandLog,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
     SnapshotRetention,
     SnapshotSource,
-    SyncSandbox,
-    SyncSandboxCommand,
-    SyncSandboxRuntimeSession,
-    SyncSnapshot,
     TagFilter,
     TarballSource,
     WriteFile,

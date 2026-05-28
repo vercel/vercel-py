@@ -251,10 +251,26 @@ The name keeps platform retention policy distinct from local call duration.
 SDK handles retain the SDK session that created them. That originating session
 is the only local authority boundary for follow-up requests.
 
+Operational sandbox resources are stable mutable handles, not response model
+values. State properties are read-only to callers and contain the most recent
+state successfully observed through that particular handle. An operation
+targeting a handle and receiving newer state for the same remote identity
+updates the receiver in place and returns it. Operations that create, retrieve,
+query, or list resources construct new independent handles; those aliases are
+not synchronized automatically.
+
+`Sandbox.current_session` is a nested bound handle. Sandbox convenience
+operations targeting that current session update and return the existing
+matching nested handle. `Sandbox.session()` returns an independent runtime
+session handle and does not replace `current_session`. Creating a snapshot
+returns a new snapshot handle while updating the addressed existing runtime
+session handle with the session state included in the successful response.
+
 Closing a `vercel.session(...)` scope closes its `SdkSession` or
 `SyncSdkSession`; later requests through its handles or an already-captured
 service raise `VercelSessionClosedError`.
 
+Terminal state is observed state rather than local revocation.
 Context-managed cleanup and explicit `Sandbox.destroy()`,
 `SandboxRuntimeSession.stop()`, and `Snapshot.delete()` do not locally revoke
 handles. Snapshot responses reporting a stopped runtime likewise do not revoke
@@ -293,6 +309,8 @@ async with sandbox_.session() as session:
 
 Context manager exit awaits cleanup and surfaces cleanup failures. It expresses
 remote cleanup ownership, not reliable knowledge of future resource usability.
+When cleanup succeeds, its response is applied to the managed handle before
+exit returns.
 Callers who do not want that cleanup requested should not use the context
 manager.
 

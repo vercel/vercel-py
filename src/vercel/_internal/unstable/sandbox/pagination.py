@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vercel._internal.unstable.sandbox.models import Sandbox, SandboxRuntimeSession, Snapshot
+    from vercel._internal.unstable.sandbox.handles import Sandbox, SandboxRuntimeSession, Snapshot
 
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50

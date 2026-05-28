@@ -26,8 +26,13 @@ contract.
 - Endpoint calls use direct keyword arguments, not public `*Param` dataclasses.
 - Service methods avoid complex retry, timeout, and polling policy. Compose
   those outside the call.
-- Handles remain bound to the SDK session that created them and can issue
-  requests only while that session is open.
+- Remote resource handles are stable mutable views bound to the SDK session
+  that created them. Their state properties are read-only and expose the most
+  recent state successfully observed through that handle.
+- Receiver-targeting operations update and return the existing handle.
+  Separately acquired handles are independent and may remain stale until they
+  are refreshed or used in an operation that returns updated state.
+- Handles can issue requests only while their originating SDK session is open.
 - Async is primary. Sync support mirrors each domain under that domain package,
   for example `vercel.unstable.sandbox.sync`.
 
@@ -123,8 +128,9 @@ async def main() -> None:
     ) as scratch:
         await scratch.run_command("python", ["--version"])
 
-    # Cleanup was requested remotely. Its retained handle remains bound to the
-    # still-open SDK session; later responses are determined by the API.
+    # Cleanup was requested remotely and its successful response was applied
+    # to `scratch`. The retained handle remains request-capable while its
+    # SDK session is open; later responses are determined by the API.
 
     persistent = await sandbox.create_sandbox(
         runtime="python3.13",
@@ -132,8 +138,9 @@ async def main() -> None:
     )
 
     # A context-managed sandbox runtime session is destroyed on exit.
-    # A retained runtime session handle is still request-capable while its SDK
-    # session remains open; the API decides whether the resource can be used.
+    # The successful stop response updates `runtime_session`. It is still
+    # request-capable while its SDK session remains open; the API decides
+    # whether the resource can be used.
     async with persistent.session() as runtime_session:
         await runtime_session.run_command("python", ["--version"])
 

@@ -8,12 +8,11 @@ from typing import Any
 
 from vercel._internal.unstable.context import get_active_session
 from vercel._internal.unstable.sandbox.errors import SandboxCleanupError
+from vercel._internal.unstable.sandbox.handles import Sandbox, SandboxRuntimeSession
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     JSONValue,
-    Sandbox,
     SandboxResources,
-    SandboxRuntimeSession,
     SandboxSource,
     SnapshotRetention,
 )
@@ -85,10 +84,11 @@ class CreateSandboxOperation:
             return None
 
         try:
-            await self._session.sandbox_service().destroy_sandbox(
+            payload = await self._session.sandbox_service().destroy_sandbox_payload(
                 name=self._handle.name,
                 project_id=self._handle.project_id,
             )
+            self._handle._apply_payload(payload)
         except Exception as exc:
             raise SandboxCleanupError(
                 f"Failed to clean up sandbox {self._handle.name!r}",
@@ -146,9 +146,10 @@ class CreateRuntimeSessionOperation:
             return None
 
         try:
-            await self._session.sandbox_service().destroy_runtime_session(
+            payload = await self._session.sandbox_service().stop_runtime_session_payload(
                 session_id=self._handle.id,
             )
+            self._handle._apply_payload(payload)
         except Exception as exc:
             raise SandboxCleanupError(
                 f"Failed to clean up sandbox runtime session {self._handle.id!r}",

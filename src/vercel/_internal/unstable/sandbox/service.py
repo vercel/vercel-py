@@ -7,27 +7,35 @@ from typing import TYPE_CHECKING, cast
 import anyio
 import httpx
 
-from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
+from vercel._internal.unstable.sandbox.api_client import (
+    SandboxApiClient,
+    _CommandPayload,
+    _RuntimeSessionPayload,
+    _SandboxPayload,
+    _SnapshotPayload,
+)
 from vercel._internal.unstable.sandbox.errors import (
     SandboxResponseError,
     SandboxTerminalStateError,
 )
-from vercel._internal.unstable.sandbox.models import (
-    DurationInput,
-    JSONValue,
+from vercel._internal.unstable.sandbox.handles import (
     Sandbox,
     SandboxCommand,
-    SandboxCommandLog,
-    SandboxResources,
     SandboxRuntimeSession,
-    SandboxSource,
-    SandboxStatus,
     Snapshot,
-    SnapshotRetention,
     SyncSandbox,
     SyncSandboxCommand,
     SyncSandboxRuntimeSession,
     SyncSnapshot,
+)
+from vercel._internal.unstable.sandbox.models import (
+    DurationInput,
+    JSONValue,
+    SandboxCommandLog,
+    SandboxResources,
+    SandboxSource,
+    SandboxStatus,
+    SnapshotRetention,
     TagFilter,
     WriteFile,
 )
@@ -92,32 +100,21 @@ class SandboxService:
     def options(self) -> SandboxServiceOptions:
         return self._options
 
-    def _bind_sandbox(self, sandbox: Sandbox) -> Sandbox:
-        if self._sync_handles:
-            sandbox = cast(Sandbox, SyncSandbox.model_validate(sandbox.model_dump()))
-        sandbox._bind_sdk_session(self._sdk_session)
-        return sandbox
+    def _bind_sandbox(self, payload: _SandboxPayload) -> Sandbox:
+        cls = SyncSandbox if self._sync_handles else Sandbox
+        return cast(Sandbox, cls(payload=payload, sdk_session=self._sdk_session))
 
-    def _bind_runtime_session(self, session: SandboxRuntimeSession) -> SandboxRuntimeSession:
-        if self._sync_handles:
-            session = cast(
-                SandboxRuntimeSession,
-                SyncSandboxRuntimeSession.model_validate(session.model_dump()),
-            )
-        session._bind_sdk_session(self._sdk_session)
-        return session
+    def _bind_runtime_session(self, payload: _RuntimeSessionPayload) -> SandboxRuntimeSession:
+        cls = SyncSandboxRuntimeSession if self._sync_handles else SandboxRuntimeSession
+        return cast(SandboxRuntimeSession, cls(payload=payload, sdk_session=self._sdk_session))
 
-    def _bind_command(self, command: SandboxCommand) -> SandboxCommand:
-        if self._sync_handles:
-            command = cast(SandboxCommand, SyncSandboxCommand.model_validate(command.model_dump()))
-        command._bind_sdk_session(self._sdk_session)
-        return command
+    def _bind_command(self, payload: _CommandPayload) -> SandboxCommand:
+        cls = SyncSandboxCommand if self._sync_handles else SandboxCommand
+        return cast(SandboxCommand, cls(payload=payload, sdk_session=self._sdk_session))
 
-    def _bind_snapshot(self, snapshot: Snapshot) -> Snapshot:
-        if self._sync_handles:
-            snapshot = cast(Snapshot, SyncSnapshot.model_validate(snapshot.model_dump()))
-        snapshot._bind_sdk_session(self._sdk_session)
-        return snapshot
+    def _bind_snapshot(self, payload: _SnapshotPayload) -> Snapshot:
+        cls = SyncSnapshot if self._sync_handles else Snapshot
+        return cast(Snapshot, cls(payload=payload, sdk_session=self._sdk_session))
 
     def _check_open(self) -> None:
         self._sdk_session.check_open()
@@ -145,7 +142,7 @@ class SandboxService:
             if status not in _TRANSITIONAL_SANDBOX_STATUSES:
                 raise SandboxResponseError(
                     "Sandbox API response did not include a recognized creation status",
-                    data=sandbox.model_dump(by_alias=True),
+                    data=sandbox.raw,
                 )
 
             await self._sleep(_READY_POLL_INTERVAL_SECONDS)
@@ -279,9 +276,16 @@ class SandboxService:
         return iter_sandboxes()
 
     async def destroy_sandbox(self, *, name: str, project_id: str | None = None) -> Sandbox:
+        return self._bind_sandbox(
+            await self.destroy_sandbox_payload(name=name, project_id=project_id)
+        )
+
+    async def destroy_sandbox_payload(
+        self, *, name: str, project_id: str | None = None
+    ) -> _SandboxPayload:
         self._check_open()
         response = await self._api_client.destroy_sandbox(name=name, project_id=project_id)
-        return self._bind_sandbox(response.to_sandbox())
+        return response.to_sandbox()
 
     async def update_sandbox(
         self,
@@ -300,6 +304,41 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
     ) -> Sandbox:
+        return self._bind_sandbox(
+            await self.update_sandbox_payload(
+                name=name,
+                project_id=project_id,
+                runtime=runtime,
+                ports=ports,
+                execution_time_limit=execution_time_limit,
+                resources=resources,
+                persistent=persistent,
+                network_policy=network_policy,
+                env=env,
+                tags=tags,
+                snapshot_expiration=snapshot_expiration,
+                snapshot_retention=snapshot_retention,
+                current_snapshot_id=current_snapshot_id,
+            )
+        )
+
+    async def update_sandbox_payload(
+        self,
+        *,
+        name: str,
+        project_id: str | None = None,
+        runtime: str | None = None,
+        ports: list[int] | None = None,
+        execution_time_limit: DurationInput = None,
+        resources: SandboxResources | None = None,
+        persistent: bool | None = None,
+        network_policy: JSONValue | None = None,
+        env: Mapping[str, str] | None = None,
+        tags: Mapping[str, str] | None = None,
+        snapshot_expiration: DurationInput = None,
+        snapshot_retention: SnapshotRetention | None = None,
+        current_snapshot_id: str | None = None,
+    ) -> _SandboxPayload:
         self._check_open()
         response = await self._api_client.update_sandbox(
             name=name,
@@ -316,7 +355,7 @@ class SandboxService:
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
         )
-        return self._bind_sandbox(response.to_sandbox())
+        return response.to_sandbox()
 
     async def create_runtime_session(
         self,
@@ -333,13 +372,13 @@ class SandboxService:
             resume=resume,
             include_system_routes=include_system_routes,
         )
-        sandbox = response.to_sandbox()
-        if sandbox.current_session is None:
+        payload = response.to_sandbox()
+        if payload.current_session is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'session'",
                 data=response.model_dump(by_alias=True),
             )
-        return self._bind_runtime_session(sandbox.current_session)
+        return self._bind_runtime_session(payload.current_session)
 
     async def destroy_runtime_session(self, *, session_id: str) -> Sandbox:
         return await self.stop_runtime_session_sandbox(session_id=session_id)
@@ -350,13 +389,25 @@ class SandboxService:
         return self._bind_sandbox(response.to_sandbox())
 
     async def stop_runtime_session(self, *, session_id: str) -> SandboxRuntimeSession:
-        sandbox = await self.stop_runtime_session_sandbox(session_id=session_id)
-        if sandbox.current_session is None:
+        return self._bind_runtime_session(
+            await self.stop_runtime_session_payload(session_id=session_id)
+        )
+
+    async def stop_runtime_session_payload(self, *, session_id: str) -> _RuntimeSessionPayload:
+        self._check_open()
+        response = await self._api_client.stop_runtime_session(session_id=session_id)
+        payload = response.to_sandbox()
+        if payload.current_session is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'session'",
-                data=sandbox.model_dump(by_alias=True),
+                data=response.model_dump(by_alias=True),
             )
-        return self._bind_runtime_session(sandbox.current_session)
+        if payload.current_session.id != session_id:
+            raise SandboxResponseError(
+                "Sandbox current-session operation returned a different session identity",
+                data=response.model_dump(by_alias=True),
+            )
+        return payload.current_session
 
     async def get_runtime_session(
         self,
@@ -364,12 +415,24 @@ class SandboxService:
         session_id: str,
         include_system_routes: bool | None = None,
     ) -> SandboxRuntimeSession:
+        return self._bind_runtime_session(
+            await self.get_runtime_session_payload(
+                session_id=session_id, include_system_routes=include_system_routes
+            )
+        )
+
+    async def get_runtime_session_payload(
+        self,
+        *,
+        session_id: str,
+        include_system_routes: bool | None = None,
+    ) -> _RuntimeSessionPayload:
         self._check_open()
         response = await self._api_client.get_runtime_session(
             session_id=session_id,
             include_system_routes=include_system_routes,
         )
-        return self._bind_runtime_session(response.to_runtime_session())
+        return response.to_runtime_session()
 
     async def query_sessions_page(
         self,
@@ -431,12 +494,21 @@ class SandboxService:
         session_id: str,
         duration: DurationInput,
     ) -> SandboxRuntimeSession:
+        return self._bind_runtime_session(
+            await self.extend_runtime_session_timeout_payload(
+                session_id=session_id, duration=duration
+            )
+        )
+
+    async def extend_runtime_session_timeout_payload(
+        self, *, session_id: str, duration: DurationInput
+    ) -> _RuntimeSessionPayload:
         self._check_open()
         response = await self._api_client.extend_runtime_session_timeout(
             session_id=session_id,
             duration=duration,
         )
-        return self._bind_runtime_session(response.to_runtime_session())
+        return response.to_runtime_session()
 
     async def update_runtime_session_network_policy(
         self,
@@ -444,12 +516,21 @@ class SandboxService:
         session_id: str,
         network_policy: JSONValue,
     ) -> SandboxRuntimeSession:
+        return self._bind_runtime_session(
+            await self.update_runtime_session_network_policy_payload(
+                session_id=session_id, network_policy=network_policy
+            )
+        )
+
+    async def update_runtime_session_network_policy_payload(
+        self, *, session_id: str, network_policy: JSONValue
+    ) -> _RuntimeSessionPayload:
         self._check_open()
         response = await self._api_client.update_runtime_session_network_policy(
             session_id=session_id,
             network_policy=network_policy,
         )
-        return self._bind_runtime_session(response.to_runtime_session())
+        return response.to_runtime_session()
 
     async def create_snapshot(
         self,
@@ -457,13 +538,24 @@ class SandboxService:
         session_id: str,
         expiration: DurationInput = None,
     ) -> tuple[Snapshot, SandboxRuntimeSession]:
+        snapshot, payload = await self.create_snapshot_for_session(
+            session_id=session_id, expiration=expiration
+        )
+        return snapshot, self._bind_runtime_session(payload)
+
+    async def create_snapshot_for_session(
+        self,
+        *,
+        session_id: str,
+        expiration: DurationInput = None,
+    ) -> tuple[Snapshot, _RuntimeSessionPayload]:
         self._check_open()
         response = await self._api_client.create_snapshot(
             session_id=session_id,
             expiration=expiration,
         )
         snapshot, session = response.to_snapshot_and_session()
-        return self._bind_snapshot(snapshot), self._bind_runtime_session(session)
+        return self._bind_snapshot(snapshot), session
 
     async def query_snapshots_page(
         self,
@@ -525,9 +617,12 @@ class SandboxService:
         return self._bind_snapshot(response.to_snapshot())
 
     async def delete_snapshot(self, *, snapshot_id: str) -> Snapshot:
+        return self._bind_snapshot(await self.delete_snapshot_payload(snapshot_id=snapshot_id))
+
+    async def delete_snapshot_payload(self, *, snapshot_id: str) -> _SnapshotPayload:
         self._check_open()
         response = await self._api_client.delete_snapshot(snapshot_id=snapshot_id)
-        return self._bind_snapshot(response.to_snapshot())
+        return response.to_snapshot()
 
     async def _run_command(
         self,
@@ -606,13 +701,20 @@ class SandboxService:
         command_id: str,
         wait: bool = False,
     ) -> SandboxCommand:
+        return self._bind_command(
+            await self.get_command_payload(session_id=session_id, command_id=command_id, wait=wait)
+        )
+
+    async def get_command_payload(
+        self, *, session_id: str, command_id: str, wait: bool = False
+    ) -> _CommandPayload:
         self._check_open()
         response = await self._api_client.get_command(
             session_id=session_id,
             command_id=command_id,
             wait=wait,
         )
-        return self._bind_command(response.to_command())
+        return response.to_command()
 
     async def query_commands(self, *, session_id: str) -> list[SandboxCommand]:
         self._check_open()
@@ -668,13 +770,22 @@ class SandboxService:
         command_id: str,
         signal: int,
     ) -> SandboxCommand:
+        return self._bind_command(
+            await self.kill_command_payload(
+                session_id=session_id, command_id=command_id, signal=signal
+            )
+        )
+
+    async def kill_command_payload(
+        self, *, session_id: str, command_id: str, signal: int
+    ) -> _CommandPayload:
         self._check_open()
         response = await self._api_client.kill_command(
             session_id=session_id,
             command_id=command_id,
             signal=signal,
         )
-        return self._bind_command(response.to_command())
+        return response.to_command()
 
     async def command_logs_response(
         self,

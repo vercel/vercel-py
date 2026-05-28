@@ -7,12 +7,21 @@ import sys
 import tarfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from importlib.metadata import version as _pkg_version
-from typing import TypeVar, cast
+from typing import Literal, TypeVar, cast
 
 from httpx import Response
 from httpx._types import QueryParamTypes
-from pydantic import BaseModel, ValidationError
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_serializer,
+    field_validator,
+)
 
 from vercel._internal.http import (
     BaseTransport,
@@ -21,36 +30,17 @@ from vercel._internal.http import (
     RequestBody,
     extract_structured_error,
 )
-from vercel._internal.time import MILLISECOND, parse_duration
+from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
 from vercel._internal.unstable.sandbox.errors import SandboxApiError, SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
-    CommandResponse,
-    CommandsResponse,
-    CreateSandboxRequest,
-    CreateSnapshotRequest,
-    CreateSnapshotResponse,
     DurationInput,
-    ExtendTimeoutRequest,
-    FilesystemPathRequest,
-    GetSandboxRequest,
     JSONObject,
     JSONValue,
-    MkdirRequest,
-    QuerySandboxesRequest,
-    QuerySessionsRequest,
-    QuerySnapshotsRequest,
-    RunCommandRequest,
-    RuntimeSessionResponse,
-    RuntimeSessionsResponse,
-    SandboxesResponse,
     SandboxResources,
-    SandboxResponse,
     SandboxSource,
-    SnapshotResponse,
+    SandboxStatus,
     SnapshotRetention,
-    SnapshotsResponse,
     TagFilter,
-    UpdateSandboxRequest,
     WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import (
@@ -74,8 +64,461 @@ ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
 @dataclass(frozen=True, slots=True)
 class _QuerySandboxesResult:
-    response: SandboxesResponse
+    response: "_SandboxesResponse"
     project_id: str
+
+
+class _ApiModel(BaseModel):
+    model_config = ConfigDict(
+        extra="ignore", frozen=True, populate_by_name=True, serialize_by_alias=True
+    )
+
+
+class _ApiRequestModel(_ApiModel):
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True, serialize_by_alias=True
+    )
+
+    def to_api_dict(self) -> JSONObject:
+        return cast(JSONObject, self.model_dump(by_alias=True, exclude_none=True))
+
+
+def _duration_to_milliseconds(value: object) -> timedelta | None:
+    return parse_duration(value, MILLISECOND)
+
+
+class _CreateSandboxRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="projectId")
+    name: str | None = None
+    runtime: str | None = None
+    source: SandboxSource | None = None
+    ports: list[int] | None = None
+    timeout: timedelta | None = None
+    resources: SandboxResources | None = None
+    persistent: bool | None = None
+    network_policy: JSONValue | None = Field(default=None, serialization_alias="networkPolicy")
+    env: dict[str, str] | None = None
+    tags: dict[str, str] | None = None
+    snapshot_expiration: timedelta | None = Field(
+        default=None, serialization_alias="snapshotExpiration"
+    )
+    keep_last_snapshots: SnapshotRetention | None = Field(
+        default=None, serialization_alias="keepLastSnapshots"
+    )
+
+    @field_validator("timeout", "snapshot_expiration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta | None:
+        return _duration_to_milliseconds(value)
+
+    @field_serializer("timeout", "snapshot_expiration")
+    def _serialize_duration(self, value: timedelta | None) -> int | None:
+        return None if value is None else to_ms_int(value)
+
+
+class _UpdateSandboxRequest(_ApiRequestModel):
+    runtime: str | None = None
+    ports: list[int] | None = None
+    timeout: timedelta | None = None
+    resources: SandboxResources | None = None
+    persistent: bool | None = None
+    network_policy: JSONValue | None = Field(default=None, serialization_alias="networkPolicy")
+    env: dict[str, str] | None = None
+    tags: dict[str, str] | None = None
+    snapshot_expiration: timedelta | None = Field(
+        default=None, serialization_alias="snapshotExpiration"
+    )
+    keep_last_snapshots: SnapshotRetention | None = Field(
+        default=None, serialization_alias="keepLastSnapshots"
+    )
+    current_snapshot_id: str | None = Field(default=None, serialization_alias="currentSnapshotId")
+
+    @field_validator("timeout", "snapshot_expiration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta | None:
+        return _duration_to_milliseconds(value)
+
+    @field_serializer("timeout", "snapshot_expiration")
+    def _serialize_duration(self, value: timedelta | None) -> int | None:
+        return None if value is None else to_ms_int(value)
+
+
+class _GetSandboxRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="projectId")
+    resume: bool = True
+    include_system_routes: bool | None = Field(
+        default=None, serialization_alias="__includeSystemRoutes"
+    )
+
+    @field_serializer("resume", "include_system_routes")
+    def _serialize_bool(self, value: bool | None) -> str | None:
+        return None if value is None else "true" if value else "false"
+
+
+class _QuerySandboxesRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="project")
+    limit: int | None = None
+    cursor: str | None = None
+    sort_by: str | None = Field(default=None, serialization_alias="sortBy")
+    sort_order: str | None = Field(default=None, serialization_alias="sortOrder")
+    name_prefix: str | None = Field(default=None, serialization_alias="namePrefix")
+    tags: Sequence[TagFilter] | None = None
+
+    @field_serializer("tags")
+    def _serialize_tags(self, value: Sequence[TagFilter] | None) -> list[str] | None:
+        return None if value is None else [tag.to_query_value() for tag in value]
+
+
+class _QuerySessionsRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="project")
+    name: str | None = None
+    limit: int | None = None
+    cursor: str | None = None
+    sort_order: str | None = Field(default=None, serialization_alias="sortOrder")
+
+
+class _QuerySnapshotsRequest(_QuerySessionsRequest):
+    pass
+
+
+class _CreateSnapshotRequest(_ApiRequestModel):
+    expiration: DurationInput = None
+
+    @field_validator("expiration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta | None:
+        return _duration_to_milliseconds(value)
+
+    @field_serializer("expiration")
+    def _serialize_duration(self, value: timedelta | None) -> int | None:
+        return None if value is None else to_ms_int(value)
+
+
+class _ExtendTimeoutRequest(_ApiRequestModel):
+    duration: DurationInput
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def _coerce_duration(cls, value: object) -> timedelta:
+        duration = parse_duration(value, MILLISECOND)
+        if duration is None:
+            raise TypeError("duration is required")
+        return duration
+
+    @field_serializer("duration")
+    def _serialize_duration(self, value: DurationInput) -> int:
+        duration = parse_duration(value, MILLISECOND)
+        if duration is None:
+            raise TypeError("duration is required")
+        return to_ms_int(duration)
+
+
+class _RunCommandRequest(_ApiRequestModel):
+    command: str
+    args: list[str] | None = None
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    sudo: bool | None = None
+
+
+class _FilesystemPathRequest(_ApiRequestModel):
+    path: str
+    cwd: str | None = None
+
+
+class _MkdirRequest(_FilesystemPathRequest):
+    recursive: bool = True
+
+
+class _SandboxRoutePayload(_ApiModel):
+    url: str
+    port: int
+    subdomain: str
+    system: bool = False
+
+
+class _CommandPayload(_ApiModel):
+    id: str
+    name: str
+    args: list[str]
+    cwd: str
+    session_id: str = Field(
+        validation_alias=AliasChoices("session_id", "sessionId"),
+        serialization_alias="sessionId",
+    )
+    exit_code: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("exit_code", "exitCode"),
+        serialization_alias="exitCode",
+    )
+    started_at: int = Field(
+        validation_alias=AliasChoices("started_at", "startedAt"),
+        serialization_alias="startedAt",
+    )
+
+
+class _RuntimeSessionPayload(_ApiModel):
+    id: str
+    sandbox_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("sandbox_name", "sourceSandboxName"),
+        serialization_alias="sourceSandboxName",
+    )
+    project_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("project_id", "projectId"),
+        serialization_alias="projectId",
+    )
+    status: SandboxStatus | None = None
+    runtime: str | None = None
+    cwd: str | None = None
+    region: str | None = None
+    memory: int | None = None
+    vcpus: int | None = None
+    execution_time_limit: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("execution_time_limit", "timeout"),
+        serialization_alias="timeout",
+    )
+    network_policy: JSONValue | None = Field(
+        default=None,
+        validation_alias=AliasChoices("network_policy", "networkPolicy"),
+        serialization_alias="networkPolicy",
+    )
+    requested_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("requested_at", "requestedAt"),
+        serialization_alias="requestedAt",
+    )
+    started_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("started_at", "startedAt"),
+        serialization_alias="startedAt",
+    )
+    stopped_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("stopped_at", "stoppedAt"),
+        serialization_alias="stoppedAt",
+    )
+
+
+class _SandboxPayload(_ApiModel):
+    name: str
+    current_session_id: str = Field(
+        validation_alias=AliasChoices("current_session_id", "currentSessionId"),
+        serialization_alias="currentSessionId",
+    )
+    runtime: str | None = None
+    status: SandboxStatus | None = None
+    persistent: bool | None = None
+    current_snapshot_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("current_snapshot_id", "currentSnapshotId"),
+        serialization_alias="currentSnapshotId",
+    )
+    project_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("project_id", "projectId"),
+        serialization_alias="projectId",
+    )
+    cwd: str | None = None
+    region: str | None = None
+    memory: int | None = None
+    vcpus: int | None = None
+    execution_time_limit: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("execution_time_limit", "timeout"),
+        serialization_alias="timeout",
+    )
+    network_policy: JSONValue | None = Field(
+        default=None,
+        validation_alias=AliasChoices("network_policy", "networkPolicy"),
+        serialization_alias="networkPolicy",
+    )
+    snapshot_expiration: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("snapshot_expiration", "snapshotExpiration"),
+        serialization_alias="snapshotExpiration",
+    )
+    status_updated_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("status_updated_at", "statusUpdatedAt"),
+        serialization_alias="statusUpdatedAt",
+    )
+    created_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("created_at", "createdAt"),
+        serialization_alias="createdAt",
+    )
+    updated_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("updated_at", "updatedAt"),
+        serialization_alias="updatedAt",
+    )
+    tags: dict[str, str] | None = None
+    routes: tuple[_SandboxRoutePayload, ...] = ()
+    current_session: _RuntimeSessionPayload | None = None
+    raw: JSONObject | None = None
+
+
+class _SnapshotPayload(_ApiModel):
+    id: str
+    source_session_id: str = Field(
+        validation_alias=AliasChoices("source_session_id", "sourceSessionId"),
+        serialization_alias="sourceSessionId",
+    )
+    region: str
+    status: Literal["created", "deleted", "failed"]
+    size_bytes: int = Field(
+        validation_alias=AliasChoices("size_bytes", "sizeBytes"), serialization_alias="sizeBytes"
+    )
+    expires_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("expires_at", "expiresAt"),
+        serialization_alias="expiresAt",
+    )
+    created_at: int = Field(
+        validation_alias=AliasChoices("created_at", "createdAt"), serialization_alias="createdAt"
+    )
+    updated_at: int = Field(
+        validation_alias=AliasChoices("updated_at", "updatedAt"), serialization_alias="updatedAt"
+    )
+    last_used_at: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("last_used_at", "lastUsedAt"),
+        serialization_alias="lastUsedAt",
+    )
+    creation_method: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("creation_method", "creationMethod"),
+        serialization_alias="creationMethod",
+    )
+    parent_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("parent_id", "parentId"),
+        serialization_alias="parentId",
+    )
+
+
+class _Pagination(_ApiModel):
+    count: int
+    next: str | None = None
+    prev: str | None = None
+
+
+class _CommandResponse(_ApiModel):
+    command: _CommandPayload | None = None
+
+    def to_command(self) -> _CommandPayload:
+        if self.command is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'command'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.command
+
+
+class _CommandsResponse(_ApiModel):
+    commands: list[_CommandPayload]
+
+
+class _RuntimeSessionResponse(_ApiModel):
+    session: _RuntimeSessionPayload | None = None
+    routes: list[_SandboxRoutePayload] = Field(default_factory=list)
+
+    def to_runtime_session(self) -> _RuntimeSessionPayload:
+        if self.session is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'session'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.session
+
+
+class _RuntimeSessionsResponse(_ApiModel):
+    sessions: list[_RuntimeSessionPayload]
+    pagination: _Pagination | None = None
+
+
+class _SandboxResponse(_ApiModel):
+    sandbox: _SandboxPayload | None = None
+    session: _RuntimeSessionPayload | None = None
+    routes: list[_SandboxRoutePayload] = Field(default_factory=list)
+    resumed: bool | None = None
+
+    def to_sandbox(self) -> _SandboxPayload:
+        if self.sandbox is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'sandbox'",
+                data=self.model_dump(by_alias=True),
+            )
+        raw = cast(
+            JSONObject,
+            self.sandbox.model_dump(
+                by_alias=True, exclude_none=True, exclude={"routes", "current_session", "raw"}
+            ),
+        )
+        updates: dict[str, object] = {
+            "routes": tuple(self.routes),
+            "current_session": self.session,
+            "raw": raw,
+        }
+        if self.session is not None:
+            if self.sandbox.project_id is None and self.session.project_id is not None:
+                updates["project_id"] = self.session.project_id
+            for name in (
+                "runtime",
+                "status",
+                "cwd",
+                "region",
+                "memory",
+                "vcpus",
+                "execution_time_limit",
+                "network_policy",
+            ):
+                if getattr(self.sandbox, name) is None:
+                    updates[name] = getattr(self.session, name)
+        return self.sandbox.model_copy(update=updates)
+
+
+class _SandboxesResponse(_ApiModel):
+    sandboxes: list[_SandboxPayload]
+    pagination: _Pagination | None = None
+
+
+class _CreateSnapshotResponse(_ApiModel):
+    snapshot: _SnapshotPayload | None = None
+    session: _RuntimeSessionPayload | None = None
+
+    def to_snapshot_and_session(self) -> tuple[_SnapshotPayload, _RuntimeSessionPayload]:
+        if self.snapshot is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'snapshot'",
+                data=self.model_dump(by_alias=True),
+            )
+        if self.session is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'session'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.snapshot, self.session
+
+
+class _SnapshotResponse(_ApiModel):
+    snapshot: _SnapshotPayload | None = None
+
+    def to_snapshot(self) -> _SnapshotPayload:
+        if self.snapshot is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'snapshot'",
+                data=self.model_dump(by_alias=True),
+            )
+        return self.snapshot
+
+
+class _SnapshotsResponse(_ApiModel):
+    snapshots: list[_SnapshotPayload]
+    pagination: _Pagination | None = None
 
 
 def _drop_none(data: Mapping[str, JSONValue | None]) -> JSONObject:
@@ -281,9 +724,9 @@ class SandboxApiClient:
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: DurationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-    ) -> SandboxResponse:
+    ) -> _SandboxResponse:
         credentials = await self._credentials_factory()
-        request = CreateSandboxRequest(
+        request = _CreateSandboxRequest(
             project_id=project_id or credentials.project_id,
             name=name,
             runtime=runtime,
@@ -301,7 +744,7 @@ class SandboxApiClient:
         data = await self._request_json(
             "POST", "v2/sandboxes", credentials=credentials, body=request.to_api_dict()
         )
-        return _validate_response(SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data)
 
     async def get_sandbox(
         self,
@@ -310,9 +753,9 @@ class SandboxApiClient:
         project_id: str | None = None,
         resume: bool = True,
         include_system_routes: bool | None = None,
-    ) -> SandboxResponse:
+    ) -> _SandboxResponse:
         credentials = await self._credentials_factory()
-        request = GetSandboxRequest(
+        request = _GetSandboxRequest(
             project_id=project_id or credentials.project_id,
             resume=resume,
             include_system_routes=include_system_routes,
@@ -323,7 +766,7 @@ class SandboxApiClient:
             credentials=credentials,
             params=request.to_api_dict(),
         )
-        return _validate_response(SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data)
 
     async def query_sandboxes(
         self,
@@ -338,7 +781,7 @@ class SandboxApiClient:
     ) -> _QuerySandboxesResult:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
-        request = QuerySandboxesRequest(
+        request = _QuerySandboxesRequest(
             project_id=effective_project_id,
             limit=limit,
             cursor=cursor,
@@ -354,7 +797,7 @@ class SandboxApiClient:
             params=request.to_api_dict(),
         )
         return _QuerySandboxesResult(
-            response=_validate_response(SandboxesResponse, data),
+            response=_validate_response(_SandboxesResponse, data),
             project_id=effective_project_id,
         )
 
@@ -363,7 +806,7 @@ class SandboxApiClient:
         *,
         name: str,
         project_id: str | None = None,
-    ) -> SandboxResponse:
+    ) -> _SandboxResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
@@ -371,7 +814,7 @@ class SandboxApiClient:
             credentials=credentials,
             params={"projectId": project_id or credentials.project_id},
         )
-        return _validate_response(SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data)
 
     async def update_sandbox(
         self,
@@ -389,9 +832,9 @@ class SandboxApiClient:
         snapshot_expiration: DurationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
-    ) -> SandboxResponse:
+    ) -> _SandboxResponse:
         credentials = await self._credentials_factory()
-        request = UpdateSandboxRequest(
+        request = _UpdateSandboxRequest(
             runtime=runtime,
             ports=ports,
             timeout=parse_duration(execution_time_limit, MILLISECOND),
@@ -411,7 +854,7 @@ class SandboxApiClient:
             params={"projectId": project_id or credentials.project_id},
             body=request.to_api_dict(),
         )
-        return _validate_response(SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data)
 
     async def create_runtime_session(
         self,
@@ -420,7 +863,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         resume: bool = True,
         include_system_routes: bool | None = None,
-    ) -> SandboxResponse:
+    ) -> _SandboxResponse:
         return await self.get_sandbox(
             name=name,
             project_id=project_id,
@@ -428,7 +871,7 @@ class SandboxApiClient:
             include_system_routes=include_system_routes,
         )
 
-    async def stop_runtime_session(self, *, session_id: str) -> SandboxResponse:
+    async def stop_runtime_session(self, *, session_id: str) -> _SandboxResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -436,9 +879,9 @@ class SandboxApiClient:
             credentials=credentials,
             body={},
         )
-        return _validate_response(SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data)
 
-    async def destroy_runtime_session(self, *, session_id: str) -> SandboxResponse:
+    async def destroy_runtime_session(self, *, session_id: str) -> _SandboxResponse:
         return await self.stop_runtime_session(session_id=session_id)
 
     async def get_runtime_session(
@@ -446,7 +889,7 @@ class SandboxApiClient:
         *,
         session_id: str,
         include_system_routes: bool | None = None,
-    ) -> RuntimeSessionResponse:
+    ) -> _RuntimeSessionResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
@@ -462,7 +905,7 @@ class SandboxApiClient:
                 )
             },
         )
-        return _validate_response(RuntimeSessionResponse, data)
+        return _validate_response(_RuntimeSessionResponse, data)
 
     async def query_runtime_sessions(
         self,
@@ -472,9 +915,9 @@ class SandboxApiClient:
         limit: int | None = None,
         cursor: str | None = None,
         sort_order: str | None = None,
-    ) -> RuntimeSessionsResponse:
+    ) -> _RuntimeSessionsResponse:
         credentials = await self._credentials_factory()
-        request = QuerySessionsRequest(
+        request = _QuerySessionsRequest(
             project_id=project_id or credentials.project_id,
             name=name,
             limit=limit,
@@ -487,16 +930,16 @@ class SandboxApiClient:
             credentials=credentials,
             params=request.to_api_dict(),
         )
-        return _validate_response(RuntimeSessionsResponse, data)
+        return _validate_response(_RuntimeSessionsResponse, data)
 
     async def extend_runtime_session_timeout(
         self,
         *,
         session_id: str,
         duration: DurationInput,
-    ) -> RuntimeSessionResponse:
+    ) -> _RuntimeSessionResponse:
         credentials = await self._credentials_factory()
-        request = ExtendTimeoutRequest(duration=duration)
+        request = _ExtendTimeoutRequest(duration=duration)
         data = await self._request_json(
             "POST",
             format_url_path(
@@ -506,14 +949,14 @@ class SandboxApiClient:
             credentials=credentials,
             body=request.to_api_dict(),
         )
-        return _validate_response(RuntimeSessionResponse, data)
+        return _validate_response(_RuntimeSessionResponse, data)
 
     async def update_runtime_session_network_policy(
         self,
         *,
         session_id: str,
         network_policy: JSONValue,
-    ) -> RuntimeSessionResponse:
+    ) -> _RuntimeSessionResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -524,18 +967,18 @@ class SandboxApiClient:
             credentials=credentials,
             body=network_policy,
         )
-        return _validate_response(RuntimeSessionResponse, data)
+        return _validate_response(_RuntimeSessionResponse, data)
 
     async def create_snapshot(
         self,
         *,
         session_id: str,
         expiration: DurationInput = None,
-    ) -> CreateSnapshotResponse:
+    ) -> _CreateSnapshotResponse:
         credentials = await self._credentials_factory()
         body: JSONValue | None = None
         if expiration is not None:
-            request = CreateSnapshotRequest(expiration=expiration)
+            request = _CreateSnapshotRequest(expiration=expiration)
             body = request.to_api_dict()
         data = await self._request_json(
             "POST",
@@ -543,7 +986,7 @@ class SandboxApiClient:
             credentials=credentials,
             body=body,
         )
-        return _validate_response(CreateSnapshotResponse, data)
+        return _validate_response(_CreateSnapshotResponse, data)
 
     async def query_snapshots(
         self,
@@ -553,9 +996,9 @@ class SandboxApiClient:
         limit: int | None = None,
         cursor: str | None = None,
         sort_order: str | None = None,
-    ) -> SnapshotsResponse:
+    ) -> _SnapshotsResponse:
         credentials = await self._credentials_factory()
-        request = QuerySnapshotsRequest(
+        request = _QuerySnapshotsRequest(
             project_id=project_id or credentials.project_id,
             name=name,
             limit=limit,
@@ -568,25 +1011,25 @@ class SandboxApiClient:
             credentials=credentials,
             params=request.to_api_dict(),
         )
-        return _validate_response(SnapshotsResponse, data)
+        return _validate_response(_SnapshotsResponse, data)
 
-    async def get_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
+    async def get_snapshot(self, *, snapshot_id: str) -> _SnapshotResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
             credentials=credentials,
         )
-        return _validate_response(SnapshotResponse, data)
+        return _validate_response(_SnapshotResponse, data)
 
-    async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
+    async def delete_snapshot(self, *, snapshot_id: str) -> _SnapshotResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
             format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
             credentials=credentials,
         )
-        return _validate_response(SnapshotResponse, data)
+        return _validate_response(_SnapshotResponse, data)
 
     async def run_command(
         self,
@@ -597,9 +1040,9 @@ class SandboxApiClient:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
-    ) -> CommandResponse:
+    ) -> _CommandResponse:
         credentials = await self._credentials_factory()
-        request = RunCommandRequest(
+        request = _RunCommandRequest(
             command=command,
             args=args or [],
             cwd=cwd,
@@ -612,7 +1055,7 @@ class SandboxApiClient:
             credentials=credentials,
             body=request.to_api_dict(),
         )
-        return _validate_response(CommandResponse, data)
+        return _validate_response(_CommandResponse, data)
 
     async def get_command(
         self,
@@ -620,7 +1063,7 @@ class SandboxApiClient:
         session_id: str,
         command_id: str,
         wait: bool = True,
-    ) -> CommandResponse:
+    ) -> _CommandResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
@@ -632,16 +1075,16 @@ class SandboxApiClient:
             credentials=credentials,
             params={"wait": "true" if wait else "false"},
         )
-        return _validate_response(CommandResponse, data)
+        return _validate_response(_CommandResponse, data)
 
-    async def query_commands(self, *, session_id: str) -> CommandsResponse:
+    async def query_commands(self, *, session_id: str) -> _CommandsResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/sessions/{session_id}/cmd", session_id=session_id),
             credentials=credentials,
         )
-        return _validate_response(CommandsResponse, data)
+        return _validate_response(_CommandsResponse, data)
 
     async def mkdir(
         self,
@@ -652,7 +1095,7 @@ class SandboxApiClient:
         recursive: bool = True,
     ) -> None:
         credentials = await self._credentials_factory()
-        request = MkdirRequest(path=path, cwd=cwd, recursive=recursive)
+        request = _MkdirRequest(path=path, cwd=cwd, recursive=recursive)
         await self._request(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/mkdir", session_id=session_id),
@@ -668,7 +1111,7 @@ class SandboxApiClient:
         cwd: str | None = None,
     ) -> bytes:
         credentials = await self._credentials_factory()
-        request = FilesystemPathRequest(path=path, cwd=cwd)
+        request = _FilesystemPathRequest(path=path, cwd=cwd)
         response = await self._request(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/read", session_id=session_id),
@@ -701,7 +1144,7 @@ class SandboxApiClient:
         session_id: str,
         command_id: str,
         signal: int,
-    ) -> CommandResponse:
+    ) -> _CommandResponse:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -713,7 +1156,7 @@ class SandboxApiClient:
             credentials=credentials,
             body={"signal": signal},
         )
-        return _validate_response(CommandResponse, data)
+        return _validate_response(_CommandResponse, data)
 
     async def command_logs_response(
         self,

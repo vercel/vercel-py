@@ -19,6 +19,7 @@ from vercel.unstable.sandbox import (
     SandboxApiError,
     SandboxCleanupError,
     SandboxResources,
+    SandboxResponseError,
     SandboxServiceOptions,
     SandboxSource,
     SandboxStatus,
@@ -173,6 +174,27 @@ async def test_public_create_sandbox_uses_session_options(mock_env_clear: None) 
     assert handle.current_session.project_id == "prj_123"
     assert handle.current_session.execution_time_limit == 300000
     assert handle.routes[0].url == "https://preview.sandbox.test"
+
+
+@respx.mock
+async def test_handle_observed_state_is_read_only_to_callers(mock_env_clear: None) -> None:
+    response = _sandbox_response()
+    sandbox_payload = response["sandbox"]
+    assert isinstance(sandbox_payload, dict)
+    sandbox_payload["tags"] = {"env": "test"}
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=response)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+
+        with pytest.raises(AttributeError):
+            handle.status = SandboxStatus.STOPPED  # type: ignore[misc]
+        assert handle.tags is not None
+        handle.tags["env"] = "mutated"
+        assert handle.tags == {"env": "test"}
+        assert not hasattr(handle, "model_dump")
 
 
 @respx.mock
@@ -515,7 +537,9 @@ async def test_closed_session_rejects_handles_lazy_logs_and_captured_service(
         return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response(exit_code=None))
+        return_value=httpx.Response(
+            200, json=_command_response(session_id="sbx_123", exit_code=None)
+        )
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
         return_value=httpx.Response(
@@ -573,6 +597,9 @@ async def test_context_cleanup_preserves_handle_and_surfaces_cleanup_failures(
             assert handle.name == "preview"
 
         assert destroy_route.called
+        assert handle.status is SandboxStatus.STOPPED
+        assert handle.current_session is not None
+        assert handle.current_session.status is SandboxStatus.STOPPED
         runtime_session = await handle.session()
         assert runtime_session.id == "sbx_runtime"
         assert session_route.called
@@ -619,6 +646,7 @@ async def test_explicit_destroy_leaves_server_to_answer_later_operations(
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         destroyed = await handle.destroy()
 
+        assert destroyed is handle
         assert destroyed.status is SandboxStatus.STOPPED
         command = await handle.start_command("python", ["--version"])
         assert command.id == "cmd_123"
@@ -655,6 +683,7 @@ async def test_explicit_runtime_session_stop_leaves_server_to_answer_later_opera
         runtime_session = await handle.session()
         stopped = await runtime_session.stop()
 
+        assert stopped is runtime_session
         assert stopped.status is SandboxStatus.STOPPED
         command = await runtime_session.start_command("python", ["--version"])
         assert command.id == "cmd_123"
@@ -732,6 +761,7 @@ async def test_runtime_session_context_cleanup_does_not_invalidate_handles(
             async with handle.session() as runtime_session:
                 pass
 
+            assert runtime_session.status is SandboxStatus.STOPPED
             assert (await runtime_session.start_command("python", ["--version"])).id == "cmd_123"
 
         assert (await handle.current_session.start_command("python", ["--version"])).id == "cmd_123"
@@ -819,9 +849,11 @@ async def test_command_handle_lifecycle_supports_logs_lookup_list_and_kill(
         fetched = await handle.get_command("cmd_sleep")
         assert fetched.id == command.id
         finished = await command.wait()
+        assert finished is command
         assert finished.exit_code == 0
         assert [item.id for item in await handle.query_commands()] == ["cmd_sleep"]
         killed = await command.kill("TERM")
+        assert killed is command
 
     assert start_route.called
     assert logs_route.called
@@ -1100,6 +1132,8 @@ async def test_session_controls_and_sandbox_update_public_flow(
 
     async with vercel.session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        assert handle.current_session is not None
+        initial_session = handle.current_session
         updated = await handle.update(
             ports=[3000],
             execution_time_limit=300000,
@@ -1124,6 +1158,12 @@ async def test_session_controls_and_sandbox_update_public_flow(
             )
         ]
 
+    assert updated is handle
+    assert handle.current_session is initial_session
+    assert extended is initial_session
+    assert policy_updated is initial_session
+    assert refreshed is initial_session
+    assert session_extended is initial_session
     assert updated.name == "preview"
     assert extended.execution_time_limit == 420000
     assert session_extended.execution_time_limit == 420000
@@ -1238,6 +1278,7 @@ async def test_snapshot_restore_public_flow(mock_env_clear: None) -> None:
         ]
         fetched = await sandbox.get_snapshot(snapshot_id=created.id)
         deleted = await created.delete()
+        assert deleted is created
         assert (await created.delete()).status == "deleted"
 
     assert create_route.call_count == 2
@@ -1270,6 +1311,80 @@ async def test_snapshot_restore_public_flow(mock_env_clear: None) -> None:
 
 
 @respx.mock
+async def test_runtime_session_created_from_sandbox_is_independent(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
+    )
+    session_payload = _sandbox_response(session_id="sbx_runtime")["session"]
+    assert isinstance(session_payload, dict)
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/extend-timeout").mock(
+        return_value=httpx.Response(200, json={"session": {**session_payload, "timeout": 999000}})
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        assert handle.current_session is not None
+        current = handle.current_session
+        independent = await handle.session()
+        await independent.extend_execution_time_limit(10_000)
+
+        assert independent is not current
+        assert independent.execution_time_limit == 999000
+        assert current.execution_time_limit == 300000
+        assert handle.current_session is current
+
+
+@respx.mock
+async def test_mutating_handles_reject_mismatched_response_identity(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="other"))
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(
+            200, json=_command_response(session_id="sbx_123", exit_code=None)
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123").mock(
+        return_value=httpx.Response(
+            200, json=_command_response(command_id="other", session_id="sbx_123")
+        )
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                **_snapshot_response(),
+                "session": _sandbox_response()["session"],
+            },
+        )
+    )
+    respx.delete("https://sandbox.test/v2/sandboxes/snapshots/snap_123").mock(
+        return_value=httpx.Response(200, json=_snapshot_response(snapshot_id="other"))
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(SandboxResponseError):
+            await handle.update(runtime="node22")
+
+        command = await handle.start_command("sleep", ["30"])
+        with pytest.raises(SandboxResponseError):
+            await command.refresh()
+
+        snapshot = await handle.snapshot()
+        with pytest.raises(SandboxResponseError):
+            await snapshot.delete()
+
+
+@respx.mock
 def test_sync_session_controls_and_sandbox_update_public_flow(
     mock_env_clear: None,
 ) -> None:
@@ -1292,11 +1407,16 @@ def test_sync_session_controls_and_sandbox_update_public_flow(
 
     with vercel.session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        assert handle.current_session is not None
+        initial_session = handle.current_session
         updated = handle.update(execution_time_limit=300000)
         extended = handle.extend_execution_time_limit(120000)
         assert handle.current_session is not None
         session_extended = handle.current_session.extend_execution_time_limit(30_000)
 
+    assert updated is handle
+    assert extended is initial_session
+    assert session_extended is initial_session
     assert updated.name == "preview"
     assert extended.execution_time_limit == 420000
     assert session_extended.execution_time_limit == 420000
@@ -1354,6 +1474,7 @@ def test_sync_snapshot_create_list_get_delete_parity(mock_env_clear: None) -> No
         )
         fetched = sandbox_sync.get_snapshot(snapshot_id=created.id)
         deleted = created.delete()
+        assert deleted is created
         assert created.delete().status == "deleted"
 
     assert created.id == "snap_sync"
@@ -1411,9 +1532,11 @@ def test_sync_create_runtime_command_and_cleanup_parity(mock_env_clear: None) ->
             with handle.session() as runtime_session:
                 result = runtime_session.run_command("python", ["--version"])
 
+            assert runtime_session.status is SandboxStatus.STOPPED
             assert result.exit_code == 0
             assert runtime_session.start_command("python", ["--version"]).id == "cmd_123"
 
+        assert handle.status is SandboxStatus.STOPPED
         assert handle.session().id == "sbx_runtime"
 
     assert create_route.called
@@ -1507,9 +1630,11 @@ def test_sync_command_handle_lifecycle_supports_lookup_list_and_kill(
             ("stderr", "two\n"),
         ]
         assert handle.get_command("cmd_sleep").id == command.id
-        assert command.wait().exit_code == 0
+        assert command.wait() is command
+        assert command.exit_code == 0
         assert [item.id for item in handle.query_commands()] == ["cmd_sleep"]
         killed = command.kill(9)
+        assert killed is command
 
     assert start_route.called
     assert logs_route.called
@@ -1761,6 +1886,7 @@ def test_sync_explicit_destroy_leaves_server_to_answer_later_operations(
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         destroyed = handle.destroy()
 
+        assert destroyed is handle
         assert destroyed.status is SandboxStatus.STOPPED
         assert handle.session().id == "sbx_runtime"
 
@@ -1797,6 +1923,7 @@ def test_sync_explicit_runtime_session_stop_leaves_server_to_answer_later_operat
         runtime_session = handle.session()
         stopped = runtime_session.stop()
 
+        assert stopped is runtime_session
         assert stopped.status is SandboxStatus.STOPPED
         assert runtime_session.start_command("python", ["--version"]).id == "cmd_123"
 
@@ -1883,11 +2010,12 @@ def test_sync_query_sandbox_context_cleanup_uses_query_project_id(
 
     with vercel.session(service_options=_session_options()):
         handle = next(sandbox_sync.query_sandboxes(project_id="custom_project"))
+        assert handle.project_id == "custom_project"
         with handle:
             pass
 
     assert delete_route.called
-    assert handle.project_id == "custom_project"
+    assert handle.status is SandboxStatus.STOPPED
     assert delete_requests == [{"teamId": "team_123", "projectId": "custom_project"}]
 
 
