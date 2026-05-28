@@ -9,6 +9,7 @@ import pytest
 import respx
 
 from vercel import unstable as vercel
+from vercel._internal.unstable.context import get_active_session
 from vercel._internal.unstable.errors import VercelSessionClosedError
 from vercel._internal.unstable.sandbox.models import JSONValue
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
@@ -17,7 +18,6 @@ from vercel.unstable.sandbox import (
     GitSource,
     SandboxApiError,
     SandboxCleanupError,
-    SandboxInvalidHandleError,
     SandboxResources,
     SandboxServiceOptions,
     SandboxSource,
@@ -505,7 +505,54 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
 
 
 @respx.mock
-async def test_context_cleanup_invalidation_and_cleanup_failure_errors(
+async def test_closed_session_rejects_handles_lazy_logs_and_captured_service(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response(exit_code=None))
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                **_snapshot_response(snapshot_id="snap_closed"),
+                "session": _sandbox_response()["session"],
+            },
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        sdk_session = get_active_session()
+        service = sdk_session.sandbox_service()
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        runtime_session = await handle.session()
+        command = await handle.start_command("sleep", ["30"])
+        pending_logs = command.logs()
+        snapshot = await handle.snapshot()
+
+    assert sdk_session.is_closed
+    with pytest.raises(VercelSessionClosedError):
+        await handle.start_command("true")
+    with pytest.raises(VercelSessionClosedError):
+        await runtime_session.start_command("true")
+    with pytest.raises(VercelSessionClosedError):
+        await command.refresh()
+    with pytest.raises(VercelSessionClosedError):
+        await anext(pending_logs)
+    with pytest.raises(VercelSessionClosedError):
+        await snapshot.delete()
+    with pytest.raises(VercelSessionClosedError):
+        await service.get_sandbox(name="preview")
+
+
+@respx.mock
+async def test_context_cleanup_preserves_handle_and_surfaces_cleanup_failures(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -517,14 +564,18 @@ async def test_context_cleanup_invalidation_and_cleanup_failure_errors(
             json=_sandbox_response(status="stopped", session_status="stopped"),
         )
     )
+    session_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
+    )
 
     async with vercel.session(service_options=_session_options()):
         async with sandbox.create_sandbox(name="preview", runtime="python3.13") as handle:
             assert handle.name == "preview"
 
         assert destroy_route.called
-        with pytest.raises(SandboxInvalidHandleError):
-            handle.session()
+        runtime_session = await handle.session()
+        assert runtime_session.id == "sbx_runtime"
+        assert session_route.called
 
     respx.post("https://cleanup.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
@@ -548,7 +599,7 @@ async def test_context_cleanup_invalidation_and_cleanup_failure_errors(
 
 
 @respx.mock
-async def test_explicit_destroy_invalidates_handle(
+async def test_explicit_destroy_leaves_server_to_answer_later_operations(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -569,17 +620,15 @@ async def test_explicit_destroy_invalidates_handle(
         destroyed = await handle.destroy()
 
         assert destroyed.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxInvalidHandleError):
-            handle.session()
-        with pytest.raises(SandboxInvalidHandleError):
-            await handle.run_command("python", ["--version"])
+        command = await handle.start_command("python", ["--version"])
+        assert command.id == "cmd_123"
 
     assert destroy_route.called
-    assert not command_route.called
+    assert command_route.called
 
 
 @respx.mock
-async def test_explicit_runtime_session_stop_invalidates_session_handle(
+async def test_explicit_runtime_session_stop_leaves_server_to_answer_later_operations(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -601,22 +650,21 @@ async def test_explicit_runtime_session_stop_invalidates_session_handle(
     command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/cmd").mock(
         return_value=httpx.Response(200, json=_command_response(exit_code=None))
     )
-
     async with vercel.session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         runtime_session = await handle.session()
         stopped = await runtime_session.stop()
 
         assert stopped.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxInvalidHandleError):
-            await runtime_session.run_command("python", ["--version"])
+        command = await runtime_session.start_command("python", ["--version"])
+        assert command.id == "cmd_123"
 
     assert stop_route.called
-    assert not command_route.called
+    assert command_route.called
 
 
 @respx.mock
-async def test_child_runtime_session_invalid_after_parent_sandbox_context_exit(
+async def test_child_runtime_session_usable_after_parent_sandbox_context_exit(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -639,14 +687,14 @@ async def test_child_runtime_session_invalid_after_parent_sandbox_context_exit(
         async with sandbox.create_sandbox(name="preview", runtime="python3.13") as handle:
             runtime_session = await handle.session()
 
-        with pytest.raises(SandboxInvalidHandleError):
-            await runtime_session.run_command("python", ["--version"])
+        command = await runtime_session.start_command("python", ["--version"])
+        assert command.id == "cmd_123"
 
-    assert not command_route.called
+    assert command_route.called
 
 
 @respx.mock
-async def test_runtime_session_context_has_independent_resource_token(
+async def test_runtime_session_context_cleanup_does_not_invalidate_handles(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -658,6 +706,9 @@ async def test_runtime_session_context_has_independent_resource_token(
     command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/cmd").mock(
         return_value=httpx.Response(200, json=_command_response(exit_code=None))
     )
+    current_command_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd"
+    ).mock(return_value=httpx.Response(200, json=_command_response(exit_code=None)))
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/stop").mock(
         return_value=httpx.Response(
             200,
@@ -681,13 +732,12 @@ async def test_runtime_session_context_has_independent_resource_token(
             async with handle.session() as runtime_session:
                 pass
 
-            with pytest.raises(SandboxInvalidHandleError):
-                await runtime_session.run_command("python", ["--version"])
+            assert (await runtime_session.start_command("python", ["--version"])).id == "cmd_123"
 
-        with pytest.raises(SandboxInvalidHandleError):
-            await handle.current_session.run_command("python", ["--version"])
+        assert (await handle.current_session.start_command("python", ["--version"])).id == "cmd_123"
 
-    assert not command_route.called
+    assert command_route.called
+    assert current_command_route.called
 
 
 @respx.mock
@@ -787,7 +837,7 @@ async def test_command_handle_lifecycle_supports_logs_lookup_list_and_kill(
 
 
 @respx.mock
-async def test_sandbox_context_invalidates_command_handles_and_lazy_logs(
+async def test_sandbox_context_preserves_command_handles_and_lazy_logs(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -848,20 +898,19 @@ async def test_sandbox_context_invalidates_command_handles_and_lazy_logs(
 
         get_call_count = get_route.call_count
         for command in [ran, started, fetched, queried, refreshed, waited, killed]:
-            with pytest.raises(SandboxInvalidHandleError):
-                await command.refresh()
-        with pytest.raises(SandboxInvalidHandleError):
+            assert (await command.refresh()).id == "cmd_context"
+        with pytest.raises(StopAsyncIteration):
             await anext(pending_logs)
 
     assert start_route.call_count == 2
     assert list_route.called
     assert kill_route.called
-    assert get_route.call_count == get_call_count
-    assert not logs_route.called
+    assert get_route.call_count == get_call_count + 7
+    assert logs_route.called
 
 
 @respx.mock
-async def test_runtime_session_context_invalidates_all_command_producer_results(
+async def test_runtime_session_context_preserves_command_producer_results(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -917,12 +966,11 @@ async def test_runtime_session_context_invalidates_all_command_producer_results(
 
         get_call_count = get_route.call_count
         for command in [ran, started, fetched, queried]:
-            with pytest.raises(SandboxInvalidHandleError):
-                await command.refresh()
+            assert (await command.refresh()).id == "cmd_context"
 
     assert start_route.call_count == 2
     assert list_route.called
-    assert get_route.call_count == get_call_count
+    assert get_route.call_count == get_call_count + 4
 
 
 @respx.mock
@@ -1161,14 +1209,16 @@ async def test_snapshot_restore_public_flow(mock_env_clear: None) -> None:
             json=_snapshot_response(snapshot_id="snap_restore", status="deleted"),
         )
     )
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response(exit_code=None))
+    )
 
     async with vercel.session(service_options=_session_options()):
         base = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         await base.write_files([WriteFile(path="state.txt", content="from snapshot\n")])
         created = await base.snapshot(expiration=0)
         assert base.current_session is not None
-        with pytest.raises(SandboxInvalidHandleError):
-            await base.current_session.run_command("python", ["--version"])
+        assert (await base.current_session.start_command("python", ["--version"])).id == "cmd_123"
 
         restored = await sandbox.create_sandbox(
             name="restored",
@@ -1188,8 +1238,7 @@ async def test_snapshot_restore_public_flow(mock_env_clear: None) -> None:
         ]
         fetched = await sandbox.get_snapshot(snapshot_id=created.id)
         deleted = await created.delete()
-        with pytest.raises(SandboxInvalidHandleError):
-            await created.delete()
+        assert (await created.delete()).status == "deleted"
 
     assert create_route.call_count == 2
     assert create_requests[1]["source"] == {"type": "snapshot", "snapshotId": "snap_restore"}
@@ -1216,7 +1265,8 @@ async def test_snapshot_restore_public_flow(mock_env_clear: None) -> None:
     ]
     assert get_route.called
     assert read_route.called
-    assert delete_route.called
+    assert delete_route.call_count == 2
+    assert command_route.called
 
 
 @respx.mock
@@ -1289,21 +1339,22 @@ def test_sync_snapshot_create_list_get_delete_parity(mock_env_clear: None) -> No
             json=_snapshot_response(snapshot_id="snap_sync", status="deleted"),
         )
     )
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response(exit_code=None))
+    )
 
     with vercel.session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         created = handle.snapshot(expiration=0)
         assert handle.current_session is not None
-        with pytest.raises(SandboxInvalidHandleError):
-            handle.current_session.run_command("python", ["--version"])
+        assert handle.current_session.start_command("python", ["--version"]).id == "cmd_123"
         listed = handle.list_snapshots(page_size=10)
         project_listed = list(
             sandbox_sync.query_snapshots(project_id="prj_123", name="preview", page_size=10)
         )
         fetched = sandbox_sync.get_snapshot(snapshot_id=created.id)
         deleted = created.delete()
-        with pytest.raises(SandboxInvalidHandleError):
-            created.delete()
+        assert created.delete().status == "deleted"
 
     assert created.id == "snap_sync"
     assert [snapshot.id for snapshot in listed] == ["snap_sync"]
@@ -1313,7 +1364,8 @@ def test_sync_snapshot_create_list_get_delete_parity(mock_env_clear: None) -> No
     assert json.loads(snapshot_route.calls.last.request.content) == {"expiration": 0}
     assert list_route.call_count == 2
     assert get_route.called
-    assert delete_route.called
+    assert delete_route.call_count == 2
+    assert command_route.called
 
 
 @respx.mock
@@ -1360,18 +1412,16 @@ def test_sync_create_runtime_command_and_cleanup_parity(mock_env_clear: None) ->
                 result = runtime_session.run_command("python", ["--version"])
 
             assert result.exit_code == 0
-            with pytest.raises(SandboxInvalidHandleError):
-                runtime_session.run_command("python", ["--version"])
+            assert runtime_session.start_command("python", ["--version"]).id == "cmd_123"
 
-        with pytest.raises(SandboxInvalidHandleError):
-            handle.session()
+        assert handle.session().id == "sbx_runtime"
 
     assert create_route.called
     create_body = json.loads(create_route.calls.last.request.content)
     assert create_body["timeout"] == 60000
     assert create_body["resources"] == {"vcpus": 2, "memory": 4096}
-    assert runtime_route.called
-    assert start_command_route.called
+    assert runtime_route.call_count == 2
+    assert start_command_route.call_count == 2
     assert wait_command_route.called
     assert stop_runtime_route.called
     assert destroy_sandbox_route.called
@@ -1475,7 +1525,7 @@ def test_sync_command_handle_lifecycle_supports_lookup_list_and_kill(
 
 
 @respx.mock
-def test_sync_sandbox_context_invalidates_command_handles(
+def test_sync_sandbox_context_preserves_command_handles(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -1532,17 +1582,16 @@ def test_sync_sandbox_context_invalidates_command_handles(
 
         get_call_count = get_route.call_count
         for command in [ran, started, fetched, queried, refreshed, waited, killed]:
-            with pytest.raises(SandboxInvalidHandleError):
-                command.refresh()
+            assert command.refresh().id == "cmd_context"
 
     assert start_route.call_count == 2
     assert list_route.called
     assert kill_route.called
-    assert get_route.call_count == get_call_count
+    assert get_route.call_count == get_call_count + 7
 
 
 @respx.mock
-def test_sync_runtime_session_context_invalidates_all_command_producer_results(
+def test_sync_runtime_session_context_preserves_all_command_producer_results(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -1598,12 +1647,11 @@ def test_sync_runtime_session_context_invalidates_all_command_producer_results(
 
         get_call_count = get_route.call_count
         for command in [ran, started, fetched, queried]:
-            with pytest.raises(SandboxInvalidHandleError):
-                command.refresh()
+            assert command.refresh().id == "cmd_context"
 
     assert start_route.call_count == 2
     assert list_route.called
-    assert get_route.call_count == get_call_count
+    assert get_route.call_count == get_call_count + 4
 
 
 @respx.mock
@@ -1693,7 +1741,9 @@ def test_sync_runtime_session_command_logs_parity(mock_env_clear: None) -> None:
 
 
 @respx.mock
-def test_sync_explicit_destroy_invalidates_handle(mock_env_clear: None) -> None:
+def test_sync_explicit_destroy_leaves_server_to_answer_later_operations(
+    mock_env_clear: None,
+) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -1703,20 +1753,23 @@ def test_sync_explicit_destroy_invalidates_handle(mock_env_clear: None) -> None:
             json=_sandbox_response(status="stopped", session_status="stopped"),
         )
     )
+    session_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
+    )
 
     with vercel.session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         destroyed = handle.destroy()
 
         assert destroyed.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxInvalidHandleError):
-            handle.session()
+        assert handle.session().id == "sbx_runtime"
 
     assert destroy_route.called
+    assert session_route.called
 
 
 @respx.mock
-def test_sync_explicit_runtime_session_stop_invalidates_session_handle(
+def test_sync_explicit_runtime_session_stop_leaves_server_to_answer_later_operations(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -1735,6 +1788,9 @@ def test_sync_explicit_runtime_session_stop_invalidates_session_handle(
             ),
         )
     )
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response(exit_code=None))
+    )
 
     with vercel.session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
@@ -1742,14 +1798,14 @@ def test_sync_explicit_runtime_session_stop_invalidates_session_handle(
         stopped = runtime_session.stop()
 
         assert stopped.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxInvalidHandleError):
-            runtime_session.run_command("python", ["--version"])
+        assert runtime_session.start_command("python", ["--version"]).id == "cmd_123"
 
     assert stop_route.called
+    assert command_route.called
 
 
 @respx.mock
-def test_sync_child_runtime_session_invalid_after_parent_sandbox_context_exit(
+def test_sync_child_runtime_session_usable_after_parent_sandbox_context_exit(
     mock_env_clear: None,
 ) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
@@ -1772,10 +1828,9 @@ def test_sync_child_runtime_session_invalid_after_parent_sandbox_context_exit(
         with sandbox_sync.create_sandbox(name="preview", runtime="python3.13") as handle:
             runtime_session = handle.session()
 
-        with pytest.raises(SandboxInvalidHandleError):
-            runtime_session.run_command("python", ["--version"])
+        assert runtime_session.start_command("python", ["--version"]).id == "cmd_123"
 
-    assert not command_route.called
+    assert command_route.called
 
 
 @respx.mock

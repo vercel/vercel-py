@@ -248,32 +248,29 @@ The name keeps platform retention policy distinct from local call duration.
 
 ## Decision 10: Handle Validity
 
-SDK handles carry an internal alive marker.
+SDK handles retain the SDK session that created them. That originating session
+is the only local authority boundary for follow-up requests.
 
-A handle is valid only while:
+Closing a `vercel.session(...)` scope closes its `SdkSession` or
+`SyncSdkSession`; later requests through its handles or an already-captured
+service raise `VercelSessionClosedError`.
 
-- its owning SDK session is alive
-- its own context-managed remote resource has not exited
-- explicit cleanup such as `destroy()` or `stop()` has not succeeded
+Context-managed cleanup and explicit `Sandbox.destroy()`,
+`SandboxRuntimeSession.stop()`, and `Snapshot.delete()` do not locally revoke
+handles. Snapshot responses reporting a stopped runtime likewise do not revoke
+the previous runtime-session handle. Remote existence and terminal state are
+server-authoritative, so retained handles may receive ordinary API success or
+error responses while their SDK session remains open.
 
-Handles created inside a `vercel.session(...)` context are invalidated when that
-session context exits. The remote resource may still exist, but the old Python
-handle is not usable.
-
-Context-managed sandboxes and sandbox runtime sessions invalidate their handles
-after cleanup.
-
-Explicit `Sandbox.destroy()` and `SandboxRuntimeSession.stop()` follow the same
-invalidation rule after successful remote cleanup.
-
-The design specifies the invalidation behavior but does not freeze the exact
-exception name yet.
+`SandboxInvalidHandleError` remains for unattached or incorrectly mode-bound
+handle objects, not closed sessions or remote lifecycle state.
 
 Rationale:
 
-Handles are bound to SDK runtime resources such as clients, options, and close
-hooks. Requiring reacquisition after session close keeps that binding explicit
-and prevents stale handles from silently using the wrong configuration.
+Handles are bound to SDK runtime resources such as clients and options.
+Requiring reacquisition after session close keeps that binding explicit and
+prevents stale handles from silently using the wrong configuration, without
+guessing at server-side resource lifetime.
 
 ## Decision 11: Context-managed Cleanup
 
@@ -294,8 +291,10 @@ async with sandbox_.session() as session:
     ...
 ```
 
-Context manager exit awaits cleanup and surfaces cleanup failures. Callers who
-want a sandbox or runtime session to survive should not use its context manager.
+Context manager exit awaits cleanup and surfaces cleanup failures. It expresses
+remote cleanup ownership, not reliable knowledge of future resource usability.
+Callers who do not want that cleanup requested should not use the context
+manager.
 
 The same remote cleanup can be requested explicitly with `Sandbox.destroy()` or
 `SandboxRuntimeSession.stop()`. Sandbox identity behavior belongs on `Sandbox`,
@@ -347,8 +346,8 @@ sandbox_ = sandbox.create_sandbox(runtime="python3.13")
 ```
 
 The sync mirror resolves `SyncSdkSession` rather than `SdkSession`, and follows
-the same service option, waiting, cleanup, and invalidation rules as the async
-API.
+the same service option, waiting, cleanup, and session-bound handle rules as
+the async API.
 
 Rationale:
 
@@ -362,8 +361,9 @@ All unstable SDK exceptions inherit from `vercel.unstable.VercelError`.
 Session errors inherit from `VercelSessionError`. Domain errors inherit from
 domain-specific bases such as `SandboxError`.
 
-Sandbox invalid handles raise `SandboxInvalidHandleError`. Sandbox context
-manager cleanup failures raise `SandboxCleanupError`; the error carries
+Unattached or mode-invalid sandbox handles raise `SandboxInvalidHandleError`.
+Requests through a closed SDK session raise `VercelSessionClosedError`.
+Sandbox context manager cleanup failures raise `SandboxCleanupError`; the error carries
 `resource_type`, `resource_id`, and the underlying `cause`. Sandbox v2 API
 errors raise `SandboxApiError`, which preserves `status_code`, structured
 `data`, and the v2 error `code` when available.
@@ -383,7 +383,8 @@ Positive consequences:
 - Each session owns one transport and HTTP pool for its runtime mode; endpoint
   clients own their origins.
 - Service methods stay small and endpoint-focused.
-- Resource lifetime follows Python context manager ownership.
+- Context managers express remote cleanup ownership while remote lifecycle
+  remains server-authoritative.
 - Sync support exists without weakening the async-first API.
 
 Costs:
@@ -391,7 +392,7 @@ Costs:
 - Context-local session resolution requires careful tests.
 - Wrong-mode scoped service calls and client factories require explicit runtime
   errors.
-- Handles need explicit validity tracking.
+- Handles retain their originating SDK session for close checks.
 - Nested session inheritance must be precise and well documented.
 - Sync mirrors add duplicate API surface.
 - Avoiding built-in retry and timeout policy pushes that composition to callers.

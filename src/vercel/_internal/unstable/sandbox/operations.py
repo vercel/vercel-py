@@ -17,7 +17,7 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxSource,
     SnapshotRetention,
 )
-from vercel._internal.unstable.session import AliveToken, SdkSession
+from vercel._internal.unstable.session import SdkSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +43,6 @@ class CreateSandboxOperation:
         self._params = params
         self._consumed = False
         self._handle: Sandbox | None = None
-        self._resource_token: AliveToken | None = None
 
     def _mark_consumed(self) -> None:
         if self._consumed:
@@ -73,10 +72,7 @@ class CreateSandboxOperation:
 
     async def __aenter__(self) -> Sandbox:
         handle = await self._run_once()
-        resource_token = AliveToken()
-        handle._attach_resource_token(resource_token)
         self._handle = handle
-        self._resource_token = resource_token
         return handle
 
     async def __aexit__(
@@ -85,7 +81,7 @@ class CreateSandboxOperation:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._handle is None or self._resource_token is None:
+        if self._handle is None:
             return None
 
         try:
@@ -100,7 +96,6 @@ class CreateSandboxOperation:
                 resource_id=self._handle.name,
                 cause=exc,
             ) from exc
-        self._resource_token.invalidate()
         return None
 
     def __del__(self) -> None:
@@ -119,7 +114,6 @@ class CreateRuntimeSessionOperation:
         self._sandbox = sandbox
         self._consumed = False
         self._handle: SandboxRuntimeSession | None = None
-        self._resource_token: AliveToken | None = None
 
     def _mark_consumed(self) -> None:
         if self._consumed:
@@ -128,12 +122,10 @@ class CreateRuntimeSessionOperation:
 
     async def _run_once(self) -> SandboxRuntimeSession:
         self._mark_consumed()
-        self._sandbox._raise_if_invalid()
         handle = await self._session.sandbox_service().create_runtime_session(
             name=self._sandbox.name,
             project_id=self._sandbox.project_id,
         )
-        self._sandbox._attach_resource_tokens_to_runtime_session(handle)
         return handle
 
     def __await__(self) -> Generator[Any, None, SandboxRuntimeSession]:
@@ -141,10 +133,7 @@ class CreateRuntimeSessionOperation:
 
     async def __aenter__(self) -> SandboxRuntimeSession:
         handle = await self._run_once()
-        resource_token = AliveToken()
-        handle._attach_resource_token(resource_token)
         self._handle = handle
-        self._resource_token = resource_token
         return handle
 
     async def __aexit__(
@@ -153,7 +142,7 @@ class CreateRuntimeSessionOperation:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._handle is None or self._resource_token is None:
+        if self._handle is None:
             return None
 
         try:
@@ -167,7 +156,6 @@ class CreateRuntimeSessionOperation:
                 resource_id=self._handle.id,
                 cause=exc,
             ) from exc
-        self._resource_token.invalidate()
         return None
 
 

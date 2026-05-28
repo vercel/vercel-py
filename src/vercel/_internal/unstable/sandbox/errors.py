@@ -15,7 +15,7 @@ class SandboxError(VercelError):
 
 
 class SandboxInvalidHandleError(SandboxError):
-    """Raised when a Sandbox handle is used after invalidation."""
+    """Raised when a Sandbox handle is unattached or mode-invalid."""
 
 
 class SandboxTerminalStateError(SandboxError):

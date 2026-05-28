@@ -42,7 +42,7 @@ class CountingAsyncClient(httpx.AsyncClient):
         await super().aclose()
 
 
-def test_sync_session_options_inherit_replace_reject_duplicates_and_invalidate() -> None:
+def test_sync_session_options_inherit_replace_reject_duplicates_and_close() -> None:
     parent = get_active_sync_session()
     sandbox_outer = SandboxServiceOptions(base_url="https://outer.example.com")
     sandbox_inner = SandboxServiceOptions()
@@ -67,10 +67,10 @@ def test_sync_session_options_inherit_replace_reject_duplicates_and_invalidate()
             assert inner_session.get_setting("httpx_client_factory") is factory
 
         assert get_active_sync_session() is outer_session
-        assert not inner_session.is_alive
+        assert inner_session.is_closed
 
     assert get_active_sync_session() is parent
-    assert not outer_session.is_alive
+    assert outer_session.is_closed
     with pytest.raises(VercelSessionClosedError):
         outer_session.sandbox_service()
 
@@ -105,6 +105,10 @@ async def test_async_sessions_inherit_factory_and_explicit_none_resets_it() -> N
             reset.sandbox_service()
 
     assert calls == 2
+    assert inherited.is_closed
+    assert reset.is_closed
+    with pytest.raises(VercelSessionClosedError):
+        inherited.sandbox_service()
 
 
 def test_default_sessions_are_independent() -> None:

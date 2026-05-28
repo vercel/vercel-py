@@ -26,8 +26,8 @@ contract.
 - Endpoint calls use direct keyword arguments, not public `*Param` dataclasses.
 - Service methods avoid complex retry, timeout, and polling policy. Compose
   those outside the call.
-- Handles are valid only while their owning SDK session and resource context
-  are alive.
+- Handles remain bound to the SDK session that created them and can issue
+  requests only while that session is open.
 - Async is primary. Sync support mirrors each domain under that domain package,
   for example `vercel.unstable.sandbox.sync`.
 
@@ -108,13 +108,12 @@ async def main() -> None:
             )
             await inner.run_command("python", ["--version"])
 
-        # `inner` was created by the nested SDK session.
-        # When that session exited, the Python handle was invalidated.
-        # The remote sandbox may still exist; reacquire a fresh handle.
+        # `inner` was created by the nested SDK session. That session is closed,
+        # so later calls through `inner` raise VercelSessionClosedError.
+        # Reacquire through an open session to make more requests.
         inner = await sandbox.get_sandbox(name="inner-preview")
 
-    # `preview` was created by the outer scoped SDK session.
-    # That session has exited, so this handle is invalid too.
+    # `preview` is also bound to a closed scoped SDK session.
     preview = await sandbox.get_sandbox(name="preview")
 
     # A context-managed sandbox is destroyed on exit.
@@ -124,7 +123,8 @@ async def main() -> None:
     ) as scratch:
         await scratch.run_command("python", ["--version"])
 
-    # `scratch` has been destroyed and its handle is invalid.
+    # Cleanup was requested remotely. Its retained handle remains bound to the
+    # still-open SDK session; later responses are determined by the API.
 
     persistent = await sandbox.create_sandbox(
         runtime="python3.13",
@@ -132,12 +132,12 @@ async def main() -> None:
     )
 
     # A context-managed sandbox runtime session is destroyed on exit.
-    # The sandbox survives; the runtime session handle does not.
+    # A retained runtime session handle is still request-capable while its SDK
+    # session remains open; the API decides whether the resource can be used.
     async with persistent.session() as runtime_session:
         await runtime_session.run_command("python", ["--version"])
 
-    # If you want a sandbox or runtime session to survive, do not use its
-    # context manager.
+    # Do not use its context manager when this code should not request cleanup.
     surviving_session = await persistent.session()
     await surviving_session.run_command("python", ["--version"])
 
@@ -302,10 +302,11 @@ async with sandbox_.session() as runtime_session:
 ```
 
 Context manager exit awaits cleanup. Cleanup failures raise
-`SandboxCleanupError`, whose `cause` points at the underlying failure. To keep a
-sandbox or sandbox runtime session around, do not use its context manager.
+`SandboxCleanupError`, whose `cause` points at the underlying failure. Context
+managers express ownership of a remote cleanup request, not reliable knowledge
+of whether a resource can answer a later API request.
 
-Explicit cleanup uses the same ownership rules:
+Explicit cleanup requests termination or deletion through the API:
 
 ```python
 sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
@@ -341,21 +342,15 @@ used with `SnapshotSource(snapshot_id=...)` to create another sandbox.
 `sandbox.query_snapshots(...)` lists project snapshots,
 `Sandbox.list_snapshots(...)` filters by sandbox name, and
 `sandbox.get_snapshot(...)` fetches one snapshot by ID. `Snapshot.delete()`
-invalidates the deleted snapshot handle after the API confirms deletion.
+requests remote deletion; later calls through a retained handle are still
+sent while its SDK session is open.
 
 ## Handle Validity
 
-Handles carry an internal alive marker.
-
-A handle is valid only while:
-
-- its owning SDK session is alive
-- its own context-managed remote resource has not exited
-- explicit cleanup such as `destroy()` or `stop()` has not succeeded
-
-Handles created inside `vercel.session(...)` are invalidated when that session
-context exits. The remote resource may still exist, but the old Python handle is
-not usable. Reacquire a new handle through an active SDK session:
+Handles are permanently bound to their originating SDK session. Once that SDK
+session closes, any later request through its sandbox, runtime-session,
+command, snapshot, or captured service object raises
+`VercelSessionClosedError`. Reacquire through an open SDK session:
 
 ```python
 from vercel import unstable as vercel
@@ -365,17 +360,18 @@ from vercel.unstable import sandbox
 async with vercel.session(service_options=[...]):
     preview = await sandbox.create_sandbox(runtime="python3.13", name="preview")
 
-# `preview` is invalid as a Python handle.
+# `preview` is bound to the closed scoped SDK session.
 preview = await sandbox.get_sandbox(name="preview")
 ```
 
-Snapshot creation may stop the current runtime session. When `snapshot()`
-returns a non-running session from the API, the SDK invalidates the old
-runtime-session handle. The sandbox identity handle remains usable for
-sandbox-scoped operations such as `list_snapshots(...)`, `update(...)`, and
-`destroy()`.
+Context-managed cleanup, explicit `destroy()` / `stop()` / `delete()`, and
+snapshot responses reporting a stopped runtime do not locally revoke handles.
+Remote existence and terminal state are server-authoritative: a retained
+handle may make another request and receive the ordinary API success or error
+response.
 
-Invalid handle use raises `SandboxInvalidHandleError`.
+`SandboxInvalidHandleError` is reserved for unattached or mode-invalid handle
+objects. Closed originating sessions raise `VercelSessionClosedError`.
 
 ## Sync Mirror
 
@@ -431,7 +427,7 @@ with vercel.session(
 ```
 
 The sync mirror resolves `SyncSdkSession` and follows the same service option,
-waiting, cleanup, and handle invalidation rules as the async API. Sync command
+waiting, cleanup, and session-bound handle rules as the async API. Sync command
 log streaming is exposed as a normal Python iterator.
 
 ## Error Model
@@ -447,5 +443,6 @@ Sandbox terminal states raise `SandboxTerminalStateError`. Sandbox v2 API
 failures raise `SandboxApiError`, which exposes `status_code`, `data`, and
 `code` when the API returns an `{ "error": { "code": ... } }` envelope.
 Malformed successful API responses raise `SandboxResponseError`. Cleanup
-failures raise `SandboxCleanupError`, and invalid handle use raises
-`SandboxInvalidHandleError`.
+failures raise `SandboxCleanupError`; unattached or mode-invalid handles raise
+`SandboxInvalidHandleError`; and requests through closed SDK sessions raise
+`VercelSessionClosedError`.

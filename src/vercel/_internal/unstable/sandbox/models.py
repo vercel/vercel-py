@@ -26,7 +26,7 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxInvalidHandleError,
     SandboxResponseError,
 )
-from vercel._internal.unstable.session import AliveToken, SdkSession, SyncSdkSession
+from vercel._internal.unstable.session import SdkSession, SyncSdkSession
 
 if TYPE_CHECKING:
     from vercel._internal.unstable.sandbox.operations import CreateRuntimeSessionOperation
@@ -366,8 +366,6 @@ class SandboxCommandLog(_ApiModel):
 
 
 class BaseSandboxCommand(_ApiModel):
-    _session_alive_token: AliveToken | None = PrivateAttr(default=None)
-    _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
     _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
     _stdout_cache: str | None = PrivateAttr(default=None)
     _stderr_cache: str | None = PrivateAttr(default=None)
@@ -394,39 +392,15 @@ class BaseSandboxCommand(_ApiModel):
     def status(self) -> Literal["running", "exited"]:
         return "running" if self.exit_code is None else "exited"
 
-    def _bind_alive_tokens(
-        self,
-        *,
-        session_token: AliveToken,
-        sdk_session: SdkSession | SyncSdkSession | None = None,
-    ) -> None:
-        self._session_alive_token = session_token
-        if sdk_session is not None:
-            self._sdk_session = sdk_session
-
-    def _attach_resource_token(self, resource_token: AliveToken) -> None:
-        self._resource_alive_tokens.add(resource_token)
-
-    def _attach_resource_tokens_to_command(self, command: "BaseSandboxCommand") -> None:
-        for resource_token in self._resource_alive_tokens:
-            command._attach_resource_token(resource_token)
-
-    def _raise_if_invalid(self) -> None:
-        if self._session_alive_token is None:
-            raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
-        if not self._session_alive_token.is_alive:
-            raise SandboxInvalidHandleError("Sandbox command handle is no longer valid")
-        if any(not token.is_alive for token in self._resource_alive_tokens):
-            raise SandboxInvalidHandleError("Sandbox command handle is no longer valid")
+    def _bind_sdk_session(self, sdk_session: SdkSession | SyncSdkSession) -> None:
+        self._sdk_session = sdk_session
 
     def _require_sandbox_service(self) -> "SandboxService":
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
         return self._sdk_session.sandbox_service()
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SyncSdkSession):
             raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
         return self._sdk_session.sandbox_service()
@@ -442,7 +416,6 @@ class SandboxCommand(BaseSandboxCommand):
             command_id=self.id,
             wait=wait,
         )
-        self._attach_resource_tokens_to_command(command)
         return command
 
     async def wait(self) -> "SandboxCommand":
@@ -458,14 +431,12 @@ class SandboxCommand(BaseSandboxCommand):
             command_id=self.id,
             signal=_signal_number(signal),
         )
-        self._attach_resource_tokens_to_command(command)
         return command
 
     def logs(self) -> AsyncIterator[SandboxCommandLog]:
         service = self._require_sandbox_service()
 
         async def iter_logs() -> AsyncIterator[SandboxCommandLog]:
-            self._raise_if_invalid()
             async for line in service.command_logs(
                 session_id=self.session_id,
                 command_id=self.id,
@@ -512,7 +483,6 @@ class SyncSandboxCommand(BaseSandboxCommand):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command)
         return command
 
     def wait(self) -> "SyncSandboxCommand":
@@ -533,7 +503,6 @@ class SyncSandboxCommand(BaseSandboxCommand):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command)
         return command
 
     def logs(self) -> Iterator[SandboxCommandLog]:
@@ -613,8 +582,6 @@ class RuntimeSessionsResponse(_ApiModel):
 
 
 class BaseSnapshot(_ApiModel):
-    _session_alive_token: AliveToken | None = PrivateAttr(default=None)
-    _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
     _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
 
     id: str
@@ -657,38 +624,18 @@ class BaseSnapshot(_ApiModel):
         serialization_alias="parentId",
     )
 
-    def _bind_alive_tokens(
-        self,
-        *,
-        session_token: AliveToken,
-        sdk_session: SdkSession | SyncSdkSession | None = None,
-    ) -> None:
-        self._session_alive_token = session_token
-        if sdk_session is not None:
-            self._sdk_session = sdk_session
-
-    def _raise_if_invalid(self) -> None:
-        if self._session_alive_token is None:
-            raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
-        if not self._handle_alive_token.is_alive:
-            raise SandboxInvalidHandleError("Snapshot handle is no longer valid")
-        if not self._session_alive_token.is_alive:
-            raise SandboxInvalidHandleError("Snapshot handle is no longer valid")
+    def _bind_sdk_session(self, sdk_session: SdkSession | SyncSdkSession) -> None:
+        self._sdk_session = sdk_session
 
     def _require_sandbox_service(self) -> "SandboxService":
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
         return self._sdk_session.sandbox_service()
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SyncSdkSession):
             raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
         return self._sdk_session.sandbox_service()
-
-    def _invalidate_handle(self) -> None:
-        self._handle_alive_token.invalidate()
 
 
 class Snapshot(BaseSnapshot):
@@ -696,9 +643,7 @@ class Snapshot(BaseSnapshot):
 
     async def delete(self) -> "Snapshot":
         service = self._require_sandbox_service()
-        deleted = await service.delete_snapshot(snapshot_id=self.id)
-        self._invalidate_handle()
-        return deleted
+        return await service.delete_snapshot(snapshot_id=self.id)
 
 
 class SyncSnapshot(BaseSnapshot):
@@ -706,15 +651,10 @@ class SyncSnapshot(BaseSnapshot):
 
     def delete(self) -> "SyncSnapshot":
         service = self._require_sync_sandbox_service()
-        deleted = iter_coroutine(service.delete_snapshot(snapshot_id=self.id))
-        self._invalidate_handle()
-        return cast(SyncSnapshot, deleted)
+        return cast(SyncSnapshot, iter_coroutine(service.delete_snapshot(snapshot_id=self.id)))
 
 
 class BaseSandboxRuntimeSession(_ApiModel):
-    _session_alive_token: AliveToken | None = PrivateAttr(default=None)
-    _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
-    _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
     _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
 
     id: str
@@ -760,40 +700,10 @@ class BaseSandboxRuntimeSession(_ApiModel):
         serialization_alias="stoppedAt",
     )
 
-    def _bind_alive_tokens(
-        self,
-        *,
-        session_token: AliveToken,
-        resource_token: AliveToken | None = None,
-        sdk_session: SdkSession | SyncSdkSession | None = None,
-    ) -> None:
-        self._session_alive_token = session_token
-        if sdk_session is not None:
-            self._sdk_session = sdk_session
-        if resource_token is not None:
-            self._attach_resource_token(resource_token)
-
-    def _attach_resource_token(self, resource_token: AliveToken) -> None:
-        self._resource_alive_tokens.add(resource_token)
-
-    def _attach_resource_tokens_to_command(self, command: BaseSandboxCommand) -> None:
-        for resource_token in self._resource_alive_tokens:
-            command._attach_resource_token(resource_token)
-
-    def _raise_if_invalid(self) -> None:
-        if self._session_alive_token is None:
-            raise SandboxInvalidHandleError(
-                "Sandbox runtime-session handle is not attached to an SDK session"
-            )
-        if not self._handle_alive_token.is_alive:
-            raise SandboxInvalidHandleError("Sandbox runtime-session handle is no longer valid")
-        if not self._session_alive_token.is_alive:
-            raise SandboxInvalidHandleError("Sandbox runtime-session handle is no longer valid")
-        if any(not token.is_alive for token in self._resource_alive_tokens):
-            raise SandboxInvalidHandleError("Sandbox runtime-session handle is no longer valid")
+    def _bind_sdk_session(self, sdk_session: SdkSession | SyncSdkSession) -> None:
+        self._sdk_session = sdk_session
 
     def _require_sandbox_service(self) -> "SandboxService":
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError(
                 "Sandbox runtime-session handle is not attached to an SDK session"
@@ -801,15 +711,11 @@ class BaseSandboxRuntimeSession(_ApiModel):
         return self._sdk_session.sandbox_service()
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SyncSdkSession):
             raise SandboxInvalidHandleError(
                 "Sandbox runtime-session handle is not attached to an SDK session"
             )
         return self._sdk_session.sandbox_service()
-
-    def _invalidate_handle(self) -> None:
-        self._handle_alive_token.invalidate()
 
     def _write_files_cwd(self, cwd: str | None) -> str:
         return cwd or self.cwd or "/vercel/sandbox"
@@ -819,8 +725,7 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
     """A running Sandbox v2 session bound to an SDK session.
 
     Session-scoped behavior such as commands and stop operations belongs on this
-    handle. The handle becomes invalid after its SDK session closes, its owning
-    resource context exits, or `stop()` succeeds.
+    handle. The handle remains bound to the SDK session that created it.
     """
 
     async def run_command(
@@ -833,7 +738,7 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        command_handle = await service.run_command(
+        return await service.run_command(
             session_id=self.id,
             command=command,
             args=args,
@@ -841,8 +746,6 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
             env=env,
             sudo=sudo,
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     async def start_command(
         self,
@@ -854,7 +757,7 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        command_handle = await service.start_command(
+        return await service.start_command(
             session_id=self.id,
             command=command,
             args=args,
@@ -862,25 +765,18 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
             env=env,
             sudo=sudo,
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
         service = self._require_sandbox_service()
-        command = await service.get_command(
+        return await service.get_command(
             session_id=self.id,
             command_id=command_id,
             wait=wait,
         )
-        self._attach_resource_tokens_to_command(command)
-        return command
 
     async def query_commands(self) -> list[SandboxCommand]:
         service = self._require_sandbox_service()
-        commands = await service.query_commands(session_id=self.id)
-        for command in commands:
-            self._attach_resource_tokens_to_command(command)
-        return commands
+        return await service.query_commands(session_id=self.id)
 
     async def refresh(
         self,
@@ -961,12 +857,10 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
 
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
         service = self._require_sandbox_service()
-        snapshot, session = await service.create_snapshot(
+        snapshot, _ = await service.create_snapshot(
             session_id=self.id,
             expiration=expiration,
         )
-        if session.status is not SandboxStatus.RUNNING:
-            self._invalidate_handle()
         return snapshot
 
     def command_logs(self, command_id: str) -> AsyncIterator[SandboxCommandLog]:
@@ -978,23 +872,16 @@ class SandboxRuntimeSession(BaseSandboxRuntimeSession):
 
     async def stop(self) -> "SandboxRuntimeSession":
         service = self._require_sandbox_service()
-        stopped = await service.stop_runtime_session(
+        return await service.stop_runtime_session(
             session_id=self.id,
         )
-        self._invalidate_handle()
-        return stopped
 
 
 class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
     """Synchronous mirror of `SandboxRuntimeSession`."""
 
-    _context_resource_token: AliveToken | None = PrivateAttr(default=None)
-
     def __enter__(self) -> "SyncSandboxRuntimeSession":
-        self._raise_if_invalid()
-        if self._context_resource_token is None:
-            self._context_resource_token = AliveToken()
-            self._attach_resource_token(self._context_resource_token)
+        self._require_sync_sandbox_service()
         return self
 
     def __exit__(
@@ -1014,8 +901,6 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 resource_id=self.id,
                 cause=exc,
             ) from exc
-        if self._context_resource_token is not None:
-            self._context_resource_token.invalidate()
         return None
 
     def run_command(
@@ -1028,7 +913,7 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        command_handle = cast(
+        return cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.run_command(
@@ -1041,8 +926,6 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     def start_command(
         self,
@@ -1054,7 +937,7 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        command_handle = cast(
+        return cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.start_command(
@@ -1067,12 +950,10 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        command = cast(
+        return cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.get_command(
@@ -1082,18 +963,13 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command)
-        return command
 
     def query_commands(self) -> list[SyncSandboxCommand]:
         service = self._require_sync_sandbox_service()
-        commands = cast(
+        return cast(
             list[SyncSandboxCommand],
             iter_coroutine(service.query_commands(session_id=self.id)),
         )
-        for command in commands:
-            self._attach_resource_tokens_to_command(command)
-        return commands
 
     def refresh(
         self,
@@ -1197,14 +1073,12 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
 
     def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
         service = self._require_sync_sandbox_service()
-        snapshot, session = iter_coroutine(
+        snapshot, _ = iter_coroutine(
             service.create_snapshot(
                 session_id=self.id,
                 expiration=expiration,
             )
         )
-        if session.status is not SandboxStatus.RUNNING:
-            self._invalidate_handle()
         return cast(SyncSnapshot, snapshot)
 
     def command_logs(self, command_id: str) -> Iterator[SandboxCommandLog]:
@@ -1228,15 +1102,13 @@ class SyncSandboxRuntimeSession(BaseSandboxRuntimeSession):
 
     def stop(self) -> "SyncSandboxRuntimeSession":
         service = self._require_sync_sandbox_service()
-        stopped = iter_coroutine(service.stop_runtime_session(session_id=self.id))
-        self._invalidate_handle()
-        return cast(SyncSandboxRuntimeSession, stopped)
+        return cast(
+            SyncSandboxRuntimeSession,
+            iter_coroutine(service.stop_runtime_session(session_id=self.id)),
+        )
 
 
 class BaseSandbox(_ApiModel):
-    _session_alive_token: AliveToken | None = PrivateAttr(default=None)
-    _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
-    _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
     _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
 
     name: str
@@ -1296,57 +1168,12 @@ class BaseSandbox(_ApiModel):
     current_session: BaseSandboxRuntimeSession | None = None
     raw: JSONObject | None = None
 
-    def _bind_alive_tokens(
-        self,
-        *,
-        session_token: AliveToken,
-        resource_token: AliveToken | None = None,
-        sdk_session: SdkSession | SyncSdkSession | None = None,
-    ) -> None:
-        self._session_alive_token = session_token
-        if sdk_session is not None:
-            self._sdk_session = sdk_session
-        if resource_token is not None:
-            self._attach_resource_token(resource_token)
+    def _bind_sdk_session(self, sdk_session: SdkSession | SyncSdkSession) -> None:
+        self._sdk_session = sdk_session
         if self.current_session is not None:
-            self.current_session._bind_alive_tokens(
-                session_token=session_token,
-                resource_token=resource_token,
-            )
-            if sdk_session is not None:
-                self.current_session._sdk_session = sdk_session
-
-    def _attach_resource_token(self, resource_token: AliveToken) -> None:
-        self._resource_alive_tokens.add(resource_token)
-        if self.current_session is not None:
-            self.current_session._bind_alive_tokens(
-                session_token=self._session_alive_token or resource_token,
-                resource_token=resource_token,
-                sdk_session=self._sdk_session,
-            )
-
-    def _attach_resource_tokens_to_runtime_session(
-        self, runtime_session: BaseSandboxRuntimeSession
-    ) -> None:
-        for resource_token in self._resource_alive_tokens:
-            runtime_session._attach_resource_token(resource_token)
-
-    def _attach_resource_tokens_to_command(self, command: BaseSandboxCommand) -> None:
-        for resource_token in self._resource_alive_tokens:
-            command._attach_resource_token(resource_token)
-
-    def _raise_if_invalid(self) -> None:
-        if self._session_alive_token is None:
-            raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
-        if not self._handle_alive_token.is_alive:
-            raise SandboxInvalidHandleError("Sandbox handle is no longer valid")
-        if not self._session_alive_token.is_alive:
-            raise SandboxInvalidHandleError("Sandbox handle is no longer valid")
-        if any(not token.is_alive for token in self._resource_alive_tokens):
-            raise SandboxInvalidHandleError("Sandbox handle is no longer valid")
+            self.current_session._bind_sdk_session(sdk_session)
 
     def _require_sdk_session(self) -> SdkSession:
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
         return self._sdk_session
@@ -1355,15 +1182,9 @@ class BaseSandbox(_ApiModel):
         return self._require_sdk_session().sandbox_service()
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
-        self._raise_if_invalid()
         if not isinstance(self._sdk_session, SyncSdkSession):
             raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
         return self._sdk_session.sandbox_service()
-
-    def _invalidate_handle(self) -> None:
-        self._handle_alive_token.invalidate()
-        if self.current_session is not None:
-            self.current_session._invalidate_handle()
 
     def _write_files_cwd(self, cwd: str | None) -> str:
         if cwd is not None:
@@ -1377,9 +1198,8 @@ class Sandbox(BaseSandbox):
     """A Sandbox v2 handle bound to an SDK session.
 
     Sandbox identity behavior such as creating sessions, running commands on the
-    current session, and destroying the sandbox belongs here. The handle becomes
-    invalid after its SDK session closes, its context manager exits, or
-    `destroy()` succeeds.
+    current session, and destroying the sandbox belongs here. The handle remains
+    bound to the SDK session that created it.
     """
 
     current_session: SandboxRuntimeSession | None = None
@@ -1402,7 +1222,7 @@ class Sandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        command_handle = await service.run_command(
+        return await service.run_command(
             session_id=self.current_session_id,
             command=command,
             args=args,
@@ -1410,8 +1230,6 @@ class Sandbox(BaseSandbox):
             env=env,
             sudo=sudo,
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     async def start_command(
         self,
@@ -1423,7 +1241,7 @@ class Sandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SandboxCommand:
         service = self._require_sandbox_service()
-        command_handle = await service.start_command(
+        return await service.start_command(
             session_id=self.current_session_id,
             command=command,
             args=args,
@@ -1431,27 +1249,20 @@ class Sandbox(BaseSandbox):
             env=env,
             sudo=sudo,
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
         service = self._require_sandbox_service()
-        command = await service.get_command(
+        return await service.get_command(
             session_id=self.current_session_id,
             command_id=command_id,
             wait=wait,
         )
-        self._attach_resource_tokens_to_command(command)
-        return command
 
     async def query_commands(self) -> list[SandboxCommand]:
         service = self._require_sandbox_service()
-        commands = await service.query_commands(
+        return await service.query_commands(
             session_id=self.current_session_id,
         )
-        for command in commands:
-            self._attach_resource_tokens_to_command(command)
-        return commands
 
     async def list_sessions(
         self,
@@ -1555,22 +1366,18 @@ class Sandbox(BaseSandbox):
 
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
         service = self._require_sandbox_service()
-        snapshot, session = await service.create_snapshot(
+        snapshot, _ = await service.create_snapshot(
             session_id=self.current_session_id,
             expiration=expiration,
         )
-        if self.current_session is not None and session.status is not SandboxStatus.RUNNING:
-            self.current_session._invalidate_handle()
         return snapshot
 
     async def destroy(self) -> "Sandbox":
         service = self._require_sandbox_service()
-        destroyed = await service.destroy_sandbox(
+        return await service.destroy_sandbox(
             name=self.name,
             project_id=self.project_id,
         )
-        self._invalidate_handle()
-        return destroyed
 
     async def update(
         self,
@@ -1609,13 +1416,9 @@ class SyncSandbox(BaseSandbox):
     """Synchronous mirror of `Sandbox`."""
 
     current_session: SyncSandboxRuntimeSession | None = None
-    _context_resource_token: AliveToken | None = PrivateAttr(default=None)
 
     def __enter__(self) -> "SyncSandbox":
-        self._raise_if_invalid()
-        if self._context_resource_token is None:
-            self._context_resource_token = AliveToken()
-            self._attach_resource_token(self._context_resource_token)
+        self._require_sync_sandbox_service()
         return self
 
     def __exit__(
@@ -1640,8 +1443,6 @@ class SyncSandbox(BaseSandbox):
                 resource_id=self.name,
                 cause=exc,
             ) from exc
-        if self._context_resource_token is not None:
-            self._context_resource_token.invalidate()
         return None
 
     def session(self) -> SyncSandboxRuntimeSession:
@@ -1657,7 +1458,6 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
-        self._attach_resource_tokens_to_runtime_session(runtime_session)
         return runtime_session
 
     def run_command(
@@ -1670,7 +1470,7 @@ class SyncSandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        command_handle = cast(
+        return cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.run_command(
@@ -1683,8 +1483,6 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     def start_command(
         self,
@@ -1696,7 +1494,7 @@ class SyncSandbox(BaseSandbox):
         sudo: bool = False,
     ) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        command_handle = cast(
+        return cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.start_command(
@@ -1709,12 +1507,10 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command_handle)
-        return command_handle
 
     def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
         service = self._require_sync_sandbox_service()
-        command = cast(
+        return cast(
             SyncSandboxCommand,
             iter_coroutine(
                 service.get_command(
@@ -1724,12 +1520,10 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
-        self._attach_resource_tokens_to_command(command)
-        return command
 
     def query_commands(self) -> list[SyncSandboxCommand]:
         service = self._require_sync_sandbox_service()
-        commands = cast(
+        return cast(
             list[SyncSandboxCommand],
             iter_coroutine(
                 service.query_commands(
@@ -1737,9 +1531,6 @@ class SyncSandbox(BaseSandbox):
                 )
             ),
         )
-        for command in commands:
-            self._attach_resource_tokens_to_command(command)
-        return commands
 
     def list_sessions(
         self,
@@ -1865,26 +1656,25 @@ class SyncSandbox(BaseSandbox):
 
     def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
         service = self._require_sync_sandbox_service()
-        snapshot, session = iter_coroutine(
+        snapshot, _ = iter_coroutine(
             service.create_snapshot(
                 session_id=self.current_session_id,
                 expiration=expiration,
             )
         )
-        if self.current_session is not None and session.status is not SandboxStatus.RUNNING:
-            self.current_session._invalidate_handle()
         return cast(SyncSnapshot, snapshot)
 
     def destroy(self) -> "SyncSandbox":
         service = self._require_sync_sandbox_service()
-        destroyed = iter_coroutine(
-            service.destroy_sandbox(
-                name=self.name,
-                project_id=self.project_id,
-            )
+        return cast(
+            SyncSandbox,
+            iter_coroutine(
+                service.destroy_sandbox(
+                    name=self.name,
+                    project_id=self.project_id,
+                )
+            ),
         )
-        self._invalidate_handle()
-        return cast(SyncSandbox, destroyed)
 
     def update(
         self,

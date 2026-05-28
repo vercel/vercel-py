@@ -40,7 +40,6 @@ from vercel._internal.unstable.sandbox.pagination import (
     QuerySnapshotsPage,
     QuerySnapshotsParams,
 )
-from vercel._internal.unstable.session import AliveToken
 
 if TYPE_CHECKING:
     from vercel._internal.unstable.session import SdkSession, SyncSdkSession
@@ -74,14 +73,12 @@ class SandboxService:
         self,
         *,
         api_client: SandboxApiClient,
-        alive_token: AliveToken,
         options: SandboxServiceOptions,
-        sdk_session: "SdkSession | SyncSdkSession | None" = None,
+        sdk_session: "SdkSession | SyncSdkSession",
         sleep: AsyncSleep | None = None,
         sync_handles: bool = False,
     ) -> None:
         self._api_client = api_client
-        self._alive_token = alive_token
         self._options = options
         self._sdk_session = sdk_session
         self._sleep = sleep or anyio.sleep
@@ -92,20 +89,13 @@ class SandboxService:
         return self._api_client
 
     @property
-    def alive_token(self) -> AliveToken:
-        return self._alive_token
-
-    @property
     def options(self) -> SandboxServiceOptions:
         return self._options
 
     def _bind_sandbox(self, sandbox: Sandbox) -> Sandbox:
         if self._sync_handles:
             sandbox = cast(Sandbox, SyncSandbox.model_validate(sandbox.model_dump()))
-        sandbox._bind_alive_tokens(
-            session_token=self._alive_token,
-            sdk_session=self._sdk_session,
-        )
+        sandbox._bind_sdk_session(self._sdk_session)
         return sandbox
 
     def _bind_runtime_session(self, session: SandboxRuntimeSession) -> SandboxRuntimeSession:
@@ -114,29 +104,23 @@ class SandboxService:
                 SandboxRuntimeSession,
                 SyncSandboxRuntimeSession.model_validate(session.model_dump()),
             )
-        session._bind_alive_tokens(
-            session_token=self._alive_token,
-            sdk_session=self._sdk_session,
-        )
+        session._bind_sdk_session(self._sdk_session)
         return session
 
     def _bind_command(self, command: SandboxCommand) -> SandboxCommand:
         if self._sync_handles:
             command = cast(SandboxCommand, SyncSandboxCommand.model_validate(command.model_dump()))
-        command._bind_alive_tokens(
-            session_token=self._alive_token,
-            sdk_session=self._sdk_session,
-        )
+        command._bind_sdk_session(self._sdk_session)
         return command
 
     def _bind_snapshot(self, snapshot: Snapshot) -> Snapshot:
         if self._sync_handles:
             snapshot = cast(Snapshot, SyncSnapshot.model_validate(snapshot.model_dump()))
-        snapshot._bind_alive_tokens(
-            session_token=self._alive_token,
-            sdk_session=self._sdk_session,
-        )
+        snapshot._bind_sdk_session(self._sdk_session)
         return snapshot
+
+    def _check_open(self) -> None:
+        self._sdk_session.check_open()
 
     async def _wait_for_ready_sandbox(
         self,
@@ -145,7 +129,7 @@ class SandboxService:
         project_id: str | None = None,
     ) -> Sandbox:
         while True:
-            self._alive_token.raise_if_invalid()
+            self._check_open()
             status = _sandbox_status(sandbox)
 
             if status in _READY_SANDBOX_STATUSES:
@@ -188,7 +172,7 @@ class SandboxService:
         snapshot_expiration: DurationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
     ) -> Sandbox:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.create_sandbox(
             project_id=project_id,
             name=name,
@@ -215,7 +199,7 @@ class SandboxService:
         resume: bool = True,
         include_system_routes: bool | None = None,
     ) -> Sandbox:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.get_sandbox(
             name=name,
             project_id=project_id,
@@ -235,7 +219,7 @@ class SandboxService:
         name_prefix: str | None = None,
         tags: Sequence[TagFilter] | None = None,
     ) -> QuerySandboxesPage:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         result = await self._api_client.query_sandboxes(
             project_id=project_id,
             limit=page_size,
@@ -295,7 +279,7 @@ class SandboxService:
         return iter_sandboxes()
 
     async def destroy_sandbox(self, *, name: str, project_id: str | None = None) -> Sandbox:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.destroy_sandbox(name=name, project_id=project_id)
         return self._bind_sandbox(response.to_sandbox())
 
@@ -316,7 +300,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
     ) -> Sandbox:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.update_sandbox(
             name=name,
             project_id=project_id,
@@ -342,7 +326,7 @@ class SandboxService:
         resume: bool = True,
         include_system_routes: bool | None = None,
     ) -> SandboxRuntimeSession:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.create_runtime_session(
             name=name,
             project_id=project_id,
@@ -361,7 +345,7 @@ class SandboxService:
         return await self.stop_runtime_session_sandbox(session_id=session_id)
 
     async def stop_runtime_session_sandbox(self, *, session_id: str) -> Sandbox:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.stop_runtime_session(session_id=session_id)
         return self._bind_sandbox(response.to_sandbox())
 
@@ -380,7 +364,7 @@ class SandboxService:
         session_id: str,
         include_system_routes: bool | None = None,
     ) -> SandboxRuntimeSession:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.get_runtime_session(
             session_id=session_id,
             include_system_routes=include_system_routes,
@@ -396,7 +380,7 @@ class SandboxService:
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> QuerySessionsPage:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.query_runtime_sessions(
             project_id=project_id,
             name=name,
@@ -447,7 +431,7 @@ class SandboxService:
         session_id: str,
         duration: DurationInput,
     ) -> SandboxRuntimeSession:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.extend_runtime_session_timeout(
             session_id=session_id,
             duration=duration,
@@ -460,7 +444,7 @@ class SandboxService:
         session_id: str,
         network_policy: JSONValue,
     ) -> SandboxRuntimeSession:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.update_runtime_session_network_policy(
             session_id=session_id,
             network_policy=network_policy,
@@ -473,7 +457,7 @@ class SandboxService:
         session_id: str,
         expiration: DurationInput = None,
     ) -> tuple[Snapshot, SandboxRuntimeSession]:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.create_snapshot(
             session_id=session_id,
             expiration=expiration,
@@ -490,7 +474,7 @@ class SandboxService:
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> QuerySnapshotsPage:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.query_snapshots(
             project_id=project_id,
             name=name,
@@ -536,12 +520,12 @@ class SandboxService:
         return iter_snapshots()
 
     async def get_snapshot(self, *, snapshot_id: str) -> Snapshot:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.get_snapshot(snapshot_id=snapshot_id)
         return self._bind_snapshot(response.to_snapshot())
 
     async def delete_snapshot(self, *, snapshot_id: str) -> Snapshot:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.delete_snapshot(snapshot_id=snapshot_id)
         return self._bind_snapshot(response.to_snapshot())
 
@@ -556,7 +540,7 @@ class SandboxService:
         sudo: bool = False,
         wait: bool,
     ) -> SandboxCommand:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         started_response = await self._api_client.run_command(
             session_id=session_id,
             command=command,
@@ -622,7 +606,7 @@ class SandboxService:
         command_id: str,
         wait: bool = False,
     ) -> SandboxCommand:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.get_command(
             session_id=session_id,
             command_id=command_id,
@@ -631,7 +615,7 @@ class SandboxService:
         return self._bind_command(response.to_command())
 
     async def query_commands(self, *, session_id: str) -> list[SandboxCommand]:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.query_commands(session_id=session_id)
         return [self._bind_command(command) for command in response.commands]
 
@@ -643,7 +627,7 @@ class SandboxService:
         cwd: str | None = None,
         recursive: bool = True,
     ) -> None:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         await self._api_client.mkdir(
             session_id=session_id,
             path=path,
@@ -658,7 +642,7 @@ class SandboxService:
         path: str,
         cwd: str | None = None,
     ) -> bytes:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         return await self._api_client.read_file(session_id=session_id, path=path, cwd=cwd)
 
     async def write_files(
@@ -669,7 +653,7 @@ class SandboxService:
         cwd: str,
         encoding: str = "utf-8",
     ) -> None:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         await self._api_client.write_files(
             session_id=session_id,
             files=files,
@@ -684,7 +668,7 @@ class SandboxService:
         command_id: str,
         signal: int,
     ) -> SandboxCommand:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         response = await self._api_client.kill_command(
             session_id=session_id,
             command_id=command_id,
@@ -698,7 +682,7 @@ class SandboxService:
         session_id: str,
         command_id: str,
     ) -> httpx.Response:
-        self._alive_token.raise_if_invalid()
+        self._check_open()
         return await self._api_client.command_logs_response(
             session_id=session_id,
             command_id=command_id,

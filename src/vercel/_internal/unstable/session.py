@@ -21,24 +21,6 @@ HttpxClientFactory = Callable[[], httpx.AsyncClient] | Callable[[], httpx.Client
 _UNSET = object()
 
 
-class AliveToken:
-    """Shared invalidation marker for session-owned runtime objects."""
-
-    def __init__(self) -> None:
-        self._is_alive = True
-
-    @property
-    def is_alive(self) -> bool:
-        return self._is_alive
-
-    def invalidate(self) -> None:
-        self._is_alive = False
-
-    def raise_if_invalid(self, message: str = "SDK session is closed") -> None:
-        if not self._is_alive:
-            raise VercelSessionClosedError(message)
-
-
 class _BaseSdkSession:
     """Common scoped state shared by one runtime-mode session."""
 
@@ -47,41 +29,39 @@ class _BaseSdkSession:
         *,
         service_options: Mapping[type[ServiceOptions], ServiceOptions] | None = None,
         httpx_client_factory: HttpxClientFactory | None = None,
-        alive_token: AliveToken | None = None,
     ) -> None:
         self._service_options = dict(service_options or {})
         self._httpx_client_factory = httpx_client_factory
-        self._alive_token = alive_token or AliveToken()
+        self._closed = False
         self._service_cache: dict[type[object], object] = {}
 
     @property
-    def alive_token(self) -> AliveToken:
-        return self._alive_token
-
-    @property
-    def is_alive(self) -> bool:
-        return self._alive_token.is_alive
+    def is_closed(self) -> bool:
+        return self._closed
 
     @property
     def service_options(self) -> Mapping[type[ServiceOptions], ServiceOptions]:
+        self.check_open()
         return dict(self._service_options)
 
     @property
     def settings(self) -> Mapping[str, Any]:
+        self.check_open()
         return {"httpx_client_factory": self._httpx_client_factory}
 
-    def check_alive(self) -> None:
-        self._alive_token.raise_if_invalid()
+    def check_open(self) -> None:
+        if self._closed:
+            raise VercelSessionClosedError("SDK session is closed")
 
     def get_service_option(self, option_type: type[ServiceOptionsT]) -> ServiceOptionsT | None:
-        self.check_alive()
+        self.check_open()
         option = self._service_options.get(option_type)
         if option is None:
             return None
         return cast(ServiceOptionsT, option)
 
     def get_setting(self, name: str, default: Any = None) -> Any:
-        self.check_alive()
+        self.check_open()
         if name == "httpx_client_factory":
             return self._httpx_client_factory
         return default
@@ -100,12 +80,10 @@ class SdkSession(_BaseSdkSession):
         *,
         service_options: Mapping[type[ServiceOptions], ServiceOptions] | None = None,
         httpx_client_factory: HttpxClientFactory | None = None,
-        alive_token: AliveToken | None = None,
     ) -> None:
         super().__init__(
             service_options=service_options,
             httpx_client_factory=httpx_client_factory,
-            alive_token=alive_token,
         )
         self._transport: AsyncTransport | None = None
 
@@ -123,7 +101,7 @@ class SdkSession(_BaseSdkSession):
         service_options: Sequence[ServiceOptions] | None,
         httpx_client_factory: HttpxClientFactory | None | object = _UNSET,
     ) -> "SdkSession":
-        parent.check_alive()
+        parent.check_open()
         factory = (
             parent._httpx_client_factory
             if httpx_client_factory is _UNSET
@@ -135,7 +113,7 @@ class SdkSession(_BaseSdkSession):
         )
 
     def _get_transport(self) -> "AsyncTransport":
-        self.check_alive()
+        self.check_open()
         if self._transport is not None:
             return self._transport
 
@@ -171,7 +149,7 @@ class SdkSession(_BaseSdkSession):
         return self._transport
 
     def sandbox_service(self) -> "SandboxService":
-        self.check_alive()
+        self.check_open()
 
         from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
         from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
@@ -187,7 +165,6 @@ class SdkSession(_BaseSdkSession):
                 credentials_factory=options.credentials_factory,
                 transport=self._get_transport(),
             ),
-            alive_token=self._alive_token,
             options=options,
             sdk_session=self,
         )
@@ -195,9 +172,9 @@ class SdkSession(_BaseSdkSession):
         return service
 
     async def aclose(self) -> None:
-        if not self._alive_token.is_alive:
+        if self._closed:
             return
-        self._alive_token.invalidate()
+        self._closed = True
         self._clear_services()
         if self._transport is not None:
             await self._transport.aclose()
@@ -214,12 +191,10 @@ class SyncSdkSession(_BaseSdkSession):
         *,
         service_options: Mapping[type[ServiceOptions], ServiceOptions] | None = None,
         httpx_client_factory: HttpxClientFactory | None = None,
-        alive_token: AliveToken | None = None,
     ) -> None:
         super().__init__(
             service_options=service_options,
             httpx_client_factory=httpx_client_factory,
-            alive_token=alive_token,
         )
         self._transport: SyncTransport | None = None
 
@@ -237,7 +212,7 @@ class SyncSdkSession(_BaseSdkSession):
         service_options: Sequence[ServiceOptions] | None,
         httpx_client_factory: HttpxClientFactory | None | object = _UNSET,
     ) -> "SyncSdkSession":
-        parent.check_alive()
+        parent.check_open()
         factory = (
             parent._httpx_client_factory
             if httpx_client_factory is _UNSET
@@ -260,7 +235,7 @@ class SyncSdkSession(_BaseSdkSession):
             loop.create_task(client.aclose())
 
     def _get_transport(self) -> "SyncTransport":
-        self.check_alive()
+        self.check_open()
         if self._transport is not None:
             return self._transport
 
@@ -293,7 +268,7 @@ class SyncSdkSession(_BaseSdkSession):
         return self._transport
 
     def sandbox_service(self) -> "SandboxService":
-        self.check_alive()
+        self.check_open()
 
         from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
         from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
@@ -313,7 +288,6 @@ class SyncSdkSession(_BaseSdkSession):
                 credentials_factory=options.credentials_factory,
                 transport=self._get_transport(),
             ),
-            alive_token=self._alive_token,
             options=options,
             sdk_session=self,
             sleep=sync_sleep,
@@ -323,9 +297,9 @@ class SyncSdkSession(_BaseSdkSession):
         return service
 
     def close(self) -> None:
-        if not self._alive_token.is_alive:
+        if self._closed:
             return
-        self._alive_token.invalidate()
+        self._closed = True
         self._clear_services()
         if self._transport is not None:
             self._transport.close()
