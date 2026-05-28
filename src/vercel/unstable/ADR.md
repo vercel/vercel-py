@@ -45,10 +45,12 @@ Module functions make common usage direct while preserving strict typing and
 domain package boundaries. They also keep SDK sessions as runtime context
 rather than user-facing service factories.
 
-## Decision 3: Default Session And Scoped Overrides
+## Decision 3: Mode-specific Default Sessions And Scoped Overrides
 
-The SDK has a process default session. Module-level service functions use that
-default session unless a scoped override is active.
+The SDK has separate process default sessions for async and sync APIs:
+`SdkSession` owns async resources and `SyncSdkSession` owns sync resources.
+Module-level service functions use the default session for their API mode
+unless a scoped override is active.
 
 Scoped overrides use `vercel.session(...)`:
 
@@ -57,24 +59,41 @@ from vercel import unstable as vercel
 
 async with vercel.session(httpx_client_factory=client_factory):
     ...
+
+with vercel.session(httpx_client_factory=sync_client_factory):
+    ...
 ```
 
 There is no public "configure default session" API. Callers either use the
-default session as-is or create a scoped override.
+appropriate mode's default session as-is or create a scoped override.
 
-Session overrides are implemented with `ContextVar`. Service calls resolve the
-effective session at call time.
+Session overrides are implemented with `ContextVar`. `async with
+vercel.session(...)` binds an `SdkSession`; `with vercel.session(...)` binds a
+`SyncSdkSession`. Service calls resolve the effective session at call time.
+Calling a sync service facade while an explicit async session is active, or an
+async facade while an explicit sync session is active, raises a session error
+rather than silently constructing another pool or ignoring scoped
+configuration.
 
 Rationale:
 
-The default session keeps simple scripts small. Context-local overrides support
-tests, framework request scopes, nested behavior, and concurrent tasks without
-mutating process-global configuration.
+Mode-specific default sessions keep simple scripts small while preventing async
+and sync clients from being mixed in one lifetime owner. Context-local
+overrides support tests, framework request scopes, nested behavior, and
+concurrent tasks without mutating process-global configuration. Rejecting
+opposite-mode calls makes service options and client-pool selection
+deterministic.
 
 ## Decision 4: Nested Session Inheritance
 
-Nested `vercel.session(...)` contexts inherit from the currently active session.
-Values supplied to the nested context replace inherited values.
+Nested `vercel.session(...)` contexts of the same mode inherit from the
+currently active session. Values supplied to the nested context replace
+inherited values.
+
+An omitted `httpx_client_factory` inherits its same-mode parent value. An
+explicit `httpx_client_factory=None` replaces an inherited factory with
+SDK-default HTTPX client construction. Entering a nested session in the
+opposite mode is invalid and raises `VercelSessionError`.
 
 Service option inheritance is by concrete option type. A nested
 `SandboxServiceOptions(...)` replaces the inherited `SandboxServiceOptions`
@@ -114,7 +133,66 @@ Rationale:
 Session-level service options let service functions remain focused on endpoint
 semantics. Runtime validation catches ambiguous configuration early.
 
-## Decision 6: No Operation Policy Objects
+## Decision 6: Session-owned Transports And HTTP Client Pools
+
+Each `SdkSession` lazily owns one async transport wrapping one
+`httpx.AsyncClient` connection pool. Each `SyncSdkSession` lazily owns one
+sync transport wrapping one `httpx.Client` connection pool. Services and
+endpoint API clients borrow the matching transport; they do not allocate or
+close a transport or pool for each service.
+
+The transport and pool are origin-neutral: they are not configured with a
+service `base_url`.
+Endpoint API clients own their configured origins and build absolute request
+URLs when sending through the shared session transport. A single service may
+therefore reach more than one origin, and unrelated services may share the
+same pool without sharing routing configuration.
+
+`httpx_client_factory` is session configuration. In an async session it must
+construct an `httpx.AsyncClient`; in a sync session it must construct an
+`httpx.Client`. When a session first needs its transport, it validates the
+factory result and wraps it in its matching transport. The context-manager
+form selects the required return type:
+
+```python
+async with vercel.session(httpx_client_factory=async_client_factory):
+    ...
+
+with vercel.session(httpx_client_factory=sync_client_factory):
+    ...
+```
+
+Overloads may catch mismatches for explicitly typed factories. They are not
+sufficient for untyped factories, `Any`, or every use of one
+`vercel.session(...)` constructor that supports both `with` and `async with`.
+Transport initialization therefore validates the constructed client type and
+raises a session configuration error for a mismatched factory before sending a
+request.
+
+The session configuration error is the existing public `VercelSessionError`;
+this design does not add a new exported error subtype.
+
+Rationale:
+
+Transport and connection-pool lifetime are session concerns, whereas base URLs
+are endpoint configuration. Separating them avoids creating a pool per service
+or per origin and permits future endpoints such as token, usage, or JWKS
+requests to reuse the same connections. Runtime validation prevents a
+sync/async factory mismatch from failing later in an endpoint call.
+
+Implementation note:
+
+The transport remains useful for the common request envelope and for exposing
+`httpx.Client.send()` through an async-shaped call when sync services drive
+shared business logic through `iter_coroutine()`. Its current base-URL-bound
+construction must change for the unstable session design: the session creates
+an origin-neutral transport around the factory-produced client, owns its
+shutdown, and lends it to endpoint clients. The transport may retain generic
+request encoding, streaming mechanics, and bearer-header injection; endpoint
+clients own origin selection, credential selection, and domain error
+translation.
+
+## Decision 7: No Operation Policy Objects
 
 Service methods do not expose complex timeout, retry, transport, or polling
 policy objects.
@@ -132,7 +210,7 @@ Timeout and retry policy often belongs to the application, framework, or job
 runner. Keeping it outside service methods avoids freezing cross-service policy
 types before the SDK has evidence for them.
 
-## Decision 7: Sandbox Creation Waiting
+## Decision 8: Sandbox Creation Waiting
 
 `sandbox.create_sandbox(...)` always waits until the sandbox reaches a ready
 state or a terminal state.
@@ -146,7 +224,7 @@ A created sandbox handle is expected to be ready for immediate use. Returning
 half-created handles would push the common state-machine concern into every
 caller.
 
-## Decision 8: Sandbox Snapshot Expiration
+## Decision 9: Sandbox Snapshot Expiration
 
 Sandbox creation accepts `snapshot_expiration` for the platform-side lifetime of
 snapshots owned by the sandbox.
@@ -168,7 +246,7 @@ Rationale:
 
 The name keeps platform retention policy distinct from local call duration.
 
-## Decision 9: Handle Validity
+## Decision 10: Handle Validity
 
 SDK handles carry an internal alive marker.
 
@@ -197,7 +275,7 @@ Handles are bound to SDK runtime resources such as clients, options, and close
 hooks. Requiring reacquisition after session close keeps that binding explicit
 and prevents stale handles from silently using the wrong configuration.
 
-## Decision 10: Context-managed Cleanup
+## Decision 11: Context-managed Cleanup
 
 Context managers own remote cleanup.
 
@@ -229,7 +307,7 @@ Rationale:
 The context manager syntax should mean scoped ownership. Awaiting cleanup makes
 the lifecycle deterministic and visible.
 
-## Decision 11: Sandbox Defaults vs Session Controls
+## Decision 12: Sandbox Defaults Vs Session Controls
 
 Named sandbox defaults and running session controls are separate public
 operations.
@@ -255,7 +333,7 @@ The v2 REST API has both named sandbox configuration and session-centered
 mutation routes. Keeping them distinct prevents a caller from accidentally
 assuming that a running-session change persists as a sandbox default.
 
-## Decision 12: Domain-owned Sync Mirror
+## Decision 13: Domain-owned Sync Mirror
 
 Async is the primary API. Sync support mirrors each domain inside that domain
 package.
@@ -268,15 +346,16 @@ from vercel.unstable.sandbox import sync as sandbox
 sandbox_ = sandbox.create_sandbox(runtime="python3.13")
 ```
 
-The sync mirror follows the same session resolution, service option, waiting,
-cleanup, and invalidation rules as the async API.
+The sync mirror resolves `SyncSdkSession` rather than `SdkSession`, and follows
+the same service option, waiting, cleanup, and invalidation rules as the async
+API.
 
 Rationale:
 
 Keeping sync under the domain package avoids cluttering async modules with
 `*_sync` functions and avoids a separate top-level sync namespace.
 
-## Decision 13: Error Root
+## Decision 14: Error Root
 
 All unstable SDK exceptions inherit from `vercel.unstable.VercelError`.
 
@@ -301,6 +380,8 @@ Positive consequences:
 - Common usage is direct: import a service module and call functions.
 - Scoped configuration works for tests, frameworks, and nested service behavior.
 - Service configuration is centralized at SDK session boundaries.
+- Each session owns one transport and HTTP pool for its runtime mode; endpoint
+  clients own their origins.
 - Service methods stay small and endpoint-focused.
 - Resource lifetime follows Python context manager ownership.
 - Sync support exists without weakening the async-first API.
@@ -308,6 +389,8 @@ Positive consequences:
 Costs:
 
 - Context-local session resolution requires careful tests.
+- Wrong-mode scoped service calls and client factories require explicit runtime
+  errors.
 - Handles need explicit validity tracking.
 - Nested session inheritance must be precise and well documented.
 - Sync mirrors add duplicate API surface.
@@ -315,4 +398,5 @@ Costs:
 
 ## Open Questions
 
-- Exact transport/session option names beyond `httpx_client_factory`.
+- Whether future session-level HTTP configuration should extend
+  `httpx_client_factory` or introduce additional narrowly scoped settings.

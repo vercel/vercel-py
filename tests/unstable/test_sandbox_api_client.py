@@ -12,6 +12,9 @@ from vercel._internal.url import format_url_path
 
 
 class InvalidJsonTransport(BaseTransport):
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+
     async def send(
         self,
         method: str,
@@ -25,10 +28,11 @@ class InvalidJsonTransport(BaseTransport):
         follow_redirects: bool | None = None,
         stream: bool = False,
     ) -> httpx.Response:
+        self.paths.append(path)
         return httpx.Response(
             200,
             content=b"not-json",
-            request=httpx.Request(method, f"https://sandbox.test/{path}"),
+            request=httpx.Request(method, path),
         )
 
 
@@ -40,14 +44,16 @@ async def test_invalid_json_response_raises_response_error(mock_env_clear: None)
             project_id="prj_123",
         )
 
+    transport = InvalidJsonTransport()
     client = SandboxApiClient(
         base_url="https://sandbox.test",
         credentials_factory=credentials_factory,
-        transport=InvalidJsonTransport(),
+        transport=transport,
     )
 
     with pytest.raises(SandboxResponseError):
         await client.get_sandbox(name="preview")
+    assert transport.paths == ["https://sandbox.test/v2/sandboxes/preview"]
 
 
 def test_format_url_path_quotes_placeholder_values() -> None:

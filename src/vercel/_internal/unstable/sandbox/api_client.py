@@ -15,12 +15,10 @@ from httpx._types import QueryParamTypes
 from pydantic import BaseModel, ValidationError
 
 from vercel._internal.http import (
-    AsyncTransport,
     BaseTransport,
     BytesBody,
     JSONBody,
     RequestBody,
-    SyncTransport,
     extract_structured_error,
 )
 from vercel._internal.time import MILLISECOND, parse_duration
@@ -148,9 +146,8 @@ class SandboxApiClient:
         self._base_url = base_url
         self._transport = transport
 
-    @property
-    def base_url(self) -> str:
-        return self._base_url
+    def _url(self, path: str) -> str:
+        return self._base_url.rstrip("/") + "/" + path.lstrip("/")
 
     async def _request(
         self,
@@ -177,7 +174,7 @@ class SandboxApiClient:
         }
         response = await self._transport.send(
             method,
-            path,
+            self._url(path),
             token=credentials.token,
             params=query,
             body=body,
@@ -220,7 +217,7 @@ class SandboxApiClient:
         }
         response = await self._transport.send(
             method,
-            path,
+            self._url(path),
             token=credentials.token,
             params=query,
             body=body,
@@ -734,11 +731,3 @@ class SandboxApiClient:
             ),
             credentials=credentials,
         )
-
-    def close(self) -> None:
-        if isinstance(self._transport, SyncTransport):
-            self._transport.close()
-
-    async def aclose(self) -> None:
-        if isinstance(self._transport, AsyncTransport):
-            await self._transport.aclose()

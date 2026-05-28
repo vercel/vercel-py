@@ -1,10 +1,11 @@
-"""Context-local SDK session state."""
+"""Context-local explicit SDK session state."""
 
 from contextvars import ContextVar, Token
 
-from vercel._internal.unstable.session import SdkSession
+from vercel._internal.unstable.errors import VercelSessionError
+from vercel._internal.unstable.session import SdkSession, SyncSdkSession
 
-_active_session: ContextVar[SdkSession | None] = ContextVar(
+_active_session: ContextVar[SdkSession | SyncSdkSession | None] = ContextVar(
     "vercel_unstable_active_session",
     default=None,
 )
@@ -13,14 +14,26 @@ _active_session: ContextVar[SdkSession | None] = ContextVar(
 def get_active_session() -> SdkSession:
     session = _active_session.get()
     if session is None:
-        session = SdkSession.default()
-        _active_session.set(session)
+        return SdkSession.default()
+    if isinstance(session, SyncSdkSession):
+        raise VercelSessionError("Async unstable APIs cannot be used in a sync SDK session")
     return session
 
 
-def bind_active_session(session: SdkSession) -> Token[SdkSession | None]:
+def get_active_sync_session() -> SyncSdkSession:
+    session = _active_session.get()
+    if session is None:
+        return SyncSdkSession.default()
+    if isinstance(session, SdkSession):
+        raise VercelSessionError("Sync unstable APIs cannot be used in an async SDK session")
+    return session
+
+
+def bind_active_session(
+    session: SdkSession | SyncSdkSession,
+) -> Token[SdkSession | SyncSdkSession | None]:
     return _active_session.set(session)
 
 
-def reset_active_session(token: Token[SdkSession | None]) -> None:
+def reset_active_session(token: Token[SdkSession | SyncSdkSession | None]) -> None:
     _active_session.reset(token)

@@ -43,7 +43,7 @@ from vercel._internal.unstable.sandbox.pagination import (
 from vercel._internal.unstable.session import AliveToken
 
 if TYPE_CHECKING:
-    from vercel._internal.unstable.session import SdkSession
+    from vercel._internal.unstable.session import SdkSession, SyncSdkSession
 
 _READY_SANDBOX_STATUSES = frozenset({SandboxStatus.RUNNING})
 _TERMINAL_SANDBOX_STATUSES = frozenset(
@@ -76,7 +76,7 @@ class SandboxService:
         api_client: SandboxApiClient,
         alive_token: AliveToken,
         options: SandboxServiceOptions,
-        sdk_session: "SdkSession | None" = None,
+        sdk_session: "SdkSession | SyncSdkSession | None" = None,
         sleep: AsyncSleep | None = None,
         sync_handles: bool = False,
     ) -> None:
@@ -726,9 +726,3 @@ class SandboxService:
                 await response.aclose()
 
         return iter_logs()
-
-    def close(self) -> None:
-        self._api_client.close()
-
-    async def aclose(self) -> None:
-        await self._api_client.aclose()

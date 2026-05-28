@@ -26,12 +26,11 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxInvalidHandleError,
     SandboxResponseError,
 )
-from vercel._internal.unstable.session import AliveToken
+from vercel._internal.unstable.session import AliveToken, SdkSession, SyncSdkSession
 
 if TYPE_CHECKING:
     from vercel._internal.unstable.sandbox.operations import CreateRuntimeSessionOperation
     from vercel._internal.unstable.sandbox.service import SandboxService
-    from vercel._internal.unstable.session import SdkSession
 
 JSONValue: TypeAlias = PydanticJsonValue
 JSONObject: TypeAlias = dict[str, JSONValue]
@@ -369,7 +368,7 @@ class SandboxCommandLog(_ApiModel):
 class BaseSandboxCommand(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
     _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
-    _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
+    _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
     _stdout_cache: str | None = PrivateAttr(default=None)
     _stderr_cache: str | None = PrivateAttr(default=None)
 
@@ -399,7 +398,7 @@ class BaseSandboxCommand(_ApiModel):
         self,
         *,
         session_token: AliveToken,
-        sdk_session: "SdkSession | None" = None,
+        sdk_session: SdkSession | SyncSdkSession | None = None,
     ) -> None:
         self._session_alive_token = session_token
         if sdk_session is not None:
@@ -422,15 +421,15 @@ class BaseSandboxCommand(_ApiModel):
 
     def _require_sandbox_service(self) -> "SandboxService":
         self._raise_if_invalid()
-        if self._sdk_session is None:
+        if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
         return self._sdk_session.sandbox_service()
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
         self._raise_if_invalid()
-        if self._sdk_session is None:
+        if not isinstance(self._sdk_session, SyncSdkSession):
             raise SandboxInvalidHandleError(_COMMAND_NOT_ATTACHED)
-        return self._sdk_session.sync_sandbox_service()
+        return self._sdk_session.sandbox_service()
 
 
 class SandboxCommand(BaseSandboxCommand):
@@ -616,7 +615,7 @@ class RuntimeSessionsResponse(_ApiModel):
 class BaseSnapshot(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
     _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
-    _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
+    _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
 
     id: str
     source_session_id: str = Field(
@@ -662,7 +661,7 @@ class BaseSnapshot(_ApiModel):
         self,
         *,
         session_token: AliveToken,
-        sdk_session: "SdkSession | None" = None,
+        sdk_session: SdkSession | SyncSdkSession | None = None,
     ) -> None:
         self._session_alive_token = session_token
         if sdk_session is not None:
@@ -678,15 +677,15 @@ class BaseSnapshot(_ApiModel):
 
     def _require_sandbox_service(self) -> "SandboxService":
         self._raise_if_invalid()
-        if self._sdk_session is None:
+        if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
         return self._sdk_session.sandbox_service()
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
         self._raise_if_invalid()
-        if self._sdk_session is None:
+        if not isinstance(self._sdk_session, SyncSdkSession):
             raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
-        return self._sdk_session.sync_sandbox_service()
+        return self._sdk_session.sandbox_service()
 
     def _invalidate_handle(self) -> None:
         self._handle_alive_token.invalidate()
@@ -716,7 +715,7 @@ class BaseSandboxRuntimeSession(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
     _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
     _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
-    _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
+    _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
 
     id: str
     sandbox_name: str | None = Field(
@@ -766,7 +765,7 @@ class BaseSandboxRuntimeSession(_ApiModel):
         *,
         session_token: AliveToken,
         resource_token: AliveToken | None = None,
-        sdk_session: "SdkSession | None" = None,
+        sdk_session: SdkSession | SyncSdkSession | None = None,
     ) -> None:
         self._session_alive_token = session_token
         if sdk_session is not None:
@@ -795,7 +794,7 @@ class BaseSandboxRuntimeSession(_ApiModel):
 
     def _require_sandbox_service(self) -> "SandboxService":
         self._raise_if_invalid()
-        if self._sdk_session is None:
+        if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError(
                 "Sandbox runtime-session handle is not attached to an SDK session"
             )
@@ -803,11 +802,11 @@ class BaseSandboxRuntimeSession(_ApiModel):
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
         self._raise_if_invalid()
-        if self._sdk_session is None:
+        if not isinstance(self._sdk_session, SyncSdkSession):
             raise SandboxInvalidHandleError(
                 "Sandbox runtime-session handle is not attached to an SDK session"
             )
-        return self._sdk_session.sync_sandbox_service()
+        return self._sdk_session.sandbox_service()
 
     def _invalidate_handle(self) -> None:
         self._handle_alive_token.invalidate()
@@ -1238,7 +1237,7 @@ class BaseSandbox(_ApiModel):
     _session_alive_token: AliveToken | None = PrivateAttr(default=None)
     _handle_alive_token: AliveToken = PrivateAttr(default_factory=AliveToken)
     _resource_alive_tokens: set[AliveToken] = PrivateAttr(default_factory=set)
-    _sdk_session: "SdkSession | None" = PrivateAttr(default=None)
+    _sdk_session: SdkSession | SyncSdkSession | None = PrivateAttr(default=None)
 
     name: str
     current_session_id: str = Field(
@@ -1302,7 +1301,7 @@ class BaseSandbox(_ApiModel):
         *,
         session_token: AliveToken,
         resource_token: AliveToken | None = None,
-        sdk_session: "SdkSession | None" = None,
+        sdk_session: SdkSession | SyncSdkSession | None = None,
     ) -> None:
         self._session_alive_token = session_token
         if sdk_session is not None:
@@ -1346,9 +1345,9 @@ class BaseSandbox(_ApiModel):
         if any(not token.is_alive for token in self._resource_alive_tokens):
             raise SandboxInvalidHandleError("Sandbox handle is no longer valid")
 
-    def _require_sdk_session(self) -> "SdkSession":
+    def _require_sdk_session(self) -> SdkSession:
         self._raise_if_invalid()
-        if self._sdk_session is None:
+        if not isinstance(self._sdk_session, SdkSession):
             raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
         return self._sdk_session
 
@@ -1356,7 +1355,10 @@ class BaseSandbox(_ApiModel):
         return self._require_sdk_session().sandbox_service()
 
     def _require_sync_sandbox_service(self) -> "SandboxService":
-        return self._require_sdk_session().sync_sandbox_service()
+        self._raise_if_invalid()
+        if not isinstance(self._sdk_session, SyncSdkSession):
+            raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
+        return self._sdk_session.sandbox_service()
 
     def _invalidate_handle(self) -> None:
         self._handle_alive_token.invalidate()

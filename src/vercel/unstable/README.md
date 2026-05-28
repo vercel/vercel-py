@@ -10,10 +10,15 @@ contract.
 
 - Most callers use module-level service functions such as
   `sandbox.create_sandbox(...)`.
-- Service functions resolve their SDK session from `ContextVar` state, falling
-  back to the process default session.
+- Async and sync service functions resolve separate SDK session types from
+  `ContextVar` state, falling back to their mode's process default session.
 - There is no public "configure default session" API. Use the default session
   as-is or create a scoped override with `vercel.session(...)`.
+- `async with vercel.session(...)` owns an async transport and
+  `httpx.AsyncClient` pool; `with vercel.session(...)` owns their sync
+  equivalents.
+- Endpoint clients own service base URLs and send absolute URLs through the
+  session transport, so multiple services and origins can share one pool.
 - Service configuration lives on the SDK session through
   `service_options=[...]`.
 - Each service has a default options object, so simple calls work without a
@@ -65,8 +70,8 @@ async def main() -> None:
         # There is no wait=True / wait=False argument.
         await ready_sandbox.run_command("python", ["--version"])
 
-    # vercel.session(...) creates a scoped SDK session override.
-    # It does not configure the process default session globally.
+    # `async with` creates an async scoped SDK session. Its client factory
+    # must return httpx.AsyncClient; the session validates before first use.
     async with vercel.session(
         httpx_client_factory=client_factory,
         service_options=[
@@ -162,9 +167,74 @@ async def main() -> None:
     await fetched_snapshot.delete()
 ```
 
+## SDK Sessions And Transports
+
+There are two session runtime types:
+
+- `SdkSession` backs async service facades and owns one lazy async transport
+  wrapping an `httpx.AsyncClient` pool.
+- `SyncSdkSession` backs sync service facades and owns one lazy sync transport
+  wrapping an `httpx.Client` pool.
+
+The public construction syntax is shared, but the context-manager form selects
+the mode:
+
+```python
+import httpx
+
+from vercel import unstable as vercel
+
+
+def async_client_factory() -> httpx.AsyncClient:
+    return httpx.AsyncClient()
+
+
+def sync_client_factory() -> httpx.Client:
+    return httpx.Client()
+
+
+async with vercel.session(httpx_client_factory=async_client_factory):
+    ...
+
+with vercel.session(httpx_client_factory=sync_client_factory):
+    ...
+```
+
+The expected factory return type follows `with` versus `async with`. Type
+overloads may catch a mismatch when the factory is explicitly annotated, but
+runtime validation is still required for untyped factories and `Any`. When the
+session first materializes its lazy transport, it checks that an async scope
+received an `httpx.AsyncClient` and a sync scope received an `httpx.Client`,
+then wraps that client in the appropriate session-owned transport. Mismatches
+raise a session configuration error before a request is sent.
+
+An explicit scope is mode-bound. Calling a sync facade inside an active async
+scope, or an async facade inside an active sync scope, raises a session error.
+Entering `with vercel.session(...)` below an active async scope, or entering
+`async with vercel.session(...)` below an active sync scope, is rejected for
+the same reason. Same-mode nesting inherits an omitted
+`httpx_client_factory`; passing `httpx_client_factory=None` explicitly resets
+the nested session to SDK-default HTTPX client construction.
+Outside an explicit scope, async and sync facades use independent default
+sessions.
+
+Session transports and HTTP pools do not carry service origins. For example,
+`SandboxServiceOptions.base_url` configures the Sandbox endpoint client, which
+constructs absolute request URLs and uses the session's shared transport. This
+permits one session to reuse its pool for multiple services, or for one
+service to contact additional origins such as token, usage, or JWKS endpoints.
+
+The transport is intentionally below service configuration. It preserves
+common HTTP request mechanics, including generic bearer-header injection, and
+can bridge sync execution through shared service logic, but it does not own
+endpoint base URLs or select service credentials. Supplying
+`httpx_client_factory` customizes the pool wrapped by the session transport;
+it does not replace the transport contract.
+
 ## Service Options
 
-Service configuration belongs to the SDK session.
+Service endpoint configuration belongs to the SDK session. Transport and HTTP
+pool construction are session-level concerns rather than service options.
 
 ```python
 from vercel import unstable as vercel
@@ -185,7 +255,7 @@ Service option rules:
 - the session stores options in a map keyed by concrete type
 - a single `service_options` list may contain at most one option per concrete
   type
-- nested sessions inherit options from the active session
+- nested sessions of the same mode inherit options from the active session
 - nested sessions replace option objects by concrete type
 - option fields do not merge
 
@@ -351,6 +421,7 @@ from vercel.unstable.sandbox import sync as sandbox
 
 
 with vercel.session(
+    httpx_client_factory=sync_client_factory,
     service_options=[SandboxServiceOptions(base_url="https://sandbox-proxy.example.com")],
 ):
     sandbox.create_sandbox(
@@ -359,9 +430,9 @@ with vercel.session(
     )
 ```
 
-The sync mirror follows the same session resolution, service option, waiting,
-cleanup, and handle invalidation rules as the async API. Sync command log
-streaming is exposed as a normal Python iterator.
+The sync mirror resolves `SyncSdkSession` and follows the same service option,
+waiting, cleanup, and handle invalidation rules as the async API. Sync command
+log streaming is exposed as a normal Python iterator.
 
 ## Error Model
 
@@ -369,6 +440,8 @@ All unstable SDK exceptions inherit from `vercel.unstable.VercelError`.
 
 Session errors inherit from `VercelSessionError`. Domain-specific Sandbox
 errors inherit from `SandboxError`.
+Mode mismatches and wrong HTTPX client factory results use the existing
+`VercelSessionError` type; they do not introduce an additional public error.
 
 Sandbox terminal states raise `SandboxTerminalStateError`. Sandbox v2 API
 failures raise `SandboxApiError`, which exposes `status_code`, `data`, and

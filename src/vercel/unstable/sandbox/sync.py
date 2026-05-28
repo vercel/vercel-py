@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import cast
 
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.unstable.context import get_active_session
+from vercel._internal.unstable.context import get_active_sync_session
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -60,8 +60,8 @@ def create_sandbox(
     return cast(
         SyncSandbox,
         iter_coroutine(
-            get_active_session()
-            .sync_sandbox_service()
+            get_active_sync_session()
+            .sandbox_service()
             .create_sandbox(
                 project_id=project_id,
                 name=name,
@@ -91,8 +91,8 @@ def get_sandbox(
     return cast(
         SyncSandbox,
         iter_coroutine(
-            get_active_session()
-            .sync_sandbox_service()
+            get_active_sync_session()
+            .sandbox_service()
             .get_sandbox(
                 name=name,
                 project_id=project_id,
@@ -113,7 +113,7 @@ def query_sandboxes(
     name_prefix: str | None = None,
     tags: Sequence[TagFilter] | None = None,
 ) -> Iterator[SyncSandbox]:
-    service = get_active_session().sync_sandbox_service()
+    service = get_active_sync_session().sandbox_service()
 
     def iter_sandboxes() -> Iterator[SyncSandbox]:
         current_params = QuerySandboxesParams(
@@ -150,7 +150,7 @@ def query_sessions(
     cursor: str | None = None,
     sort_order: str | None = None,
 ) -> Iterator[SyncSandboxRuntimeSession]:
-    service = get_active_session().sync_sandbox_service()
+    service = get_active_sync_session().sandbox_service()
 
     def iter_sessions() -> Iterator[SyncSandboxRuntimeSession]:
         current_params = QuerySessionsParams(
@@ -185,7 +185,7 @@ def query_snapshots(
     cursor: str | None = None,
     sort_order: str | None = None,
 ) -> Iterator[SyncSnapshot]:
-    service = get_active_session().sync_sandbox_service()
+    service = get_active_sync_session().sandbox_service()
 
     def iter_snapshots() -> Iterator[SyncSnapshot]:
         current_params = QuerySnapshotsParams(
@@ -216,7 +216,7 @@ def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
     return cast(
         SyncSnapshot,
         iter_coroutine(
-            get_active_session().sync_sandbox_service().get_snapshot(snapshot_id=snapshot_id)
+            get_active_sync_session().sandbox_service().get_snapshot(snapshot_id=snapshot_id)
         ),
     )
 
