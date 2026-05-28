@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -57,9 +58,21 @@ def test_unstable_example(script_path: Path) -> None:
 
 
 def _run_example(script_path: Path) -> None:
+    command = [sys.executable, str(script_path)]
+    if script_path == _unstable_examples_dir / "sandbox_04_dev_server.py":
+        command.extend(
+            [
+                "--name",
+                f"vercel-py-example-dev-{uuid4().hex[:12]}",
+                "--install",
+                "true",
+                "--destroy",
+            ]
+        )
+
     try:
         result = subprocess.run(
-            [sys.executable, str(script_path)],
+            command,
             capture_output=True,
             text=True,
             timeout=300,
