@@ -55,10 +55,10 @@ def run_script(input_text: str, script: str) -> str:
         # wrapped CLI behaves like a local subprocess.
         for event in cmd.logs():
             match event.stream:
-                case "stdout":
+                case sandbox.SandboxCommandLogStream.STDOUT:
                     sys.stdout.write(event.data)
                     sys.stdout.flush()
-                case "stderr":
+                case sandbox.SandboxCommandLogStream.STDERR:
                     sys.stderr.write(event.data)
                     sys.stderr.flush()
 

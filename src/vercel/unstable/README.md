@@ -346,6 +346,19 @@ live on `SandboxRuntimeSession`. Command handles expose `wait()`, `kill()`,
 composition, response binding, and polling stay inside the internal Sandbox
 service layer.
 
+`SandboxCommand.logs()` yields `SandboxCommandLog` output events whose
+`stream` is `SandboxCommandLogStream.STDOUT` or
+`SandboxCommandLogStream.STDERR`. These string-compatible enum values
+serialize to JSON/wire values `"stdout"` and `"stderr"`. A structured
+in-band stream failure raises `SandboxStreamError`, which exposes the server
+`code` and uses the server
+message as its exception message. Once one complete `logs()` iteration
+finishes, command handles replay those ordered events locally: `output("both")`
+preserves stdout/stderr arrival order, while `stdout()` and `stderr()` filter
+the same observation without another request. Use `logs(refresh=True)` to
+discard an existing complete observation and read the stream again.
+`SandboxRuntimeSession.command_logs(command_id)` is an uncached raw stream.
+
 `Sandbox.update(...)` changes named sandbox defaults for future sessions, such
 as runtime, resources, ports, tags, snapshot expiration, and persistence.
 `SandboxRuntimeSession.update_network_policy(...)` and
@@ -381,6 +394,13 @@ async with vercel.session(service_options=[...]):
 # `preview` is bound to the closed scoped SDK session.
 preview = await sandbox.get_sandbox(name="preview")
 ```
+
+The exception is complete command-log state already observed by the handle:
+cached `command.logs()`, `command.output()`, `command.stdout()`, and
+`command.stderr()` remain readable after session closure. An uncached log read,
+`command.logs(refresh=True)`, or
+`runtime_session.command_logs(command_id)` still requires an open originating
+SDK session.
 
 Context-managed cleanup, explicit `destroy()` / `stop()` / `delete()`, and
 snapshot responses reporting a stopped runtime do not locally revoke handles.
@@ -462,5 +482,6 @@ failures raise `SandboxApiError`, which exposes `status_code`, `data`, and
 `code` when the API returns an `{ "error": { "code": ... } }` envelope.
 Malformed successful API responses raise `SandboxResponseError`. Cleanup
 failures raise `SandboxCleanupError`; unattached or mode-invalid handles raise
-`SandboxInvalidHandleError`; and requests through closed SDK sessions raise
-`VercelSessionClosedError`.
+`SandboxInvalidHandleError`; valid error records received while streaming
+command logs raise `SandboxStreamError`; and requests through closed SDK
+sessions raise `VercelSessionClosedError`.

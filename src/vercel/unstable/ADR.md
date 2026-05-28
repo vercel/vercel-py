@@ -412,6 +412,35 @@ Rationale:
 A single SDK root gives callers one catch point. Domain bases preserve useful
 service-level handling.
 
+## Decision 15: Command Log Observation
+
+`SandboxCommand.logs()` and its sync mirror yield only output records.
+`SandboxCommandLog.stream` is the exported string-compatible
+`SandboxCommandLogStream` enum, with `STDOUT` and `STDERR` members serialized
+to the wire strings `"stdout"` and `"stderr"`. A valid structured wire error
+record terminates iteration by raising `SandboxStreamError`, which inherits
+from `SandboxError` and carries the wire `code`. Malformed and unsupported
+records do not become public events.
+
+A command handle caches a cleanly consumed log stream as ordered local observed
+state. Cached `output("both")` retains stdout/stderr arrival order, and
+`stdout()` or `stderr()` select records from that same observation.
+`logs(refresh=True)` starts a fresh observation, clearing the old cache when
+iteration begins and committing replacement state only after clean EOF.
+Partial, cancelled, failed, or superseded reads do not populate the cache.
+
+Cached command log state remains readable after its originating SDK session is
+closed. Operations that need a new request, including an uncached `logs()`
+read and `logs(refresh=True)`, still fail through normal session validity
+checks. `SandboxRuntimeSession.command_logs(command_id)` remains an uncached
+endpoint-level stream.
+
+Rationale:
+
+Command output is an ordered stream rather than two independent strings.
+Caching only complete observations provides stable helper results without
+turning partial or failed reads into authoritative state.
+
 ## Consequences
 
 Positive consequences:

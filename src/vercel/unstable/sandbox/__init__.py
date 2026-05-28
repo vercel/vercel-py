@@ -10,6 +10,7 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxError,
     SandboxInvalidHandleError,
     SandboxResponseError,
+    SandboxStreamError,
     SandboxTerminalStateError,
 )
 from vercel._internal.unstable.sandbox.handles import (
@@ -23,6 +24,7 @@ from vercel._internal.unstable.sandbox.models import (
     GitSource,
     JSONValue,
     SandboxCommandLog,
+    SandboxCommandLogStream,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -169,6 +171,7 @@ __all__ = [
     "SandboxCleanupError",
     "SandboxCommand",
     "SandboxCommandLog",
+    "SandboxCommandLogStream",
     "SandboxCredentialsError",
     "SandboxError",
     "SandboxInvalidHandleError",
@@ -179,6 +182,7 @@ __all__ = [
     "SandboxQueryByName",
     "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
+    "SandboxStreamError",
     "SandboxRuntimeSession",
     "SandboxServiceOptions",
     "SandboxSource",

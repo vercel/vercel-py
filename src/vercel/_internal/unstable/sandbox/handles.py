@@ -2,9 +2,11 @@
 
 import copy
 import signal as signal_module
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from types import TracebackType
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+
+import httpx
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.unstable.sandbox.api_client import (
@@ -19,11 +21,13 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxInvalidHandleError,
     SandboxResponseError,
 )
+from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     JSONObject,
     JSONValue,
     SandboxCommandLog,
+    SandboxCommandLogStream,
     SandboxResources,
     SandboxStatus,
     SnapshotRetention,
@@ -52,12 +56,39 @@ def _signal_number(value: int | str | signal_module.Signals | None) -> int:
         raise ValueError(f"Unknown signal: {value!r}") from exc
 
 
+_LogSnapshot: TypeAlias = tuple[SandboxCommandLogStream, str]
+
+
+def _log_from_snapshot(snapshot: _LogSnapshot) -> SandboxCommandLog:
+    stream, data = snapshot
+    return SandboxCommandLog(stream=stream, data=data)
+
+
+def _select_output(
+    snapshots: Sequence[_LogSnapshot], stream: Literal["stdout", "stderr", "both"]
+) -> str:
+    return "".join(data for source, data in snapshots if stream == "both" or source == stream)
+
+
+def _iter_sync_logs(response_factory: Callable[[], httpx.Response]) -> Iterator[SandboxCommandLog]:
+    response = response_factory()
+    try:
+        for line in response.iter_lines():
+            if not line:
+                continue
+            event = _parse_command_log_record(line)
+            if event is not None:
+                yield event
+    finally:
+        response.close()
+
+
 class _PayloadHandle:
     __slots__ = ("_payload", "_sdk_session")
 
 
 class _BaseCommand(_PayloadHandle):
-    __slots__ = ("_stdout_cache", "_stderr_cache")
+    __slots__ = ("_log_cache", "_log_cache_generation")
 
     def __init__(
         self,
@@ -67,8 +98,8 @@ class _BaseCommand(_PayloadHandle):
     ) -> None:
         self._payload = payload
         self._sdk_session = sdk_session
-        self._stdout_cache: str | None = None
-        self._stderr_cache: str | None = None
+        self._log_cache: tuple[_LogSnapshot, ...] | None = None
+        self._log_cache_generation = 0
 
     @property
     def id(self) -> str:
@@ -149,22 +180,33 @@ class SandboxCommand(_BaseCommand):
         self._apply_payload(payload)
         return self
 
-    def logs(self) -> AsyncIterator[SandboxCommandLog]:
-        return self._require_sandbox_service().command_logs(
-            session_id=self.session_id, command_id=self.id
-        )
+    def logs(self, *, refresh: bool = False) -> AsyncIterator[SandboxCommandLog]:
+        async def iter_logs() -> AsyncIterator[SandboxCommandLog]:
+            if not refresh and self._log_cache is not None:
+                for snapshot in self._log_cache:
+                    yield _log_from_snapshot(snapshot)
+                return
+
+            if refresh:
+                self._log_cache = None
+                self._log_cache_generation += 1
+            generation = self._log_cache_generation
+            staged: list[_LogSnapshot] = []
+            async for event in self._require_sandbox_service().command_logs(
+                session_id=self.session_id, command_id=self.id
+            ):
+                staged.append((event.stream, event.data))
+                yield event
+            if generation == self._log_cache_generation:
+                self._log_cache = tuple(staged)
+
+        return iter_logs()
 
     async def output(self, stream: Literal["stdout", "stderr", "both"] = "both") -> str:
-        stdout = ""
-        stderr = ""
+        snapshots: list[_LogSnapshot] = []
         async for line in self.logs():
-            if line.stream == "stdout":
-                stdout += line.data
-            elif line.stream == "stderr":
-                stderr += line.data
-        self._stdout_cache = stdout
-        self._stderr_cache = stderr
-        return stdout if stream == "stdout" else stderr if stream == "stderr" else stdout + stderr
+            snapshots.append((line.stream, line.data))
+        return _select_output(snapshots, stream)
 
     async def stdout(self) -> str:
         return await self.output("stdout")
@@ -199,34 +241,37 @@ class SyncSandboxCommand(_BaseCommand):
         self._apply_payload(payload)
         return self
 
-    def logs(self) -> Iterator[SandboxCommandLog]:
-        response = iter_coroutine(
-            self._require_sync_sandbox_service().command_logs_response(
-                session_id=self.session_id, command_id=self.id
-            )
-        )
-
+    def logs(self, *, refresh: bool = False) -> Iterator[SandboxCommandLog]:
         def iter_logs() -> Iterator[SandboxCommandLog]:
-            try:
-                for line in response.iter_lines():
-                    if line:
-                        yield SandboxCommandLog.model_validate_json(line)
-            finally:
-                response.close()
+            if not refresh and self._log_cache is not None:
+                for snapshot in self._log_cache:
+                    yield _log_from_snapshot(snapshot)
+                return
+
+            if refresh:
+                self._log_cache = None
+                self._log_cache_generation += 1
+            generation = self._log_cache_generation
+            staged: list[_LogSnapshot] = []
+            for event in _iter_sync_logs(
+                lambda: iter_coroutine(
+                    self._require_sync_sandbox_service().command_logs_response(
+                        session_id=self.session_id, command_id=self.id
+                    )
+                )
+            ):
+                staged.append((event.stream, event.data))
+                yield event
+            if generation == self._log_cache_generation:
+                self._log_cache = tuple(staged)
 
         return iter_logs()
 
     def output(self, stream: Literal["stdout", "stderr", "both"] = "both") -> str:
-        stdout = ""
-        stderr = ""
+        snapshots: list[_LogSnapshot] = []
         for line in self.logs():
-            if line.stream == "stdout":
-                stdout += line.data
-            elif line.stream == "stderr":
-                stderr += line.data
-        self._stdout_cache = stdout
-        self._stderr_cache = stderr
-        return stdout if stream == "stdout" else stderr if stream == "stderr" else stdout + stderr
+            snapshots.append((line.stream, line.data))
+        return _select_output(snapshots, stream)
 
     def stdout(self) -> str:
         return self.output("stdout")
@@ -671,21 +716,13 @@ class SyncSandboxRuntimeSession(_BaseRuntimeSession):
         return cast(SyncSnapshot, snapshot)
 
     def command_logs(self, command_id: str) -> Iterator[SandboxCommandLog]:
-        response = iter_coroutine(
-            self._require_sync_sandbox_service().command_logs_response(
-                session_id=self.id, command_id=command_id
+        return _iter_sync_logs(
+            lambda: iter_coroutine(
+                self._require_sync_sandbox_service().command_logs_response(
+                    session_id=self.id, command_id=command_id
+                )
             )
         )
-
-        def iter_logs() -> Iterator[SandboxCommandLog]:
-            try:
-                for line in response.iter_lines():
-                    if line:
-                        yield SandboxCommandLog.model_validate_json(line)
-            finally:
-                response.close()
-
-        return iter_logs()
 
     def stop(self) -> "SyncSandboxRuntimeSession":
         payload = iter_coroutine(

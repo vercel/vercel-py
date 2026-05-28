@@ -79,6 +79,14 @@ class SandboxCredentialsError(SandboxError):
     """Raised when Sandbox credentials cannot be resolved."""
 
 
+class SandboxStreamError(SandboxError):
+    """Raised when a Sandbox log stream reports an in-band failure."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def _extract_api_error_code(data: object | None) -> str | None:
     if not isinstance(data, dict):
         return None

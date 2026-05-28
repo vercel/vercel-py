@@ -1,6 +1,5 @@
 """Sandbox service layer."""
 
-import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -29,6 +28,7 @@ from vercel._internal.unstable.sandbox.handles import (
     SyncSandboxRuntimeSession,
     SyncSnapshot,
 )
+from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     JSONValue,
@@ -843,9 +843,9 @@ class SandboxService:
                 async for line in response.aiter_lines():
                     if not line:
                         continue
-                    yield SandboxCommandLog.model_validate_json(line)
-            except json.JSONDecodeError:
-                return
+                    event = _parse_command_log_record(line)
+                    if event is not None:
+                        yield event
             finally:
                 await response.aclose()
 

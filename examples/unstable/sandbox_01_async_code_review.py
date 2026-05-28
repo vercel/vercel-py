@@ -7,7 +7,7 @@ import sys
 from dotenv import load_dotenv
 
 from vercel.unstable import sandbox
-from vercel.unstable.sandbox import WriteFile
+from vercel.unstable.sandbox import SandboxCommandLogStream, WriteFile
 
 load_dotenv()
 
@@ -42,10 +42,10 @@ async def review_code(files: list[WriteFile], review_agent: str) -> str:
         # Sandbox log events preserve the original stream
         async for event in cmd.logs():
             match event.stream:
-                case "stdout":
+                case SandboxCommandLogStream.STDOUT:
                     sys.stdout.write(event.data)
                     sys.stdout.flush()
-                case "stderr":
+                case SandboxCommandLogStream.STDERR:
                     sys.stderr.write(event.data)
                     sys.stderr.flush()
 

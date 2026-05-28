@@ -1,6 +1,9 @@
+import asyncio
 import gc
 import json
+from collections.abc import AsyncGenerator, AsyncIterator, Generator
 from itertools import islice
+from typing import cast
 
 import httpx
 import pytest
@@ -16,6 +19,7 @@ from vercel.unstable.sandbox import (
     GitSource,
     SandboxApiError,
     SandboxCleanupError,
+    SandboxCommandLogStream,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -26,6 +30,7 @@ from vercel.unstable.sandbox import (
     SandboxServiceOptions,
     SandboxSource,
     SandboxStatus,
+    SandboxStreamError,
     SandboxTerminalStateError,
     SnapshotRetention,
     SnapshotSource,
@@ -127,6 +132,30 @@ def _session_options(*, base_url: str = "https://sandbox.test") -> list[SandboxS
             credentials_factory=credentials_factory,
         )
     ]
+
+
+def _logs_response(*records: object) -> httpx.Response:
+    return httpx.Response(
+        200,
+        text="\n".join(
+            record if isinstance(record, str) else json.dumps(record) for record in records
+        )
+        + "\n",
+    )
+
+
+class _PendingLogStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.waiting = asyncio.Event()
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b'{"stream": "stdout", "data": "partial\\n"}\n'
+        self.waiting.set()
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 @respx.mock
@@ -503,6 +532,191 @@ async def test_closed_session_rejects_handles_and_lazy_logs(mock_env_clear: None
 
 
 @respx.mock
+async def test_async_command_logs_cache_order_refresh_and_closed_reads(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    responses = iter(
+        [
+            _logs_response(
+                {"stream": "stdout", "data": "out-1\n"},
+                {"stream": "stderr", "data": "err\n"},
+                {"stream": "stdout", "data": "out-2\n"},
+            ),
+            _logs_response({"stream": "stdout", "data": "fresh\n"}),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123/logs").mock(
+        side_effect=lambda _request: next(responses)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        command = await handle.start_command("python", ["--version"])
+        uncached = await handle.start_command("python", ["--version"])
+
+        logs = [(event.stream, event.data) async for event in command.logs()]
+        assert logs[0][0] is SandboxCommandLogStream.STDOUT
+        assert logs[1][0] is SandboxCommandLogStream.STDERR
+        assert logs == [
+            ("stdout", "out-1\n"),
+            ("stderr", "err\n"),
+            ("stdout", "out-2\n"),
+        ]
+        assert await command.output() == "out-1\nerr\nout-2\n"
+        assert await command.stdout() == "out-1\nout-2\n"
+        assert await command.stderr() == "err\n"
+        assert route.call_count == 1
+
+        refreshed = [(event.stream, event.data) async for event in command.logs(refresh=True)]
+        assert refreshed == [("stdout", "fresh\n")]
+        assert await command.output() == "fresh\n"
+        assert route.call_count == 2
+
+    assert await command.output() == "fresh\n"
+    assert [(event.stream, event.data) async for event in command.logs()] == [("stdout", "fresh\n")]
+    with pytest.raises(VercelSessionClosedError):
+        await command.logs(refresh=True).__anext__()
+    with pytest.raises(VercelSessionClosedError):
+        await uncached.output()
+
+
+@respx.mock
+async def test_async_command_logs_skip_invalid_records_and_do_not_cache_failures(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    responses = iter(
+        [
+            _logs_response(
+                "not-json",
+                {"stream": "stdin", "data": "ignored"},
+                {"stream": "stdout", "data": "before\n"},
+                {
+                    "stream": "error",
+                    "data": {"code": "sandbox_stopped", "message": "session stopped"},
+                },
+            ),
+            _logs_response(
+                "still-not-json",
+                {"stream": "unexpected", "data": "ignored"},
+                {"stream": "stdout", "data": "retried\n"},
+            ),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123/logs").mock(
+        side_effect=lambda _request: next(responses)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        command = await handle.start_command("python", ["--version"])
+
+        events = command.logs()
+        first = await anext(events)
+        assert first.stream is SandboxCommandLogStream.STDOUT
+        assert (first.stream, first.data) == ("stdout", "before\n")
+        with pytest.raises(SandboxStreamError, match="session stopped") as exc_info:
+            await anext(events)
+        assert exc_info.value.code == "sandbox_stopped"
+
+        assert await command.output() == "retried\n"
+        assert await command.output() == "retried\n"
+        assert route.call_count == 2
+
+
+@respx.mock
+async def test_async_command_logs_close_and_refresh_generation_do_not_commit_stale_data(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    responses = iter(
+        [
+            _logs_response(
+                {"stream": "stdout", "data": "partial\n"},
+                {"stream": "stdout", "data": "discarded\n"},
+            ),
+            _logs_response(
+                {"stream": "stdout", "data": "old-1\n"},
+                {"stream": "stderr", "data": "old-2\n"},
+            ),
+            _logs_response({"stream": "stdout", "data": "fresh\n"}),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123/logs").mock(
+        side_effect=lambda _request: next(responses)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        command = await handle.start_command("python", ["--version"])
+
+        partial = cast(AsyncGenerator[sandbox.SandboxCommandLog, None], command.logs())
+        assert (await anext(partial)).data == "partial\n"
+        await partial.aclose()
+
+        stale = command.logs()
+        assert (await anext(stale)).data == "old-1\n"
+        assert [(event.stream, event.data) async for event in command.logs(refresh=True)] == [
+            ("stdout", "fresh\n")
+        ]
+        assert [(event.stream, event.data) async for event in stale] == [("stderr", "old-2\n")]
+        assert await command.output() == "fresh\n"
+        assert route.call_count == 3
+
+
+@respx.mock
+async def test_async_cancelled_command_logs_close_stream_without_caching(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    pending = _PendingLogStream()
+    responses = iter(
+        [
+            httpx.Response(200, stream=pending),
+            _logs_response({"stream": "stdout", "data": "retried\n"}),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123/logs").mock(
+        side_effect=lambda _request: next(responses)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        command = await handle.start_command("python", ["--version"])
+
+        output = asyncio.create_task(command.output())
+        await pending.waiting.wait()
+        output.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await output
+
+        assert pending.closed
+        assert await command.output() == "retried\n"
+        assert route.call_count == 2
+
+
+@respx.mock
 async def test_async_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
@@ -650,6 +864,151 @@ def test_stopped_sync_runtime_session_continues_issuing_requests(mock_env_clear:
         assert runtime_session.start_command("python", ["--version"]).id == "cmd_123"
 
     assert command_route.called
+
+
+@respx.mock
+def test_sync_command_logs_cache_order_refresh_and_closed_reads(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    responses = iter(
+        [
+            _logs_response(
+                {"stream": "stdout", "data": "out-1\n"},
+                {"stream": "stderr", "data": "err\n"},
+                {"stream": "stdout", "data": "out-2\n"},
+            ),
+            _logs_response({"stream": "stdout", "data": "fresh\n"}),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123/logs").mock(
+        side_effect=lambda _request: next(responses)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        command = handle.start_command("python", ["--version"])
+        uncached = handle.start_command("python", ["--version"])
+
+        logs = [(event.stream, event.data) for event in command.logs()]
+        assert logs[0][0] is SandboxCommandLogStream.STDOUT
+        assert logs[1][0] is SandboxCommandLogStream.STDERR
+        assert logs == [
+            ("stdout", "out-1\n"),
+            ("stderr", "err\n"),
+            ("stdout", "out-2\n"),
+        ]
+        assert command.output() == "out-1\nerr\nout-2\n"
+        assert command.stdout() == "out-1\nout-2\n"
+        assert command.stderr() == "err\n"
+        assert route.call_count == 1
+
+        assert [(event.stream, event.data) for event in command.logs(refresh=True)] == [
+            ("stdout", "fresh\n")
+        ]
+        assert command.output() == "fresh\n"
+        assert route.call_count == 2
+
+    assert command.output() == "fresh\n"
+    with pytest.raises(VercelSessionClosedError):
+        next(command.logs(refresh=True))
+    with pytest.raises(VercelSessionClosedError):
+        uncached.output()
+
+
+@respx.mock
+def test_sync_log_iterators_are_lazy_and_stream_errors_do_not_cache(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    responses = iter(
+        [
+            _logs_response(
+                "{",
+                {"stream": "error", "data": {"code": "terminated", "message": "terminated"}},
+            ),
+            _logs_response(
+                "still-not-json",
+                {"stream": "unexpected", "data": "ignored"},
+                {"stream": "stdout", "data": "retried\n"},
+            ),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123/logs").mock(
+        side_effect=lambda _request: next(responses)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        command = handle.start_command("python", ["--version"])
+        lazy_command_logs = handle.start_command("python", ["--version"]).logs()
+        assert handle.current_session is not None
+        logs = command.logs()
+        raw_logs = handle.current_session.command_logs(command.id)
+        assert route.call_count == 0
+
+        with pytest.raises(SandboxStreamError, match="terminated") as exc_info:
+            next(logs)
+        assert exc_info.value.code == "terminated"
+        assert command.output() == "retried\n"
+        assert route.call_count == 2
+
+    with pytest.raises(VercelSessionClosedError):
+        next(lazy_command_logs)
+    with pytest.raises(VercelSessionClosedError):
+        next(raw_logs)
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_sync_command_logs_close_and_refresh_generation_do_not_commit_stale_data(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    responses = iter(
+        [
+            _logs_response(
+                {"stream": "stdout", "data": "partial\n"},
+                {"stream": "stderr", "data": "discarded\n"},
+            ),
+            _logs_response(
+                {"stream": "stdout", "data": "old-1\n"},
+                {"stream": "stderr", "data": "old-2\n"},
+            ),
+            _logs_response({"stream": "stdout", "data": "fresh\n"}),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123/logs").mock(
+        side_effect=lambda _request: next(responses)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        command = handle.start_command("python", ["--version"])
+
+        partial = cast(Generator[sandbox.SandboxCommandLog, None, None], command.logs())
+        assert next(partial).data == "partial\n"
+        partial.close()
+
+        stale = command.logs()
+        assert next(stale).data == "old-1\n"
+        assert [(event.stream, event.data) for event in command.logs(refresh=True)] == [
+            ("stdout", "fresh\n")
+        ]
+        assert [(event.stream, event.data) for event in stale] == [("stderr", "old-2\n")]
+        assert command.output() == "fresh\n"
+        assert route.call_count == 3
 
 
 @respx.mock

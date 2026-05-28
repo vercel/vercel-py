@@ -18,6 +18,7 @@ from vercel.unstable.sandbox import (
     SandboxApiError,
     SandboxCommand,
     SandboxCommandLog,
+    SandboxCommandLogStream,
     WriteFile,
 )
 
@@ -220,10 +221,10 @@ async def anext_event(events: AsyncIterator[SandboxCommandLog]) -> SandboxComman
 
 
 def write_log_event(event: SandboxCommandLog) -> None:
-    if event.stream == "stdout":
+    if event.stream is SandboxCommandLogStream.STDOUT:
         sys.stdout.write(event.data)
         sys.stdout.flush()
-    elif event.stream == "stderr":
+    elif event.stream is SandboxCommandLogStream.STDERR:
         sys.stderr.write(event.data)
         sys.stderr.flush()
 

@@ -150,8 +150,15 @@ SandboxQuery: TypeAlias = (
 )
 
 
+class SandboxCommandLogStream(StrEnum):
+    """Output stream represented by a command log event."""
+
+    STDOUT = "stdout"
+    STDERR = "stderr"
+
+
 class SandboxCommandLog(BaseModel):
     """One streamed command output event."""
 
     data: str
-    stream: Literal["unspecified", "stdin", "stdout", "stderr", "error"]
+    stream: SandboxCommandLogStream
