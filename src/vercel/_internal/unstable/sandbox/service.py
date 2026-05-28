@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import anyio
@@ -32,6 +33,11 @@ from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     JSONValue,
     SandboxCommandLog,
+    SandboxQuery,
+    SandboxQueryByCreatedAt,
+    SandboxQueryByCurrentSnapshotId,
+    SandboxQueryByName,
+    SandboxQueryByStatusUpdatedAt,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
@@ -61,6 +67,37 @@ _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
 AsyncSleep = Callable[[float], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class _SandboxQueryCriteria:
+    sort_by: str | None = None
+    sort_order: str | None = None
+    name_prefix: str | None = None
+    tag: TagFilter | None = None
+
+
+def _compile_sandbox_query(query: SandboxQuery | None) -> _SandboxQueryCriteria:
+    if query is None:
+        return _SandboxQueryCriteria()
+    if isinstance(query, SandboxQueryByCreatedAt):
+        return _SandboxQueryCriteria(
+            sort_by="createdAt",
+            sort_order=query.sort_order,
+            tag=query.tag,
+        )
+    if isinstance(query, SandboxQueryByName):
+        return _SandboxQueryCriteria(
+            sort_by="name",
+            sort_order=query.sort_order,
+            name_prefix=query.name_prefix,
+            tag=query.tag,
+        )
+    if isinstance(query, SandboxQueryByStatusUpdatedAt):
+        return _SandboxQueryCriteria(sort_by="statusUpdatedAt", sort_order=query.sort_order)
+    if isinstance(query, SandboxQueryByCurrentSnapshotId):
+        return _SandboxQueryCriteria(sort_by="currentSnapshotId", sort_order=query.sort_order)
+    raise TypeError(f"Unsupported sandbox query type: {type(query)!r}")
 
 
 def _sandbox_status(sandbox: Sandbox) -> SandboxStatus | None:
@@ -208,23 +245,21 @@ class SandboxService:
     async def query_sandboxes_page(
         self,
         *,
+        query: SandboxQuery | None = None,
         project_id: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
-        sort_by: str | None = None,
-        sort_order: str | None = None,
-        name_prefix: str | None = None,
-        tags: Sequence[TagFilter] | None = None,
     ) -> QuerySandboxesPage:
         self._check_open()
+        criteria = _compile_sandbox_query(query)
         result = await self._api_client.query_sandboxes(
             project_id=project_id,
             limit=page_size,
             cursor=cursor,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            name_prefix=name_prefix,
-            tags=tags,
+            sort_by=criteria.sort_by,
+            sort_order=criteria.sort_order,
+            name_prefix=criteria.name_prefix,
+            tag=criteria.tag,
         )
         response = result.response
         return QuerySandboxesPage(
@@ -242,13 +277,10 @@ class SandboxService:
     def query_sandboxes(
         self,
         *,
+        query: SandboxQuery | None = None,
         project_id: str | None = None,
         page_size: int | None = None,
         cursor: str | None = None,
-        sort_by: str | None = None,
-        sort_order: str | None = None,
-        name_prefix: str | None = None,
-        tags: Sequence[TagFilter] | None = None,
     ) -> AsyncIterator[Sandbox]:
         async def iter_sandboxes() -> AsyncIterator[Sandbox]:
             current_params = QuerySandboxesParams(
@@ -257,13 +289,10 @@ class SandboxService:
             )
             while True:
                 page = await self.query_sandboxes_page(
+                    query=query,
                     project_id=project_id,
                     page_size=current_params.page_size,
                     cursor=current_params.cursor,
-                    sort_by=sort_by,
-                    sort_order=sort_order,
-                    name_prefix=name_prefix,
-                    tags=tags,
                 )
                 for sandbox in page.sandboxes:
                     yield sandbox

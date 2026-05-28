@@ -115,6 +115,41 @@ class TagFilter(_InputModel):
         return f"{self.key}:{self.value}"
 
 
+class SandboxQueryByCreatedAt(_InputModel):
+    """Sandbox listing ordered by creation time."""
+
+    sort_order: Literal["asc", "desc"] = "desc"
+    tag: TagFilter | None = None
+
+
+class SandboxQueryByName(_InputModel):
+    """Sandbox listing ordered by name."""
+
+    sort_order: Literal["asc", "desc"] = "desc"
+    name_prefix: str | None = None
+    tag: TagFilter | None = None
+
+
+class SandboxQueryByStatusUpdatedAt(_InputModel):
+    """Sandbox listing ordered by its status update time."""
+
+    sort_order: Literal["asc", "desc"] = "desc"
+
+
+class SandboxQueryByCurrentSnapshotId(_InputModel):
+    """Sandbox listing ordered by current snapshot identifier."""
+
+    sort_order: Literal["asc", "desc"] = "desc"
+
+
+SandboxQuery: TypeAlias = (
+    SandboxQueryByCreatedAt
+    | SandboxQueryByName
+    | SandboxQueryByStatusUpdatedAt
+    | SandboxQueryByCurrentSnapshotId
+)
+
+
 class SandboxCommandLog(BaseModel):
     """One streamed command output event."""
 

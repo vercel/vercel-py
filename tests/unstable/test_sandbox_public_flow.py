@@ -5,6 +5,7 @@ from itertools import islice
 import httpx
 import pytest
 import respx
+from pydantic import BaseModel, ValidationError
 
 from vercel import unstable as vercel
 from vercel._internal.unstable.context import get_active_session
@@ -15,6 +16,11 @@ from vercel.unstable.sandbox import (
     GitSource,
     SandboxApiError,
     SandboxCleanupError,
+    SandboxQuery,
+    SandboxQueryByCreatedAt,
+    SandboxQueryByCurrentSnapshotId,
+    SandboxQueryByName,
+    SandboxQueryByStatusUpdatedAt,
     SandboxResources,
     SandboxResponseError,
     SandboxServiceOptions,
@@ -282,12 +288,12 @@ async def test_query_sandboxes_paginates_and_encodes_filters(mock_env_clear: Non
         handles = [
             handle
             async for handle in sandbox.query_sandboxes(
+                query=SandboxQueryByName(
+                    name_prefix="preview",
+                    tag=TagFilter(key="env", value="prod"),
+                ),
                 page_size=2,
                 cursor="cursor_1",
-                sort_by="createdAt",
-                sort_order="desc",
-                name_prefix="preview",
-                tags=[TagFilter(key="env", value="prod"), TagFilter(key="team", value="api")],
             )
         ]
 
@@ -298,24 +304,93 @@ async def test_query_sandboxes_paginates_and_encodes_filters(mock_env_clear: Non
             ("project", "prj_123"),
             ("limit", "2"),
             ("cursor", "cursor_1"),
-            ("sortBy", "createdAt"),
+            ("sortBy", "name"),
             ("sortOrder", "desc"),
             ("namePrefix", "preview"),
             ("tags", "env:prod"),
-            ("tags", "team:api"),
         ],
         [
             ("teamId", "team_123"),
             ("project", "prj_123"),
             ("limit", "2"),
             ("cursor", "cursor_2"),
-            ("sortBy", "createdAt"),
+            ("sortBy", "name"),
             ("sortOrder", "desc"),
             ("namePrefix", "preview"),
             ("tags", "env:prod"),
-            ("tags", "team:api"),
         ],
     ]
+
+
+@respx.mock
+async def test_query_sandboxes_without_query_omits_criteria(mock_env_clear: None) -> None:
+    route = respx.get("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sandboxes": [], "pagination": {"count": 0, "next": None, "prev": None}},
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        assert [item async for item in sandbox.query_sandboxes()] == []
+
+    assert dict(route.calls[0].request.url.params) == {
+        "teamId": "team_123",
+        "project": "prj_123",
+    }
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (
+            SandboxQueryByCreatedAt(tag=TagFilter(key="env", value="prod"), sort_order="asc"),
+            {"sortBy": "createdAt", "sortOrder": "asc", "tags": "env:prod"},
+        ),
+        (
+            SandboxQueryByStatusUpdatedAt(sort_order="desc"),
+            {"sortBy": "statusUpdatedAt", "sortOrder": "desc"},
+        ),
+        (
+            SandboxQueryByCurrentSnapshotId(sort_order="asc"),
+            {"sortBy": "currentSnapshotId", "sortOrder": "asc"},
+        ),
+    ],
+)
+async def test_query_sandboxes_encodes_supported_orderings(
+    mock_env_clear: None,
+    query: SandboxQuery,
+    expected: dict[str, str],
+) -> None:
+    route = respx.get("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sandboxes": [], "pagination": {"count": 0, "next": None, "prev": None}},
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        assert [item async for item in sandbox.query_sandboxes(query=query)] == []
+
+    params = dict(route.calls[0].request.url.params)
+    assert params == {"teamId": "team_123", "project": "prj_123", **expected}
+
+
+@pytest.mark.parametrize(
+    ("query_type", "kwargs"),
+    [
+        (SandboxQueryByCreatedAt, {"sort_order": "newest"}),
+        (SandboxQueryByName, {"tags": [TagFilter(key="env", value="prod")]}),
+        (SandboxQueryByStatusUpdatedAt, {"tag": TagFilter(key="env", value="prod")}),
+        (SandboxQueryByCurrentSnapshotId, {"name_prefix": "preview"}),
+    ],
+)
+def test_sandbox_query_variants_reject_unsupported_combinations(
+    query_type: type[BaseModel], kwargs: dict[str, object]
+) -> None:
+    with pytest.raises(ValidationError):
+        query_type(**kwargs)
 
 
 @respx.mock
@@ -650,10 +725,41 @@ def test_sync_query_sandboxes_paginates_and_supports_early_consumers(
     respx.get("https://sandbox.test/v2/sandboxes").mock(side_effect=handler)
 
     with vercel.session(service_options=_session_options()):
-        handles = list(islice(sandbox_sync.query_sandboxes(page_size=2, cursor="cursor_1"), 3))
+        handles = list(
+            islice(
+                sandbox_sync.query_sandboxes(
+                    query=sandbox_sync.SandboxQueryByName(
+                        sort_order="asc",
+                        name_prefix="preview",
+                        tag=sandbox_sync.TagFilter(key="env", value="prod"),
+                    ),
+                    page_size=2,
+                    cursor="cursor_1",
+                ),
+                3,
+            )
+        )
 
     assert [handle.name for handle in handles] == ["preview-1", "preview-2", "preview-3"]
     assert requests == [
-        {"teamId": "team_123", "project": "prj_123", "limit": "2", "cursor": "cursor_1"},
-        {"teamId": "team_123", "project": "prj_123", "limit": "2", "cursor": "cursor_2"},
+        {
+            "teamId": "team_123",
+            "project": "prj_123",
+            "limit": "2",
+            "cursor": "cursor_1",
+            "sortBy": "name",
+            "sortOrder": "asc",
+            "namePrefix": "preview",
+            "tags": "env:prod",
+        },
+        {
+            "teamId": "team_123",
+            "project": "prj_123",
+            "limit": "2",
+            "cursor": "cursor_2",
+            "sortBy": "name",
+            "sortOrder": "asc",
+            "namePrefix": "preview",
+            "tags": "env:prod",
+        },
     ]

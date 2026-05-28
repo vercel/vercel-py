@@ -23,7 +23,9 @@ contract.
   `service_options=[...]`.
 - Each service has a default options object, so simple calls work without a
   configured session; scoped options replace that default for the service.
-- Endpoint calls use direct keyword arguments, not public `*Param` dataclasses.
+- Endpoint calls use direct keyword arguments. Sandbox listing accepts a
+  constrained query value because separate filter/order keywords would express
+  unsupported backend query combinations.
 - Service methods avoid complex retry, timeout, and polling policy. Compose
   those outside the call.
 - Remote resource handles are stable mutable views bound to the SDK session
@@ -46,6 +48,7 @@ from vercel import unstable as vercel
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
     GitSource,
+    SandboxQueryByName,
     SandboxResources,
     SandboxServiceOptions,
     SnapshotRetention,
@@ -152,7 +155,10 @@ async def main() -> None:
         item
         async for item in sandbox.query_sandboxes(
             page_size=20,
-            tags=[TagFilter(key="env", value="preview")]
+            query=SandboxQueryByName(
+                name_prefix="preview-",
+                tag=TagFilter(key="env", value="preview"),
+            ),
         )
     ]
 
@@ -312,6 +318,11 @@ Context manager exit awaits cleanup. Cleanup failures raise
 `SandboxCleanupError`, whose `cause` points at the underlying failure. Context
 managers express ownership of a remote cleanup request, not reliable knowledge
 of whether a resource can answer a later API request.
+
+For a sandbox context manager, observe deletion by fetching its unique name
+with `resume=False` and receiving a not-found API response. For a runtime
+session context manager, the retained session handle reflects the successful
+stop response as `SandboxStatus.STOPPED`.
 
 Explicit cleanup requests termination or deletion through the API:
 

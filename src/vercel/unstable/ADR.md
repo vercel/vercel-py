@@ -30,14 +30,29 @@ Examples:
 
 ```python
 from vercel.unstable import sandbox
+from vercel.unstable.sandbox import SandboxQueryByName, TagFilter
 
 sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
 sandbox_ = await sandbox.get_sandbox(name="preview")
-sandboxes = [item async for item in sandbox.query_sandboxes()]
+sandboxes = [
+    item
+    async for item in sandbox.query_sandboxes(
+        query=SandboxQueryByName(
+            name_prefix="preview-",
+            tag=TagFilter(key="env", value="prod"),
+        )
+    )
+]
 ```
 
 Endpoint input dataclasses such as `SandboxCreateParams` are not public API.
-Service methods accept typed keyword arguments directly.
+Service methods accept typed keyword arguments directly. `query_sandboxes()`
+is the bounded exception: its `query` keyword accepts one typed query variant
+for each supported index path (`SandboxQueryByCreatedAt`,
+`SandboxQueryByName`, `SandboxQueryByStatusUpdatedAt`, or
+`SandboxQueryByCurrentSnapshotId`). This prevents callers from constructing
+name-prefix or tag-filter combinations that the selected ordering cannot
+support.
 
 Rationale:
 
@@ -313,6 +328,12 @@ When cleanup succeeds, its response is applied to the managed handle before
 exit returns.
 Callers who do not want that cleanup requested should not use the context
 manager.
+
+Live verification observes sandbox cleanup as absence: a post-exit
+`get_sandbox(name=..., resume=False)` must return not found. Runtime-session
+cleanup has a different observable contract: after its context exits, the
+retained runtime-session handle records `SandboxStatus.STOPPED` from the stop
+response.
 
 The same remote cleanup can be requested explicitly with `Sandbox.destroy()` or
 `SandboxRuntimeSession.stop()`. Sandbox identity behavior belongs on `Sandbox`,

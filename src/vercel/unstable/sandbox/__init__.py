@@ -1,6 +1,6 @@
 """Experimental Sandbox SDK surface."""
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 
 from vercel._internal.unstable.context import get_active_session
 from vercel._internal.unstable.sandbox.errors import (
@@ -23,6 +23,11 @@ from vercel._internal.unstable.sandbox.models import (
     GitSource,
     JSONValue,
     SandboxCommandLog,
+    SandboxQuery,
+    SandboxQueryByCreatedAt,
+    SandboxQueryByCurrentSnapshotId,
+    SandboxQueryByName,
+    SandboxQueryByStatusUpdatedAt,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
@@ -95,25 +100,19 @@ async def get_sandbox(
 
 def query_sandboxes(
     *,
+    query: SandboxQuery | None = None,
     project_id: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
-    sort_by: str | None = None,
-    sort_order: str | None = None,
-    name_prefix: str | None = None,
-    tags: Sequence[TagFilter] | None = None,
 ) -> AsyncIterator[Sandbox]:
     return (
         get_active_session()
         .sandbox_service()
         .query_sandboxes(
+            query=query,
             project_id=project_id,
             page_size=page_size,
             cursor=cursor,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            name_prefix=name_prefix,
-            tags=tags,
         )
     )
 
@@ -174,6 +173,11 @@ __all__ = [
     "SandboxError",
     "SandboxInvalidHandleError",
     "SandboxResources",
+    "SandboxQuery",
+    "SandboxQueryByCreatedAt",
+    "SandboxQueryByCurrentSnapshotId",
+    "SandboxQueryByName",
+    "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
     "SandboxRuntimeSession",
     "SandboxServiceOptions",

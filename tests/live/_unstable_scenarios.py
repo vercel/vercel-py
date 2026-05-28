@@ -8,6 +8,9 @@ from typing import Any
 from vercel import unstable as vercel
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
+    SandboxApiError,
+    SandboxQueryByName,
+    SandboxStatus,
     SnapshotSource,
     TagFilter,
     WriteFile as AsyncWriteFile,
@@ -57,6 +60,9 @@ class _ScenarioDriver:
         raise NotImplementedError
 
     async def query_sandboxes(self, name_prefix: str, tag: TagFilter) -> list[Any]:
+        raise NotImplementedError
+
+    async def get_sandbox(self, name: str) -> Any:
         raise NotImplementedError
 
     async def query_snapshots(self, name: str) -> list[Any]:
@@ -133,9 +139,12 @@ class AsyncDriver(_ScenarioDriver):
         return [
             item
             async for item in sandbox.query_sandboxes(
-                sort_by="name", name_prefix=name_prefix, tags=[tag]
+                query=SandboxQueryByName(name_prefix=name_prefix, tag=tag)
             )
         ]
+
+    async def get_sandbox(self, name: str) -> Any:
+        return await sandbox.get_sandbox(name=name, resume=False)
 
     async def query_snapshots(self, name: str) -> list[Any]:
         return [item async for item in sandbox.query_snapshots(name=name)]
@@ -171,7 +180,7 @@ class AsyncDriver(_ScenarioDriver):
             command = await runtime_session.run_command("printf", ["session follow-up\n"])
             output = await command.stdout()
             exit_code = command.exit_code
-        return output, exit_code, True
+        return output, exit_code, runtime_session.status is SandboxStatus.STOPPED
 
     async def delete_snapshot(self, snapshot: Any) -> None:
         await snapshot.delete()
@@ -216,11 +225,15 @@ class SyncDriver(_ScenarioDriver):
     async def query_sandboxes(self, name_prefix: str, tag: TagFilter) -> list[Any]:
         return list(
             sandbox_sync.query_sandboxes(
-                sort_by="name",
-                name_prefix=name_prefix,
-                tags=[sandbox_sync.TagFilter(key=tag.key, value=tag.value)],
+                query=sandbox_sync.SandboxQueryByName(
+                    name_prefix=name_prefix,
+                    tag=sandbox_sync.TagFilter(key=tag.key, value=tag.value),
+                ),
             )
         )
+
+    async def get_sandbox(self, name: str) -> Any:
+        return sandbox_sync.get_sandbox(name=name, resume=False)
 
     async def query_snapshots(self, name: str) -> list[Any]:
         return list(sandbox_sync.query_snapshots(name=name))
@@ -256,7 +269,7 @@ class SyncDriver(_ScenarioDriver):
             command = runtime_session.run_command("printf", ["session follow-up\n"])
             output = command.stdout()
             exit_code = command.exit_code
-        return output, exit_code, True
+        return output, exit_code, runtime_session.status is SandboxStatus.STOPPED
 
     async def delete_snapshot(self, snapshot: Any) -> None:
         snapshot.delete()
@@ -290,7 +303,10 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
             logs = await driver.logs(command)
             exit_code = await driver.wait(command)
             output = await driver.read_text(box, "workspace/output.txt")
-        context_cleaned_up = True
+        try:
+            await driver.get_sandbox(name)
+        except SandboxApiError as error:
+            context_cleaned_up = error.status_code == 404
 
     return WorkspaceObservation(
         stdout="".join(data for stream, data in logs if stream == "stdout"),

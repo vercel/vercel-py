@@ -162,11 +162,11 @@ class _QuerySandboxesRequest(_ApiRequestModel):
     sort_by: str | None = Field(default=None, serialization_alias="sortBy")
     sort_order: str | None = Field(default=None, serialization_alias="sortOrder")
     name_prefix: str | None = Field(default=None, serialization_alias="namePrefix")
-    tags: Sequence[TagFilter] | None = None
+    tag: TagFilter | None = Field(default=None, serialization_alias="tags")
 
-    @field_serializer("tags")
-    def _serialize_tags(self, value: Sequence[TagFilter] | None) -> list[str] | None:
-        return None if value is None else [tag.to_query_value() for tag in value]
+    @field_serializer("tag")
+    def _serialize_tag(self, value: TagFilter | None) -> str | None:
+        return None if value is None else value.to_query_value()
 
 
 class _QuerySessionsRequest(_ApiRequestModel):
@@ -777,7 +777,7 @@ class SandboxApiClient:
         sort_by: str | None = None,
         sort_order: str | None = None,
         name_prefix: str | None = None,
-        tags: Sequence[TagFilter] | None = None,
+        tag: TagFilter | None = None,
     ) -> _QuerySandboxesResult:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
@@ -788,7 +788,7 @@ class SandboxApiClient:
             sort_by=sort_by,
             sort_order=sort_order,
             name_prefix=name_prefix,
-            tags=tags,
+            tag=tag,
         )
         data = await self._request_json(
             "GET",

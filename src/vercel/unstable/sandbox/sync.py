@@ -1,6 +1,6 @@
 """Sync mirror for the experimental Sandbox SDK surface."""
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from typing import cast
 
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -26,6 +26,11 @@ from vercel._internal.unstable.sandbox.models import (
     GitSource,
     JSONValue,
     SandboxCommandLog,
+    SandboxQuery,
+    SandboxQueryByCreatedAt,
+    SandboxQueryByCurrentSnapshotId,
+    SandboxQueryByName,
+    SandboxQueryByStatusUpdatedAt,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
@@ -107,13 +112,10 @@ def get_sandbox(
 
 def query_sandboxes(
     *,
+    query: SandboxQuery | None = None,
     project_id: str | None = None,
     page_size: int | None = None,
     cursor: str | None = None,
-    sort_by: str | None = None,
-    sort_order: str | None = None,
-    name_prefix: str | None = None,
-    tags: Sequence[TagFilter] | None = None,
 ) -> Iterator[SyncSandbox]:
     service = get_active_sync_session().sandbox_service()
 
@@ -125,13 +127,10 @@ def query_sandboxes(
         while True:
             page = iter_coroutine(
                 service.query_sandboxes_page(
+                    query=query,
                     project_id=project_id,
                     page_size=current_params.page_size,
                     cursor=current_params.cursor,
-                    sort_by=sort_by,
-                    sort_order=sort_order,
-                    name_prefix=name_prefix,
-                    tags=tags,
                 )
             )
             yield from cast(list[SyncSandbox], page.sandboxes)
@@ -232,6 +231,11 @@ __all__ = [
     "SandboxError",
     "SandboxInvalidHandleError",
     "SandboxResources",
+    "SandboxQuery",
+    "SandboxQueryByCreatedAt",
+    "SandboxQueryByCurrentSnapshotId",
+    "SandboxQueryByName",
+    "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
     "SandboxServiceOptions",
     "SandboxSource",
