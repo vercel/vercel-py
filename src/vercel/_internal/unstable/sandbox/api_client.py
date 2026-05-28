@@ -19,6 +19,7 @@ from vercel._internal.http import (
     BaseTransport,
     BytesBody,
     JSONBody,
+    RequestBody,
     SyncTransport,
     extract_structured_error,
 )
@@ -151,57 +152,16 @@ class SandboxApiClient:
     def base_url(self) -> str:
         return self._base_url
 
-    async def _request_response(
+    async def _request(
         self,
         method: str,
         path: str,
         *,
         credentials: SandboxCredentials,
-        body: JSONValue | None = None,
-        params: Mapping[str, JSONValue | None] | None = None,
-    ) -> Response:
-        query = cast(
-            QueryParamTypes,
-            _drop_none(
-                {
-                    "teamId": credentials.team_id,
-                    **dict(params or {}),
-                }
-            ),
-        )
-        response = await self._transport.send(
-            method,
-            path,
-            token=credentials.token,
-            params=query,
-            body=JSONBody(body) if body is not None else None,
-            headers={
-                "content-type": "application/json",
-                "user-agent": USER_AGENT,
-            },
-        )
-
-        try:
-            response.read()
-        except RuntimeError:
-            await response.aread()
-
-        if not response.is_success:
-            message, data = extract_structured_error(response)
-            raise SandboxApiError(response, message, data=data)
-
-        return response
-
-    async def _request_bytes(
-        self,
-        method: str,
-        path: str,
-        *,
-        credentials: SandboxCredentials,
-        body: JSONBody | BytesBody,
+        body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
-    ) -> bytes:
+    ) -> Response:
         query = cast(
             QueryParamTypes,
             _drop_none(
@@ -233,26 +193,51 @@ class SandboxApiClient:
             message, data = extract_structured_error(response)
             raise SandboxApiError(response, message, data=data)
 
-        return response.content
+        return response
 
-    async def _request_empty(
+    async def _request_stream(
         self,
         method: str,
         path: str,
         *,
         credentials: SandboxCredentials,
-        body: JSONBody | BytesBody,
+        body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
-    ) -> None:
-        await self._request_bytes(
+    ) -> Response:
+        query = cast(
+            QueryParamTypes,
+            _drop_none(
+                {
+                    "teamId": credentials.team_id,
+                    **dict(params or {}),
+                }
+            ),
+        )
+        request_headers = {
+            "user-agent": USER_AGENT,
+            **dict(headers or {}),
+        }
+        response = await self._transport.send(
             method,
             path,
-            credentials=credentials,
+            token=credentials.token,
+            params=query,
             body=body,
-            params=params,
-            headers=headers,
+            headers=request_headers,
+            stream=True,
         )
+
+        if response.is_success:
+            return response
+
+        try:
+            response.read()
+        except RuntimeError:
+            await response.aread()
+
+        message, data = extract_structured_error(response)
+        raise SandboxApiError(response, message, data=data)
 
     async def _request_json(
         self,
@@ -263,12 +248,13 @@ class SandboxApiClient:
         body: JSONValue | None = None,
         params: Mapping[str, JSONValue | None] | None = None,
     ) -> JSONObject:
-        response = await self._request_response(
+        response = await self._request(
             method,
             path,
             credentials=credentials,
-            body=body,
+            body=JSONBody(body) if body is not None else None,
             params=params,
+            headers={"content-type": "application/json"},
         )
 
         try:
@@ -670,7 +656,7 @@ class SandboxApiClient:
     ) -> None:
         credentials = await self._credentials_factory()
         request = MkdirRequest(path=path, cwd=cwd, recursive=recursive)
-        await self._request_empty(
+        await self._request(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/mkdir", session_id=session_id),
             credentials=credentials,
@@ -686,12 +672,13 @@ class SandboxApiClient:
     ) -> bytes:
         credentials = await self._credentials_factory()
         request = FilesystemPathRequest(path=path, cwd=cwd)
-        return await self._request_bytes(
+        response = await self._request(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/read", session_id=session_id),
             credentials=credentials,
             body=JSONBody(request.to_api_dict()),
         )
+        return response.content
 
     async def write_files(
         self,
@@ -703,7 +690,7 @@ class SandboxApiClient:
     ) -> None:
         credentials = await self._credentials_factory()
         payload = _build_write_files_tarball(files, cwd=cwd, encoding=encoding)
-        await self._request_empty(
+        await self._request(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/write", session_id=session_id),
             credentials=credentials,
@@ -738,32 +725,15 @@ class SandboxApiClient:
         command_id: str,
     ) -> Response:
         credentials = await self._credentials_factory()
-        query = cast(
-            QueryParamTypes,
-            _drop_none({"teamId": credentials.team_id}),
-        )
-        response = await self._transport.send(
+        return await self._request_stream(
             "GET",
             format_url_path(
                 "v2/sandboxes/sessions/{session_id}/cmd/{command_id}/logs",
                 session_id=session_id,
                 command_id=command_id,
             ),
-            token=credentials.token,
-            params=query,
-            headers={
-                "user-agent": USER_AGENT,
-            },
-            stream=True,
+            credentials=credentials,
         )
-        if response.is_success:
-            return response
-        try:
-            response.read()
-        except RuntimeError:
-            await response.aread()
-        message, data = extract_structured_error(response)
-        raise SandboxApiError(response, message, data=data)
 
     def close(self) -> None:
         if isinstance(self._transport, SyncTransport):
