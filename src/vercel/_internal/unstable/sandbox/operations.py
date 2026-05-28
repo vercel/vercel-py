@@ -7,6 +7,7 @@ from types import TracebackType
 from typing import Any
 
 from vercel._internal.unstable.context import get_active_session
+from vercel._internal.unstable.sandbox.client import AsyncSandboxClient
 from vercel._internal.unstable.sandbox.errors import SandboxCleanupError
 from vercel._internal.unstable.sandbox.handles import Sandbox, SandboxRuntimeSession
 from vercel._internal.unstable.sandbox.models import (
@@ -16,7 +17,6 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxSource,
     SnapshotRetention,
 )
-from vercel._internal.unstable.session import SdkSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +37,8 @@ class _CreateSandboxParams:
 
 
 class CreateSandboxOperation:
-    def __init__(self, *, session: SdkSession, params: _CreateSandboxParams) -> None:
-        self._session = session
+    def __init__(self, *, client: AsyncSandboxClient, params: _CreateSandboxParams) -> None:
+        self._client = client
         self._params = params
         self._consumed = False
         self._handle: Sandbox | None = None
@@ -50,7 +50,7 @@ class CreateSandboxOperation:
 
     async def _run_once(self) -> Sandbox:
         self._mark_consumed()
-        return await self._session.sandbox_service().create_sandbox(
+        return await self._client.create_sandbox(
             project_id=self._params.project_id,
             name=self._params.name,
             runtime=self._params.runtime,
@@ -84,7 +84,7 @@ class CreateSandboxOperation:
             return None
 
         try:
-            payload = await self._session.sandbox_service().destroy_sandbox_payload(
+            payload = await self._client.destroy_sandbox_payload(
                 name=self._handle.name,
                 project_id=self._handle.project_id,
             )
@@ -109,8 +109,8 @@ class CreateSandboxOperation:
 
 
 class CreateRuntimeSessionOperation:
-    def __init__(self, *, session: SdkSession, sandbox: Sandbox) -> None:
-        self._session = session
+    def __init__(self, *, client: AsyncSandboxClient, sandbox: Sandbox) -> None:
+        self._client = client
         self._sandbox = sandbox
         self._consumed = False
         self._handle: SandboxRuntimeSession | None = None
@@ -122,7 +122,7 @@ class CreateRuntimeSessionOperation:
 
     async def _run_once(self) -> SandboxRuntimeSession:
         self._mark_consumed()
-        handle = await self._session.sandbox_service().create_runtime_session(
+        handle = await self._client.create_runtime_session(
             name=self._sandbox.name,
             project_id=self._sandbox.project_id,
         )
@@ -146,7 +146,7 @@ class CreateRuntimeSessionOperation:
             return None
 
         try:
-            payload = await self._session.sandbox_service().stop_runtime_session_payload(
+            payload = await self._client.stop_runtime_session_payload(
                 session_id=self._handle.id,
             )
             self._handle._apply_payload(payload)
@@ -177,7 +177,7 @@ def create_sandbox_operation(
     snapshot_retention: SnapshotRetention | None = None,
 ) -> CreateSandboxOperation:
     return CreateSandboxOperation(
-        session=get_active_session(),
+        client=get_active_session().sandbox_service(),
         params=_CreateSandboxParams(
             project_id=project_id,
             name=name,
@@ -199,6 +199,6 @@ def create_sandbox_operation(
 def create_runtime_session_operation(
     *,
     sandbox: Sandbox,
-    session: SdkSession,
+    client: AsyncSandboxClient,
 ) -> CreateRuntimeSessionOperation:
-    return CreateRuntimeSessionOperation(sandbox=sandbox, session=session)
+    return CreateRuntimeSessionOperation(sandbox=sandbox, client=client)

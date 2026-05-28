@@ -6,7 +6,6 @@ import posixpath
 import sys
 import tarfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Literal, TypeVar, cast
@@ -47,6 +46,17 @@ from vercel._internal.unstable.sandbox.options import (
     SandboxCredentials,
     SandboxCredentialsFactory,
 )
+from vercel._internal.unstable.sandbox.state import (
+    RuntimeSessionsPageState,
+    SandboxCommandState,
+    SandboxesPageState,
+    SandboxRouteState,
+    SandboxRuntimeSessionState,
+    SandboxState,
+    SnapshotSessionState,
+    SnapshotsPageState,
+    SnapshotState,
+)
 from vercel._internal.url import format_url_path
 
 try:
@@ -60,12 +70,6 @@ USER_AGENT = (
     f"(Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
-
-
-@dataclass(frozen=True, slots=True)
-class _QuerySandboxesResult:
-    response: "_SandboxesResponse"
-    project_id: str
 
 
 class _ApiModel(BaseModel):
@@ -409,13 +413,13 @@ class _Pagination(_ApiModel):
 class _CommandResponse(_ApiModel):
     command: _CommandPayload | None = None
 
-    def to_command(self) -> _CommandPayload:
+    def to_command(self) -> SandboxCommandState:
         if self.command is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'command'",
                 data=self.model_dump(by_alias=True),
             )
-        return self.command
+        return _command_state(self.command)
 
 
 class _CommandsResponse(_ApiModel):
@@ -426,13 +430,13 @@ class _RuntimeSessionResponse(_ApiModel):
     session: _RuntimeSessionPayload | None = None
     routes: list[_SandboxRoutePayload] = Field(default_factory=list)
 
-    def to_runtime_session(self) -> _RuntimeSessionPayload:
+    def to_runtime_session(self) -> SandboxRuntimeSessionState:
         if self.session is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'session'",
                 data=self.model_dump(by_alias=True),
             )
-        return self.session
+        return _runtime_session_state(self.session)
 
 
 class _RuntimeSessionsResponse(_ApiModel):
@@ -446,7 +450,7 @@ class _SandboxResponse(_ApiModel):
     routes: list[_SandboxRoutePayload] = Field(default_factory=list)
     resumed: bool | None = None
 
-    def to_sandbox(self) -> _SandboxPayload:
+    def to_sandbox(self) -> SandboxState:
         if self.sandbox is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'sandbox'",
@@ -458,14 +462,12 @@ class _SandboxResponse(_ApiModel):
                 by_alias=True, exclude_none=True, exclude={"routes", "current_session", "raw"}
             ),
         )
-        updates: dict[str, object] = {
-            "routes": tuple(self.routes),
-            "current_session": self.session,
-            "raw": raw,
-        }
-        if self.session is not None:
-            if self.sandbox.project_id is None and self.session.project_id is not None:
-                updates["project_id"] = self.session.project_id
+        payload = self.sandbox
+        session = self.session
+        updates: dict[str, object] = {}
+        if session is not None:
+            if payload.project_id is None and session.project_id is not None:
+                updates["project_id"] = session.project_id
             for name in (
                 "runtime",
                 "status",
@@ -476,9 +478,15 @@ class _SandboxResponse(_ApiModel):
                 "execution_time_limit",
                 "network_policy",
             ):
-                if getattr(self.sandbox, name) is None:
-                    updates[name] = getattr(self.session, name)
-        return self.sandbox.model_copy(update=updates)
+                if getattr(payload, name) is None:
+                    updates[name] = getattr(session, name)
+        payload = payload.model_copy(update=updates)
+        return _sandbox_state(
+            payload,
+            routes=tuple(_route_state(route) for route in self.routes),
+            current_session=(None if session is None else _runtime_session_state(session)),
+            raw=raw,
+        )
 
 
 class _SandboxesResponse(_ApiModel):
@@ -490,7 +498,7 @@ class _CreateSnapshotResponse(_ApiModel):
     snapshot: _SnapshotPayload | None = None
     session: _RuntimeSessionPayload | None = None
 
-    def to_snapshot_and_session(self) -> tuple[_SnapshotPayload, _RuntimeSessionPayload]:
+    def to_snapshot_and_session(self) -> SnapshotSessionState:
         if self.snapshot is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'snapshot'",
@@ -501,24 +509,116 @@ class _CreateSnapshotResponse(_ApiModel):
                 "Sandbox API response is missing object field 'session'",
                 data=self.model_dump(by_alias=True),
             )
-        return self.snapshot, self.session
+        return SnapshotSessionState(
+            snapshot=_snapshot_state(self.snapshot),
+            session=_runtime_session_state(self.session),
+        )
 
 
 class _SnapshotResponse(_ApiModel):
     snapshot: _SnapshotPayload | None = None
 
-    def to_snapshot(self) -> _SnapshotPayload:
+    def to_snapshot(self) -> SnapshotState:
         if self.snapshot is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'snapshot'",
                 data=self.model_dump(by_alias=True),
             )
-        return self.snapshot
+        return _snapshot_state(self.snapshot)
 
 
 class _SnapshotsResponse(_ApiModel):
     snapshots: list[_SnapshotPayload]
     pagination: _Pagination | None = None
+
+
+def _route_state(payload: _SandboxRoutePayload) -> SandboxRouteState:
+    return SandboxRouteState(
+        url=payload.url,
+        port=payload.port,
+        subdomain=payload.subdomain,
+        system=payload.system,
+    )
+
+
+def _command_state(payload: _CommandPayload) -> SandboxCommandState:
+    return SandboxCommandState(
+        id=payload.id,
+        name=payload.name,
+        args=tuple(payload.args),
+        cwd=payload.cwd,
+        session_id=payload.session_id,
+        exit_code=payload.exit_code,
+        started_at=payload.started_at,
+    )
+
+
+def _runtime_session_state(payload: _RuntimeSessionPayload) -> SandboxRuntimeSessionState:
+    return SandboxRuntimeSessionState(
+        id=payload.id,
+        sandbox_name=payload.sandbox_name,
+        project_id=payload.project_id,
+        status=payload.status,
+        runtime=payload.runtime,
+        cwd=payload.cwd,
+        region=payload.region,
+        memory=payload.memory,
+        vcpus=payload.vcpus,
+        execution_time_limit=payload.execution_time_limit,
+        network_policy=payload.network_policy,
+        requested_at=payload.requested_at,
+        started_at=payload.started_at,
+        stopped_at=payload.stopped_at,
+    )
+
+
+def _sandbox_state(
+    payload: _SandboxPayload,
+    *,
+    routes: tuple[SandboxRouteState, ...] = (),
+    current_session: SandboxRuntimeSessionState | None = None,
+    raw: JSONObject | None = None,
+    project_id: str | None = None,
+) -> SandboxState:
+    return SandboxState(
+        name=payload.name,
+        current_session_id=payload.current_session_id,
+        runtime=payload.runtime,
+        status=payload.status,
+        persistent=payload.persistent,
+        current_snapshot_id=payload.current_snapshot_id,
+        project_id=payload.project_id or project_id,
+        cwd=payload.cwd,
+        region=payload.region,
+        memory=payload.memory,
+        vcpus=payload.vcpus,
+        execution_time_limit=payload.execution_time_limit,
+        network_policy=payload.network_policy,
+        snapshot_expiration=payload.snapshot_expiration,
+        status_updated_at=payload.status_updated_at,
+        created_at=payload.created_at,
+        updated_at=payload.updated_at,
+        tags=None if payload.tags is None else dict(payload.tags),
+        routes=routes,
+        current_session=current_session,
+        raw=raw,
+    )
+
+
+def _snapshot_state(payload: _SnapshotPayload) -> SnapshotState:
+    return SnapshotState(
+        id=payload.id,
+        source_session_id=payload.source_session_id,
+        region=payload.region,
+        status=payload.status,
+        size_bytes=payload.size_bytes,
+        expires_at=payload.expires_at,
+        created_at=payload.created_at,
+        updated_at=payload.updated_at,
+        last_used_at=payload.last_used_at,
+        creation_method=payload.creation_method,
+        parent_id=payload.parent_id,
+    )
 
 
 def _drop_none(data: Mapping[str, JSONValue | None]) -> JSONObject:
@@ -724,7 +824,7 @@ class SandboxApiClient:
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: DurationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
-    ) -> _SandboxResponse:
+    ) -> SandboxState:
         credentials = await self._credentials_factory()
         request = _CreateSandboxRequest(
             project_id=project_id or credentials.project_id,
@@ -744,7 +844,7 @@ class SandboxApiClient:
         data = await self._request_json(
             "POST", "v2/sandboxes", credentials=credentials, body=request.to_api_dict()
         )
-        return _validate_response(_SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data).to_sandbox()
 
     async def get_sandbox(
         self,
@@ -753,7 +853,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         resume: bool = True,
         include_system_routes: bool | None = None,
-    ) -> _SandboxResponse:
+    ) -> SandboxState:
         credentials = await self._credentials_factory()
         request = _GetSandboxRequest(
             project_id=project_id or credentials.project_id,
@@ -766,7 +866,7 @@ class SandboxApiClient:
             credentials=credentials,
             params=request.to_api_dict(),
         )
-        return _validate_response(_SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data).to_sandbox()
 
     async def query_sandboxes(
         self,
@@ -778,7 +878,7 @@ class SandboxApiClient:
         sort_order: str | None = None,
         name_prefix: str | None = None,
         tag: TagFilter | None = None,
-    ) -> _QuerySandboxesResult:
+    ) -> SandboxesPageState:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
         request = _QuerySandboxesRequest(
@@ -796,9 +896,13 @@ class SandboxApiClient:
             credentials=credentials,
             params=request.to_api_dict(),
         )
-        return _QuerySandboxesResult(
-            response=_validate_response(_SandboxesResponse, data),
-            project_id=effective_project_id,
+        response = _validate_response(_SandboxesResponse, data)
+        return SandboxesPageState(
+            sandboxes=tuple(
+                _sandbox_state(sandbox, project_id=effective_project_id)
+                for sandbox in response.sandboxes
+            ),
+            next_cursor=response.pagination.next if response.pagination is not None else None,
         )
 
     async def destroy_sandbox(
@@ -806,7 +910,7 @@ class SandboxApiClient:
         *,
         name: str,
         project_id: str | None = None,
-    ) -> _SandboxResponse:
+    ) -> SandboxState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
@@ -814,7 +918,7 @@ class SandboxApiClient:
             credentials=credentials,
             params={"projectId": project_id or credentials.project_id},
         )
-        return _validate_response(_SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data).to_sandbox()
 
     async def update_sandbox(
         self,
@@ -832,7 +936,7 @@ class SandboxApiClient:
         snapshot_expiration: DurationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
-    ) -> _SandboxResponse:
+    ) -> SandboxState:
         credentials = await self._credentials_factory()
         request = _UpdateSandboxRequest(
             runtime=runtime,
@@ -854,7 +958,7 @@ class SandboxApiClient:
             params={"projectId": project_id or credentials.project_id},
             body=request.to_api_dict(),
         )
-        return _validate_response(_SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data).to_sandbox()
 
     async def create_runtime_session(
         self,
@@ -863,7 +967,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         resume: bool = True,
         include_system_routes: bool | None = None,
-    ) -> _SandboxResponse:
+    ) -> SandboxState:
         return await self.get_sandbox(
             name=name,
             project_id=project_id,
@@ -871,7 +975,7 @@ class SandboxApiClient:
             include_system_routes=include_system_routes,
         )
 
-    async def stop_runtime_session(self, *, session_id: str) -> _SandboxResponse:
+    async def stop_runtime_session(self, *, session_id: str) -> SandboxState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -879,9 +983,9 @@ class SandboxApiClient:
             credentials=credentials,
             body={},
         )
-        return _validate_response(_SandboxResponse, data)
+        return _validate_response(_SandboxResponse, data).to_sandbox()
 
-    async def destroy_runtime_session(self, *, session_id: str) -> _SandboxResponse:
+    async def destroy_runtime_session(self, *, session_id: str) -> SandboxState:
         return await self.stop_runtime_session(session_id=session_id)
 
     async def get_runtime_session(
@@ -889,7 +993,7 @@ class SandboxApiClient:
         *,
         session_id: str,
         include_system_routes: bool | None = None,
-    ) -> _RuntimeSessionResponse:
+    ) -> SandboxRuntimeSessionState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
@@ -905,7 +1009,7 @@ class SandboxApiClient:
                 )
             },
         )
-        return _validate_response(_RuntimeSessionResponse, data)
+        return _validate_response(_RuntimeSessionResponse, data).to_runtime_session()
 
     async def query_runtime_sessions(
         self,
@@ -915,7 +1019,7 @@ class SandboxApiClient:
         limit: int | None = None,
         cursor: str | None = None,
         sort_order: str | None = None,
-    ) -> _RuntimeSessionsResponse:
+    ) -> RuntimeSessionsPageState:
         credentials = await self._credentials_factory()
         request = _QuerySessionsRequest(
             project_id=project_id or credentials.project_id,
@@ -930,14 +1034,18 @@ class SandboxApiClient:
             credentials=credentials,
             params=request.to_api_dict(),
         )
-        return _validate_response(_RuntimeSessionsResponse, data)
+        response = _validate_response(_RuntimeSessionsResponse, data)
+        return RuntimeSessionsPageState(
+            sessions=tuple(_runtime_session_state(session) for session in response.sessions),
+            next_cursor=response.pagination.next if response.pagination is not None else None,
+        )
 
     async def extend_runtime_session_timeout(
         self,
         *,
         session_id: str,
         duration: DurationInput,
-    ) -> _RuntimeSessionResponse:
+    ) -> SandboxRuntimeSessionState:
         credentials = await self._credentials_factory()
         request = _ExtendTimeoutRequest(duration=duration)
         data = await self._request_json(
@@ -949,14 +1057,14 @@ class SandboxApiClient:
             credentials=credentials,
             body=request.to_api_dict(),
         )
-        return _validate_response(_RuntimeSessionResponse, data)
+        return _validate_response(_RuntimeSessionResponse, data).to_runtime_session()
 
     async def update_runtime_session_network_policy(
         self,
         *,
         session_id: str,
         network_policy: JSONValue,
-    ) -> _RuntimeSessionResponse:
+    ) -> SandboxRuntimeSessionState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -967,14 +1075,14 @@ class SandboxApiClient:
             credentials=credentials,
             body=network_policy,
         )
-        return _validate_response(_RuntimeSessionResponse, data)
+        return _validate_response(_RuntimeSessionResponse, data).to_runtime_session()
 
     async def create_snapshot(
         self,
         *,
         session_id: str,
         expiration: DurationInput = None,
-    ) -> _CreateSnapshotResponse:
+    ) -> SnapshotSessionState:
         credentials = await self._credentials_factory()
         body: JSONValue | None = None
         if expiration is not None:
@@ -986,7 +1094,7 @@ class SandboxApiClient:
             credentials=credentials,
             body=body,
         )
-        return _validate_response(_CreateSnapshotResponse, data)
+        return _validate_response(_CreateSnapshotResponse, data).to_snapshot_and_session()
 
     async def query_snapshots(
         self,
@@ -996,7 +1104,7 @@ class SandboxApiClient:
         limit: int | None = None,
         cursor: str | None = None,
         sort_order: str | None = None,
-    ) -> _SnapshotsResponse:
+    ) -> SnapshotsPageState:
         credentials = await self._credentials_factory()
         request = _QuerySnapshotsRequest(
             project_id=project_id or credentials.project_id,
@@ -1011,25 +1119,29 @@ class SandboxApiClient:
             credentials=credentials,
             params=request.to_api_dict(),
         )
-        return _validate_response(_SnapshotsResponse, data)
+        response = _validate_response(_SnapshotsResponse, data)
+        return SnapshotsPageState(
+            snapshots=tuple(_snapshot_state(snapshot) for snapshot in response.snapshots),
+            next_cursor=response.pagination.next if response.pagination is not None else None,
+        )
 
-    async def get_snapshot(self, *, snapshot_id: str) -> _SnapshotResponse:
+    async def get_snapshot(self, *, snapshot_id: str) -> SnapshotState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
             credentials=credentials,
         )
-        return _validate_response(_SnapshotResponse, data)
+        return _validate_response(_SnapshotResponse, data).to_snapshot()
 
-    async def delete_snapshot(self, *, snapshot_id: str) -> _SnapshotResponse:
+    async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
             format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
             credentials=credentials,
         )
-        return _validate_response(_SnapshotResponse, data)
+        return _validate_response(_SnapshotResponse, data).to_snapshot()
 
     async def run_command(
         self,
@@ -1040,7 +1152,7 @@ class SandboxApiClient:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
-    ) -> _CommandResponse:
+    ) -> SandboxCommandState:
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
             command=command,
@@ -1055,7 +1167,7 @@ class SandboxApiClient:
             credentials=credentials,
             body=request.to_api_dict(),
         )
-        return _validate_response(_CommandResponse, data)
+        return _validate_response(_CommandResponse, data).to_command()
 
     async def get_command(
         self,
@@ -1063,7 +1175,7 @@ class SandboxApiClient:
         session_id: str,
         command_id: str,
         wait: bool = True,
-    ) -> _CommandResponse:
+    ) -> SandboxCommandState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
@@ -1075,16 +1187,17 @@ class SandboxApiClient:
             credentials=credentials,
             params={"wait": "true" if wait else "false"},
         )
-        return _validate_response(_CommandResponse, data)
+        return _validate_response(_CommandResponse, data).to_command()
 
-    async def query_commands(self, *, session_id: str) -> _CommandsResponse:
+    async def query_commands(self, *, session_id: str) -> list[SandboxCommandState]:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/sessions/{session_id}/cmd", session_id=session_id),
             credentials=credentials,
         )
-        return _validate_response(_CommandsResponse, data)
+        response = _validate_response(_CommandsResponse, data)
+        return [_command_state(command) for command in response.commands]
 
     async def mkdir(
         self,
@@ -1144,7 +1257,7 @@ class SandboxApiClient:
         session_id: str,
         command_id: str,
         signal: int,
-    ) -> _CommandResponse:
+    ) -> SandboxCommandState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -1156,7 +1269,7 @@ class SandboxApiClient:
             credentials=credentials,
             body={"signal": signal},
         )
-        return _validate_response(_CommandResponse, data)
+        return _validate_response(_CommandResponse, data).to_command()
 
     async def command_logs_response(
         self,

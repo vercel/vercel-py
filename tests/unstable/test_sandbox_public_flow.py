@@ -11,9 +11,10 @@ import respx
 from pydantic import BaseModel, ValidationError
 
 from vercel import unstable as vercel
-from vercel._internal.unstable.context import get_active_session
+from vercel._internal.unstable.context import get_active_session, get_active_sync_session
 from vercel._internal.unstable.errors import VercelSessionClosedError
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
+from vercel._internal.unstable.sandbox.state import SandboxRuntimeSessionState, SandboxState
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
     GitSource,
@@ -287,6 +288,108 @@ async def test_public_create_rejects_terminal_initial_state(mock_env_clear: None
     assert exc_info.value.status is SandboxStatus.STOPPED
     assert isinstance(exc_info.value.sandbox, sandbox.Sandbox)
     assert exc_info.value.sandbox.name == "preview"
+
+
+@respx.mock
+def test_sync_create_terminal_error_contains_sync_handle(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(status="stopped", session_status="stopped"),
+        )
+    )
+
+    with vercel.session(service_options=_session_options()):
+        with pytest.raises(SandboxTerminalStateError) as exc_info:
+            sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+
+    assert exc_info.value.status is SandboxStatus.STOPPED
+    assert isinstance(exc_info.value.sandbox, sandbox_sync.SyncSandbox)
+    assert exc_info.value.sandbox.name == "preview"
+
+
+@respx.mock
+async def test_service_returns_neutral_state_and_async_client_binds_handles(
+    mock_env_clear: None,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+        return_value=httpx.Response(
+            201,
+            json={**_snapshot_response(), "session": _sandbox_response()["session"]},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sandboxes": [_sandbox_response()["sandbox"]], "pagination": {"count": 1}},
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        client = get_active_session().sandbox_service()
+        state = await client.service.get_sandbox(name="preview")
+        assert isinstance(state, SandboxState)
+        assert isinstance(state.current_session, SandboxRuntimeSessionState)
+        page_state = await client.service.query_sandboxes_page()
+        assert isinstance(page_state.sandboxes[0], SandboxState)
+
+        handle = await client.get_sandbox(name="preview")
+        assert isinstance(handle, sandbox.Sandbox)
+        assert isinstance(handle.current_session, sandbox.SandboxRuntimeSession)
+        assert isinstance(await handle.start_command("python"), sandbox.SandboxCommand)
+        assert isinstance(await handle.snapshot(), sandbox.Snapshot)
+        page = await client.query_sandboxes_page()
+        assert isinstance(page.sandboxes[0], sandbox.Sandbox)
+
+
+@respx.mock
+def test_sync_client_binds_only_sync_handles(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+        return_value=httpx.Response(
+            201,
+            json={**_snapshot_response(), "session": _sandbox_response()["session"]},
+        )
+    )
+
+    with vercel.session(service_options=_session_options()):
+        handle = get_active_sync_session().sandbox_service().get_sandbox(name="preview")
+        assert isinstance(handle, sandbox_sync.SyncSandbox)
+        assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
+        assert isinstance(handle.start_command("python"), sandbox_sync.SyncSandboxCommand)
+        assert isinstance(handle.snapshot(), sandbox_sync.SyncSnapshot)
+
+
+@respx.mock
+async def test_session_closure_during_create_polling_is_rejected(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(status="pending", session_status="pending"),
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        session = get_active_session()
+        operation = asyncio.create_task(
+            session.sandbox_service().create_sandbox(name="preview", runtime="python3.13")
+        )
+        await asyncio.sleep(0)
+        await session.aclose()
+
+        with pytest.raises(VercelSessionClosedError):
+            await operation
 
 
 @respx.mock

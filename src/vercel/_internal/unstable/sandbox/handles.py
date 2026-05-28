@@ -2,26 +2,14 @@
 
 import copy
 import signal as signal_module
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
-import httpx
-
-from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.unstable.sandbox.api_client import (
-    _CommandPayload,
-    _RuntimeSessionPayload,
-    _SandboxPayload,
-    _SandboxRoutePayload,
-    _SnapshotPayload,
-)
 from vercel._internal.unstable.sandbox.errors import (
     SandboxCleanupError,
-    SandboxInvalidHandleError,
     SandboxResponseError,
 )
-from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     JSONObject,
@@ -33,11 +21,17 @@ from vercel._internal.unstable.sandbox.models import (
     SnapshotRetention,
     WriteFile,
 )
-from vercel._internal.unstable.session import SdkSession, SyncSdkSession
+from vercel._internal.unstable.sandbox.state import (
+    SandboxCommandState,
+    SandboxRouteState,
+    SandboxRuntimeSessionState,
+    SandboxState,
+    SnapshotState,
+)
 
 if TYPE_CHECKING:
+    from vercel._internal.unstable.sandbox.client import AsyncSandboxClient, SyncSandboxClient
     from vercel._internal.unstable.sandbox.operations import CreateRuntimeSessionOperation
-    from vercel._internal.unstable.sandbox.service import SandboxService
 
 
 def _signal_number(value: int | str | signal_module.Signals | None) -> int:
@@ -70,21 +64,8 @@ def _select_output(
     return "".join(data for source, data in snapshots if stream == "both" or source == stream)
 
 
-def _iter_sync_logs(response_factory: Callable[[], httpx.Response]) -> Iterator[SandboxCommandLog]:
-    response = response_factory()
-    try:
-        for line in response.iter_lines():
-            if not line:
-                continue
-            event = _parse_command_log_record(line)
-            if event is not None:
-                yield event
-    finally:
-        response.close()
-
-
 class _PayloadHandle:
-    __slots__ = ("_payload", "_sdk_session")
+    __slots__ = ("_payload", "_client")
 
 
 class _BaseCommand(_PayloadHandle):
@@ -93,11 +74,11 @@ class _BaseCommand(_PayloadHandle):
     def __init__(
         self,
         *,
-        payload: _CommandPayload,
-        sdk_session: SdkSession | SyncSdkSession,
+        payload: SandboxCommandState,
+        client: "AsyncSandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
-        self._sdk_session = sdk_session
+        self._client = client
         self._log_cache: tuple[_LogSnapshot, ...] | None = None
         self._log_cache_generation = 0
 
@@ -133,34 +114,24 @@ class _BaseCommand(_PayloadHandle):
     def status(self) -> Literal["running", "exited"]:
         return "running" if self._payload.exit_code is None else "exited"
 
-    def _apply_payload(self, payload: _CommandPayload) -> None:
+    def _apply_payload(self, payload: SandboxCommandState) -> None:
         if payload.id != self._payload.id or payload.session_id != self._payload.session_id:
             raise SandboxResponseError(
                 "Sandbox command mutation response returned a different command identity",
-                data=payload.model_dump(by_alias=True),
+                data=payload,
             )
         self._payload = payload
-
-    def _require_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SdkSession):
-            raise SandboxInvalidHandleError(
-                "Sandbox command handle is not attached to an SDK session"
-            )
-        return self._sdk_session.sandbox_service()
-
-    def _require_sync_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SyncSdkSession):
-            raise SandboxInvalidHandleError(
-                "Sandbox command handle is not attached to an SDK session"
-            )
-        return self._sdk_session.sandbox_service()
 
 
 class SandboxCommand(_BaseCommand):
     __slots__ = ()
+    _client: "AsyncSandboxClient"
+
+    def __init__(self, *, payload: SandboxCommandState, client: "AsyncSandboxClient") -> None:
+        super().__init__(payload=payload, client=client)
 
     async def refresh(self, *, wait: bool = False) -> "SandboxCommand":
-        payload = await self._require_sandbox_service().get_command_payload(
+        payload = await self._client.get_command_payload(
             session_id=self.session_id, command_id=self.id, wait=wait
         )
         self._apply_payload(payload)
@@ -172,7 +143,7 @@ class SandboxCommand(_BaseCommand):
     async def kill(
         self, signal: int | str | signal_module.Signals | None = None
     ) -> "SandboxCommand":
-        payload = await self._require_sandbox_service().kill_command_payload(
+        payload = await self._client.kill_command_payload(
             session_id=self.session_id,
             command_id=self.id,
             signal=_signal_number(signal),
@@ -192,7 +163,7 @@ class SandboxCommand(_BaseCommand):
                 self._log_cache_generation += 1
             generation = self._log_cache_generation
             staged: list[_LogSnapshot] = []
-            async for event in self._require_sandbox_service().command_logs(
+            async for event in self._client.command_logs(
                 session_id=self.session_id, command_id=self.id
             ):
                 staged.append((event.stream, event.data))
@@ -217,12 +188,14 @@ class SandboxCommand(_BaseCommand):
 
 class SyncSandboxCommand(_BaseCommand):
     __slots__ = ()
+    _client: "SyncSandboxClient"
+
+    def __init__(self, *, payload: SandboxCommandState, client: "SyncSandboxClient") -> None:
+        super().__init__(payload=payload, client=client)
 
     def refresh(self, *, wait: bool = False) -> "SyncSandboxCommand":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().get_command_payload(
-                session_id=self.session_id, command_id=self.id, wait=wait
-            )
+        payload = self._client.get_command_payload(
+            session_id=self.session_id, command_id=self.id, wait=wait
         )
         self._apply_payload(payload)
         return self
@@ -231,12 +204,10 @@ class SyncSandboxCommand(_BaseCommand):
         return self.refresh(wait=True)
 
     def kill(self, signal: int | str | signal_module.Signals | None = None) -> "SyncSandboxCommand":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().kill_command_payload(
-                session_id=self.session_id,
-                command_id=self.id,
-                signal=_signal_number(signal),
-            )
+        payload = self._client.kill_command_payload(
+            session_id=self.session_id,
+            command_id=self.id,
+            signal=_signal_number(signal),
         )
         self._apply_payload(payload)
         return self
@@ -253,13 +224,7 @@ class SyncSandboxCommand(_BaseCommand):
                 self._log_cache_generation += 1
             generation = self._log_cache_generation
             staged: list[_LogSnapshot] = []
-            for event in _iter_sync_logs(
-                lambda: iter_coroutine(
-                    self._require_sync_sandbox_service().command_logs_response(
-                        session_id=self.session_id, command_id=self.id
-                    )
-                )
-            ):
+            for event in self._client.command_logs(session_id=self.session_id, command_id=self.id):
                 staged.append((event.stream, event.data))
                 yield event
             if generation == self._log_cache_generation:
@@ -286,11 +251,11 @@ class _BaseSnapshot(_PayloadHandle):
     def __init__(
         self,
         *,
-        payload: _SnapshotPayload,
-        sdk_session: SdkSession | SyncSdkSession,
+        payload: SnapshotState,
+        client: "AsyncSandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
-        self._sdk_session = sdk_session
+        self._client = client
 
     @property
     def id(self) -> str:
@@ -336,41 +301,37 @@ class _BaseSnapshot(_PayloadHandle):
     def parent_id(self) -> str | None:
         return self._payload.parent_id
 
-    def _apply_payload(self, payload: _SnapshotPayload) -> None:
+    def _apply_payload(self, payload: SnapshotState) -> None:
         if payload.id != self._payload.id:
             raise SandboxResponseError(
                 "Snapshot mutation response returned a different snapshot identity",
-                data=payload.model_dump(by_alias=True),
+                data=payload,
             )
         self._payload = payload
-
-    def _require_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SdkSession):
-            raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
-        return self._sdk_session.sandbox_service()
-
-    def _require_sync_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SyncSdkSession):
-            raise SandboxInvalidHandleError("Snapshot handle is not attached to an SDK session")
-        return self._sdk_session.sandbox_service()
 
 
 class Snapshot(_BaseSnapshot):
     __slots__ = ()
+    _client: "AsyncSandboxClient"
+
+    def __init__(self, *, payload: SnapshotState, client: "AsyncSandboxClient") -> None:
+        super().__init__(payload=payload, client=client)
 
     async def delete(self) -> "Snapshot":
-        payload = await self._require_sandbox_service().delete_snapshot_payload(snapshot_id=self.id)
+        payload = await self._client.delete_snapshot_payload(snapshot_id=self.id)
         self._apply_payload(payload)
         return self
 
 
 class SyncSnapshot(_BaseSnapshot):
     __slots__ = ()
+    _client: "SyncSandboxClient"
+
+    def __init__(self, *, payload: SnapshotState, client: "SyncSandboxClient") -> None:
+        super().__init__(payload=payload, client=client)
 
     def delete(self) -> "SyncSnapshot":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().delete_snapshot_payload(snapshot_id=self.id)
-        )
+        payload = self._client.delete_snapshot_payload(snapshot_id=self.id)
         self._apply_payload(payload)
         return self
 
@@ -381,11 +342,11 @@ class _BaseRuntimeSession(_PayloadHandle):
     def __init__(
         self,
         *,
-        payload: _RuntimeSessionPayload,
-        sdk_session: SdkSession | SyncSdkSession,
+        payload: SandboxRuntimeSessionState,
+        client: "AsyncSandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
-        self._sdk_session = sdk_session
+        self._client = client
 
     @property
     def id(self) -> str:
@@ -443,27 +404,13 @@ class _BaseRuntimeSession(_PayloadHandle):
     def stopped_at(self) -> int | None:
         return self._payload.stopped_at
 
-    def _apply_payload(self, payload: _RuntimeSessionPayload) -> None:
+    def _apply_payload(self, payload: SandboxRuntimeSessionState) -> None:
         if payload.id != self._payload.id:
             raise SandboxResponseError(
                 "Sandbox runtime-session mutation response returned a different session identity",
-                data=payload.model_dump(by_alias=True),
+                data=payload,
             )
         self._payload = payload
-
-    def _require_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SdkSession):
-            raise SandboxInvalidHandleError(
-                "Sandbox runtime-session handle is not attached to an SDK session"
-            )
-        return self._sdk_session.sandbox_service()
-
-    def _require_sync_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SyncSdkSession):
-            raise SandboxInvalidHandleError(
-                "Sandbox runtime-session handle is not attached to an SDK session"
-            )
-        return self._sdk_session.sandbox_service()
 
     def _write_files_cwd(self, cwd: str | None) -> str:
         return cwd or self.cwd or "/vercel/sandbox"
@@ -471,6 +418,12 @@ class _BaseRuntimeSession(_PayloadHandle):
 
 class SandboxRuntimeSession(_BaseRuntimeSession):
     __slots__ = ()
+    _client: "AsyncSandboxClient"
+
+    def __init__(
+        self, *, payload: SandboxRuntimeSessionState, client: "AsyncSandboxClient"
+    ) -> None:
+        super().__init__(payload=payload, client=client)
 
     async def run_command(
         self,
@@ -481,7 +434,7 @@ class SandboxRuntimeSession(_BaseRuntimeSession):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SandboxCommand:
-        return await self._require_sandbox_service().run_command(
+        return await self._client.run_command(
             session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
         )
 
@@ -494,52 +447,44 @@ class SandboxRuntimeSession(_BaseRuntimeSession):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SandboxCommand:
-        return await self._require_sandbox_service().start_command(
+        return await self._client.start_command(
             session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
         )
 
     async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
-        return await self._require_sandbox_service().get_command(
-            session_id=self.id, command_id=command_id, wait=wait
-        )
+        return await self._client.get_command(session_id=self.id, command_id=command_id, wait=wait)
 
     async def query_commands(self) -> list[SandboxCommand]:
-        return await self._require_sandbox_service().query_commands(session_id=self.id)
+        return await self._client.query_commands(session_id=self.id)
 
     async def refresh(
         self, *, include_system_routes: bool | None = None
     ) -> "SandboxRuntimeSession":
-        payload = await self._require_sandbox_service().get_runtime_session_payload(
+        payload = await self._client.get_runtime_session_payload(
             session_id=self.id, include_system_routes=include_system_routes
         )
         self._apply_payload(payload)
         return self
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> "SandboxRuntimeSession":
-        payload = await self._require_sandbox_service().extend_runtime_session_timeout_payload(
+        payload = await self._client.extend_runtime_session_timeout_payload(
             session_id=self.id, duration=duration
         )
         self._apply_payload(payload)
         return self
 
     async def update_network_policy(self, network_policy: JSONValue) -> "SandboxRuntimeSession":
-        payload = (
-            await self._require_sandbox_service().update_runtime_session_network_policy_payload(
-                session_id=self.id, network_policy=network_policy
-            )
+        payload = await self._client.update_runtime_session_network_policy_payload(
+            session_id=self.id, network_policy=network_policy
         )
         self._apply_payload(payload)
         return self
 
     async def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        await self._require_sandbox_service().mkdir(
-            session_id=self.id, path=path, cwd=cwd, recursive=recursive
-        )
+        await self._client.mkdir(session_id=self.id, path=path, cwd=cwd, recursive=recursive)
 
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return await self._require_sandbox_service().read_file(
-            session_id=self.id, path=path, cwd=cwd
-        )
+        return await self._client.read_file(session_id=self.id, path=path, cwd=cwd)
 
     async def read_text(
         self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
@@ -549,35 +494,34 @@ class SandboxRuntimeSession(_BaseRuntimeSession):
     async def write_files(
         self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
     ) -> None:
-        await self._require_sandbox_service().write_files(
+        await self._client.write_files(
             session_id=self.id, files=files, cwd=self._write_files_cwd(cwd), encoding=encoding
         )
 
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
-        snapshot, payload = await self._require_sandbox_service().create_snapshot_for_session(
+        snapshot, payload = await self._client.create_snapshot_for_session(
             session_id=self.id, expiration=expiration
         )
         self._apply_payload(payload)
         return snapshot
 
     def command_logs(self, command_id: str) -> AsyncIterator[SandboxCommandLog]:
-        return self._require_sandbox_service().command_logs(
-            session_id=self.id, command_id=command_id
-        )
+        return self._client.command_logs(session_id=self.id, command_id=command_id)
 
     async def stop(self) -> "SandboxRuntimeSession":
-        payload = await self._require_sandbox_service().stop_runtime_session_payload(
-            session_id=self.id
-        )
+        payload = await self._client.stop_runtime_session_payload(session_id=self.id)
         self._apply_payload(payload)
         return self
 
 
 class SyncSandboxRuntimeSession(_BaseRuntimeSession):
     __slots__ = ()
+    _client: "SyncSandboxClient"
+
+    def __init__(self, *, payload: SandboxRuntimeSessionState, client: "SyncSandboxClient") -> None:
+        super().__init__(payload=payload, client=client)
 
     def __enter__(self) -> "SyncSandboxRuntimeSession":
-        self._require_sync_sandbox_service()
         return self
 
     def __exit__(
@@ -587,11 +531,7 @@ class SyncSandboxRuntimeSession(_BaseRuntimeSession):
         traceback: TracebackType | None,
     ) -> None:
         try:
-            payload = iter_coroutine(
-                self._require_sync_sandbox_service().stop_runtime_session_payload(
-                    session_id=self.id
-                )
-            )
+            payload = self._client.stop_runtime_session_payload(session_id=self.id)
             self._apply_payload(payload)
         except Exception as cleanup_exc:
             raise SandboxCleanupError(
@@ -610,13 +550,8 @@ class SyncSandboxRuntimeSession(_BaseRuntimeSession):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SyncSandboxCommand:
-        return cast(
-            SyncSandboxCommand,
-            iter_coroutine(
-                self._require_sync_sandbox_service().run_command(
-                    session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
-                )
-            ),
+        return self._client.run_command(
+            session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
         )
 
     def start_command(
@@ -628,69 +563,42 @@ class SyncSandboxRuntimeSession(_BaseRuntimeSession):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SyncSandboxCommand:
-        return cast(
-            SyncSandboxCommand,
-            iter_coroutine(
-                self._require_sync_sandbox_service().start_command(
-                    session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
-                )
-            ),
+        return self._client.start_command(
+            session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
         )
 
     def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
-        return cast(
-            SyncSandboxCommand,
-            iter_coroutine(
-                self._require_sync_sandbox_service().get_command(
-                    session_id=self.id, command_id=command_id, wait=wait
-                )
-            ),
-        )
+        return self._client.get_command(session_id=self.id, command_id=command_id, wait=wait)
 
     def query_commands(self) -> list[SyncSandboxCommand]:
-        return cast(
-            list[SyncSandboxCommand],
-            iter_coroutine(self._require_sync_sandbox_service().query_commands(session_id=self.id)),
-        )
+        return self._client.query_commands(session_id=self.id)
 
     def refresh(self, *, include_system_routes: bool | None = None) -> "SyncSandboxRuntimeSession":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().get_runtime_session_payload(
-                session_id=self.id, include_system_routes=include_system_routes
-            )
+        payload = self._client.get_runtime_session_payload(
+            session_id=self.id, include_system_routes=include_system_routes
         )
         self._apply_payload(payload)
         return self
 
     def extend_execution_time_limit(self, duration: DurationInput) -> "SyncSandboxRuntimeSession":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().extend_runtime_session_timeout_payload(
-                session_id=self.id, duration=duration
-            )
+        payload = self._client.extend_runtime_session_timeout_payload(
+            session_id=self.id, duration=duration
         )
         self._apply_payload(payload)
         return self
 
     def update_network_policy(self, network_policy: JSONValue) -> "SyncSandboxRuntimeSession":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().update_runtime_session_network_policy_payload(
-                session_id=self.id, network_policy=network_policy
-            )
+        payload = self._client.update_runtime_session_network_policy_payload(
+            session_id=self.id, network_policy=network_policy
         )
         self._apply_payload(payload)
         return self
 
     def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        iter_coroutine(
-            self._require_sync_sandbox_service().mkdir(
-                session_id=self.id, path=path, cwd=cwd, recursive=recursive
-            )
-        )
+        self._client.mkdir(session_id=self.id, path=path, cwd=cwd, recursive=recursive)
 
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return iter_coroutine(
-            self._require_sync_sandbox_service().read_file(session_id=self.id, path=path, cwd=cwd)
-        )
+        return self._client.read_file(session_id=self.id, path=path, cwd=cwd)
 
     def read_text(
         self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
@@ -700,34 +608,22 @@ class SyncSandboxRuntimeSession(_BaseRuntimeSession):
     def write_files(
         self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
     ) -> None:
-        iter_coroutine(
-            self._require_sync_sandbox_service().write_files(
-                session_id=self.id, files=files, cwd=self._write_files_cwd(cwd), encoding=encoding
-            )
+        self._client.write_files(
+            session_id=self.id, files=files, cwd=self._write_files_cwd(cwd), encoding=encoding
         )
 
     def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
-        snapshot, payload = iter_coroutine(
-            self._require_sync_sandbox_service().create_snapshot_for_session(
-                session_id=self.id, expiration=expiration
-            )
+        snapshot, payload = self._client.create_snapshot_for_session(
+            session_id=self.id, expiration=expiration
         )
         self._apply_payload(payload)
-        return cast(SyncSnapshot, snapshot)
+        return snapshot
 
     def command_logs(self, command_id: str) -> Iterator[SandboxCommandLog]:
-        return _iter_sync_logs(
-            lambda: iter_coroutine(
-                self._require_sync_sandbox_service().command_logs_response(
-                    session_id=self.id, command_id=command_id
-                )
-            )
-        )
+        return self._client.command_logs(session_id=self.id, command_id=command_id)
 
     def stop(self) -> "SyncSandboxRuntimeSession":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().stop_runtime_session_payload(session_id=self.id)
-        )
+        payload = self._client.stop_runtime_session_payload(session_id=self.id)
         self._apply_payload(payload)
         return self
 
@@ -736,10 +632,13 @@ class _BaseSandbox(_PayloadHandle):
     __slots__ = ("_current_session",)
 
     def __init__(
-        self, *, payload: _SandboxPayload, sdk_session: SdkSession | SyncSdkSession
+        self,
+        *,
+        payload: SandboxState,
+        client: "AsyncSandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
-        self._sdk_session = sdk_session
+        self._client = client
         self._current_session: SandboxRuntimeSession | SyncSandboxRuntimeSession | None = None
         if payload.current_session is not None:
             self._current_session = self._new_runtime_session(payload.current_session)
@@ -817,7 +716,7 @@ class _BaseSandbox(_PayloadHandle):
         return None if self._payload.tags is None else dict(self._payload.tags)
 
     @property
-    def routes(self) -> tuple[_SandboxRoutePayload, ...]:
+    def routes(self) -> tuple[SandboxRouteState, ...]:
         return self._payload.routes
 
     @property
@@ -829,23 +728,21 @@ class _BaseSandbox(_PayloadHandle):
         return self._current_session
 
     def _new_runtime_session(
-        self, payload: _RuntimeSessionPayload
+        self, payload: SandboxRuntimeSessionState
     ) -> SandboxRuntimeSession | SyncSandboxRuntimeSession:
-        if isinstance(self._sdk_session, SdkSession):
-            return SandboxRuntimeSession(payload=payload, sdk_session=self._sdk_session)
-        return SyncSandboxRuntimeSession(payload=payload, sdk_session=self._sdk_session)
+        raise NotImplementedError
 
-    def _apply_payload(self, payload: _SandboxPayload) -> None:
+    def _apply_payload(self, payload: SandboxState) -> None:
         if payload.name != self._payload.name:
             raise SandboxResponseError(
                 "Sandbox mutation response returned a different sandbox identity",
-                data=payload.model_dump(by_alias=True),
+                data=payload,
             )
         returned_session = payload.current_session
         if returned_session is not None and returned_session.id != payload.current_session_id:
             raise SandboxResponseError(
                 "Sandbox response session does not match current session identity",
-                data=payload.model_dump(by_alias=True),
+                data=payload,
             )
         if returned_session is not None:
             if (
@@ -860,28 +757,18 @@ class _BaseSandbox(_PayloadHandle):
         self._payload = payload
 
     def _apply_current_session_payload(
-        self, payload: _RuntimeSessionPayload
+        self, payload: SandboxRuntimeSessionState
     ) -> SandboxRuntimeSession | SyncSandboxRuntimeSession:
         if payload.id != self.current_session_id:
             raise SandboxResponseError(
                 "Sandbox current-session operation returned a different session identity",
-                data=payload.model_dump(by_alias=True),
+                data=payload,
             )
         if self._current_session is None:
             self._current_session = self._new_runtime_session(payload)
         else:
             self._current_session._apply_payload(payload)
         return self._current_session
-
-    def _require_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SdkSession):
-            raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
-        return self._sdk_session.sandbox_service()
-
-    def _require_sync_sandbox_service(self) -> "SandboxService":
-        if not isinstance(self._sdk_session, SyncSdkSession):
-            raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
-        return self._sdk_session.sandbox_service()
 
     def _write_files_cwd(self, cwd: str | None) -> str:
         if cwd is not None:
@@ -893,6 +780,13 @@ class _BaseSandbox(_PayloadHandle):
 
 class Sandbox(_BaseSandbox):
     __slots__ = ()
+    _client: "AsyncSandboxClient"
+
+    def __init__(self, *, payload: SandboxState, client: "AsyncSandboxClient") -> None:
+        super().__init__(payload=payload, client=client)
+
+    def _new_runtime_session(self, payload: SandboxRuntimeSessionState) -> SandboxRuntimeSession:
+        return SandboxRuntimeSession(payload=payload, client=self._client)
 
     @property
     def current_session(self) -> SandboxRuntimeSession | None:
@@ -901,9 +795,7 @@ class Sandbox(_BaseSandbox):
     def session(self) -> "CreateRuntimeSessionOperation":
         from vercel._internal.unstable.sandbox.operations import create_runtime_session_operation
 
-        if not isinstance(self._sdk_session, SdkSession):
-            raise SandboxInvalidHandleError("Sandbox handle is not attached to an SDK session")
-        return create_runtime_session_operation(sandbox=self, session=self._sdk_session)
+        return create_runtime_session_operation(sandbox=self, client=self._client)
 
     async def run_command(
         self,
@@ -914,7 +806,7 @@ class Sandbox(_BaseSandbox):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SandboxCommand:
-        return await self._require_sandbox_service().run_command(
+        return await self._client.run_command(
             session_id=self.current_session_id,
             command=command,
             args=args,
@@ -932,7 +824,7 @@ class Sandbox(_BaseSandbox):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SandboxCommand:
-        return await self._require_sandbox_service().start_command(
+        return await self._client.start_command(
             session_id=self.current_session_id,
             command=command,
             args=args,
@@ -942,14 +834,12 @@ class Sandbox(_BaseSandbox):
         )
 
     async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
-        return await self._require_sandbox_service().get_command(
+        return await self._client.get_command(
             session_id=self.current_session_id, command_id=command_id, wait=wait
         )
 
     async def query_commands(self) -> list[SandboxCommand]:
-        return await self._require_sandbox_service().query_commands(
-            session_id=self.current_session_id
-        )
+        return await self._client.query_commands(session_id=self.current_session_id)
 
     async def list_sessions(
         self,
@@ -959,7 +849,7 @@ class Sandbox(_BaseSandbox):
         sort_order: str | None = None,
     ) -> list[SandboxRuntimeSession]:
         return (
-            await self._require_sandbox_service().query_sessions_page(
+            await self._client.query_sessions_page(
                 project_id=self.project_id,
                 name=self.name,
                 page_size=page_size,
@@ -976,7 +866,7 @@ class Sandbox(_BaseSandbox):
         sort_order: str | None = None,
     ) -> list[Snapshot]:
         return (
-            await self._require_sandbox_service().query_snapshots_page(
+            await self._client.query_snapshots_page(
                 project_id=self.project_id,
                 name=self.name,
                 page_size=page_size,
@@ -986,28 +876,24 @@ class Sandbox(_BaseSandbox):
         ).snapshots
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> SandboxRuntimeSession:
-        payload = await self._require_sandbox_service().extend_runtime_session_timeout_payload(
+        payload = await self._client.extend_runtime_session_timeout_payload(
             session_id=self.current_session_id, duration=duration
         )
         return cast(SandboxRuntimeSession, self._apply_current_session_payload(payload))
 
     async def update_network_policy(self, network_policy: JSONValue) -> SandboxRuntimeSession:
-        payload = (
-            await self._require_sandbox_service().update_runtime_session_network_policy_payload(
-                session_id=self.current_session_id, network_policy=network_policy
-            )
+        payload = await self._client.update_runtime_session_network_policy_payload(
+            session_id=self.current_session_id, network_policy=network_policy
         )
         return cast(SandboxRuntimeSession, self._apply_current_session_payload(payload))
 
     async def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        await self._require_sandbox_service().mkdir(
+        await self._client.mkdir(
             session_id=self.current_session_id, path=path, cwd=cwd, recursive=recursive
         )
 
     async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return await self._require_sandbox_service().read_file(
-            session_id=self.current_session_id, path=path, cwd=cwd
-        )
+        return await self._client.read_file(session_id=self.current_session_id, path=path, cwd=cwd)
 
     async def read_text(
         self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
@@ -1017,7 +903,7 @@ class Sandbox(_BaseSandbox):
     async def write_files(
         self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
     ) -> None:
-        await self._require_sandbox_service().write_files(
+        await self._client.write_files(
             session_id=self.current_session_id,
             files=files,
             cwd=self._write_files_cwd(cwd),
@@ -1025,14 +911,14 @@ class Sandbox(_BaseSandbox):
         )
 
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
-        snapshot, payload = await self._require_sandbox_service().create_snapshot_for_session(
+        snapshot, payload = await self._client.create_snapshot_for_session(
             session_id=self.current_session_id, expiration=expiration
         )
         self._apply_current_session_payload(payload)
         return snapshot
 
     async def destroy(self) -> "Sandbox":
-        payload = await self._require_sandbox_service().destroy_sandbox_payload(
+        payload = await self._client.destroy_sandbox_payload(
             name=self.name, project_id=self.project_id
         )
         self._apply_payload(payload)
@@ -1053,7 +939,7 @@ class Sandbox(_BaseSandbox):
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
     ) -> "Sandbox":
-        payload = await self._require_sandbox_service().update_sandbox_payload(
+        payload = await self._client.update_sandbox_payload(
             name=self.name,
             project_id=self.project_id,
             runtime=runtime,
@@ -1074,13 +960,21 @@ class Sandbox(_BaseSandbox):
 
 class SyncSandbox(_BaseSandbox):
     __slots__ = ()
+    _client: "SyncSandboxClient"
+
+    def __init__(self, *, payload: SandboxState, client: "SyncSandboxClient") -> None:
+        super().__init__(payload=payload, client=client)
+
+    def _new_runtime_session(
+        self, payload: SandboxRuntimeSessionState
+    ) -> SyncSandboxRuntimeSession:
+        return SyncSandboxRuntimeSession(payload=payload, client=self._client)
 
     @property
     def current_session(self) -> SyncSandboxRuntimeSession | None:
         return cast(SyncSandboxRuntimeSession | None, self._current_session)
 
     def __enter__(self) -> "SyncSandbox":
-        self._require_sync_sandbox_service()
         return self
 
     def __exit__(
@@ -1090,10 +984,8 @@ class SyncSandbox(_BaseSandbox):
         traceback: TracebackType | None,
     ) -> None:
         try:
-            payload = iter_coroutine(
-                self._require_sync_sandbox_service().destroy_sandbox_payload(
-                    name=self.name, project_id=self.project_id
-                )
+            payload = self._client.destroy_sandbox_payload(
+                name=self.name, project_id=self.project_id
             )
             self._apply_payload(payload)
         except Exception as cleanup_exc:
@@ -1105,14 +997,7 @@ class SyncSandbox(_BaseSandbox):
             ) from cleanup_exc
 
     def session(self) -> SyncSandboxRuntimeSession:
-        return cast(
-            SyncSandboxRuntimeSession,
-            iter_coroutine(
-                self._require_sync_sandbox_service().create_runtime_session(
-                    name=self.name, project_id=self.project_id
-                )
-            ),
-        )
+        return self._client.create_runtime_session(name=self.name, project_id=self.project_id)
 
     def run_command(
         self,
@@ -1123,18 +1008,13 @@ class SyncSandbox(_BaseSandbox):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SyncSandboxCommand:
-        return cast(
-            SyncSandboxCommand,
-            iter_coroutine(
-                self._require_sync_sandbox_service().run_command(
-                    session_id=self.current_session_id,
-                    command=command,
-                    args=args,
-                    cwd=cwd,
-                    env=env,
-                    sudo=sudo,
-                )
-            ),
+        return self._client.run_command(
+            session_id=self.current_session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
         )
 
     def start_command(
@@ -1146,39 +1026,22 @@ class SyncSandbox(_BaseSandbox):
         env: dict[str, str] | None = None,
         sudo: bool = False,
     ) -> SyncSandboxCommand:
-        return cast(
-            SyncSandboxCommand,
-            iter_coroutine(
-                self._require_sync_sandbox_service().start_command(
-                    session_id=self.current_session_id,
-                    command=command,
-                    args=args,
-                    cwd=cwd,
-                    env=env,
-                    sudo=sudo,
-                )
-            ),
+        return self._client.start_command(
+            session_id=self.current_session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
         )
 
     def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
-        return cast(
-            SyncSandboxCommand,
-            iter_coroutine(
-                self._require_sync_sandbox_service().get_command(
-                    session_id=self.current_session_id, command_id=command_id, wait=wait
-                )
-            ),
+        return self._client.get_command(
+            session_id=self.current_session_id, command_id=command_id, wait=wait
         )
 
     def query_commands(self) -> list[SyncSandboxCommand]:
-        return cast(
-            list[SyncSandboxCommand],
-            iter_coroutine(
-                self._require_sync_sandbox_service().query_commands(
-                    session_id=self.current_session_id
-                )
-            ),
-        )
+        return self._client.query_commands(session_id=self.current_session_id)
 
     def list_sessions(
         self,
@@ -1187,16 +1050,14 @@ class SyncSandbox(_BaseSandbox):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[SyncSandboxRuntimeSession]:
-        page = iter_coroutine(
-            self._require_sync_sandbox_service().query_sessions_page(
-                project_id=self.project_id,
-                name=self.name,
-                page_size=page_size,
-                cursor=cursor,
-                sort_order=sort_order,
-            )
+        page = self._client.query_sessions_page(
+            project_id=self.project_id,
+            name=self.name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
         )
-        return cast(list[SyncSandboxRuntimeSession], page.sessions)
+        return page.sessions
 
     def list_snapshots(
         self,
@@ -1205,46 +1066,34 @@ class SyncSandbox(_BaseSandbox):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[SyncSnapshot]:
-        page = iter_coroutine(
-            self._require_sync_sandbox_service().query_snapshots_page(
-                project_id=self.project_id,
-                name=self.name,
-                page_size=page_size,
-                cursor=cursor,
-                sort_order=sort_order,
-            )
+        page = self._client.query_snapshots_page(
+            project_id=self.project_id,
+            name=self.name,
+            page_size=page_size,
+            cursor=cursor,
+            sort_order=sort_order,
         )
-        return cast(list[SyncSnapshot], page.snapshots)
+        return page.snapshots
 
     def extend_execution_time_limit(self, duration: DurationInput) -> SyncSandboxRuntimeSession:
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().extend_runtime_session_timeout_payload(
-                session_id=self.current_session_id, duration=duration
-            )
+        payload = self._client.extend_runtime_session_timeout_payload(
+            session_id=self.current_session_id, duration=duration
         )
         return cast(SyncSandboxRuntimeSession, self._apply_current_session_payload(payload))
 
     def update_network_policy(self, network_policy: JSONValue) -> SyncSandboxRuntimeSession:
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().update_runtime_session_network_policy_payload(
-                session_id=self.current_session_id, network_policy=network_policy
-            )
+        payload = self._client.update_runtime_session_network_policy_payload(
+            session_id=self.current_session_id, network_policy=network_policy
         )
         return cast(SyncSandboxRuntimeSession, self._apply_current_session_payload(payload))
 
     def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        iter_coroutine(
-            self._require_sync_sandbox_service().mkdir(
-                session_id=self.current_session_id, path=path, cwd=cwd, recursive=recursive
-            )
+        self._client.mkdir(
+            session_id=self.current_session_id, path=path, cwd=cwd, recursive=recursive
         )
 
     def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return iter_coroutine(
-            self._require_sync_sandbox_service().read_file(
-                session_id=self.current_session_id, path=path, cwd=cwd
-            )
-        )
+        return self._client.read_file(session_id=self.current_session_id, path=path, cwd=cwd)
 
     def read_text(
         self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
@@ -1254,30 +1103,22 @@ class SyncSandbox(_BaseSandbox):
     def write_files(
         self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
     ) -> None:
-        iter_coroutine(
-            self._require_sync_sandbox_service().write_files(
-                session_id=self.current_session_id,
-                files=files,
-                cwd=self._write_files_cwd(cwd),
-                encoding=encoding,
-            )
+        self._client.write_files(
+            session_id=self.current_session_id,
+            files=files,
+            cwd=self._write_files_cwd(cwd),
+            encoding=encoding,
         )
 
     def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
-        snapshot, payload = iter_coroutine(
-            self._require_sync_sandbox_service().create_snapshot_for_session(
-                session_id=self.current_session_id, expiration=expiration
-            )
+        snapshot, payload = self._client.create_snapshot_for_session(
+            session_id=self.current_session_id, expiration=expiration
         )
         self._apply_current_session_payload(payload)
-        return cast(SyncSnapshot, snapshot)
+        return snapshot
 
     def destroy(self) -> "SyncSandbox":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().destroy_sandbox_payload(
-                name=self.name, project_id=self.project_id
-            )
-        )
+        payload = self._client.destroy_sandbox_payload(name=self.name, project_id=self.project_id)
         self._apply_payload(payload)
         return self
 
@@ -1296,22 +1137,20 @@ class SyncSandbox(_BaseSandbox):
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
     ) -> "SyncSandbox":
-        payload = iter_coroutine(
-            self._require_sync_sandbox_service().update_sandbox_payload(
-                name=self.name,
-                project_id=self.project_id,
-                runtime=runtime,
-                ports=ports,
-                execution_time_limit=execution_time_limit,
-                resources=resources,
-                persistent=persistent,
-                network_policy=network_policy,
-                env=env,
-                tags=tags,
-                snapshot_expiration=snapshot_expiration,
-                snapshot_retention=snapshot_retention,
-                current_snapshot_id=current_snapshot_id,
-            )
+        payload = self._client.update_sandbox_payload(
+            name=self.name,
+            project_id=self.project_id,
+            runtime=runtime,
+            ports=ports,
+            execution_time_limit=execution_time_limit,
+            resources=resources,
+            persistent=persistent,
+            network_policy=network_policy,
+            env=env,
+            tags=tags,
+            snapshot_expiration=snapshot_expiration,
+            snapshot_retention=snapshot_retention,
+            current_snapshot_id=current_snapshot_id,
         )
         self._apply_payload(payload)
         return self

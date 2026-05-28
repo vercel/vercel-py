@@ -1,31 +1,31 @@
 """Pagination helpers for unstable sandbox APIs."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from vercel._internal.unstable.sandbox.handles import Sandbox, SandboxRuntimeSession, Snapshot
+from typing import Generic, TypeVar
 
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50
 MAX_QUERY_SNAPSHOTS_PAGE_SIZE = 50
 
 
+PageItemT = TypeVar("PageItemT")
+
+
 @dataclass(frozen=True, slots=True)
-class QuerySandboxesPage:
-    sandboxes: list["Sandbox"]
+class QuerySandboxesPage(Generic[PageItemT]):
+    sandboxes: list[PageItemT]
     next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
-class QuerySessionsPage:
-    sessions: list["SandboxRuntimeSession"]
+class QuerySessionsPage(Generic[PageItemT]):
+    sessions: list[PageItemT]
     next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
-class QuerySnapshotsPage:
-    snapshots: list["Snapshot"]
+class QuerySnapshotsPage(Generic[PageItemT]):
+    snapshots: list[PageItemT]
     next_cursor: str | None
 
 

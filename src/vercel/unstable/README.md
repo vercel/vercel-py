@@ -37,6 +37,9 @@ contract.
 - Handles can issue requests only while their originating SDK session is open.
 - Async is primary. Sync support mirrors each domain under that domain package,
   for example `vercel.unstable.sandbox.sync`.
+- Internally, Sandbox endpoint responses become immutable domain state before
+  shared async orchestration runs. Runtime-bound async and sync clients turn
+  that state into their matching public handles.
 
 ## Primary Async Shape
 

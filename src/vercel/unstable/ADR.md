@@ -60,6 +60,16 @@ Module functions make common usage direct while preserving strict typing and
 domain package boundaries. They also keep SDK sessions as runtime context
 rather than user-facing service factories.
 
+Implementation note:
+
+Sandbox wire responses are validated and converted into immutable neutral
+domain state in its endpoint API client. `SandboxService` performs shared
+async-first domain orchestration over that state, including polling and
+compound results, without constructing public handles. Runtime-bound
+`AsyncSandboxClient` and `SyncSandboxClient` instances construct their matching
+public handles and consume command-log streams; only the sync binding client
+uses `iter_coroutine()` to drive shared service operations.
+
 ## Decision 3: Mode-specific Default Sessions And Scoped Overrides
 
 The SDK has separate process default sessions for async and sync APIs:
