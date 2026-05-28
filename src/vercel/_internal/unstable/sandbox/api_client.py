@@ -143,16 +143,13 @@ class SandboxApiClient:
         credentials_factory: SandboxCredentialsFactory,
         transport: BaseTransport,
     ) -> None:
-        self.credentials_factory = credentials_factory
+        self._credentials_factory = credentials_factory
         self._base_url = base_url
         self._transport = transport
 
     @property
     def base_url(self) -> str:
         return self._base_url
-
-    async def _resolve_credentials(self) -> SandboxCredentials:
-        return await self.credentials_factory()
 
     async def _request_response(
         self,
@@ -302,7 +299,7 @@ class SandboxApiClient:
         snapshot_expiration: DurationInput = None,
         snapshot_retention: SnapshotRetention | None = None,
     ) -> SandboxResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = CreateSandboxRequest(
             project_id=project_id or credentials.project_id,
             name=name,
@@ -331,7 +328,7 @@ class SandboxApiClient:
         resume: bool = True,
         include_system_routes: bool | None = None,
     ) -> SandboxResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = GetSandboxRequest(
             project_id=project_id or credentials.project_id,
             resume=resume,
@@ -356,7 +353,7 @@ class SandboxApiClient:
         name_prefix: str | None = None,
         tags: Sequence[TagFilter] | None = None,
     ) -> _QuerySandboxesResult:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
         request = QuerySandboxesRequest(
             project_id=effective_project_id,
@@ -384,7 +381,7 @@ class SandboxApiClient:
         name: str,
         project_id: str | None = None,
     ) -> SandboxResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
             format_url_path("v2/sandboxes/{name}", name=name),
@@ -410,7 +407,7 @@ class SandboxApiClient:
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
     ) -> SandboxResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = UpdateSandboxRequest(
             runtime=runtime,
             ports=ports,
@@ -449,7 +446,7 @@ class SandboxApiClient:
         )
 
     async def stop_runtime_session(self, *, session_id: str) -> SandboxResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/stop", session_id=session_id),
@@ -467,7 +464,7 @@ class SandboxApiClient:
         session_id: str,
         include_system_routes: bool | None = None,
     ) -> RuntimeSessionResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/sessions/{session_id}", session_id=session_id),
@@ -493,7 +490,7 @@ class SandboxApiClient:
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> RuntimeSessionsResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = QuerySessionsRequest(
             project_id=project_id or credentials.project_id,
             name=name,
@@ -515,7 +512,7 @@ class SandboxApiClient:
         session_id: str,
         duration: DurationInput,
     ) -> RuntimeSessionResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = ExtendTimeoutRequest(duration=duration)
         data = await self._request_json(
             "POST",
@@ -534,7 +531,7 @@ class SandboxApiClient:
         session_id: str,
         network_policy: JSONValue,
     ) -> RuntimeSessionResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
             format_url_path(
@@ -552,7 +549,7 @@ class SandboxApiClient:
         session_id: str,
         expiration: DurationInput = None,
     ) -> CreateSnapshotResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         body: JSONValue | None = None
         if expiration is not None:
             request = CreateSnapshotRequest(expiration=expiration)
@@ -574,7 +571,7 @@ class SandboxApiClient:
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> SnapshotsResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = QuerySnapshotsRequest(
             project_id=project_id or credentials.project_id,
             name=name,
@@ -591,7 +588,7 @@ class SandboxApiClient:
         return _validate_response(SnapshotsResponse, data)
 
     async def get_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
@@ -600,7 +597,7 @@ class SandboxApiClient:
         return _validate_response(SnapshotResponse, data)
 
     async def delete_snapshot(self, *, snapshot_id: str) -> SnapshotResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
             format_url_path("v2/sandboxes/snapshots/{snapshot_id}", snapshot_id=snapshot_id),
@@ -618,7 +615,7 @@ class SandboxApiClient:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
     ) -> CommandResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = RunCommandRequest(
             command=command,
             args=args or [],
@@ -641,7 +638,7 @@ class SandboxApiClient:
         command_id: str,
         wait: bool = True,
     ) -> CommandResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path(
@@ -655,7 +652,7 @@ class SandboxApiClient:
         return _validate_response(CommandResponse, data)
 
     async def query_commands(self, *, session_id: str) -> CommandsResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
             format_url_path("v2/sandboxes/sessions/{session_id}/cmd", session_id=session_id),
@@ -671,7 +668,7 @@ class SandboxApiClient:
         cwd: str | None = None,
         recursive: bool = True,
     ) -> None:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = MkdirRequest(path=path, cwd=cwd, recursive=recursive)
         await self._request_empty(
             "POST",
@@ -687,7 +684,7 @@ class SandboxApiClient:
         path: str,
         cwd: str | None = None,
     ) -> bytes:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         request = FilesystemPathRequest(path=path, cwd=cwd)
         return await self._request_bytes(
             "POST",
@@ -704,7 +701,7 @@ class SandboxApiClient:
         cwd: str,
         encoding: str = "utf-8",
     ) -> None:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         payload = _build_write_files_tarball(files, cwd=cwd, encoding=encoding)
         await self._request_empty(
             "POST",
@@ -721,7 +718,7 @@ class SandboxApiClient:
         command_id: str,
         signal: int,
     ) -> CommandResponse:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
             format_url_path(
@@ -740,7 +737,7 @@ class SandboxApiClient:
         session_id: str,
         command_id: str,
     ) -> Response:
-        credentials = await self._resolve_credentials()
+        credentials = await self._credentials_factory()
         query = cast(
             QueryParamTypes,
             _drop_none({"teamId": credentials.team_id}),
