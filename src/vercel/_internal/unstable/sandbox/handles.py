@@ -30,7 +30,7 @@ from vercel._internal.unstable.sandbox.state import (
 )
 
 if TYPE_CHECKING:
-    from vercel._internal.unstable.sandbox.client import AsyncSandboxClient, SyncSandboxClient
+    from vercel._internal.unstable.sandbox.client import SandboxClient, SyncSandboxClient
     from vercel._internal.unstable.sandbox.operations import CreateRuntimeSessionOperation
 
 
@@ -75,7 +75,7 @@ class _BaseCommand(_PayloadHandle):
         self,
         *,
         payload: SandboxCommandState,
-        client: "AsyncSandboxClient | SyncSandboxClient",
+        client: "SandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
         self._client = client
@@ -125,9 +125,9 @@ class _BaseCommand(_PayloadHandle):
 
 class SandboxCommand(_BaseCommand):
     __slots__ = ()
-    _client: "AsyncSandboxClient"
+    _client: "SandboxClient"
 
-    def __init__(self, *, payload: SandboxCommandState, client: "AsyncSandboxClient") -> None:
+    def __init__(self, *, payload: SandboxCommandState, client: "SandboxClient") -> None:
         super().__init__(payload=payload, client=client)
 
     async def refresh(self, *, wait: bool = False) -> "SandboxCommand":
@@ -252,7 +252,7 @@ class _BaseSnapshot(_PayloadHandle):
         self,
         *,
         payload: SnapshotState,
-        client: "AsyncSandboxClient | SyncSandboxClient",
+        client: "SandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
         self._client = client
@@ -312,9 +312,9 @@ class _BaseSnapshot(_PayloadHandle):
 
 class Snapshot(_BaseSnapshot):
     __slots__ = ()
-    _client: "AsyncSandboxClient"
+    _client: "SandboxClient"
 
-    def __init__(self, *, payload: SnapshotState, client: "AsyncSandboxClient") -> None:
+    def __init__(self, *, payload: SnapshotState, client: "SandboxClient") -> None:
         super().__init__(payload=payload, client=client)
 
     async def delete(self) -> "Snapshot":
@@ -343,7 +343,7 @@ class _BaseRuntimeSession(_PayloadHandle):
         self,
         *,
         payload: SandboxRuntimeSessionState,
-        client: "AsyncSandboxClient | SyncSandboxClient",
+        client: "SandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
         self._client = client
@@ -418,10 +418,10 @@ class _BaseRuntimeSession(_PayloadHandle):
 
 class SandboxRuntimeSession(_BaseRuntimeSession):
     __slots__ = ()
-    _client: "AsyncSandboxClient"
+    _client: "SandboxClient"
 
     def __init__(
-        self, *, payload: SandboxRuntimeSessionState, client: "AsyncSandboxClient"
+        self, *, payload: SandboxRuntimeSessionState, client: "SandboxClient"
     ) -> None:
         super().__init__(payload=payload, client=client)
 
@@ -635,7 +635,7 @@ class _BaseSandbox(_PayloadHandle):
         self,
         *,
         payload: SandboxState,
-        client: "AsyncSandboxClient | SyncSandboxClient",
+        client: "SandboxClient | SyncSandboxClient",
     ) -> None:
         self._payload = payload
         self._client = client
@@ -780,9 +780,9 @@ class _BaseSandbox(_PayloadHandle):
 
 class Sandbox(_BaseSandbox):
     __slots__ = ()
-    _client: "AsyncSandboxClient"
+    _client: "SandboxClient"
 
-    def __init__(self, *, payload: SandboxState, client: "AsyncSandboxClient") -> None:
+    def __init__(self, *, payload: SandboxState, client: "SandboxClient") -> None:
         super().__init__(payload=payload, client=client)
 
     def _new_runtime_session(self, payload: SandboxRuntimeSessionState) -> SandboxRuntimeSession:

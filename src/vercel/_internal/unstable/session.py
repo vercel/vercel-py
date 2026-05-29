@@ -14,7 +14,7 @@ from vercel._internal.unstable.options import ServiceOptions, merge_service_opti
 
 if TYPE_CHECKING:
     from vercel._internal.http import AsyncTransport, SyncTransport
-    from vercel._internal.unstable.sandbox.client import AsyncSandboxClient, SyncSandboxClient
+    from vercel._internal.unstable.sandbox.client import SandboxClient, SyncSandboxClient
 
 ServiceOptionsT = TypeVar("ServiceOptionsT", bound=ServiceOptions)
 HttpxClientFactory = Callable[[], httpx.AsyncClient] | Callable[[], httpx.Client]
@@ -148,17 +148,17 @@ class SdkSession(_BaseSdkSession):
         self._transport = AsyncTransport(client)
         return self._transport
 
-    def sandbox_service(self) -> "AsyncSandboxClient":
+    def sandbox_service(self) -> "SandboxClient":
         self.check_open()
 
         from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-        from vercel._internal.unstable.sandbox.client import AsyncSandboxClient
+        from vercel._internal.unstable.sandbox.client import SandboxClient
         from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
         from vercel._internal.unstable.sandbox.service import SandboxService
 
-        cached = self._service_cache.get(AsyncSandboxClient)
+        cached = self._service_cache.get(SandboxClient)
         if cached is not None:
-            return cast(AsyncSandboxClient, cached)
+            return cast(SandboxClient, cached)
         options = self.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
         service = SandboxService(
             api_client=SandboxApiClient(
@@ -169,8 +169,8 @@ class SdkSession(_BaseSdkSession):
             options=options,
             ensure_open=self.check_open,
         )
-        client = AsyncSandboxClient(service)
-        self._service_cache[AsyncSandboxClient] = client
+        client = SandboxClient(service)
+        self._service_cache[SandboxClient] = client
         return client
 
     async def aclose(self) -> None:

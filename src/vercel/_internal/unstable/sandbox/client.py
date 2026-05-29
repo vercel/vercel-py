@@ -42,7 +42,7 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
     )
 
 
-class AsyncSandboxClient:
+class SandboxClient:
     """Bind neutral service results to async public handles."""
 
     def __init__(self, service: SandboxService) -> None:

@@ -7,7 +7,7 @@ from types import TracebackType
 from typing import Any
 
 from vercel._internal.unstable.context import get_active_session
-from vercel._internal.unstable.sandbox.client import AsyncSandboxClient
+from vercel._internal.unstable.sandbox.client import SandboxClient
 from vercel._internal.unstable.sandbox.errors import SandboxCleanupError
 from vercel._internal.unstable.sandbox.handles import Sandbox, SandboxRuntimeSession
 from vercel._internal.unstable.sandbox.models import (
@@ -37,7 +37,7 @@ class _CreateSandboxParams:
 
 
 class CreateSandboxOperation:
-    def __init__(self, *, client: AsyncSandboxClient, params: _CreateSandboxParams) -> None:
+    def __init__(self, *, client: SandboxClient, params: _CreateSandboxParams) -> None:
         self._client = client
         self._params = params
         self._consumed = False
@@ -109,7 +109,7 @@ class CreateSandboxOperation:
 
 
 class CreateRuntimeSessionOperation:
-    def __init__(self, *, client: AsyncSandboxClient, sandbox: Sandbox) -> None:
+    def __init__(self, *, client: SandboxClient, sandbox: Sandbox) -> None:
         self._client = client
         self._sandbox = sandbox
         self._consumed = False
@@ -199,6 +199,6 @@ def create_sandbox_operation(
 def create_runtime_session_operation(
     *,
     sandbox: Sandbox,
-    client: AsyncSandboxClient,
+    client: SandboxClient,
 ) -> CreateRuntimeSessionOperation:
     return CreateRuntimeSessionOperation(sandbox=sandbox, client=client)
