@@ -3,18 +3,26 @@
 import asyncio
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextvars import Token
+from contextvars import ContextVar, Token
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, overload
+from typing import Any, ClassVar, TypeVar, cast, overload
 
 import httpx
 
+from vercel._internal.http import (
+    DEFAULT_TIMEOUT,
+    AsyncTransport,
+    SyncTransport,
+    TransportOptions,
+    create_base_async_client,
+    create_base_client,
+)
+from vercel._internal.polyfills import Self
 from vercel._internal.unstable.errors import VercelSessionClosedError, VercelSessionError
 from vercel._internal.unstable.options import ServiceOptions, merge_service_options
-
-if TYPE_CHECKING:
-    from vercel._internal.http import AsyncTransport, SyncTransport
-    from vercel._internal.unstable.sandbox.client import SandboxClient, SyncSandboxClient
+from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
+from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+from vercel._internal.unstable.sandbox.service import SandboxService
 
 ServiceOptionsT = TypeVar("ServiceOptionsT", bound=ServiceOptions)
 HttpxClientFactory = Callable[[], httpx.AsyncClient] | Callable[[], httpx.Client]
@@ -88,41 +96,37 @@ class SdkSession(_BaseSdkSession):
         self._transport: AsyncTransport | None = None
 
     @classmethod
-    def default(cls) -> "SdkSession":
+    def default(cls) -> Self:
         if cls._default is None:
             cls._default = cls()
-        return cls._default
+        return cast(Self, cls._default)
 
     @classmethod
     def scoped(
         cls,
         *,
-        parent: "SdkSession",
+        parent: Self,
         service_options: Sequence[ServiceOptions] | None,
         httpx_client_factory: HttpxClientFactory | None | object = _UNSET,
-    ) -> "SdkSession":
+    ) -> Self:
         parent.check_open()
         factory = (
             parent._httpx_client_factory
             if httpx_client_factory is _UNSET
             else cast(HttpxClientFactory | None, httpx_client_factory)
         )
-        return cls(
-            service_options=merge_service_options(parent._service_options, service_options),
-            httpx_client_factory=factory,
+        return cast(
+            Self,
+            cls(
+                service_options=merge_service_options(parent._service_options, service_options),
+                httpx_client_factory=factory,
+            ),
         )
 
-    def _get_transport(self) -> "AsyncTransport":
+    def _get_transport(self) -> AsyncTransport:
         self.check_open()
         if self._transport is not None:
             return self._transport
-
-        from vercel._internal.http import (
-            DEFAULT_TIMEOUT,
-            AsyncTransport,
-            TransportOptions,
-            create_base_async_client,
-        )
 
         if self._httpx_client_factory is None:
             client = create_base_async_client(
@@ -148,17 +152,12 @@ class SdkSession(_BaseSdkSession):
         self._transport = AsyncTransport(client)
         return self._transport
 
-    def sandbox_service(self) -> "SandboxClient":
+    def sandbox_service(self) -> SandboxService:
         self.check_open()
 
-        from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-        from vercel._internal.unstable.sandbox.client import SandboxClient
-        from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
-        from vercel._internal.unstable.sandbox.service import SandboxService
-
-        cached = self._service_cache.get(SandboxClient)
+        cached = self._service_cache.get(SandboxService)
         if cached is not None:
-            return cast(SandboxClient, cached)
+            return cast(SandboxService, cached)
         options = self.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
         service = SandboxService(
             api_client=SandboxApiClient(
@@ -169,9 +168,8 @@ class SdkSession(_BaseSdkSession):
             options=options,
             ensure_open=self.check_open,
         )
-        client = SandboxClient(service)
-        self._service_cache[SandboxClient] = client
-        return client
+        self._service_cache[SandboxService] = service
+        return service
 
     async def aclose(self) -> None:
         if self._closed:
@@ -201,28 +199,31 @@ class SyncSdkSession(_BaseSdkSession):
         self._transport: SyncTransport | None = None
 
     @classmethod
-    def default(cls) -> "SyncSdkSession":
+    def default(cls) -> Self:
         if cls._default is None:
             cls._default = cls()
-        return cls._default
+        return cast(Self, cls._default)
 
     @classmethod
     def scoped(
         cls,
         *,
-        parent: "SyncSdkSession",
+        parent: Self,
         service_options: Sequence[ServiceOptions] | None,
         httpx_client_factory: HttpxClientFactory | None | object = _UNSET,
-    ) -> "SyncSdkSession":
+    ) -> Self:
         parent.check_open()
         factory = (
             parent._httpx_client_factory
             if httpx_client_factory is _UNSET
             else cast(HttpxClientFactory | None, httpx_client_factory)
         )
-        return cls(
-            service_options=merge_service_options(parent._service_options, service_options),
-            httpx_client_factory=factory,
+        return cast(
+            Self,
+            cls(
+                service_options=merge_service_options(parent._service_options, service_options),
+                httpx_client_factory=factory,
+            ),
         )
 
     def _close_wrong_async_client(self, client: httpx.AsyncClient) -> None:
@@ -236,17 +237,10 @@ class SyncSdkSession(_BaseSdkSession):
         else:
             loop.create_task(client.aclose())
 
-    def _get_transport(self) -> "SyncTransport":
+    def _get_transport(self) -> SyncTransport:
         self.check_open()
         if self._transport is not None:
             return self._transport
-
-        from vercel._internal.http import (
-            DEFAULT_TIMEOUT,
-            SyncTransport,
-            TransportOptions,
-            create_base_client,
-        )
 
         if self._httpx_client_factory is None:
             client = create_base_client(
@@ -269,17 +263,12 @@ class SyncSdkSession(_BaseSdkSession):
         self._transport = SyncTransport(client)
         return self._transport
 
-    def sandbox_service(self) -> "SyncSandboxClient":
+    def sandbox_service(self) -> SandboxService:
         self.check_open()
 
-        from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-        from vercel._internal.unstable.sandbox.client import SyncSandboxClient
-        from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
-        from vercel._internal.unstable.sandbox.service import SandboxService
-
-        cached = self._service_cache.get(SyncSandboxClient)
+        cached = self._service_cache.get(SandboxService)
         if cached is not None:
-            return cast(SyncSandboxClient, cached)
+            return cast(SandboxService, cached)
         options = self.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
 
         async def sync_sleep(seconds: float) -> None:
@@ -295,9 +284,8 @@ class SyncSdkSession(_BaseSdkSession):
             ensure_open=self.check_open,
             sleep=sync_sleep,
         )
-        client = SyncSandboxClient(service)
-        self._service_cache[SyncSandboxClient] = client
-        return client
+        self._service_cache[SandboxService] = service
+        return service
 
     def close(self) -> None:
         if self._closed:
@@ -307,6 +295,40 @@ class SyncSdkSession(_BaseSdkSession):
         if self._transport is not None:
             self._transport.close()
             self._transport = None
+
+
+_active_session: ContextVar[SdkSession | SyncSdkSession | None] = ContextVar(
+    "vercel_unstable_active_session",
+    default=None,
+)
+
+
+def get_active_session() -> SdkSession:
+    active = _active_session.get()
+    if active is None:
+        return SdkSession.default()
+    if isinstance(active, SyncSdkSession):
+        raise VercelSessionError("Async unstable APIs cannot be used in a sync SDK session")
+    return active
+
+
+def get_active_sync_session() -> SyncSdkSession:
+    active = _active_session.get()
+    if active is None:
+        return SyncSdkSession.default()
+    if isinstance(active, SdkSession):
+        raise VercelSessionError("Sync unstable APIs cannot be used in an async SDK session")
+    return active
+
+
+def bind_active_session(
+    active: SdkSession | SyncSdkSession,
+) -> Token[SdkSession | SyncSdkSession | None]:
+    return _active_session.set(active)
+
+
+def reset_active_session(token: Token[SdkSession | SyncSdkSession | None]) -> None:
+    _active_session.reset(token)
 
 
 class SessionContext:
@@ -323,11 +345,9 @@ class SessionContext:
         self._token: Token[SdkSession | SyncSdkSession | None] | None = None
         self._session: SdkSession | SyncSdkSession | None = None
 
-    def __enter__(self) -> "SessionContext":
+    def __enter__(self) -> Self:
         if self._token is not None:
             raise RuntimeError("vercel.session(...) contexts cannot be re-entered")
-
-        from vercel._internal.unstable.context import bind_active_session, get_active_sync_session
 
         session = SyncSdkSession.scoped(
             parent=get_active_sync_session(),
@@ -347,8 +367,6 @@ class SessionContext:
         if self._token is None or not isinstance(self._session, SyncSdkSession):
             return None
 
-        from vercel._internal.unstable.context import reset_active_session
-
         token = self._token
         session = self._session
         self._token = None
@@ -358,11 +376,9 @@ class SessionContext:
         finally:
             reset_active_session(token)
 
-    async def __aenter__(self) -> "SessionContext":
+    async def __aenter__(self) -> Self:
         if self._token is not None:
             raise RuntimeError("vercel.session(...) contexts cannot be re-entered")
-
-        from vercel._internal.unstable.context import bind_active_session, get_active_session
 
         session = SdkSession.scoped(
             parent=get_active_session(),
@@ -381,8 +397,6 @@ class SessionContext:
     ) -> None:
         if self._token is None or not isinstance(self._session, SdkSession):
             return None
-
-        from vercel._internal.unstable.context import reset_active_session
 
         token = self._token
         session = self._session

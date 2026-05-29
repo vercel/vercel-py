@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator, Mapping
 
-from vercel._internal.unstable.context import get_active_sync_session
+from vercel._internal.unstable.sandbox.async_runtime import SandboxCommand
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -12,13 +12,6 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxResponseError,
     SandboxStreamError,
     SandboxTerminalStateError,
-)
-from vercel._internal.unstable.sandbox.handles import (
-    SandboxCommand,
-    SyncSandbox,
-    SyncSandboxCommand,
-    SyncSandboxRuntimeSession,
-    SyncSnapshot,
 )
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
@@ -41,6 +34,19 @@ from vercel._internal.unstable.sandbox.models import (
     WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+from vercel._internal.unstable.sandbox.sync_runtime import (
+    SyncSandbox,
+    SyncSandboxCommand,
+    SyncSandboxRuntimeSession,
+    SyncSnapshot,
+    create_sandbox as _create_sandbox,
+    get_sandbox as _get_sandbox,
+    get_snapshot as _get_snapshot,
+    query_sandboxes as _query_sandboxes,
+    query_sessions as _query_sessions,
+    query_snapshots as _query_snapshots,
+)
+from vercel._internal.unstable.session import get_active_sync_session
 
 
 def create_sandbox(
@@ -59,24 +65,21 @@ def create_sandbox(
     snapshot_expiration: DurationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
 ) -> SyncSandbox:
-    return (
-        get_active_sync_session()
-        .sandbox_service()
-        .create_sandbox(
-            project_id=project_id,
-            name=name,
-            runtime=runtime,
-            source=source,
-            ports=ports,
-            execution_time_limit=execution_time_limit,
-            resources=resources,
-            persistent=persistent,
-            network_policy=network_policy,
-            env=env,
-            tags=tags,
-            snapshot_expiration=snapshot_expiration,
-            snapshot_retention=snapshot_retention,
-        )
+    return _create_sandbox(
+        get_active_sync_session().sandbox_service(),
+        project_id=project_id,
+        name=name,
+        runtime=runtime,
+        source=source,
+        ports=ports,
+        execution_time_limit=execution_time_limit,
+        resources=resources,
+        persistent=persistent,
+        network_policy=network_policy,
+        env=env,
+        tags=tags,
+        snapshot_expiration=snapshot_expiration,
+        snapshot_retention=snapshot_retention,
     )
 
 
@@ -87,15 +90,12 @@ def get_sandbox(
     resume: bool = True,
     include_system_routes: bool | None = None,
 ) -> SyncSandbox:
-    return (
-        get_active_sync_session()
-        .sandbox_service()
-        .get_sandbox(
-            name=name,
-            project_id=project_id,
-            resume=resume,
-            include_system_routes=include_system_routes,
-        )
+    return _get_sandbox(
+        get_active_sync_session().sandbox_service(),
+        name=name,
+        project_id=project_id,
+        resume=resume,
+        include_system_routes=include_system_routes,
     )
 
 
@@ -106,10 +106,12 @@ def query_sandboxes(
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[SyncSandbox]:
-    return (
-        get_active_sync_session()
-        .sandbox_service()
-        .query_sandboxes(query=query, project_id=project_id, page_size=page_size, cursor=cursor)
+    return _query_sandboxes(
+        get_active_sync_session().sandbox_service(),
+        query=query,
+        project_id=project_id,
+        page_size=page_size,
+        cursor=cursor,
     )
 
 
@@ -121,16 +123,13 @@ def query_sessions(
     cursor: str | None = None,
     sort_order: str | None = None,
 ) -> Iterator[SyncSandboxRuntimeSession]:
-    return (
-        get_active_sync_session()
-        .sandbox_service()
-        .query_sessions(
-            project_id=project_id,
-            name=name,
-            page_size=page_size,
-            cursor=cursor,
-            sort_order=sort_order,
-        )
+    return _query_sessions(
+        get_active_sync_session().sandbox_service(),
+        project_id=project_id,
+        name=name,
+        page_size=page_size,
+        cursor=cursor,
+        sort_order=sort_order,
     )
 
 
@@ -142,21 +141,18 @@ def query_snapshots(
     cursor: str | None = None,
     sort_order: str | None = None,
 ) -> Iterator[SyncSnapshot]:
-    return (
-        get_active_sync_session()
-        .sandbox_service()
-        .query_snapshots(
-            project_id=project_id,
-            name=name,
-            page_size=page_size,
-            cursor=cursor,
-            sort_order=sort_order,
-        )
+    return _query_snapshots(
+        get_active_sync_session().sandbox_service(),
+        project_id=project_id,
+        name=name,
+        page_size=page_size,
+        cursor=cursor,
+        sort_order=sort_order,
     )
 
 
 def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
-    return get_active_sync_session().sandbox_service().get_snapshot(snapshot_id=snapshot_id)
+    return _get_snapshot(get_active_sync_session().sandbox_service(), snapshot_id=snapshot_id)
 
 
 __all__ = [

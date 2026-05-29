@@ -1,10 +1,10 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import pytest
 
 from vercel import unstable as vercel
-from vercel._internal.unstable.context import get_active_session, get_active_sync_session
 from vercel._internal.unstable.errors import (
     VercelServiceOptionsError,
     VercelSessionClosedError,
@@ -12,7 +12,12 @@ from vercel._internal.unstable.errors import (
 )
 from vercel._internal.unstable.options import ServiceOptions
 from vercel._internal.unstable.sandbox.options import DEFAULT_SANDBOX_API_BASE_URL
-from vercel._internal.unstable.session import SdkSession, SyncSdkSession
+from vercel._internal.unstable.session import (
+    SdkSession,
+    SyncSdkSession,
+    get_active_session,
+    get_active_sync_session,
+)
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import SandboxServiceOptions, sync as sync_sandbox
 
@@ -40,6 +45,25 @@ class CountingAsyncClient(httpx.AsyncClient):
     async def aclose(self) -> None:
         self.close_calls += 1
         await super().aclose()
+
+
+def test_runtime_dependency_direction_and_removed_layers() -> None:
+    internal = Path(__file__).parents[2] / "src/vercel/_internal/unstable"
+    sandbox_internal = internal / "sandbox"
+
+    deleted_modules = (
+        "context.py",
+        "sandbox/client.py",
+        "sandbox/handles.py",
+        "sandbox/operations.py",
+    )
+    for deleted in deleted_modules:
+        assert not (internal / deleted).exists()
+
+    for runtime in ("async_runtime.py", "sync_runtime.py"):
+        source = (sandbox_internal / runtime).read_text()
+        assert "vercel._internal.unstable.session" not in source
+        assert "vercel.unstable" not in source
 
 
 def test_sync_session_options_inherit_replace_reject_duplicates_and_close() -> None:

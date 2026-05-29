@@ -1,13 +1,9 @@
 """Sandbox errors for the experimental SDK surface."""
 
-from typing import TYPE_CHECKING
-
 import httpx
 
 from vercel._internal.unstable.errors import VercelError
-
-if TYPE_CHECKING:
-    from vercel._internal.unstable.sandbox.models import SandboxStatus
+from vercel._internal.unstable.sandbox.models import SandboxStatus
 
 
 class SandboxError(VercelError):
@@ -25,7 +21,7 @@ class SandboxTerminalStateError(SandboxError):
         self,
         message: str,
         *,
-        status: "SandboxStatus",
+        status: SandboxStatus,
         sandbox: object | None = None,
     ) -> None:
         super().__init__(message)

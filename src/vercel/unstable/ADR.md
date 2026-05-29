@@ -65,10 +65,11 @@ Implementation note:
 Sandbox wire responses are validated and converted into immutable neutral
 domain state in its endpoint API client. `SandboxService` performs shared
 async-first domain orchestration over that state, including polling and
-compound results, without constructing public handles. Runtime-bound
-`AsyncSandboxClient` and `SyncSandboxClient` instances construct their matching
-public handles and consume command-log streams; only the sync binding client
-uses `iter_coroutine()` to drive shared service operations.
+compound results, without constructing public handles. Each SDK session caches
+a `SandboxService` backed by its matching transport. Separate async and sync
+runtime modules construct their matching public handles and consume command-log
+streams; sync runtime entry points use `iter_coroutine()` to drive service
+operations.
 
 ## Decision 3: Mode-specific Default Sessions And Scoped Overrides
 
@@ -273,8 +274,9 @@ The name keeps platform retention policy distinct from local call duration.
 
 ## Decision 10: Handle Validity
 
-SDK handles retain the SDK session that created them. That originating session
-is the only local authority boundary for follow-up requests.
+SDK handles retain the `SandboxService` created by their originating SDK
+session. That session-owned service is the only local authority boundary for
+follow-up requests.
 
 Operational sandbox resources are stable mutable handles, not response model
 values. State properties are read-only to callers and contain the most recent
@@ -308,7 +310,7 @@ handle objects, not closed sessions or remote lifecycle state.
 
 Rationale:
 
-Handles are bound to SDK runtime resources such as clients and options.
+Handles are bound to a session-owned service and its configuration.
 Requiring reacquisition after session close keeps that binding explicit and
 prevents stale handles from silently using the wrong configuration, without
 guessing at server-side resource lifetime.

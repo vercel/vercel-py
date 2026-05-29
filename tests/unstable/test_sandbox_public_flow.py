@@ -11,10 +11,10 @@ import respx
 from pydantic import BaseModel, ValidationError
 
 from vercel import unstable as vercel
-from vercel._internal.unstable.context import get_active_session, get_active_sync_session
 from vercel._internal.unstable.errors import VercelSessionClosedError
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
 from vercel._internal.unstable.sandbox.state import SandboxRuntimeSessionState, SandboxState
+from vercel._internal.unstable.session import get_active_session
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
     GitSource,
@@ -309,7 +309,7 @@ def test_sync_create_terminal_error_contains_sync_handle(mock_env_clear: None) -
 
 
 @respx.mock
-async def test_service_returns_neutral_state_and_async_client_binds_handles(
+async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
     mock_env_clear: None,
 ) -> None:
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -332,24 +332,24 @@ async def test_service_returns_neutral_state_and_async_client_binds_handles(
     )
 
     async with vercel.session(service_options=_session_options()):
-        client = get_active_session().sandbox_service()
-        state = await client.service.get_sandbox(name="preview")
+        service = get_active_session().sandbox_service()
+        state = await service.get_sandbox(name="preview")
         assert isinstance(state, SandboxState)
         assert isinstance(state.current_session, SandboxRuntimeSessionState)
-        page_state = await client.service.query_sandboxes_page()
+        page_state = await service.query_sandboxes_page()
         assert isinstance(page_state.sandboxes[0], SandboxState)
 
-        handle = await client.get_sandbox(name="preview")
+        handle = await sandbox.get_sandbox(name="preview")
         assert isinstance(handle, sandbox.Sandbox)
         assert isinstance(handle.current_session, sandbox.SandboxRuntimeSession)
         assert isinstance(await handle.start_command("python"), sandbox.SandboxCommand)
         assert isinstance(await handle.snapshot(), sandbox.Snapshot)
-        page = await client.query_sandboxes_page()
-        assert isinstance(page.sandboxes[0], sandbox.Sandbox)
+        page = [item async for item in sandbox.query_sandboxes()]
+        assert isinstance(page[0], sandbox.Sandbox)
 
 
 @respx.mock
-def test_sync_client_binds_only_sync_handles(mock_env_clear: None) -> None:
+def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -364,7 +364,7 @@ def test_sync_client_binds_only_sync_handles(mock_env_clear: None) -> None:
     )
 
     with vercel.session(service_options=_session_options()):
-        handle = get_active_sync_session().sandbox_service().get_sandbox(name="preview")
+        handle = sandbox_sync.get_sandbox(name="preview")
         assert isinstance(handle, sandbox_sync.SyncSandbox)
         assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
         assert isinstance(handle.start_command("python"), sandbox_sync.SyncSandboxCommand)

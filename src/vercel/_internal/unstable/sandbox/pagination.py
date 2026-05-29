@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from vercel._internal.polyfills import Self
+
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50
 MAX_QUERY_SNAPSHOTS_PAGE_SIZE = 50
@@ -47,8 +49,8 @@ class QuerySandboxesParams:
         object.__setattr__(self, "page_size", page_size)
         object.__setattr__(self, "cursor", cursor)
 
-    def with_cursor(self, cursor: str) -> "QuerySandboxesParams":
-        return QuerySandboxesParams(
+    def with_cursor(self, cursor: str) -> Self:
+        return type(self)(
             page_size=self.page_size,
             cursor=cursor,
         )
@@ -72,8 +74,8 @@ class QuerySessionsParams:
         object.__setattr__(self, "page_size", page_size)
         object.__setattr__(self, "cursor", cursor)
 
-    def with_cursor(self, cursor: str) -> "QuerySessionsParams":
-        return QuerySessionsParams(
+    def with_cursor(self, cursor: str) -> Self:
+        return type(self)(
             page_size=self.page_size,
             cursor=cursor,
         )
@@ -97,8 +99,8 @@ class QuerySnapshotsParams:
         object.__setattr__(self, "page_size", page_size)
         object.__setattr__(self, "cursor", cursor)
 
-    def with_cursor(self, cursor: str) -> "QuerySnapshotsParams":
-        return QuerySnapshotsParams(
+    def with_cursor(self, cursor: str) -> Self:
+        return type(self)(
             page_size=self.page_size,
             cursor=cursor,
         )
