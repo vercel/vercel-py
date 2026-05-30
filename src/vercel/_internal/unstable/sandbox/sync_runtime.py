@@ -1,7 +1,7 @@
 """Sync runtime handles and entry points for unstable Sandbox operations."""
 
 import signal as signal_module
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import TracebackType
 from typing import Any, Literal
 
@@ -14,6 +14,7 @@ from vercel._internal.unstable.sandbox.errors import (
 )
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
+    DirectoryEntry,
     DurationInput,
     JSONValue,
     SandboxCommandLog,
@@ -132,12 +133,161 @@ class SyncSnapshot(SnapshotHandleBase):
         return self
 
 
+class SyncSandboxFilesystem:
+    __slots__ = ("_service", "_session_id", "_write_files_cwd")
+
+    def __init__(
+        self,
+        *,
+        service: SandboxService,
+        session_id: Callable[[], str],
+        write_files_cwd: Callable[[str | None], str],
+    ) -> None:
+        self._service = service
+        self._session_id = session_id
+        self._write_files_cwd = write_files_cwd
+
+    async def _collect_output(self, command: SandboxCommandState) -> tuple[str, str]:
+        stdout: list[str] = []
+        stderr: list[str] = []
+        for event in _command_logs(
+            self._service, session_id=command.session_id, command_id=command.id
+        ):
+            if event.stream == "stdout":
+                stdout.append(event.data)
+            else:
+                stderr.append(event.data)
+        return "".join(stdout), "".join(stderr)
+
+    def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
+        iter_coroutine(
+            self._service.mkdir(
+                session_id=self._session_id(), path=path, cwd=cwd, recursive=recursive
+            )
+        )
+
+    def read_bytes(self, path: str, *, cwd: str | None = None) -> bytes:
+        return iter_coroutine(
+            self._service.read_bytes(session_id=self._session_id(), path=path, cwd=cwd)
+        )
+
+    def read_text(
+        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
+        return self.read_bytes(path, cwd=cwd).decode(encoding, errors=errors)
+
+    def write_bytes(
+        self, path: str, data: bytes, *, cwd: str | None = None, mode: int | None = None
+    ) -> None:
+        self.write_files([WriteFile(path=path, content=data, mode=mode)], cwd=cwd)
+
+    def write_text(
+        self,
+        path: str,
+        text: str,
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+        mode: int | None = None,
+    ) -> None:
+        self.write_files(
+            [WriteFile(path=path, content=text, mode=mode)], cwd=cwd, encoding=encoding
+        )
+
+    def write_files(
+        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
+    ) -> None:
+        iter_coroutine(
+            self._service.write_files(
+                session_id=self._session_id(),
+                files=files,
+                cwd=self._write_files_cwd(cwd),
+                encoding=encoding,
+            )
+        )
+
+    def exists(self, path: str, *, cwd: str | None = None) -> bool:
+        return iter_coroutine(
+            self._service.exists(
+                session_id=self._session_id(),
+                path=path,
+                cwd=cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    def is_file(self, path: str, *, cwd: str | None = None) -> bool:
+        return iter_coroutine(
+            self._service.is_file(
+                session_id=self._session_id(),
+                path=path,
+                cwd=cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    def is_dir(self, path: str, *, cwd: str | None = None) -> bool:
+        return iter_coroutine(
+            self._service.is_dir(
+                session_id=self._session_id(),
+                path=path,
+                cwd=cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    def listdir(self, path: str = ".", *, cwd: str | None = None) -> list[DirectoryEntry]:
+        return iter_coroutine(
+            self._service.listdir(
+                session_id=self._session_id(),
+                path=path,
+                cwd=cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+    def remove(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        recursive: bool = False,
+        missing_ok: bool = False,
+    ) -> None:
+        iter_coroutine(
+            self._service.remove(
+                session_id=self._session_id(),
+                path=path,
+                cwd=cwd,
+                recursive=recursive,
+                missing_ok=missing_ok,
+                collect_output=self._collect_output,
+            )
+        )
+
+    def rename(self, source: str, destination: str, *, cwd: str | None = None) -> None:
+        iter_coroutine(
+            self._service.rename(
+                session_id=self._session_id(),
+                source=source,
+                destination=destination,
+                cwd=cwd,
+                collect_output=self._collect_output,
+            )
+        )
+
+
 class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
-    __slots__ = ("_service",)
+    __slots__ = ("_service", "fs")
 
     def __init__(self, *, payload: SandboxRuntimeSessionState, service: SandboxService) -> None:
         super().__init__(payload)
         self._service = service
+        self.fs = SyncSandboxFilesystem(
+            service=service,
+            session_id=lambda: self.id,
+            write_files_cwd=self._write_files_cwd,
+        )
 
     def __enter__(self) -> Self:
         return self
@@ -226,31 +376,6 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(payload)
         return self
 
-    def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        iter_coroutine(
-            self._service.mkdir(session_id=self.id, path=path, cwd=cwd, recursive=recursive)
-        )
-
-    def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return iter_coroutine(self._service.read_file(session_id=self.id, path=path, cwd=cwd))
-
-    def read_text(
-        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
-    ) -> str:
-        return self.read_file(path, cwd=cwd).decode(encoding, errors=errors)
-
-    def write_files(
-        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
-    ) -> None:
-        iter_coroutine(
-            self._service.write_files(
-                session_id=self.id,
-                files=files,
-                cwd=self._write_files_cwd(cwd),
-                encoding=encoding,
-            )
-        )
-
     def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
         result = iter_coroutine(
             self._service.create_snapshot(session_id=self.id, expiration=expiration)
@@ -268,7 +393,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
 
 
 class SyncSandbox(SandboxHandleBase):
-    __slots__ = ("_service", "_current_session")
+    __slots__ = ("_service", "_current_session", "fs")
 
     def __init__(self, *, payload: SandboxState, service: SandboxService) -> None:
         super().__init__(payload)
@@ -278,6 +403,11 @@ class SyncSandbox(SandboxHandleBase):
             self._current_session = SyncSandboxRuntimeSession(
                 payload=payload.current_session, service=service
             )
+        self.fs = SyncSandboxFilesystem(
+            service=service,
+            session_id=lambda: self.current_session_id,
+            write_files_cwd=self._write_files_cwd,
+        )
 
     @property
     def current_session(self) -> SyncSandboxRuntimeSession | None:
@@ -461,35 +591,6 @@ class SyncSandbox(SandboxHandleBase):
             )
         )
         return self._apply_current_session_payload(payload)
-
-    def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        iter_coroutine(
-            self._service.mkdir(
-                session_id=self.current_session_id, path=path, cwd=cwd, recursive=recursive
-            )
-        )
-
-    def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return iter_coroutine(
-            self._service.read_file(session_id=self.current_session_id, path=path, cwd=cwd)
-        )
-
-    def read_text(
-        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
-    ) -> str:
-        return self.read_file(path, cwd=cwd).decode(encoding, errors=errors)
-
-    def write_files(
-        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
-    ) -> None:
-        iter_coroutine(
-            self._service.write_files(
-                session_id=self.current_session_id,
-                files=files,
-                cwd=self._write_files_cwd(cwd),
-                encoding=encoding,
-            )
-        )
 
     def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
         result = iter_coroutine(

@@ -80,6 +80,24 @@ class _ScenarioDriver:
     async def read_text(self, box: Any, path: str) -> str:
         raise NotImplementedError
 
+    async def exists(self, box: Any, path: str) -> bool:
+        raise NotImplementedError
+
+    async def is_file(self, box: Any, path: str) -> bool:
+        raise NotImplementedError
+
+    async def is_dir(self, box: Any, path: str) -> bool:
+        raise NotImplementedError
+
+    async def listdir(self, box: Any, path: str) -> list[Any]:
+        raise NotImplementedError
+
+    async def rename(self, box: Any, source: str, destination: str) -> None:
+        raise NotImplementedError
+
+    async def remove(self, box: Any, path: str) -> None:
+        raise NotImplementedError
+
     async def start_command(self, box: Any, command: str, args: list[str]) -> Any:
         raise NotImplementedError
 
@@ -153,15 +171,33 @@ class AsyncDriver(_ScenarioDriver):
         return await sandbox.get_snapshot(snapshot_id=snapshot_id)
 
     async def mkdir(self, box: Any, path: str) -> None:
-        await box.mkdir(path)
+        await box.fs.mkdir(path)
 
     async def write_files(self, box: Any, files: list[tuple[str, str]]) -> None:
-        await box.write_files(
+        await box.fs.write_files(
             [self.write_file_type(path=path, content=content) for path, content in files]
         )
 
     async def read_text(self, box: Any, path: str) -> str:
-        return await box.read_text(path)
+        return await box.fs.read_text(path)
+
+    async def exists(self, box: Any, path: str) -> bool:
+        return await box.fs.exists(path)
+
+    async def is_file(self, box: Any, path: str) -> bool:
+        return await box.fs.is_file(path)
+
+    async def is_dir(self, box: Any, path: str) -> bool:
+        return await box.fs.is_dir(path)
+
+    async def listdir(self, box: Any, path: str) -> list[Any]:
+        return await box.fs.listdir(path)
+
+    async def rename(self, box: Any, source: str, destination: str) -> None:
+        await box.fs.rename(source, destination)
+
+    async def remove(self, box: Any, path: str) -> None:
+        await box.fs.remove(path)
 
     async def start_command(self, box: Any, command: str, args: list[str]) -> Any:
         return await box.start_command(command, args)
@@ -242,15 +278,33 @@ class SyncDriver(_ScenarioDriver):
         return sandbox_sync.get_snapshot(snapshot_id=snapshot_id)
 
     async def mkdir(self, box: Any, path: str) -> None:
-        box.mkdir(path)
+        box.fs.mkdir(path)
 
     async def write_files(self, box: Any, files: list[tuple[str, str]]) -> None:
-        box.write_files(
+        box.fs.write_files(
             [self.write_file_type(path=path, content=content) for path, content in files]
         )
 
     async def read_text(self, box: Any, path: str) -> str:
-        return box.read_text(path)
+        return box.fs.read_text(path)
+
+    async def exists(self, box: Any, path: str) -> bool:
+        return box.fs.exists(path)
+
+    async def is_file(self, box: Any, path: str) -> bool:
+        return box.fs.is_file(path)
+
+    async def is_dir(self, box: Any, path: str) -> bool:
+        return box.fs.is_dir(path)
+
+    async def listdir(self, box: Any, path: str) -> list[Any]:
+        return box.fs.listdir(path)
+
+    async def rename(self, box: Any, source: str, destination: str) -> None:
+        box.fs.rename(source, destination)
+
+    async def remove(self, box: Any, path: str) -> None:
+        box.fs.remove(path)
 
     async def start_command(self, box: Any, command: str, args: list[str]) -> Any:
         return box.start_command(command, args)
@@ -297,8 +351,20 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
                         "print('stderr:' + value, file=sys.stderr)\n",
                     ),
                     ("workspace/input.txt", "scenario input\n"),
+                    ("workspace/remove-me.txt", "temporary\n"),
                 ],
             )
+            assert await driver.exists(box, "workspace/remove-me.txt")
+            assert await driver.is_file(box, "workspace/remove-me.txt")
+            assert await driver.is_dir(box, "workspace")
+            assert any(
+                entry.path == "remove-me.txt" and entry.kind == "file"
+                for entry in await driver.listdir(box, "workspace")
+            )
+            await driver.rename(box, "workspace/remove-me.txt", "workspace/renamed.txt")
+            assert await driver.exists(box, "workspace/renamed.txt")
+            await driver.remove(box, "workspace/renamed.txt")
+            assert not await driver.exists(box, "workspace/renamed.txt")
             command = await driver.start_command(box, "python", ["workspace/tool.py"])
             logs = await driver.logs(command)
             exit_code = await driver.wait(command)

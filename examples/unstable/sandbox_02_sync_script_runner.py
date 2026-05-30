@@ -27,10 +27,10 @@ def run_script(input_text: str, script: str) -> str:
         runtime="python3.13",
         execution_time_limit=60_000,
     ) as box:
-        # `box` already points at the sandbox's current runtime session, so the
-        # common path is direct filesystem and command calls on the sandbox.
-        box.mkdir("workspace")
-        box.write_files(
+        # `box` already points at the sandbox's current runtime session. Commands
+        # live on the handle and workspace operations live on `box.fs`.
+        box.fs.mkdir("workspace")
+        box.fs.write_files(
             [
                 sandbox.WriteFile(path="workspace/tool.py", content=script),
                 sandbox.WriteFile(path="workspace/input.txt", content=input_text),
@@ -66,7 +66,7 @@ def run_script(input_text: str, script: str) -> str:
         if finished.exit_code != 0:
             raise RuntimeError(f"script failed with exit code {finished.exit_code}")
 
-        return box.read_text("workspace/output.json")
+        return box.fs.read_text("workspace/output.json")
 
 
 def main() -> None:

@@ -2,7 +2,7 @@
 
 import signal as signal_module
 import warnings
-from collections.abc import AsyncIterator, Generator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Literal
@@ -15,6 +15,7 @@ from vercel._internal.unstable.sandbox.errors import (
 )
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
+    DirectoryEntry,
     DurationInput,
     JSONValue,
     SandboxCommandLog,
@@ -133,12 +134,143 @@ class Snapshot(SnapshotHandleBase):
         return self
 
 
+class SandboxFilesystem:
+    __slots__ = ("_service", "_session_id", "_write_files_cwd")
+
+    def __init__(
+        self,
+        *,
+        service: SandboxService,
+        session_id: Callable[[], str],
+        write_files_cwd: Callable[[str | None], str],
+    ) -> None:
+        self._service = service
+        self._session_id = session_id
+        self._write_files_cwd = write_files_cwd
+
+    async def _collect_output(self, command: SandboxCommandState) -> tuple[str, str]:
+        stdout: list[str] = []
+        stderr: list[str] = []
+        async for event in _command_logs(
+            self._service, session_id=command.session_id, command_id=command.id
+        ):
+            if event.stream == "stdout":
+                stdout.append(event.data)
+            else:
+                stderr.append(event.data)
+        return "".join(stdout), "".join(stderr)
+
+    async def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
+        await self._service.mkdir(
+            session_id=self._session_id(), path=path, cwd=cwd, recursive=recursive
+        )
+
+    async def read_bytes(self, path: str, *, cwd: str | None = None) -> bytes:
+        return await self._service.read_bytes(session_id=self._session_id(), path=path, cwd=cwd)
+
+    async def read_text(
+        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
+    ) -> str:
+        return (await self.read_bytes(path, cwd=cwd)).decode(encoding, errors=errors)
+
+    async def write_bytes(
+        self, path: str, data: bytes, *, cwd: str | None = None, mode: int | None = None
+    ) -> None:
+        await self.write_files([WriteFile(path=path, content=data, mode=mode)], cwd=cwd)
+
+    async def write_text(
+        self,
+        path: str,
+        text: str,
+        *,
+        cwd: str | None = None,
+        encoding: str = "utf-8",
+        mode: int | None = None,
+    ) -> None:
+        await self.write_files(
+            [WriteFile(path=path, content=text, mode=mode)], cwd=cwd, encoding=encoding
+        )
+
+    async def write_files(
+        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
+    ) -> None:
+        await self._service.write_files(
+            session_id=self._session_id(),
+            files=files,
+            cwd=self._write_files_cwd(cwd),
+            encoding=encoding,
+        )
+
+    async def exists(self, path: str, *, cwd: str | None = None) -> bool:
+        return await self._service.exists(
+            session_id=self._session_id(),
+            path=path,
+            cwd=cwd,
+            collect_output=self._collect_output,
+        )
+
+    async def is_file(self, path: str, *, cwd: str | None = None) -> bool:
+        return await self._service.is_file(
+            session_id=self._session_id(),
+            path=path,
+            cwd=cwd,
+            collect_output=self._collect_output,
+        )
+
+    async def is_dir(self, path: str, *, cwd: str | None = None) -> bool:
+        return await self._service.is_dir(
+            session_id=self._session_id(),
+            path=path,
+            cwd=cwd,
+            collect_output=self._collect_output,
+        )
+
+    async def listdir(self, path: str = ".", *, cwd: str | None = None) -> list[DirectoryEntry]:
+        return await self._service.listdir(
+            session_id=self._session_id(),
+            path=path,
+            cwd=cwd,
+            collect_output=self._collect_output,
+        )
+
+    async def remove(
+        self,
+        path: str,
+        *,
+        cwd: str | None = None,
+        recursive: bool = False,
+        missing_ok: bool = False,
+    ) -> None:
+        await self._service.remove(
+            session_id=self._session_id(),
+            path=path,
+            cwd=cwd,
+            recursive=recursive,
+            missing_ok=missing_ok,
+            collect_output=self._collect_output,
+        )
+
+    async def rename(self, source: str, destination: str, *, cwd: str | None = None) -> None:
+        await self._service.rename(
+            session_id=self._session_id(),
+            source=source,
+            destination=destination,
+            cwd=cwd,
+            collect_output=self._collect_output,
+        )
+
+
 class SandboxRuntimeSession(RuntimeSessionHandleBase):
-    __slots__ = ("_service",)
+    __slots__ = ("_service", "fs")
 
     def __init__(self, *, payload: SandboxRuntimeSessionState, service: SandboxService) -> None:
         super().__init__(payload)
         self._service = service
+        self.fs = SandboxFilesystem(
+            service=service,
+            session_id=lambda: self.id,
+            write_files_cwd=self._write_files_cwd,
+        )
 
     async def run_command(
         self,
@@ -199,24 +331,6 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(payload)
         return self
 
-    async def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        await self._service.mkdir(session_id=self.id, path=path, cwd=cwd, recursive=recursive)
-
-    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return await self._service.read_file(session_id=self.id, path=path, cwd=cwd)
-
-    async def read_text(
-        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
-    ) -> str:
-        return (await self.read_file(path, cwd=cwd)).decode(encoding, errors=errors)
-
-    async def write_files(
-        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
-    ) -> None:
-        await self._service.write_files(
-            session_id=self.id, files=files, cwd=self._write_files_cwd(cwd), encoding=encoding
-        )
-
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
         result = await self._service.create_snapshot(session_id=self.id, expiration=expiration)
         self._apply_payload(result.session)
@@ -232,7 +346,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
 
 
 class Sandbox(SandboxHandleBase):
-    __slots__ = ("_service", "_current_session")
+    __slots__ = ("_service", "_current_session", "fs")
 
     def __init__(self, *, payload: SandboxState, service: SandboxService) -> None:
         super().__init__(payload)
@@ -242,6 +356,11 @@ class Sandbox(SandboxHandleBase):
             self._current_session = SandboxRuntimeSession(
                 payload=payload.current_session, service=service
             )
+        self.fs = SandboxFilesystem(
+            service=service,
+            session_id=lambda: self.current_session_id,
+            write_files_cwd=self._write_files_cwd,
+        )
 
     @property
     def current_session(self) -> SandboxRuntimeSession | None:
@@ -394,29 +513,6 @@ class Sandbox(SandboxHandleBase):
             session_id=self.current_session_id, network_policy=network_policy
         )
         return self._apply_current_session_payload(payload)
-
-    async def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
-        await self._service.mkdir(
-            session_id=self.current_session_id, path=path, cwd=cwd, recursive=recursive
-        )
-
-    async def read_file(self, path: str, *, cwd: str | None = None) -> bytes:
-        return await self._service.read_file(session_id=self.current_session_id, path=path, cwd=cwd)
-
-    async def read_text(
-        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
-    ) -> str:
-        return (await self.read_file(path, cwd=cwd)).decode(encoding, errors=errors)
-
-    async def write_files(
-        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
-    ) -> None:
-        await self._service.write_files(
-            session_id=self.current_session_id,
-            files=files,
-            cwd=self._write_files_cwd(cwd),
-            encoding=encoding,
-        )
 
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
         result = await self._service.create_snapshot(

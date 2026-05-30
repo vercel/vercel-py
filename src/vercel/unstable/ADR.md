@@ -349,8 +349,9 @@ response.
 
 The same remote cleanup can be requested explicitly with `Sandbox.destroy()` or
 `SandboxRuntimeSession.stop()`. Sandbox identity behavior belongs on `Sandbox`,
-session-scoped behavior belongs on `SandboxRuntimeSession`, and endpoint
-composition belongs in the internal Sandbox service.
+session-scoped lifecycle and command behavior belongs on
+`SandboxRuntimeSession`, filesystem behavior belongs on each handle's `fs`
+capability, and endpoint composition belongs in the internal Sandbox service.
 
 Rationale:
 
@@ -452,6 +453,43 @@ Rationale:
 Command output is an ordered stream rather than two independent strings.
 Caching only complete observations provides stable helper results without
 turning partial or failed reads into authoritative state.
+
+## Decision 16: Sandbox Filesystem Capability
+
+Unstable workspace filesystem access is exposed through `Sandbox.fs` and
+`SandboxRuntimeSession.fs`, implemented by `SandboxFilesystem` and its sync
+mirror `SyncSandboxFilesystem`. Direct `mkdir`, `read_file`, `read_text`, and
+`write_files` methods do not live on sandbox or runtime-session handles.
+
+`Sandbox.fs` targets `current_session_id` at operation time so retained
+capabilities follow current-session changes. `SandboxRuntimeSession.fs` is
+bound to that runtime session identity. The capability includes native-backed
+directory creation, reads, and tarball writes, plus command-backed predicates,
+direct-child listing, removal, and rename. `DirectoryEntry` is a passive,
+sorted listing result with coarse `file`, `directory`, `symlink`, or `other`
+classification.
+
+Command-backed methods execute fixed portable shell scripts with user paths
+passed as positional arguments. Relative operands are prefixed within those
+scripts before utilities receive them, preventing leading `-` path components
+from becoming options. `rename()` deliberately retains ordinary `mv`
+overwrite behavior.
+
+`SandboxFilesystemError` is the filesystem error root.
+`SandboxPathNotFoundError` is produced for native endpoint failures only when
+structured backend error data proves a missing path; otherwise the ordinary
+`SandboxApiError` is preserved. Predicate non-matches return `False`.
+`SandboxFilesystemCommandError` reports failed command-backed list, remove,
+and rename operations with operation name, paths, exit code, stdout, and
+stderr.
+
+Rationale:
+
+A capability object keeps the sandbox and runtime-session handle surfaces
+focused on lifecycle and commands while giving workspace editing a coherent
+API. Native endpoints are retained where they exist, while command-backed
+operations provide a bounded initial contract without claiming rich POSIX
+metadata or new server endpoints.
 
 ## Consequences
 

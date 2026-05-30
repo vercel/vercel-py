@@ -83,6 +83,48 @@ class SandboxStreamError(SandboxError):
         self.code = code
 
 
+class SandboxFilesystemError(SandboxError):
+    """Base error for filesystem capability operations."""
+
+
+class SandboxFilesystemCommandError(SandboxFilesystemError):
+    """Raised when a command-backed filesystem operation fails."""
+
+    def __init__(
+        self,
+        operation: str,
+        *,
+        paths: tuple[str, ...],
+        exit_code: int | None,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        super().__init__(f"Sandbox filesystem {operation} failed with exit code {exit_code}")
+        self.operation = operation
+        self.paths = paths
+        self.exit_code = exit_code
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class SandboxPathNotFoundError(SandboxFilesystemError):
+    """Raised when a native filesystem operation proves a missing path."""
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        operation: str,
+        cwd: str | None,
+        cause: SandboxApiError,
+    ) -> None:
+        super().__init__(f"Sandbox filesystem path not found: {path!r}")
+        self.path = path
+        self.operation = operation
+        self.cwd = cwd
+        self.cause = cause
+
+
 def _extract_api_error_code(data: object | None) -> str | None:
     if not isinstance(data, dict):
         return None

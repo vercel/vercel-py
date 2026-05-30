@@ -1216,7 +1216,7 @@ class SandboxApiClient:
             body=JSONBody(request.to_api_dict()),
         )
 
-    async def read_file(
+    async def read_bytes(
         self,
         *,
         session_id: str,

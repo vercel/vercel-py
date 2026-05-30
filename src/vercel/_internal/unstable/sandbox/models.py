@@ -28,6 +28,12 @@ class WriteFile:
     mode: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DirectoryEntry:
+    path: str
+    kind: Literal["file", "directory", "symlink", "other"]
+
+
 class SandboxStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"

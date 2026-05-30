@@ -21,7 +21,7 @@ async def main() -> None:
 
     async with sandbox.create_sandbox(name=base_name, runtime="python3.13") as base:
         try:
-            await base.write_files(
+            await base.fs.write_files(
                 [WriteFile(path="state/message.txt", content="restored from snapshot\n")]
             )
             snapshot = await base.snapshot()
@@ -31,7 +31,7 @@ async def main() -> None:
                 runtime="python3.13",
                 source=SnapshotSource(snapshot_id=snapshot.id),
             )
-            content = await restored.read_text("state/message.txt")
+            content = await restored.fs.read_text("state/message.txt")
             assert content == "restored from snapshot\n"
             print(f"{restored_name}: restored {snapshot.id}")
         finally:

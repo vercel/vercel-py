@@ -341,13 +341,30 @@ Sandbox identity methods such as `session()`, `run_command(...)`,
 `extend_execution_time_limit(...)`, `update_network_policy(...)`, and
 `destroy()` live on `Sandbox`. Session-scoped methods such as
 `run_command(...)`, `start_command(...)`, `refresh()`,
-`get_command(...)`, `query_commands(...)`, `mkdir(...)`, `read_file(...)`,
-`read_text(...)`, `write_files(...)`, `snapshot(...)`,
+`get_command(...)`, `query_commands(...)`, `snapshot(...)`,
 `extend_execution_time_limit(...)`, `update_network_policy(...)`, and `stop()`
 live on `SandboxRuntimeSession`. Command handles expose `wait()`, `kill()`,
 `logs()`, `output()`, `stdout()`, and `stderr()`. Low-level endpoint
 composition, response binding, and polling stay inside the internal Sandbox
 service layer.
+
+Workspace filesystem operations live on the `fs` capability of either handle:
+
+```python
+await sandbox_.fs.mkdir("workspace")
+await sandbox_.fs.write_text("workspace/input.txt", "hello\n")
+content = await sandbox_.fs.read_text("workspace/input.txt")
+entries = await sandbox_.fs.listdir("workspace")
+```
+
+`Sandbox.fs` resolves the current runtime session on every operation; a
+retained capability follows a later current session. `SandboxRuntimeSession.fs`
+remains bound to that specific runtime session. The async `SandboxFilesystem`
+and sync `SyncSandboxFilesystem` expose `mkdir`, `read_bytes`, `read_text`,
+`write_bytes`, `write_text`, `write_files`, `exists`, `is_file`, `is_dir`,
+`listdir`, `remove`, and `rename`. `listdir()` returns sorted
+`DirectoryEntry(path=..., kind=...)` values, where `kind` is `file`,
+`directory`, `symlink`, or `other`.
 
 `SandboxCommand.logs()` yields `SandboxCommandLog` output events whose
 `stream` is `SandboxCommandLogStream.STDOUT` or
@@ -430,7 +447,7 @@ with sandbox.create_sandbox(
     runtime="python3.13",
     name="sync-preview",
 ) as sandbox_:
-    sandbox_.write_files(
+    sandbox_.fs.write_files(
         [
             WriteFile(
                 path="hello.py",
@@ -488,3 +505,11 @@ failures raise `SandboxCleanupError`; unattached or mode-invalid handles raise
 `SandboxInvalidHandleError`; valid error records received while streaming
 command logs raise `SandboxStreamError`; and requests through closed SDK
 sessions raise `VercelSessionClosedError`.
+
+Filesystem capability errors inherit from `SandboxFilesystemError`. Native
+filesystem requests raise `SandboxPathNotFoundError` only when structured API
+error data proves a missing path; other endpoint failures remain
+`SandboxApiError`. `exists`, `is_file`, and `is_dir` return `False` for normal
+non-matches. Failed command-backed `listdir`, `remove`, and `rename` calls
+raise `SandboxFilesystemCommandError`, which carries the operation, input
+paths, exit code, stdout, and stderr.

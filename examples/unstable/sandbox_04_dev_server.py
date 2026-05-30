@@ -113,12 +113,9 @@ async def should_install(
         install=install,
         cwd=cwd,
     )
-    try:
-        marker = await box.read_text(MARKER_PATH, cwd=cwd)
-    except SandboxApiError as error:
-        if error.status_code == 404:
-            return True
-        raise
+    if not await box.fs.exists(MARKER_PATH, cwd=cwd):
+        return True
+    marker = await box.fs.read_text(MARKER_PATH, cwd=cwd)
 
     try:
         return json.loads(marker) != expected
@@ -173,8 +170,8 @@ async def install_dependencies(
 
     print(f"running install: {install}")
     await run_shell(box, install, cwd=cwd)
-    await box.mkdir(".vercel-py-dev-server", cwd=cwd)
-    await box.write_files(
+    await box.fs.mkdir(".vercel-py-dev-server", cwd=cwd)
+    await box.fs.write_files(
         [
             WriteFile(
                 path=MARKER_PATH,

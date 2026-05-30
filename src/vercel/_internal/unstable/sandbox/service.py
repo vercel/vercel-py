@@ -2,13 +2,20 @@
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal, cast
 
 import anyio
 import httpx
 
 from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-from vercel._internal.unstable.sandbox.errors import SandboxResponseError
+from vercel._internal.unstable.sandbox.errors import (
+    SandboxApiError,
+    SandboxFilesystemCommandError,
+    SandboxPathNotFoundError,
+    SandboxResponseError,
+)
 from vercel._internal.unstable.sandbox.models import (
+    DirectoryEntry,
     DurationInput,
     JSONValue,
     SandboxQuery,
@@ -44,6 +51,64 @@ _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
 AsyncSleep = Callable[[float], Awaitable[None]]
+CommandOutputCollector = Callable[[SandboxCommandState], Awaitable[tuple[str, str]]]
+_MISSING_PATH_ERROR_CODES = frozenset({"not_found", "path_not_found", "file_not_found", "ENOENT"})
+_PREDICATE_SCRIPT = """\
+case "$1" in
+  /*) path=$1 ;;
+  *) path=./$1 ;;
+esac
+test "$2" "$path"
+"""
+_LISTDIR_SCRIPT = """\
+case "$1" in
+  /*) path=$1 ;;
+  *) path=./$1 ;;
+esac
+test -d "$path" || exit 1
+for entry in "$path"/* "$path"/.[!.]* "$path"/..?*; do
+  if test ! -e "$entry" && test ! -L "$entry"; then
+    continue
+  fi
+  if test -L "$entry"; then
+    kind=symlink
+  elif test -d "$entry"; then
+    kind=directory
+  elif test -f "$entry"; then
+    kind=file
+  else
+    kind=other
+  fi
+  name=${entry#"$path"/}
+  printf '%s\\0%s\\0' "$name" "$kind"
+done
+"""
+_REMOVE_SCRIPT = """\
+case "$1" in
+  /*) path=$1 ;;
+  *) path=./$1 ;;
+esac
+if test ! -e "$path" && test ! -L "$path"; then
+  test "$3" = true && exit 0
+  exit 1
+fi
+if test "$2" = true; then
+  rm -rf "$path"
+else
+  rm -f "$path"
+fi
+"""
+_RENAME_SCRIPT = """\
+case "$1" in
+  /*) source=$1 ;;
+  *) source=./$1 ;;
+esac
+case "$2" in
+  /*) destination=$2 ;;
+  *) destination=./$2 ;;
+esac
+mv "$source" "$destination"
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +150,26 @@ def _sandbox_status(sandbox: SandboxState) -> SandboxStatus | None:
     if sandbox.current_session is not None and sandbox.current_session.status is not None:
         return sandbox.current_session.status
     return sandbox.status
+
+
+def _listdir_entries(output: str) -> list[DirectoryEntry]:
+    fields = output.split("\0")
+    if fields[-1:] != [""] or (len(fields) - 1) % 2 != 0:
+        raise SandboxResponseError("Sandbox filesystem listdir output was malformed", data=output)
+    entries: list[DirectoryEntry] = []
+    for index in range(0, len(fields) - 1, 2):
+        kind = fields[index + 1]
+        if kind not in {"file", "directory", "symlink", "other"}:
+            raise SandboxResponseError(
+                "Sandbox filesystem listdir returned an invalid entry kind", data=output
+            )
+        entries.append(
+            DirectoryEntry(
+                path=fields[index],
+                kind=cast(Literal["file", "directory", "symlink", "other"], kind),
+            )
+        )
+    return sorted(entries, key=lambda entry: entry.path)
 
 
 class SandboxService:
@@ -431,11 +516,27 @@ class SandboxService:
         self, *, session_id: str, path: str, cwd: str | None = None, recursive: bool = True
     ) -> None:
         self._ensure_open()
-        await self._api_client.mkdir(session_id=session_id, path=path, cwd=cwd, recursive=recursive)
+        try:
+            await self._api_client.mkdir(
+                session_id=session_id, path=path, cwd=cwd, recursive=recursive
+            )
+        except SandboxApiError as error:
+            if error.code in _MISSING_PATH_ERROR_CODES:
+                raise SandboxPathNotFoundError(
+                    path, operation="mkdir", cwd=cwd, cause=error
+                ) from error
+            raise
 
-    async def read_file(self, *, session_id: str, path: str, cwd: str | None = None) -> bytes:
+    async def read_bytes(self, *, session_id: str, path: str, cwd: str | None = None) -> bytes:
         self._ensure_open()
-        return await self._api_client.read_file(session_id=session_id, path=path, cwd=cwd)
+        try:
+            return await self._api_client.read_bytes(session_id=session_id, path=path, cwd=cwd)
+        except SandboxApiError as error:
+            if error.code in _MISSING_PATH_ERROR_CODES:
+                raise SandboxPathNotFoundError(
+                    path, operation="read_bytes", cwd=cwd, cause=error
+                ) from error
+            raise
 
     async def write_files(
         self,
@@ -449,6 +550,185 @@ class SandboxService:
         await self._api_client.write_files(
             session_id=session_id, files=files, cwd=cwd, encoding=encoding
         )
+
+    async def _filesystem_command(
+        self,
+        *,
+        operation: str,
+        session_id: str,
+        script: str,
+        args: list[str],
+        cwd: str | None,
+        collect_output: CommandOutputCollector,
+    ) -> tuple[SandboxCommandState, str, str]:
+        command = await self.run_command(
+            session_id=session_id,
+            command="sh",
+            args=["-c", script, f"vercel-fs-{operation}", *args],
+            cwd=cwd,
+        )
+        stdout, stderr = await collect_output(command)
+        return command, stdout, stderr
+
+    async def _predicate(
+        self,
+        *,
+        operation: str,
+        operator: str,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: CommandOutputCollector,
+    ) -> bool:
+        command, stdout, stderr = await self._filesystem_command(
+            operation=operation,
+            session_id=session_id,
+            script=_PREDICATE_SCRIPT,
+            args=[path, operator],
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+        if command.exit_code == 0:
+            return True
+        if command.exit_code == 1:
+            return False
+        raise SandboxFilesystemCommandError(
+            operation,
+            paths=(path,),
+            exit_code=command.exit_code,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    async def exists(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: CommandOutputCollector,
+    ) -> bool:
+        return await self._predicate(
+            operation="exists",
+            operator="-e",
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def is_file(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: CommandOutputCollector,
+    ) -> bool:
+        return await self._predicate(
+            operation="is_file",
+            operator="-f",
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def is_dir(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: CommandOutputCollector,
+    ) -> bool:
+        return await self._predicate(
+            operation="is_dir",
+            operator="-d",
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+
+    async def listdir(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        collect_output: CommandOutputCollector,
+    ) -> list[DirectoryEntry]:
+        command, stdout, stderr = await self._filesystem_command(
+            operation="listdir",
+            session_id=session_id,
+            script=_LISTDIR_SCRIPT,
+            args=[path],
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+        if command.exit_code != 0:
+            raise SandboxFilesystemCommandError(
+                "listdir",
+                paths=(path,),
+                exit_code=command.exit_code,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return _listdir_entries(stdout)
+
+    async def remove(
+        self,
+        *,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+        recursive: bool,
+        missing_ok: bool,
+        collect_output: CommandOutputCollector,
+    ) -> None:
+        command, stdout, stderr = await self._filesystem_command(
+            operation="remove",
+            session_id=session_id,
+            script=_REMOVE_SCRIPT,
+            args=[path, str(recursive).lower(), str(missing_ok).lower()],
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+        if command.exit_code != 0:
+            raise SandboxFilesystemCommandError(
+                "remove",
+                paths=(path,),
+                exit_code=command.exit_code,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+    async def rename(
+        self,
+        *,
+        session_id: str,
+        source: str,
+        destination: str,
+        cwd: str | None,
+        collect_output: CommandOutputCollector,
+    ) -> None:
+        command, stdout, stderr = await self._filesystem_command(
+            operation="rename",
+            session_id=session_id,
+            script=_RENAME_SCRIPT,
+            args=[source, destination],
+            cwd=cwd,
+            collect_output=collect_output,
+        )
+        if command.exit_code != 0:
+            raise SandboxFilesystemCommandError(
+                "rename",
+                paths=(source, destination),
+                exit_code=command.exit_code,
+                stdout=stdout,
+                stderr=stderr,
+            )
 
     async def kill_command(
         self, *, session_id: str, command_id: str, signal: int

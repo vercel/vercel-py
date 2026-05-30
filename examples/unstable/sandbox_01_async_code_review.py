@@ -24,11 +24,11 @@ async def review_code(files: list[WriteFile], review_agent: str) -> str:
         execution_time_limit=60_000,
     ) as box:
         # The sandbox returned by `create_sandbox` already has a current runtime
-        # session. Most workflows can call command and filesystem methods on
-        # `box` directly; creating an explicit `box.session()` is an advanced
+        # session. Most workflows can call commands on `box` and filesystem
+        # methods on `box.fs`; creating an explicit `box.session()` is an advanced
         # operation for separate runtime-session lifecycles.
-        await box.mkdir("workspace")
-        await box.write_files(
+        await box.fs.mkdir("workspace")
+        await box.fs.write_files(
             [
                 *files,
                 WriteFile(path="workspace/review_agent.py", content=review_agent),
@@ -53,7 +53,7 @@ async def review_code(files: list[WriteFile], review_agent: str) -> str:
         if finished.exit_code != 0:
             raise RuntimeError(f"review failed with exit code {finished.exit_code}")
 
-        return await box.read_text("workspace/review.md")
+        return await box.fs.read_text("workspace/review.md")
 
 
 async def main() -> None:
