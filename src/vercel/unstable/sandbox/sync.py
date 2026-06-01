@@ -2,7 +2,6 @@
 
 from collections.abc import Iterator, Mapping
 
-from vercel._internal.unstable.sandbox.async_runtime import SandboxCommand
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
     SandboxCleanupError,
@@ -163,7 +162,6 @@ def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
 __all__ = [
     "SandboxApiError",
     "SandboxCleanupError",
-    "SandboxCommand",
     "SandboxCommandLog",
     "SandboxCommandLogStream",
     "SandboxCredentialsError",
