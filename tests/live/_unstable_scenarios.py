@@ -1,5 +1,7 @@
 """Shared live scenarios for the experimental Sandbox public API."""
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,6 +18,9 @@ from vercel.unstable.sandbox import (
     WriteFile as AsyncWriteFile,
     sync as sandbox_sync,
 )
+
+_SESSION_STOP_TIMEOUT_SECONDS = 60
+_SESSION_STOP_POLL_INTERVAL_SECONDS = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +249,13 @@ class AsyncDriver(_ScenarioDriver):
             command = await runtime_session.run_command("printf", ["session follow-up\n"])
             output = await command.stdout()
             exit_code = command.exit_code
-        return output, exit_code, runtime_session.status is SandboxStatus.STOPPED
+        deadline = time.monotonic() + _SESSION_STOP_TIMEOUT_SECONDS
+        while runtime_session.status is not SandboxStatus.STOPPED:
+            if time.monotonic() >= deadline:
+                return output, exit_code, False
+            await asyncio.sleep(_SESSION_STOP_POLL_INTERVAL_SECONDS)
+            await runtime_session.refresh()
+        return output, exit_code, True
 
     async def delete_snapshot(self, snapshot: Any) -> None:
         await snapshot.delete()
@@ -364,7 +375,13 @@ class SyncDriver(_ScenarioDriver):
             command = runtime_session.run_command("printf", ["session follow-up\n"])
             output = command.stdout()
             exit_code = command.exit_code
-        return output, exit_code, runtime_session.status is SandboxStatus.STOPPED
+        deadline = time.monotonic() + _SESSION_STOP_TIMEOUT_SECONDS
+        while runtime_session.status is not SandboxStatus.STOPPED:
+            if time.monotonic() >= deadline:
+                return output, exit_code, False
+            await asyncio.sleep(_SESSION_STOP_POLL_INTERVAL_SECONDS)
+            runtime_session.refresh()
+        return output, exit_code, True
 
     async def delete_snapshot(self, snapshot: Any) -> None:
         snapshot.delete()
