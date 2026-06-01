@@ -1,6 +1,7 @@
 """Execution-mode-neutral helpers for Sandbox runtime handles."""
 
 import copy
+import posixpath
 import signal as signal_module
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,16 @@ from vercel._internal.unstable.sandbox.state import (
 )
 
 _LogSnapshot: TypeAlias = tuple[SandboxCommandLogStream, str]
+
+
+def _resolve_write_files_cwd(cwd: str | None, *, default: str) -> str:
+    if not posixpath.isabs(default):
+        raise ValueError("default cwd must be an absolute path")
+    if cwd is None:
+        return posixpath.normpath(default)
+    if posixpath.isabs(cwd):
+        return posixpath.normpath(cwd)
+    return posixpath.normpath(posixpath.join(default, cwd))
 
 
 def _signal_number(value: int | str | signal_module.Signals | None) -> int:
@@ -225,7 +236,7 @@ class RuntimeSessionHandleBase:
         self._payload = payload
 
     def _write_files_cwd(self, cwd: str | None) -> str:
-        return cwd or self.cwd or "/vercel/sandbox"
+        return _resolve_write_files_cwd(cwd, default=self.cwd or "/vercel/sandbox")
 
 
 @dataclass(slots=True, eq=False, repr=False)

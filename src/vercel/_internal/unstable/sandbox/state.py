@@ -66,6 +66,8 @@ class SandboxState:
     routes: tuple[SandboxRouteState, ...] = ()
     current_session: SandboxRuntimeSessionState | None = None
     raw: JSONObject | None = None
+    _routes_attached: bool = True
+    _current_session_attached: bool = True
 
 
 @dataclass(frozen=True, slots=True)

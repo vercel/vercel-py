@@ -47,6 +47,7 @@ def _sandbox_response(
     session_id: str = "sbx_123",
     status: str = "running",
     session_status: str | None = None,
+    project_id: str = "prj_123",
 ) -> dict[str, object]:
     return {
         "sandbox": {
@@ -61,7 +62,7 @@ def _sandbox_response(
         "session": {
             "id": session_id,
             "sourceSandboxName": name,
-            "projectId": "prj_123",
+            "projectId": project_id,
             "status": session_status or status,
             "runtime": "python3.13",
             "cwd": "/vercel/sandbox",
@@ -171,7 +172,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         assert request.headers["user-agent"].startswith("vercel/unstable/sandbox/")
         assert "Python/" in request.headers["user-agent"]
         assert json.loads(request.content) == {
-            "projectId": "prj_123",
+            "projectId": "prj_other",
             "name": "preview",
             "runtime": "python3.13",
             "source": {
@@ -189,16 +190,45 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             },
             "tags": {"env": "test"},
         }
-        response = _sandbox_response()
+        response = _sandbox_response(project_id="prj_other")
         payload = response["sandbox"]
         assert isinstance(payload, dict)
         payload["tags"] = {"env": "test"}
         return httpx.Response(200, json=response)
 
     route = respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=handler)
+    update_responses = iter(
+        [
+            {
+                "sandbox": {
+                    "name": "preview",
+                    "currentSessionId": "sbx_123",
+                    "tags": {"env": "updated"},
+                }
+            },
+            {
+                "sandbox": {
+                    "name": "preview",
+                    "currentSessionId": "sbx_123",
+                    "tags": {},
+                },
+                "routes": [],
+            },
+        ]
+    )
+    update_requests: list[httpx.Request] = []
+
+    def update_handler(request: httpx.Request) -> httpx.Response:
+        update_requests.append(request)
+        return httpx.Response(200, json=next(update_responses))
+
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=update_handler
+    )
 
     async with vercel.session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(
+            project_id="prj_other",
             name="preview",
             runtime="python3.13",
             source=GitSource(
@@ -220,13 +250,35 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             handle.status = SandboxStatus.STOPPED  # type: ignore[misc]
         assert handle.tags is not None
         handle.tags["env"] = "mutated"
+        retained_session = handle.current_session
+
+        await handle.update(tags={"env": "updated"})
+        assert handle.tags == {"env": "updated"}
+        assert handle.routes[0].url == "https://preview.sandbox.test"
+        assert handle.project_id == "prj_other"
+        assert handle.current_session is retained_session
+
+        await handle.update(tags={}, ports=[])
+        assert handle.tags == {}
+        assert handle.routes == ()
+        assert handle.project_id == "prj_other"
+        assert handle.current_session is retained_session
 
     assert route.called
-    assert handle.status is SandboxStatus.RUNNING
-    assert handle.tags == {"env": "test"}
+    assert update_route.call_count == 2
+    assert [dict(request.url.params) for request in update_requests] == [
+        {"teamId": "team_123", "projectId": "prj_other"},
+        {"teamId": "team_123", "projectId": "prj_other"},
+    ]
+    assert [json.loads(request.content) for request in update_requests] == [
+        {"tags": {"env": "updated"}},
+        {"ports": [], "tags": {}},
+    ]
+    assert handle.status is None
+    assert handle.tags == {}
     assert handle.current_session is not None
-    assert handle.current_session.project_id == "prj_123"
-    assert handle.routes[0].url == "https://preview.sandbox.test"
+    assert handle.current_session.project_id == "prj_other"
+    assert handle.routes == ()
     assert not hasattr(handle, "model_dump")
 
 
@@ -350,6 +402,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
 
 @respx.mock
 def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
+    assert not hasattr(sandbox_sync, "SandboxCommand")
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -899,9 +952,11 @@ async def test_stopped_runtime_session_continues_issuing_requests(mock_env_clear
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/stop").mock(
         return_value=httpx.Response(
             200,
-            json=_sandbox_response(
-                session_id="sbx_runtime", status="stopped", session_status="stopped"
-            ),
+            json={
+                "session": _sandbox_response(
+                    session_id="sbx_runtime", status="stopped", session_status="stopped"
+                )["session"]
+            },
         )
     )
     command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/cmd").mock(
@@ -951,9 +1006,11 @@ def test_stopped_sync_runtime_session_continues_issuing_requests(mock_env_clear:
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/stop").mock(
         return_value=httpx.Response(
             200,
-            json=_sandbox_response(
-                session_id="sbx_runtime", status="stopped", session_status="stopped"
-            ),
+            json={
+                "session": _sandbox_response(
+                    session_id="sbx_runtime", status="stopped", session_status="stopped"
+                )["session"]
+            },
         )
     )
     command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/cmd").mock(

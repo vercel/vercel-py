@@ -2,6 +2,7 @@
 
 import signal as signal_module
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from types import TracebackType
 from typing import Any, Literal
 
@@ -39,6 +40,7 @@ from vercel._internal.unstable.sandbox.runtime_common import (
     _CommandHandleState,
     _log_from_snapshot,
     _LogSnapshot,
+    _resolve_write_files_cwd,
     _select_output,
     _signal_number,
 )
@@ -425,7 +427,7 @@ class SyncSandbox(SandboxHandleBase):
                 "Sandbox response session does not match current session identity",
                 data=payload,
             )
-        if returned_session is not None:
+        if payload._current_session_attached and returned_session is not None:
             if (
                 self._current_session is not None
                 and self._current_session.id == returned_session.id
@@ -435,9 +437,20 @@ class SyncSandbox(SandboxHandleBase):
                 self._current_session = SyncSandboxRuntimeSession(
                     payload=returned_session, service=self._service
                 )
-        elif payload.current_session_id != self._payload.current_session_id:
+        elif (
+            payload._current_session_attached
+            or payload.current_session_id != self._payload.current_session_id
+        ):
             self._current_session = None
-        self._payload = payload
+        self._payload = replace(
+            payload,
+            routes=payload.routes if payload._routes_attached else self._payload.routes,
+            current_session=(
+                None if self._current_session is None else self._current_session._payload
+            ),
+            _routes_attached=True,
+            _current_session_attached=True,
+        )
 
     def _apply_current_session_payload(
         self, payload: SandboxRuntimeSessionState
@@ -456,11 +469,11 @@ class SyncSandbox(SandboxHandleBase):
         return self._current_session
 
     def _write_files_cwd(self, cwd: str | None) -> str:
-        if cwd is not None:
-            return cwd
         if self.current_session is not None and self.current_session.cwd is not None:
-            return self.current_session.cwd
-        return self.cwd or "/vercel/sandbox"
+            default = self.current_session.cwd
+        else:
+            default = self.cwd or "/vercel/sandbox"
+        return _resolve_write_files_cwd(cwd, default=default)
 
     def __enter__(self) -> Self:
         return self

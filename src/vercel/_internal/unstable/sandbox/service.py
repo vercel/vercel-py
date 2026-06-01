@@ -351,16 +351,11 @@ class SandboxService:
 
     async def stop_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
         self._ensure_open()
-        sandbox = await self._api_client.stop_runtime_session(session_id=session_id)
-        session = sandbox.current_session
-        if session is None:
-            raise SandboxResponseError(
-                "Sandbox API response is missing object field 'session'", data=sandbox.raw
-            )
+        session = await self._api_client.stop_runtime_session(session_id=session_id)
         if session.id != session_id:
             raise SandboxResponseError(
                 "Sandbox current-session operation returned a different session identity",
-                data=sandbox.raw,
+                data=session,
             )
         return session
 

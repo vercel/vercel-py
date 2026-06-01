@@ -115,18 +115,22 @@ async def test_async_filesystem_native_operations_and_write_composition(
         assert await box.fs.read_text("message.txt") == "text"
         await box.fs.write_bytes("data.bin", b"\x00\x01", mode=0o600)
         await box.fs.write_text("message.txt", "hello", mode=0o640)
+        await box.fs.write_text("file.txt", "relative", cwd="workspace")
 
     assert json.loads(mkdir.calls[0].request.content) == {
         "path": "parent",
         "recursive": False,
     }
     assert reads.call_count == 2
-    assert writes.call_count == 2
+    assert writes.call_count == 3
     assert _tar_entries(writes.calls[0].request.content) == {
         "vercel/sandbox/data.bin": (b"\x00\x01", 0o600)
     }
     assert _tar_entries(writes.calls[1].request.content) == {
         "vercel/sandbox/message.txt": (b"hello", 0o640)
+    }
+    assert _tar_entries(writes.calls[2].request.content) == {
+        "vercel/sandbox/workspace/file.txt": (b"relative", 0o644)
     }
 
 

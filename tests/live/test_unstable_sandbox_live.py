@@ -33,6 +33,10 @@ def _assert_persistent(result: PersistentObservation) -> None:
     assert result == PersistentObservation(
         discovered=True,
         tags_preserved=True,
+        routes_preserved=True,
+        project_id_preserved=True,
+        current_session_preserved=True,
+        routes_cleared=True,
         snapshot_fetched=True,
         snapshot_listed=True,
         restored_content="restored state\n",

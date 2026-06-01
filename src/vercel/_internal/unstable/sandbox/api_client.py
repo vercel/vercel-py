@@ -450,7 +450,9 @@ class _SandboxResponse(_ApiModel):
     routes: list[_SandboxRoutePayload] = Field(default_factory=list)
     resumed: bool | None = None
 
-    def to_sandbox(self) -> SandboxState:
+    def to_sandbox(
+        self, *, project_id: str | None = None, sparse_attachments: bool = False
+    ) -> SandboxState:
         if self.sandbox is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'sandbox'",
@@ -465,7 +467,7 @@ class _SandboxResponse(_ApiModel):
         payload = self.sandbox
         session = self.session
         updates: dict[str, object] = {}
-        if session is not None:
+        if session is not None and not sparse_attachments:
             if payload.project_id is None and session.project_id is not None:
                 updates["project_id"] = session.project_id
             for name in (
@@ -486,6 +488,9 @@ class _SandboxResponse(_ApiModel):
             routes=tuple(_route_state(route) for route in self.routes),
             current_session=(None if session is None else _runtime_session_state(session)),
             raw=raw,
+            project_id=project_id,
+            routes_attached=not sparse_attachments or "routes" in self.model_fields_set,
+            current_session_attached=not sparse_attachments or "session" in self.model_fields_set,
         )
 
 
@@ -579,6 +584,8 @@ def _sandbox_state(
     current_session: SandboxRuntimeSessionState | None = None,
     raw: JSONObject | None = None,
     project_id: str | None = None,
+    routes_attached: bool = True,
+    current_session_attached: bool = True,
 ) -> SandboxState:
     return SandboxState(
         name=payload.name,
@@ -602,6 +609,8 @@ def _sandbox_state(
         routes=routes,
         current_session=current_session,
         raw=raw,
+        _routes_attached=routes_attached,
+        _current_session_attached=current_session_attached,
     )
 
 
@@ -640,6 +649,8 @@ def _normalize_mode(mode: object) -> int | None:
 
 
 def _normalize_tar_path(path: str, *, cwd: str) -> str:
+    if not posixpath.isabs(cwd):
+        raise ValueError("cwd must be an absolute path")
     if posixpath.isabs(path):
         absolute_path = posixpath.normpath(path)
     else:
@@ -938,6 +949,7 @@ class SandboxApiClient:
         current_snapshot_id: str | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
+        effective_project_id = project_id or credentials.project_id
         request = _UpdateSandboxRequest(
             runtime=runtime,
             ports=ports,
@@ -955,10 +967,13 @@ class SandboxApiClient:
             "PATCH",
             format_url_path("v2/sandboxes/{name}", name=name),
             credentials=credentials,
-            params={"projectId": project_id or credentials.project_id},
+            params={"projectId": effective_project_id},
             body=request.to_api_dict(),
         )
-        return _validate_response(_SandboxResponse, data).to_sandbox()
+        return _validate_response(_SandboxResponse, data).to_sandbox(
+            project_id=effective_project_id,
+            sparse_attachments=True,
+        )
 
     async def create_runtime_session(
         self,
@@ -975,7 +990,7 @@ class SandboxApiClient:
             include_system_routes=include_system_routes,
         )
 
-    async def stop_runtime_session(self, *, session_id: str) -> SandboxState:
+    async def stop_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -983,9 +998,9 @@ class SandboxApiClient:
             credentials=credentials,
             body={},
         )
-        return _validate_response(_SandboxResponse, data).to_sandbox()
+        return _validate_response(_RuntimeSessionResponse, data).to_runtime_session()
 
-    async def destroy_runtime_session(self, *, session_id: str) -> SandboxState:
+    async def destroy_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
         return await self.stop_runtime_session(session_id=session_id)
 
     async def get_runtime_session(

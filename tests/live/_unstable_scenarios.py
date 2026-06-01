@@ -31,6 +31,10 @@ class WorkspaceObservation:
 class PersistentObservation:
     discovered: bool
     tags_preserved: bool
+    routes_preserved: bool
+    project_id_preserved: bool
+    current_session_preserved: bool
+    routes_cleared: bool
     snapshot_fetched: bool
     snapshot_listed: bool
     restored_content: str
@@ -56,6 +60,15 @@ class _ScenarioDriver:
     async def create_persistent(self, name: str, tags: dict[str, str]) -> Any:
         raise NotImplementedError
 
+    async def update(
+        self,
+        box: Any,
+        *,
+        ports: list[int] | None = None,
+        tags: dict[str, str] | None = None,
+    ) -> None:
+        raise NotImplementedError
+
     async def restore(self, name: str, snapshot_id: str) -> Any:
         raise NotImplementedError
 
@@ -74,7 +87,9 @@ class _ScenarioDriver:
     async def mkdir(self, box: Any, path: str) -> None:
         raise NotImplementedError
 
-    async def write_files(self, box: Any, files: list[tuple[str, str]]) -> None:
+    async def write_files(
+        self, box: Any, files: list[tuple[str, str]], *, cwd: str | None = None
+    ) -> None:
         raise NotImplementedError
 
     async def read_text(self, box: Any, path: str) -> str:
@@ -133,7 +148,7 @@ class AsyncDriver(_ScenarioDriver):
         async with sandbox.create_sandbox(
             name=name,
             runtime="python3.13",
-            execution_time_limit=60_000,
+            execution_time_limit=120_000,
         ) as box:
             yield box
 
@@ -142,9 +157,19 @@ class AsyncDriver(_ScenarioDriver):
             name=name,
             runtime="python3.13",
             persistent=True,
-            execution_time_limit=60_000,
+            ports=[3000],
+            execution_time_limit=120_000,
             tags=tags,
         )
+
+    async def update(
+        self,
+        box: Any,
+        *,
+        ports: list[int] | None = None,
+        tags: dict[str, str] | None = None,
+    ) -> None:
+        await box.update(ports=ports, tags=tags)
 
     async def restore(self, name: str, snapshot_id: str) -> Any:
         return await sandbox.create_sandbox(
@@ -173,9 +198,12 @@ class AsyncDriver(_ScenarioDriver):
     async def mkdir(self, box: Any, path: str) -> None:
         await box.fs.mkdir(path)
 
-    async def write_files(self, box: Any, files: list[tuple[str, str]]) -> None:
+    async def write_files(
+        self, box: Any, files: list[tuple[str, str]], *, cwd: str | None = None
+    ) -> None:
         await box.fs.write_files(
-            [self.write_file_type(path=path, content=content) for path, content in files]
+            [self.write_file_type(path=path, content=content) for path, content in files],
+            cwd=cwd,
         )
 
     async def read_text(self, box: Any, path: str) -> str:
@@ -238,7 +266,7 @@ class SyncDriver(_ScenarioDriver):
         with sandbox_sync.create_sandbox(
             name=name,
             runtime="python3.13",
-            execution_time_limit=60_000,
+            execution_time_limit=120_000,
         ) as box:
             yield box
 
@@ -247,9 +275,19 @@ class SyncDriver(_ScenarioDriver):
             name=name,
             runtime="python3.13",
             persistent=True,
-            execution_time_limit=60_000,
+            ports=[3000],
+            execution_time_limit=120_000,
             tags=tags,
         )
+
+    async def update(
+        self,
+        box: Any,
+        *,
+        ports: list[int] | None = None,
+        tags: dict[str, str] | None = None,
+    ) -> None:
+        box.update(ports=ports, tags=tags)
 
     async def restore(self, name: str, snapshot_id: str) -> Any:
         return sandbox_sync.create_sandbox(
@@ -280,9 +318,12 @@ class SyncDriver(_ScenarioDriver):
     async def mkdir(self, box: Any, path: str) -> None:
         box.fs.mkdir(path)
 
-    async def write_files(self, box: Any, files: list[tuple[str, str]]) -> None:
+    async def write_files(
+        self, box: Any, files: list[tuple[str, str]], *, cwd: str | None = None
+    ) -> None:
         box.fs.write_files(
-            [self.write_file_type(path=path, content=content) for path, content in files]
+            [self.write_file_type(path=path, content=content) for path, content in files],
+            cwd=cwd,
         )
 
     async def read_text(self, box: Any, path: str) -> str:
@@ -342,7 +383,7 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
                 box,
                 [
                     (
-                        "workspace/tool.py",
+                        "tool.py",
                         "from pathlib import Path\n"
                         "import sys\n"
                         "value = Path('workspace/input.txt').read_text().strip()\n"
@@ -350,9 +391,10 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
                         "print('stdout:' + value)\n"
                         "print('stderr:' + value, file=sys.stderr)\n",
                     ),
-                    ("workspace/input.txt", "scenario input\n"),
-                    ("workspace/remove-me.txt", "temporary\n"),
+                    ("input.txt", "scenario input\n"),
+                    ("remove-me.txt", "temporary\n"),
                 ],
+                cwd="workspace",
             )
             assert await driver.exists(box, "workspace/remove-me.txt")
             assert await driver.is_file(box, "workspace/remove-me.txt")
@@ -389,10 +431,23 @@ async def persistent_snapshot_flow(driver: _ScenarioDriver, name: str) -> Persis
     snapshot = None
     cleanup_complete = False
     tags = {"scenario": "unstable-live"}
+    updated_tags = {**tags, "updated": "true"}
 
     async with driver.session():
         try:
             base = await driver.create_persistent(name, tags)
+            routes = base.routes
+            project_id = base.project_id
+            current_session = base.current_session
+            assert routes
+            assert project_id is not None
+            assert current_session is not None
+            await driver.update(base, tags=updated_tags)
+            routes_preserved = base.routes == routes
+            project_id_preserved = base.project_id == project_id
+            current_session_preserved = base.current_session is current_session
+            await driver.update(base, ports=[])
+            routes_cleared = base.routes == ()
             await driver.write_files(base, [("state/message.txt", "restored state\n")])
             discovered = await driver.query_sandboxes(
                 name, TagFilter(key="scenario", value="unstable-live")
@@ -425,7 +480,11 @@ async def persistent_snapshot_flow(driver: _ScenarioDriver, name: str) -> Persis
 
     return PersistentObservation(
         discovered=found is not None,
-        tags_preserved=found is not None and found.tags == tags,
+        tags_preserved=found is not None and found.tags == updated_tags,
+        routes_preserved=routes_preserved,
+        project_id_preserved=project_id_preserved,
+        current_session_preserved=current_session_preserved,
+        routes_cleared=routes_cleared,
         snapshot_fetched=fetched.id == snapshot.id,
         snapshot_listed=any(item.id == snapshot.id for item in listed),
         restored_content=restored_content,
