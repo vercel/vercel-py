@@ -379,6 +379,12 @@ the same observation without another request. Use `logs(refresh=True)` to
 discard an existing complete observation and read the stream again.
 `SandboxRuntimeSession.command_logs(command_id)` is an uncached raw stream.
 
+`run_command(...)` and `start_command(...)` accept `kill_after` as a numeric
+duration in seconds or a `timedelta`. The sandbox enforces this per-command
+limit from exec time and kills the process with `SIGKILL` when it expires,
+including commands started with `start_command(...)`. This is distinct from
+the sandbox session's `execution_time_limit` and from local waiting policy.
+
 `Sandbox.update(...)` changes named sandbox defaults for future sessions, such
 as runtime, resources, ports, tags, snapshot expiration, and persistence.
 `SandboxRuntimeSession.update_network_policy(...)` and

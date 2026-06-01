@@ -2,6 +2,7 @@
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Literal, cast
 
 import anyio
@@ -442,11 +443,18 @@ class SandboxService:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
         wait: bool,
     ) -> SandboxCommandState:
         self._ensure_open()
         started = await self._api_client.run_command(
-            session_id=session_id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
+            session_id=session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
         )
         if not wait:
             return started
@@ -464,6 +472,7 @@ class SandboxService:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SandboxCommandState:
         return await self._run_command(
             session_id=session_id,
@@ -472,6 +481,7 @@ class SandboxService:
             cwd=cwd,
             env=env,
             sudo=sudo,
+            kill_after=kill_after,
             wait=True,
         )
 
@@ -484,6 +494,7 @@ class SandboxService:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SandboxCommandState:
         return await self._run_command(
             session_id=session_id,
@@ -492,6 +503,7 @@ class SandboxService:
             cwd=cwd,
             env=env,
             sudo=sudo,
+            kill_after=kill_after,
             wait=False,
         )
 

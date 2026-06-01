@@ -378,6 +378,13 @@ Project-wide session listing is a module-level operation
 `sandbox.query_sessions(...)`; named sandbox-scoped listing lives on
 `Sandbox.list_sessions(...)`.
 
+`Sandbox.run_command(...)`, `Sandbox.start_command(...)`, and their
+`SandboxRuntimeSession` equivalents accept `kill_after` as a numeric duration
+in seconds or a `timedelta`. This is a per-command exec-time limit: expiry
+kills that command with `SIGKILL`, including commands returned immediately by
+`start_command(...)`. The name intentionally distinguishes this server-side
+command policy from session `execution_time_limit` and local waiting policy.
+
 Rationale:
 
 The v2 REST API has both named sandbox configuration and session-centered

@@ -2,6 +2,7 @@ import asyncio
 import gc
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Generator
+from datetime import timedelta
 from itertools import islice
 from typing import cast
 
@@ -422,6 +423,67 @@ def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
         assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
         assert isinstance(handle.start_command("python"), sandbox_sync.SyncSandboxCommand)
         assert isinstance(handle.snapshot(), sandbox_sync.SyncSnapshot)
+
+
+@respx.mock
+async def test_async_command_kill_after_encodes_seconds_and_timedelta(
+    mock_env_clear: None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def command_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_command_response())
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        side_effect=command_handler
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd/cmd_123").mock(
+        return_value=httpx.Response(200, json=_command_response(exit_code=0))
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        await handle.run_command("sleep", ["60"], kill_after=2.5)
+        await handle.start_command("sleep", ["60"], kill_after=timedelta(seconds=3.25))
+        assert handle.current_session is not None
+        await handle.current_session.start_command("sleep", ["60"], kill_after=4)
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"command": "sleep", "args": ["60"], "sudo": False, "timeout": 2500},
+        {"command": "sleep", "args": ["60"], "sudo": False, "timeout": 3250},
+        {"command": "sleep", "args": ["60"], "sudo": False, "timeout": 4000},
+    ]
+
+
+@respx.mock
+def test_sync_command_kill_after_encodes_seconds_and_omits_none(mock_env_clear: None) -> None:
+    requests: list[httpx.Request] = []
+
+    def command_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_command_response())
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        side_effect=command_handler
+    )
+
+    with vercel.session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        handle.start_command("echo", ["hello"])
+        assert handle.current_session is not None
+        handle.current_session.start_command("sleep", ["60"], kill_after=1.5)
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"command": "echo", "args": ["hello"], "sudo": False},
+        {"command": "sleep", "args": ["60"], "sudo": False, "timeout": 1500},
+    ]
 
 
 @respx.mock

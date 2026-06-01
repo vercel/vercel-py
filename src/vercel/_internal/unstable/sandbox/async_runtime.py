@@ -4,6 +4,7 @@ import signal as signal_module
 import warnings
 from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal
 
@@ -281,9 +282,16 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SandboxCommand:
         state = await self._service.run_command(
-            session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
+            session_id=self.id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
         )
         return SandboxCommand(payload=state, service=self._service)
 
@@ -295,9 +303,16 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SandboxCommand:
         state = await self._service.start_command(
-            session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
+            session_id=self.id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
         )
         return SandboxCommand(payload=state, service=self._service)
 
@@ -440,6 +455,7 @@ class Sandbox(SandboxHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SandboxCommand:
         state = await self._service.run_command(
             session_id=self.current_session_id,
@@ -448,6 +464,7 @@ class Sandbox(SandboxHandleBase):
             cwd=cwd,
             env=env,
             sudo=sudo,
+            kill_after=kill_after,
         )
         return SandboxCommand(payload=state, service=self._service)
 
@@ -459,6 +476,7 @@ class Sandbox(SandboxHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SandboxCommand:
         state = await self._service.start_command(
             session_id=self.current_session_id,
@@ -467,6 +485,7 @@ class Sandbox(SandboxHandleBase):
             cwd=cwd,
             env=env,
             sudo=sudo,
+            kill_after=kill_after,
         )
         return SandboxCommand(payload=state, service=self._service)
 

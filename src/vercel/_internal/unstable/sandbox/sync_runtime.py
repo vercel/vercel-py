@@ -3,6 +3,7 @@
 import signal as signal_module
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
+from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal
 
@@ -319,10 +320,17 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SyncSandboxCommand:
         state = iter_coroutine(
             self._service.run_command(
-                session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
+                session_id=self.id,
+                command=command,
+                args=args,
+                cwd=cwd,
+                env=env,
+                sudo=sudo,
+                kill_after=kill_after,
             )
         )
         return SyncSandboxCommand(payload=state, service=self._service)
@@ -335,10 +343,17 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SyncSandboxCommand:
         state = iter_coroutine(
             self._service.start_command(
-                session_id=self.id, command=command, args=args, cwd=cwd, env=env, sudo=sudo
+                session_id=self.id,
+                command=command,
+                args=args,
+                cwd=cwd,
+                env=env,
+                sudo=sudo,
+                kill_after=kill_after,
             )
         )
         return SyncSandboxCommand(payload=state, service=self._service)
@@ -511,6 +526,7 @@ class SyncSandbox(SandboxHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SyncSandboxCommand:
         state = iter_coroutine(
             self._service.run_command(
@@ -520,6 +536,7 @@ class SyncSandbox(SandboxHandleBase):
                 cwd=cwd,
                 env=env,
                 sudo=sudo,
+                kill_after=kill_after,
             )
         )
         return SyncSandboxCommand(payload=state, service=self._service)
@@ -532,6 +549,7 @@ class SyncSandbox(SandboxHandleBase):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SyncSandboxCommand:
         state = iter_coroutine(
             self._service.start_command(
@@ -541,6 +559,7 @@ class SyncSandbox(SandboxHandleBase):
                 cwd=cwd,
                 env=env,
                 sudo=sudo,
+                kill_after=kill_after,
             )
         )
         return SyncSandboxCommand(payload=state, service=self._service)

@@ -29,7 +29,7 @@ from vercel._internal.http import (
     RequestBody,
     extract_structured_error,
 )
-from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
+from vercel._internal.time import MILLISECOND, SECOND, parse_duration, to_ms_int
 from vercel._internal.unstable.sandbox.errors import SandboxApiError, SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
     DurationInput,
@@ -223,6 +223,16 @@ class _RunCommandRequest(_ApiRequestModel):
     cwd: str | None = None
     env: dict[str, str] | None = None
     sudo: bool | None = None
+    timeout: timedelta | None = None
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _coerce_timeout(cls, value: object) -> timedelta | None:
+        return parse_duration(value, SECOND)
+
+    @field_serializer("timeout")
+    def _serialize_timeout(self, value: timedelta | None) -> int | None:
+        return None if value is None else to_ms_int(value)
 
 
 class _FilesystemPathRequest(_ApiRequestModel):
@@ -1167,6 +1177,7 @@ class SandboxApiClient:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
+        kill_after: float | timedelta | None = None,
     ) -> SandboxCommandState:
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
@@ -1175,6 +1186,7 @@ class SandboxApiClient:
             cwd=cwd,
             env=dict(env) if env is not None else None,
             sudo=sudo,
+            timeout=parse_duration(kill_after, SECOND),
         )
         data = await self._request_json(
             "POST",
