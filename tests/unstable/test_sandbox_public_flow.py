@@ -57,6 +57,8 @@ def _sandbox_response(
             "status": status,
             "persistent": True,
             "runtime": "python3.13",
+            "timeout": 300000,
+            "snapshotExpiration": 0,
             "createdAt": 1,
             "updatedAt": 2,
         },
@@ -236,12 +238,12 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 url="https://github.com/vercel/vercel-py",
                 revision="main",
             ),
-            execution_time_limit=120_000,
+            execution_time_limit=120,
             resources=SandboxResources(vcpus=2, memory=4096),
-            snapshot_expiration=300_000,
+            snapshot_expiration=300,
             snapshot_retention=SnapshotRetention(
                 count=3,
-                expiration=600_000,
+                expiration=600,
                 delete_evicted=False,
             ),
             tags={"env": "test"},
@@ -253,7 +255,12 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         handle.tags["env"] = "mutated"
         retained_session = handle.current_session
 
-        await handle.update(tags={"env": "updated"})
+        await handle.update(
+            tags={"env": "updated"},
+            execution_time_limit=4.5,
+            snapshot_expiration=0,
+            snapshot_retention=SnapshotRetention(count=1, expiration=0),
+        )
         assert handle.tags == {"env": "updated"}
         assert handle.routes[0].url == "https://preview.sandbox.test"
         assert handle.project_id == "prj_other"
@@ -272,7 +279,16 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         {"teamId": "team_123", "projectId": "prj_other"},
     ]
     assert [json.loads(request.content) for request in update_requests] == [
-        {"tags": {"env": "updated"}},
+        {
+            "timeout": 4500,
+            "snapshotExpiration": 0,
+            "keepLastSnapshots": {
+                "count": 1,
+                "expiration": 0,
+                "deleteEvicted": True,
+            },
+            "tags": {"env": "updated"},
+        },
         {"ports": [], "tags": {}},
     ]
     assert handle.status is None
@@ -371,7 +387,10 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
         return_value=httpx.Response(200, json=_command_response())
     )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+    extend_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/extend-timeout"
+    ).mock(return_value=httpx.Response(200, json={"session": _sandbox_response()["session"]}))
+    snapshot_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
         return_value=httpx.Response(
             201,
             json={**_snapshot_response(), "session": _sandbox_response()["session"]},
@@ -389,6 +408,12 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         state = await service.get_sandbox(name="preview")
         assert isinstance(state, SandboxState)
         assert isinstance(state.current_session, SandboxRuntimeSessionState)
+        assert state.execution_time_limit == timedelta(minutes=5)
+        assert state.snapshot_expiration == timedelta(0)
+        assert state.raw is not None
+        assert state.raw["timeout"] == 300000
+        assert state.raw["snapshotExpiration"] == 0
+        assert state.created_at == 1
         page_state = await service.query_sandboxes_page()
         assert isinstance(page_state.sandboxes[0], SandboxState)
 
@@ -396,9 +421,15 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         assert isinstance(handle, sandbox.Sandbox)
         assert isinstance(handle.current_session, sandbox.SandboxRuntimeSession)
         assert isinstance(await handle.start_command("python"), sandbox.SandboxCommand)
-        assert isinstance(await handle.snapshot(), sandbox.Snapshot)
+        session = await handle.extend_execution_time_limit(2.5)
+        assert isinstance(session, sandbox.SandboxRuntimeSession)
+        assert session.execution_time_limit == timedelta(minutes=5)
+        assert isinstance(await handle.snapshot(expiration=0), sandbox.Snapshot)
         page = [item async for item in sandbox.query_sandboxes()]
         assert isinstance(page[0], sandbox.Sandbox)
+
+    assert json.loads(extend_route.calls.last.request.content) == {"duration": 2500}
+    assert json.loads(snapshot_route.calls.last.request.content) == {"expiration": 0}
 
 
 @respx.mock

@@ -19,20 +19,19 @@ from pydantic import (
     Field,
     ValidationError,
     field_serializer,
-    field_validator,
 )
 
 from vercel._internal.http import (
     BaseTransport,
     BytesBody,
     JSONBody,
+    ReadResponsePolicy,
     RequestBody,
     extract_structured_error,
 )
-from vercel._internal.time import MILLISECOND, SECOND, parse_duration, to_ms_int
+from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
 from vercel._internal.unstable.sandbox.errors import SandboxApiError, SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
-    DurationInput,
     JSONObject,
     JSONValue,
     SandboxResources,
@@ -87,10 +86,6 @@ class _ApiRequestModel(_ApiModel):
         return cast(JSONObject, self.model_dump(by_alias=True, exclude_none=True))
 
 
-def _duration_to_milliseconds(value: object) -> timedelta | None:
-    return parse_duration(value, MILLISECOND)
-
-
 class _CreateSandboxRequest(_ApiRequestModel):
     project_id: str = Field(serialization_alias="projectId")
     name: str | None = None
@@ -109,11 +104,6 @@ class _CreateSandboxRequest(_ApiRequestModel):
     keep_last_snapshots: SnapshotRetention | None = Field(
         default=None, serialization_alias="keepLastSnapshots"
     )
-
-    @field_validator("timeout", "snapshot_expiration", mode="before")
-    @classmethod
-    def _coerce_duration(cls, value: object) -> timedelta | None:
-        return _duration_to_milliseconds(value)
 
     @field_serializer("timeout", "snapshot_expiration")
     def _serialize_duration(self, value: timedelta | None) -> int | None:
@@ -136,11 +126,6 @@ class _UpdateSandboxRequest(_ApiRequestModel):
         default=None, serialization_alias="keepLastSnapshots"
     )
     current_snapshot_id: str | None = Field(default=None, serialization_alias="currentSnapshotId")
-
-    @field_validator("timeout", "snapshot_expiration", mode="before")
-    @classmethod
-    def _coerce_duration(cls, value: object) -> timedelta | None:
-        return _duration_to_milliseconds(value)
 
     @field_serializer("timeout", "snapshot_expiration")
     def _serialize_duration(self, value: timedelta | None) -> int | None:
@@ -186,12 +171,7 @@ class _QuerySnapshotsRequest(_QuerySessionsRequest):
 
 
 class _CreateSnapshotRequest(_ApiRequestModel):
-    expiration: DurationInput = None
-
-    @field_validator("expiration", mode="before")
-    @classmethod
-    def _coerce_duration(cls, value: object) -> timedelta | None:
-        return _duration_to_milliseconds(value)
+    expiration: timedelta | None = None
 
     @field_serializer("expiration")
     def _serialize_duration(self, value: timedelta | None) -> int | None:
@@ -199,22 +179,11 @@ class _CreateSnapshotRequest(_ApiRequestModel):
 
 
 class _ExtendTimeoutRequest(_ApiRequestModel):
-    duration: DurationInput
-
-    @field_validator("duration", mode="before")
-    @classmethod
-    def _coerce_duration(cls, value: object) -> timedelta:
-        duration = parse_duration(value, MILLISECOND)
-        if duration is None:
-            raise TypeError("duration is required")
-        return duration
+    duration: timedelta
 
     @field_serializer("duration")
-    def _serialize_duration(self, value: DurationInput) -> int:
-        duration = parse_duration(value, MILLISECOND)
-        if duration is None:
-            raise TypeError("duration is required")
-        return to_ms_int(duration)
+    def _serialize_duration(self, value: timedelta) -> int:
+        return to_ms_int(value)
 
 
 class _RunCommandRequest(_ApiRequestModel):
@@ -224,11 +193,6 @@ class _RunCommandRequest(_ApiRequestModel):
     env: dict[str, str] | None = None
     sudo: bool | None = None
     timeout: timedelta | None = None
-
-    @field_validator("timeout", mode="before")
-    @classmethod
-    def _coerce_timeout(cls, value: object) -> timedelta | None:
-        return parse_duration(value, SECOND)
 
     @field_serializer("timeout")
     def _serialize_timeout(self, value: timedelta | None) -> int | None:
@@ -579,7 +543,7 @@ def _runtime_session_state(payload: _RuntimeSessionPayload) -> SandboxRuntimeSes
         region=payload.region,
         memory=payload.memory,
         vcpus=payload.vcpus,
-        execution_time_limit=payload.execution_time_limit,
+        execution_time_limit=parse_duration(payload.execution_time_limit, MILLISECOND),
         network_policy=payload.network_policy,
         requested_at=payload.requested_at,
         started_at=payload.started_at,
@@ -609,9 +573,9 @@ def _sandbox_state(
         region=payload.region,
         memory=payload.memory,
         vcpus=payload.vcpus,
-        execution_time_limit=payload.execution_time_limit,
+        execution_time_limit=parse_duration(payload.execution_time_limit, MILLISECOND),
         network_policy=payload.network_policy,
-        snapshot_expiration=payload.snapshot_expiration,
+        snapshot_expiration=parse_duration(payload.snapshot_expiration, MILLISECOND),
         status_updated_at=payload.status_updated_at,
         created_at=payload.created_at,
         updated_at=payload.updated_at,
@@ -743,12 +707,8 @@ class SandboxApiClient:
             params=query,
             body=body,
             headers=request_headers,
+            read_response=ReadResponsePolicy.ALWAYS,
         )
-
-        try:
-            response.read()
-        except RuntimeError:
-            await response.aread()
 
         if not response.is_success:
             message, data = extract_structured_error(response)
@@ -787,15 +747,11 @@ class SandboxApiClient:
             body=body,
             headers=request_headers,
             stream=True,
+            read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
         )
 
         if response.is_success:
             return response
-
-        try:
-            response.read()
-        except RuntimeError:
-            await response.aread()
 
         message, data = extract_structured_error(response)
         raise SandboxApiError(response, message, data=data)
@@ -837,13 +793,13 @@ class SandboxApiClient:
         runtime: str | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
-        execution_time_limit: DurationInput = None,
+        execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: DurationInput = None,
+        snapshot_expiration: timedelta | None = None,
         snapshot_retention: SnapshotRetention | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -853,13 +809,13 @@ class SandboxApiClient:
             runtime=runtime,
             source=source,
             ports=ports,
-            timeout=parse_duration(execution_time_limit, MILLISECOND),
+            timeout=execution_time_limit,
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
             env=dict(env) if env is not None else None,
             tags=dict(tags) if tags is not None else None,
-            snapshot_expiration=parse_duration(snapshot_expiration, MILLISECOND),
+            snapshot_expiration=snapshot_expiration,
             keep_last_snapshots=snapshot_retention,
         )
         data = await self._request_json(
@@ -948,13 +904,13 @@ class SandboxApiClient:
         project_id: str | None = None,
         runtime: str | None = None,
         ports: list[int] | None = None,
-        execution_time_limit: DurationInput = None,
+        execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: DurationInput = None,
+        snapshot_expiration: timedelta | None = None,
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
     ) -> SandboxState:
@@ -963,13 +919,13 @@ class SandboxApiClient:
         request = _UpdateSandboxRequest(
             runtime=runtime,
             ports=ports,
-            timeout=parse_duration(execution_time_limit, MILLISECOND),
+            timeout=execution_time_limit,
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
             env=dict(env) if env is not None else None,
             tags=dict(tags) if tags is not None else None,
-            snapshot_expiration=parse_duration(snapshot_expiration, MILLISECOND),
+            snapshot_expiration=snapshot_expiration,
             keep_last_snapshots=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
         )
@@ -1069,7 +1025,7 @@ class SandboxApiClient:
         self,
         *,
         session_id: str,
-        duration: DurationInput,
+        duration: timedelta,
     ) -> SandboxRuntimeSessionState:
         credentials = await self._credentials_factory()
         request = _ExtendTimeoutRequest(duration=duration)
@@ -1106,7 +1062,7 @@ class SandboxApiClient:
         self,
         *,
         session_id: str,
-        expiration: DurationInput = None,
+        expiration: timedelta | None = None,
     ) -> SnapshotSessionState:
         credentials = await self._credentials_factory()
         body: JSONValue | None = None
@@ -1177,7 +1133,7 @@ class SandboxApiClient:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
-        kill_after: float | timedelta | None = None,
+        kill_after: timedelta | None = None,
     ) -> SandboxCommandState:
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
@@ -1186,7 +1142,7 @@ class SandboxApiClient:
             cwd=cwd,
             env=dict(env) if env is not None else None,
             sudo=sudo,
-            timeout=parse_duration(kill_after, SECOND),
+            timeout=kill_after,
         )
         data = await self._request_json(
             "POST",

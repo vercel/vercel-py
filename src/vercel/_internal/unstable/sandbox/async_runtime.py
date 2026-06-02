@@ -3,15 +3,15 @@
 import signal as signal_module
 import warnings
 from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal
 
 from vercel._internal.polyfills import Self
+from vercel._internal.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel._internal.unstable.sandbox.errors import (
     SandboxCleanupError,
-    SandboxResponseError,
     SandboxTerminalStateError,
 )
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
@@ -41,7 +41,6 @@ from vercel._internal.unstable.sandbox.runtime_common import (
     _CommandHandleState,
     _log_from_snapshot,
     _LogSnapshot,
-    _resolve_write_files_cwd,
     _select_output,
     _signal_number,
 )
@@ -291,7 +290,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             cwd=cwd,
             env=env,
             sudo=sudo,
-            kill_after=kill_after,
+            kill_after=parse_duration_seconds(kill_after),
         )
         return SandboxCommand(payload=state, service=self._service)
 
@@ -312,7 +311,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             cwd=cwd,
             env=env,
             sudo=sudo,
-            kill_after=kill_after,
+            kill_after=parse_duration_seconds(kill_after),
         )
         return SandboxCommand(payload=state, service=self._service)
 
@@ -335,7 +334,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> Self:
         payload = await self._service.extend_runtime_session_timeout(
-            session_id=self.id, duration=duration
+            session_id=self.id, duration=parse_required_duration_seconds(duration)
         )
         self._apply_payload(payload)
         return self
@@ -348,7 +347,9 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
-        result = await self._service.create_snapshot(session_id=self.id, expiration=expiration)
+        result = await self._service.create_snapshot(
+            session_id=self.id, expiration=parse_duration_seconds(expiration)
+        )
         self._apply_payload(result.session)
         return Snapshot(payload=result.snapshot, service=self._service)
 
@@ -361,84 +362,20 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
 
-class Sandbox(SandboxHandleBase):
-    __slots__ = ("_service", "_current_session", "fs")
+class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
+    __slots__ = ("_service", "fs")
 
     def __init__(self, *, payload: SandboxState, service: SandboxService) -> None:
-        super().__init__(payload)
+        super().__init__(
+            payload,
+            session_factory=lambda session: SandboxRuntimeSession(payload=session, service=service),
+        )
         self._service = service
-        self._current_session: SandboxRuntimeSession | None = None
-        if payload.current_session is not None:
-            self._current_session = SandboxRuntimeSession(
-                payload=payload.current_session, service=service
-            )
         self.fs = SandboxFilesystem(
             service=service,
             session_id=lambda: self.current_session_id,
             write_files_cwd=self._write_files_cwd,
         )
-
-    @property
-    def current_session(self) -> SandboxRuntimeSession | None:
-        return self._current_session
-
-    def _apply_payload(self, payload: SandboxState) -> None:
-        if payload.name != self._payload.name:
-            raise SandboxResponseError(
-                "Sandbox mutation response returned a different sandbox identity",
-                data=payload,
-            )
-        returned_session = payload.current_session
-        if returned_session is not None and returned_session.id != payload.current_session_id:
-            raise SandboxResponseError(
-                "Sandbox response session does not match current session identity",
-                data=payload,
-            )
-        if payload._current_session_attached and returned_session is not None:
-            if (
-                self._current_session is not None
-                and self._current_session.id == returned_session.id
-            ):
-                self._current_session._apply_payload(returned_session)
-            else:
-                self._current_session = SandboxRuntimeSession(
-                    payload=returned_session, service=self._service
-                )
-        elif (
-            payload._current_session_attached
-            or payload.current_session_id != self._payload.current_session_id
-        ):
-            self._current_session = None
-        self._payload = replace(
-            payload,
-            routes=payload.routes if payload._routes_attached else self._payload.routes,
-            current_session=(
-                None if self._current_session is None else self._current_session._payload
-            ),
-            _routes_attached=True,
-            _current_session_attached=True,
-        )
-
-    def _apply_current_session_payload(
-        self, payload: SandboxRuntimeSessionState
-    ) -> SandboxRuntimeSession:
-        if payload.id != self.current_session_id:
-            raise SandboxResponseError(
-                "Sandbox current-session operation returned a different session identity",
-                data=payload,
-            )
-        if self._current_session is None:
-            self._current_session = SandboxRuntimeSession(payload=payload, service=self._service)
-        else:
-            self._current_session._apply_payload(payload)
-        return self._current_session
-
-    def _write_files_cwd(self, cwd: str | None) -> str:
-        if self.current_session is not None and self.current_session.cwd is not None:
-            default = self.current_session.cwd
-        else:
-            default = self.cwd or "/vercel/sandbox"
-        return _resolve_write_files_cwd(cwd, default=default)
 
     def session(self) -> "CreateRuntimeSessionOperation":
         return CreateRuntimeSessionOperation(
@@ -464,7 +401,7 @@ class Sandbox(SandboxHandleBase):
             cwd=cwd,
             env=env,
             sudo=sudo,
-            kill_after=kill_after,
+            kill_after=parse_duration_seconds(kill_after),
         )
         return SandboxCommand(payload=state, service=self._service)
 
@@ -485,7 +422,7 @@ class Sandbox(SandboxHandleBase):
             cwd=cwd,
             env=env,
             sudo=sudo,
-            kill_after=kill_after,
+            kill_after=parse_duration_seconds(kill_after),
         )
         return SandboxCommand(payload=state, service=self._service)
 
@@ -535,7 +472,8 @@ class Sandbox(SandboxHandleBase):
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> SandboxRuntimeSession:
         payload = await self._service.extend_runtime_session_timeout(
-            session_id=self.current_session_id, duration=duration
+            session_id=self.current_session_id,
+            duration=parse_required_duration_seconds(duration),
         )
         return self._apply_current_session_payload(payload)
 
@@ -547,7 +485,8 @@ class Sandbox(SandboxHandleBase):
 
     async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
         result = await self._service.create_snapshot(
-            session_id=self.current_session_id, expiration=expiration
+            session_id=self.current_session_id,
+            expiration=parse_duration_seconds(expiration),
         )
         self._apply_current_session_payload(result.session)
         return Snapshot(payload=result.snapshot, service=self._service)
@@ -577,13 +516,13 @@ class Sandbox(SandboxHandleBase):
             project_id=self.project_id,
             runtime=runtime,
             ports=ports,
-            execution_time_limit=execution_time_limit,
+            execution_time_limit=parse_duration_seconds(execution_time_limit),
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
             env=env,
             tags=tags,
-            snapshot_expiration=snapshot_expiration,
+            snapshot_expiration=parse_duration_seconds(snapshot_expiration),
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
         )
@@ -598,13 +537,13 @@ class _CreateSandboxParams:
     runtime: str | None = None
     source: SandboxSource | None = None
     ports: list[int] | None = None
-    execution_time_limit: DurationInput = None
+    execution_time_limit: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
     network_policy: JSONValue | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
-    snapshot_expiration: DurationInput = None
+    snapshot_expiration: timedelta | None = None
     snapshot_retention: SnapshotRetention | None = None
 
 
@@ -762,13 +701,13 @@ def create_sandbox_operation(
             runtime=runtime,
             source=source,
             ports=ports,
-            execution_time_limit=execution_time_limit,
+            execution_time_limit=parse_duration_seconds(execution_time_limit),
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
             env=env,
             tags=tags,
-            snapshot_expiration=snapshot_expiration,
+            snapshot_expiration=parse_duration_seconds(snapshot_expiration),
             snapshot_retention=snapshot_retention,
         ),
     )

@@ -268,6 +268,10 @@ sandbox_ = await sandbox.create_sandbox(
 timeout. `execution_time_limit` is the public sandbox execution limit name and
 serializes to the backend `timeout` property.
 
+All unstable Sandbox duration inputs accept numeric seconds or `timedelta`.
+SDK state stores normalized `timedelta` values, and the HTTP boundary serializes
+the backend's millisecond wire representation.
+
 Rationale:
 
 The name keeps platform retention policy distinct from local call duration.

@@ -3,9 +3,10 @@
 import copy
 import posixpath
 import signal as signal_module
-from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from datetime import timedelta
+from typing import Generic, Literal, TypeAlias, TypeVar
 
 from vercel._internal.unstable.sandbox.errors import SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
@@ -24,6 +25,7 @@ from vercel._internal.unstable.sandbox.state import (
 )
 
 _LogSnapshot: TypeAlias = tuple[SandboxCommandLogStream, str]
+RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
 
 
 def _resolve_write_files_cwd(cwd: str | None, *, default: str) -> str:
@@ -63,11 +65,13 @@ def _select_output(
     return "".join(data for source, data in snapshots if stream == "both" or source == stream)
 
 
-@dataclass(slots=True, eq=False, repr=False)
 class _CommandHandleState:
-    _payload: SandboxCommandState
-    _log_cache: tuple[_LogSnapshot, ...] | None = field(init=False, default=None)
-    _log_cache_generation: int = field(init=False, default=0)
+    __slots__ = ("_payload", "_log_cache", "_log_cache_generation")
+
+    def __init__(self, payload: SandboxCommandState) -> None:
+        self._payload = payload
+        self._log_cache: tuple[_LogSnapshot, ...] | None = None
+        self._log_cache_generation = 0
 
     @property
     def id(self) -> str:
@@ -110,9 +114,11 @@ class _CommandHandleState:
         self._payload = payload
 
 
-@dataclass(slots=True, eq=False, repr=False)
 class SnapshotHandleBase:
-    _payload: SnapshotState
+    __slots__ = ("_payload",)
+
+    def __init__(self, payload: SnapshotState) -> None:
+        self._payload = payload
 
     @property
     def id(self) -> str:
@@ -167,9 +173,11 @@ class SnapshotHandleBase:
         self._payload = payload
 
 
-@dataclass(slots=True, eq=False, repr=False)
 class RuntimeSessionHandleBase:
-    _payload: SandboxRuntimeSessionState
+    __slots__ = ("_payload",)
+
+    def __init__(self, payload: SandboxRuntimeSessionState) -> None:
+        self._payload = payload
 
     @property
     def id(self) -> str:
@@ -208,7 +216,7 @@ class RuntimeSessionHandleBase:
         return self._payload.vcpus
 
     @property
-    def execution_time_limit(self) -> int | None:
+    def execution_time_limit(self) -> timedelta | None:
         return self._payload.execution_time_limit
 
     @property
@@ -239,9 +247,23 @@ class RuntimeSessionHandleBase:
         return _resolve_write_files_cwd(cwd, default=self.cwd or "/vercel/sandbox")
 
 
-@dataclass(slots=True, eq=False, repr=False)
-class SandboxHandleBase:
-    _payload: SandboxState
+class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
+    __slots__ = ("_payload", "_current_session", "_session_factory")
+
+    def __init__(
+        self,
+        payload: SandboxState,
+        session_factory: Callable[[SandboxRuntimeSessionState], RuntimeSessionHandleT],
+    ) -> None:
+        self._payload = payload
+        self._session_factory = session_factory
+        self._current_session = (
+            None if payload.current_session is None else session_factory(payload.current_session)
+        )
+
+    @property
+    def current_session(self) -> RuntimeSessionHandleT | None:
+        return self._current_session
 
     @property
     def name(self) -> str:
@@ -288,7 +310,7 @@ class SandboxHandleBase:
         return self._payload.vcpus
 
     @property
-    def execution_time_limit(self) -> int | None:
+    def execution_time_limit(self) -> timedelta | None:
         return self._payload.execution_time_limit
 
     @property
@@ -296,7 +318,7 @@ class SandboxHandleBase:
         return copy.deepcopy(self._payload.network_policy)
 
     @property
-    def snapshot_expiration(self) -> int | None:
+    def snapshot_expiration(self) -> timedelta | None:
         return self._payload.snapshot_expiration
 
     @property
@@ -322,3 +344,59 @@ class SandboxHandleBase:
     @property
     def raw(self) -> JSONObject | None:
         return copy.deepcopy(self._payload.raw)
+
+    def _apply_payload(self, payload: SandboxState) -> None:
+        if payload.name != self._payload.name:
+            raise SandboxResponseError(
+                "Sandbox mutation response returned a different sandbox identity",
+                data=payload,
+            )
+        returned_session = payload.current_session
+        if returned_session is not None and returned_session.id != payload.current_session_id:
+            raise SandboxResponseError(
+                "Sandbox response session does not match current session identity",
+                data=payload,
+            )
+        if payload._current_session_attached and returned_session is not None:
+            if (
+                self._current_session is not None
+                and self._current_session.id == returned_session.id
+            ):
+                self._current_session._apply_payload(returned_session)
+            else:
+                self._current_session = self._session_factory(returned_session)
+        elif (
+            payload._current_session_attached
+            or payload.current_session_id != self._payload.current_session_id
+        ):
+            self._current_session = None
+        self._payload = replace(
+            payload,
+            routes=payload.routes if payload._routes_attached else self._payload.routes,
+            current_session=(
+                None if self._current_session is None else self._current_session._payload
+            ),
+            _routes_attached=True,
+            _current_session_attached=True,
+        )
+
+    def _apply_current_session_payload(
+        self, payload: SandboxRuntimeSessionState
+    ) -> RuntimeSessionHandleT:
+        if payload.id != self.current_session_id:
+            raise SandboxResponseError(
+                "Sandbox current-session operation returned a different session identity",
+                data=payload,
+            )
+        if self._current_session is None:
+            self._current_session = self._session_factory(payload)
+        else:
+            self._current_session._apply_payload(payload)
+        return self._current_session
+
+    def _write_files_cwd(self, cwd: str | None) -> str:
+        if self.current_session is not None and self.current_session.cwd is not None:
+            default = self.current_session.cwd
+        else:
+            default = self.cwd or "/vercel/sandbox"
+        return _resolve_write_files_cwd(cwd, default=default)

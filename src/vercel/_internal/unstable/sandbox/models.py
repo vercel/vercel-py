@@ -14,7 +14,7 @@ from pydantic import (
 )
 
 from vercel._internal.polyfills import StrEnum
-from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
+from vercel._internal.time import parse_duration_seconds, to_ms_int
 
 JSONValue: TypeAlias = PydanticJsonValue
 JSONObject: TypeAlias = dict[str, JSONValue]
@@ -52,10 +52,6 @@ class _InputModel(BaseModel):
             JSONObject,
             self.model_dump(by_alias=True, exclude_none=True, exclude=exclude or set()),
         )
-
-
-def _duration_to_milliseconds(value: object) -> timedelta | None:
-    return parse_duration(value, MILLISECOND)
 
 
 class GitSource(_InputModel):
@@ -103,12 +99,11 @@ class SnapshotRetention(_InputModel):
     @field_validator("expiration", mode="before")
     @classmethod
     def _coerce_duration(cls, value: object) -> timedelta | None:
-        return _duration_to_milliseconds(value)
+        return parse_duration_seconds(value)
 
     @field_serializer("expiration")
-    def _serialize_duration(self, value: DurationInput) -> int | None:
-        duration = parse_duration(value, MILLISECOND)
-        return None if duration is None else to_ms_int(duration)
+    def _serialize_duration(self, value: timedelta | None) -> int | None:
+        return None if value is None else to_ms_int(value)
 
 
 class TagFilter(_InputModel):

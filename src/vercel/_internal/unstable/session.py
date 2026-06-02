@@ -5,24 +5,17 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
-from typing import Any, ClassVar, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, overload
 
 import httpx
 
-from vercel._internal.http import (
-    DEFAULT_TIMEOUT,
-    AsyncTransport,
-    SyncTransport,
-    TransportOptions,
-    create_base_async_client,
-    create_base_client,
-)
 from vercel._internal.polyfills import Self
 from vercel._internal.unstable.errors import VercelSessionClosedError, VercelSessionError
 from vercel._internal.unstable.options import ServiceOptions, merge_service_options
-from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
-from vercel._internal.unstable.sandbox.service import SandboxService
+
+if TYPE_CHECKING:
+    from vercel._internal.http import AsyncTransport, SyncTransport
+    from vercel._internal.unstable.sandbox.service import SandboxService
 
 ServiceOptionsT = TypeVar("ServiceOptionsT", bound=ServiceOptions)
 HttpxClientFactory = Callable[[], httpx.AsyncClient] | Callable[[], httpx.Client]
@@ -123,7 +116,14 @@ class SdkSession(_BaseSdkSession):
             ),
         )
 
-    def _get_transport(self) -> AsyncTransport:
+    def _get_transport(self) -> "AsyncTransport":
+        from vercel._internal.http import (
+            DEFAULT_TIMEOUT,
+            AsyncTransport,
+            TransportOptions,
+            create_base_async_client,
+        )
+
         self.check_open()
         if self._transport is not None:
             return self._transport
@@ -152,7 +152,11 @@ class SdkSession(_BaseSdkSession):
         self._transport = AsyncTransport(client)
         return self._transport
 
-    def sandbox_service(self) -> SandboxService:
+    def sandbox_service(self) -> "SandboxService":
+        from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
+        from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+        from vercel._internal.unstable.sandbox.service import SandboxService
+
         self.check_open()
 
         cached = self._service_cache.get(SandboxService)
@@ -237,7 +241,14 @@ class SyncSdkSession(_BaseSdkSession):
         else:
             loop.create_task(client.aclose())
 
-    def _get_transport(self) -> SyncTransport:
+    def _get_transport(self) -> "SyncTransport":
+        from vercel._internal.http import (
+            DEFAULT_TIMEOUT,
+            SyncTransport,
+            TransportOptions,
+            create_base_client,
+        )
+
         self.check_open()
         if self._transport is not None:
             return self._transport
@@ -263,7 +274,11 @@ class SyncSdkSession(_BaseSdkSession):
         self._transport = SyncTransport(client)
         return self._transport
 
-    def sandbox_service(self) -> SandboxService:
+    def sandbox_service(self) -> "SandboxService":
+        from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
+        from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+        from vercel._internal.unstable.sandbox.service import SandboxService
+
         self.check_open()
 
         cached = self._service_cache.get(SandboxService)

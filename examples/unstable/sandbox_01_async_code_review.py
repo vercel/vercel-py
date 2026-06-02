@@ -3,6 +3,7 @@
 
 import asyncio
 import sys
+from datetime import timedelta
 
 from dotenv import load_dotenv
 
@@ -21,7 +22,7 @@ async def review_code(files: list[WriteFile], review_agent: str) -> str:
     #     box = await sandbox.create_sandbox(name="foo-box", ...)
     async with sandbox.create_sandbox(
         runtime="python3.13",
-        execution_time_limit=60_000,
+        execution_time_limit=timedelta(minutes=1),
     ) as box:
         # The sandbox returned by `create_sandbox` already has a current runtime
         # session. Most workflows can call commands on `box` and filesystem

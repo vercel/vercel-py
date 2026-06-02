@@ -17,7 +17,6 @@ from vercel._internal.unstable.sandbox.errors import (
 )
 from vercel._internal.unstable.sandbox.models import (
     DirectoryEntry,
-    DurationInput,
     JSONValue,
     SandboxQuery,
     SandboxQueryByCreatedAt,
@@ -228,13 +227,13 @@ class SandboxService:
         runtime: str | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
-        execution_time_limit: DurationInput = None,
+        execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: DurationInput = None,
+        snapshot_expiration: timedelta | None = None,
         snapshot_retention: SnapshotRetention | None = None,
     ) -> SandboxState:
         self._ensure_open()
@@ -302,13 +301,13 @@ class SandboxService:
         project_id: str | None = None,
         runtime: str | None = None,
         ports: list[int] | None = None,
-        execution_time_limit: DurationInput = None,
+        execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: DurationInput = None,
+        snapshot_expiration: timedelta | None = None,
         snapshot_retention: SnapshotRetention | None = None,
         current_snapshot_id: str | None = None,
     ) -> SandboxState:
@@ -387,7 +386,7 @@ class SandboxService:
         )
 
     async def extend_runtime_session_timeout(
-        self, *, session_id: str, duration: DurationInput
+        self, *, session_id: str, duration: timedelta
     ) -> SandboxRuntimeSessionState:
         self._ensure_open()
         return await self._api_client.extend_runtime_session_timeout(
@@ -403,7 +402,7 @@ class SandboxService:
         )
 
     async def create_snapshot(
-        self, *, session_id: str, expiration: DurationInput = None
+        self, *, session_id: str, expiration: timedelta | None = None
     ) -> SnapshotSessionState:
         self._ensure_open()
         return await self._api_client.create_snapshot(session_id=session_id, expiration=expiration)
@@ -443,7 +442,7 @@ class SandboxService:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
-        kill_after: float | timedelta | None = None,
+        kill_after: timedelta | None = None,
         wait: bool,
     ) -> SandboxCommandState:
         self._ensure_open()
@@ -472,7 +471,7 @@ class SandboxService:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
-        kill_after: float | timedelta | None = None,
+        kill_after: timedelta | None = None,
     ) -> SandboxCommandState:
         return await self._run_command(
             session_id=session_id,
@@ -494,7 +493,7 @@ class SandboxService:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
-        kill_after: float | timedelta | None = None,
+        kill_after: timedelta | None = None,
     ) -> SandboxCommandState:
         return await self._run_command(
             session_id=session_id,

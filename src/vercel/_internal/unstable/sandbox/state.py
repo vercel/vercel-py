@@ -1,6 +1,7 @@
 """Neutral domain state for unstable Sandbox operations."""
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Literal
 
 from vercel._internal.unstable.sandbox.models import JSONObject, JSONValue, SandboxStatus
@@ -36,7 +37,7 @@ class SandboxRuntimeSessionState:
     region: str | None = None
     memory: int | None = None
     vcpus: int | None = None
-    execution_time_limit: int | None = None
+    execution_time_limit: timedelta | None = None
     network_policy: JSONValue | None = None
     requested_at: int | None = None
     started_at: int | None = None
@@ -56,9 +57,9 @@ class SandboxState:
     region: str | None = None
     memory: int | None = None
     vcpus: int | None = None
-    execution_time_limit: int | None = None
+    execution_time_limit: timedelta | None = None
     network_policy: JSONValue | None = None
-    snapshot_expiration: int | None = None
+    snapshot_expiration: timedelta | None = None
     status_updated_at: int | None = None
     created_at: int | None = None
     updated_at: int | None = None

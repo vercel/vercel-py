@@ -4,7 +4,7 @@ import httpx
 import pytest
 from httpx._types import HeaderTypes, QueryParamTypes
 
-from vercel._internal.http import BaseTransport, RequestBody
+from vercel._internal.http import BaseTransport, ReadResponsePolicy, RequestBody
 from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
 from vercel._internal.unstable.sandbox.errors import SandboxResponseError
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
@@ -27,6 +27,7 @@ class InvalidJsonTransport(BaseTransport):
         timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         self.paths.append(path)
         return httpx.Response(

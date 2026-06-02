@@ -2,6 +2,7 @@
 """Run a small sync script-wrapper workflow in an unstable Sandbox."""
 
 import sys
+from datetime import timedelta
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -25,7 +26,7 @@ def run_script(input_text: str, script: str) -> str:
     with sandbox.create_sandbox(
         name=name,
         runtime="python3.13",
-        execution_time_limit=60_000,
+        execution_time_limit=timedelta(minutes=1),
     ) as box:
         # `box` already points at the sandbox's current runtime session. Commands
         # live on the handle and workspace operations live on `box.fs`.

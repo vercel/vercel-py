@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from vercel import unstable as vercel
@@ -153,7 +154,7 @@ class AsyncDriver(_ScenarioDriver):
         async with sandbox.create_sandbox(
             name=name,
             runtime="python3.13",
-            execution_time_limit=120_000,
+            execution_time_limit=timedelta(minutes=2),
         ) as box:
             yield box
 
@@ -163,7 +164,7 @@ class AsyncDriver(_ScenarioDriver):
             runtime="python3.13",
             persistent=True,
             ports=[3000],
-            execution_time_limit=120_000,
+            execution_time_limit=timedelta(minutes=2),
             tags=tags,
         )
 
@@ -277,7 +278,7 @@ class SyncDriver(_ScenarioDriver):
         with sandbox_sync.create_sandbox(
             name=name,
             runtime="python3.13",
-            execution_time_limit=120_000,
+            execution_time_limit=timedelta(minutes=2),
         ) as box:
             yield box
 
@@ -287,7 +288,7 @@ class SyncDriver(_ScenarioDriver):
             runtime="python3.13",
             persistent=True,
             ports=[3000],
-            execution_time_limit=120_000,
+            execution_time_limit=timedelta(minutes=2),
             tags=tags,
         )
 

@@ -385,6 +385,11 @@ limit from exec time and kills the process with `SIGKILL` when it expires,
 including commands started with `start_command(...)`. This is distinct from
 the sandbox session's `execution_time_limit` and from local waiting policy.
 
+All unstable Sandbox duration inputs follow the same convention: numeric
+values are seconds, while `timedelta` values are accepted directly. This
+includes execution limits, snapshot expiration and retention, timeout
+extension, snapshot creation expiration, and `kill_after`.
+
 `Sandbox.update(...)` changes named sandbox defaults for future sessions, such
 as runtime, resources, ports, tags, snapshot expiration, and persistence.
 `SandboxRuntimeSession.update_network_policy(...)` and

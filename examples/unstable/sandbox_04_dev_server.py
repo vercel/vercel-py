@@ -8,6 +8,7 @@ import json
 import sys
 import time
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 from dotenv import load_dotenv
 
@@ -82,7 +83,7 @@ async def get_or_create_sandbox(
         source=source,
         ports=[port],
         persistent=True,
-        execution_time_limit=300_000,
+        execution_time_limit=timedelta(minutes=5),
         tags={
             "example": "dev-server",
             "sdk": "vercel-py",

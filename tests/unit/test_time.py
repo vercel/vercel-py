@@ -14,6 +14,8 @@ from vercel._internal.time import (
     SECOND,
     coerce_duration,
     parse_duration,
+    parse_duration_seconds,
+    parse_required_duration_seconds,
     to_ms_int,
 )
 
@@ -134,6 +136,15 @@ def test_parse_duration_rejects_unsupported_values(value: object) -> None:
 def test_parse_duration_rejects_bool_values(value: bool) -> None:
     with pytest.raises(TypeError, match="duration must be an int, float, timedelta, or None"):
         parse_duration(value, SECOND)
+
+
+def test_parse_duration_seconds_uses_seconds_for_numeric_values() -> None:
+    assert parse_duration_seconds(1.5) == timedelta(seconds=1.5)
+
+
+def test_parse_required_duration_seconds_rejects_none() -> None:
+    with pytest.raises(TypeError, match="duration is required"):
+        parse_required_duration_seconds(None)
 
 
 def test_create_sandbox_request_preserves_timedelta_until_serialization() -> None:
