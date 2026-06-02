@@ -260,7 +260,7 @@ sandbox_ = await sandbox.create_sandbox(
     runtime="python3.13",
     name="preview",
     execution_time_limit=timedelta(minutes=5),
-    snapshot_expiration=timedelta(minutes=20),
+    snapshot_expiration=timedelta(days=1),
 )
 ```
 
@@ -271,6 +271,8 @@ serializes to the backend `timeout` property.
 All unstable Sandbox duration inputs accept numeric seconds or `timedelta`.
 SDK state stores normalized `timedelta` values, and the HTTP boundary serializes
 the backend's millisecond wire representation.
+Snapshot expiration values accept `0` for no expiration or values from one day
+through ten years inclusive.
 
 Rationale:
 
@@ -371,6 +373,8 @@ operations.
 runtime, resources, ports, tags, snapshot expiration, retention, environment,
 and the current snapshot source. These values affect later session creation and
 named sandbox metadata.
+Passing `snapshot_retention=None` explicitly clears retention by sending
+`keepLastSnapshots: null`; omitting the keyword preserves the existing policy.
 
 `SandboxRuntimeSession.extend_execution_time_limit(...)` and
 `SandboxRuntimeSession.update_network_policy(...)` target one running session.

@@ -16,6 +16,7 @@ from vercel._internal.unstable.sandbox.errors import (
 )
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
+    _OMITTED,
     DirectoryEntry,
     DurationInput,
     JSONValue,
@@ -23,8 +24,12 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxQuery,
     SandboxResources,
     SandboxSource,
+    SnapshotExpiration,
+    SnapshotExpirationInput,
     SnapshotRetention,
+    SnapshotRetentionUpdate,
     WriteFile,
+    _parse_snapshot_expiration,
 )
 from vercel._internal.unstable.sandbox.pagination import (
     QuerySandboxesPage,
@@ -346,9 +351,9 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(payload)
         return self
 
-    async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
+    async def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> Snapshot:
         result = await self._service.create_snapshot(
-            session_id=self.id, expiration=parse_duration_seconds(expiration)
+            session_id=self.id, expiration=_parse_snapshot_expiration(expiration)
         )
         self._apply_payload(result.session)
         return Snapshot(payload=result.snapshot, service=self._service)
@@ -483,10 +488,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         )
         return self._apply_current_session_payload(payload)
 
-    async def snapshot(self, *, expiration: DurationInput = None) -> Snapshot:
+    async def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> Snapshot:
         result = await self._service.create_snapshot(
             session_id=self.current_session_id,
-            expiration=parse_duration_seconds(expiration),
+            expiration=_parse_snapshot_expiration(expiration),
         )
         self._apply_current_session_payload(result.session)
         return Snapshot(payload=result.snapshot, service=self._service)
@@ -507,8 +512,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         network_policy: JSONValue | None = None,
         env: dict[str, str] | None = None,
         tags: dict[str, str] | None = None,
-        snapshot_expiration: DurationInput = None,
-        snapshot_retention: SnapshotRetention | None = None,
+        snapshot_expiration: SnapshotExpirationInput = None,
+        snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
     ) -> Self:
         payload = await self._service.update_sandbox(
@@ -522,7 +527,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             network_policy=network_policy,
             env=env,
             tags=tags,
-            snapshot_expiration=parse_duration_seconds(snapshot_expiration),
+            snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
         )
@@ -543,7 +548,7 @@ class _CreateSandboxParams:
     network_policy: JSONValue | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
-    snapshot_expiration: timedelta | None = None
+    snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
 
 
@@ -690,7 +695,7 @@ def create_sandbox_operation(
     network_policy: JSONValue | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
-    snapshot_expiration: DurationInput = None,
+    snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
 ) -> CreateSandboxOperation:
     return CreateSandboxOperation(
@@ -707,7 +712,7 @@ def create_sandbox_operation(
             network_policy=network_policy,
             env=env,
             tags=tags,
-            snapshot_expiration=parse_duration_seconds(snapshot_expiration),
+            snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
         ),
     )

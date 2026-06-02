@@ -16,6 +16,7 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxResponseError,
 )
 from vercel._internal.unstable.sandbox.models import (
+    _OMITTED,
     DirectoryEntry,
     JSONValue,
     SandboxQuery,
@@ -26,7 +27,9 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxResources,
     SandboxSource,
     SandboxStatus,
+    SnapshotExpiration,
     SnapshotRetention,
+    SnapshotRetentionUpdate,
     TagFilter,
     WriteFile,
 )
@@ -233,7 +236,7 @@ class SandboxService:
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: timedelta | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
     ) -> SandboxState:
         self._ensure_open()
@@ -307,8 +310,8 @@ class SandboxService:
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: timedelta | None = None,
-        snapshot_retention: SnapshotRetention | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
+        snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
     ) -> SandboxState:
         self._ensure_open()
@@ -402,7 +405,7 @@ class SandboxService:
         )
 
     async def create_snapshot(
-        self, *, session_id: str, expiration: timedelta | None = None
+        self, *, session_id: str, expiration: SnapshotExpiration | None = None
     ) -> SnapshotSessionState:
         self._ensure_open()
         return await self._api_client.create_snapshot(session_id=session_id, expiration=expiration)

@@ -15,6 +15,7 @@ from vercel._internal.unstable.sandbox.errors import (
 )
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
+    _OMITTED,
     DirectoryEntry,
     DurationInput,
     JSONValue,
@@ -22,8 +23,11 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxQuery,
     SandboxResources,
     SandboxSource,
+    SnapshotExpirationInput,
     SnapshotRetention,
+    SnapshotRetentionUpdate,
     WriteFile,
+    _parse_snapshot_expiration,
 )
 from vercel._internal.unstable.sandbox.pagination import (
     QuerySandboxesPage,
@@ -393,10 +397,10 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(payload)
         return self
 
-    def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
+    def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
         result = iter_coroutine(
             self._service.create_snapshot(
-                session_id=self.id, expiration=parse_duration_seconds(expiration)
+                session_id=self.id, expiration=_parse_snapshot_expiration(expiration)
             )
         )
         self._apply_payload(result.session)
@@ -563,11 +567,11 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         )
         return self._apply_current_session_payload(payload)
 
-    def snapshot(self, *, expiration: DurationInput = None) -> SyncSnapshot:
+    def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
         result = iter_coroutine(
             self._service.create_snapshot(
                 session_id=self.current_session_id,
-                expiration=parse_duration_seconds(expiration),
+                expiration=_parse_snapshot_expiration(expiration),
             )
         )
         self._apply_current_session_payload(result.session)
@@ -591,8 +595,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: DurationInput = None,
-        snapshot_retention: SnapshotRetention | None = None,
+        snapshot_expiration: SnapshotExpirationInput = None,
+        snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
     ) -> Self:
         payload = iter_coroutine(
@@ -607,7 +611,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 network_policy=network_policy,
                 env=env,
                 tags=tags,
-                snapshot_expiration=parse_duration_seconds(snapshot_expiration),
+                snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
                 current_snapshot_id=current_snapshot_id,
             )
@@ -630,7 +634,7 @@ def create_sandbox(
     network_policy: JSONValue | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
-    snapshot_expiration: DurationInput = None,
+    snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
 ) -> SyncSandbox:
     try:
@@ -647,7 +651,7 @@ def create_sandbox(
                 network_policy=network_policy,
                 env=env,
                 tags=tags,
-                snapshot_expiration=parse_duration_seconds(snapshot_expiration),
+                snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
             )
         )

@@ -45,6 +45,13 @@ class SandboxRuntimeSessionState:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotRetentionState:
+    count: int
+    expiration: timedelta | None = None
+    delete_evicted: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxState:
     name: str
     current_session_id: str
@@ -60,6 +67,7 @@ class SandboxState:
     execution_time_limit: timedelta | None = None
     network_policy: JSONValue | None = None
     snapshot_expiration: timedelta | None = None
+    snapshot_retention: SnapshotRetentionState | None = None
     status_updated_at: int | None = None
     created_at: int | None = None
     updated_at: int | None = None

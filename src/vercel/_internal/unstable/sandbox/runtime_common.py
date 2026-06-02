@@ -21,6 +21,7 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxRouteState,
     SandboxRuntimeSessionState,
     SandboxState,
+    SnapshotRetentionState,
     SnapshotState,
 )
 
@@ -320,6 +321,10 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     @property
     def snapshot_expiration(self) -> timedelta | None:
         return self._payload.snapshot_expiration
+
+    @property
+    def snapshot_retention(self) -> SnapshotRetentionState | None:
+        return self._payload.snapshot_retention
 
     @property
     def status_updated_at(self) -> int | None:

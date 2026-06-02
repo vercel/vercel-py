@@ -66,7 +66,7 @@ async def main() -> None:
     default_sandbox = await sandbox.create_sandbox(
         runtime="python3.13",
         name="default-session-preview",
-        snapshot_expiration=timedelta(minutes=20),
+        snapshot_expiration=timedelta(days=1),
     )
 
     # Service methods do not expose complex timeout/retry policy.
@@ -98,7 +98,7 @@ async def main() -> None:
             resources=SandboxResources(vcpus=2, memory=4096),
             # Platform-side retention for sandbox-owned snapshots/state.
             # This is not an SDK operation timeout.
-            snapshot_expiration=timedelta(minutes=20),
+            snapshot_expiration=timedelta(days=1),
             snapshot_retention=SnapshotRetention(
                 count=3,
                 expiration=timedelta(days=1),
@@ -392,6 +392,10 @@ extension, snapshot creation expiration, and `kill_after`.
 
 `Sandbox.update(...)` changes named sandbox defaults for future sessions, such
 as runtime, resources, ports, tags, snapshot expiration, and persistence.
+Snapshot expiration values accept `0` for no expiration or values from one day
+through ten years inclusive. Pass `snapshot_retention=None` explicitly to
+`Sandbox.update(...)` to clear an existing retention policy; omit the keyword
+to preserve the policy.
 `SandboxRuntimeSession.update_network_policy(...)` and
 `SandboxRuntimeSession.extend_execution_time_limit(...)` change the currently
 running session. Use `sandbox.query_sessions(...)` for project-level session

@@ -34,7 +34,9 @@ from vercel.unstable.sandbox import (
     SandboxStatus,
     SandboxStreamError,
     SandboxTerminalStateError,
+    SnapshotExpiration,
     SnapshotRetention,
+    SnapshotRetentionState,
     SnapshotSource,
     TagFilter,
     TarballSource,
@@ -59,6 +61,11 @@ def _sandbox_response(
             "runtime": "python3.13",
             "timeout": 300000,
             "snapshotExpiration": 0,
+            "keepLastSnapshots": {
+                "count": 2,
+                "expiration": 86400000,
+                "deleteEvicted": False,
+            },
             "createdAt": 1,
             "updatedAt": 2,
         },
@@ -185,10 +192,10 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             },
             "timeout": 120000,
             "resources": {"vcpus": 2, "memory": 4096},
-            "snapshotExpiration": 300000,
+            "snapshotExpiration": 86400000,
             "keepLastSnapshots": {
                 "count": 3,
-                "expiration": 600000,
+                "expiration": 172800000,
                 "deleteEvicted": False,
             },
             "tags": {"env": "test"},
@@ -217,6 +224,13 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 },
                 "routes": [],
             },
+            {
+                "sandbox": {
+                    "name": "preview",
+                    "currentSessionId": "sbx_123",
+                    "tags": {},
+                }
+            },
         ]
     )
     update_requests: list[httpx.Request] = []
@@ -240,10 +254,10 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             ),
             execution_time_limit=120,
             resources=SandboxResources(vcpus=2, memory=4096),
-            snapshot_expiration=300,
+            snapshot_expiration=SnapshotExpiration(timedelta(days=1)),
             snapshot_retention=SnapshotRetention(
                 count=3,
-                expiration=600,
+                expiration=timedelta(days=2),
                 delete_evicted=False,
             ),
             tags={"env": "test"},
@@ -272,9 +286,12 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         assert handle.project_id == "prj_other"
         assert handle.current_session is retained_session
 
+        await handle.update(snapshot_retention=None)
+
     assert route.called
-    assert update_route.call_count == 2
+    assert update_route.call_count == 3
     assert [dict(request.url.params) for request in update_requests] == [
+        {"teamId": "team_123", "projectId": "prj_other"},
         {"teamId": "team_123", "projectId": "prj_other"},
         {"teamId": "team_123", "projectId": "prj_other"},
     ]
@@ -290,6 +307,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             "tags": {"env": "updated"},
         },
         {"ports": [], "tags": {}},
+        {"keepLastSnapshots": None},
     ]
     assert handle.status is None
     assert handle.tags == {}
@@ -339,6 +357,40 @@ async def test_public_create_rejects_malformed_success_response(mock_env_clear: 
     async with vercel.session(service_options=_session_options()):
         with pytest.raises(SandboxResponseError):
             await sandbox.create_sandbox(name="preview", runtime="python3.13")
+
+
+@respx.mock
+async def test_public_snapshot_expiration_validation_happens_before_requests(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    snapshot_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+        return_value=httpx.Response(
+            201,
+            json={**_snapshot_response(), "session": _sandbox_response()["session"]},
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        with pytest.raises(ValueError):
+            sandbox.create_sandbox(snapshot_expiration=1)
+        handle = await sandbox.get_sandbox(name="preview")
+        with pytest.raises(ValueError):
+            await handle.update(snapshot_expiration=1)
+        with pytest.raises(ValueError):
+            await handle.snapshot(expiration=1)
+
+    assert not create_route.called
+    assert not update_route.called
+    assert not snapshot_route.called
 
 
 @respx.mock
@@ -410,9 +462,19 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         assert isinstance(state.current_session, SandboxRuntimeSessionState)
         assert state.execution_time_limit == timedelta(minutes=5)
         assert state.snapshot_expiration == timedelta(0)
+        assert state.snapshot_retention == SnapshotRetentionState(
+            count=2,
+            expiration=timedelta(days=1),
+            delete_evicted=False,
+        )
         assert state.raw is not None
         assert state.raw["timeout"] == 300000
         assert state.raw["snapshotExpiration"] == 0
+        assert state.raw["keepLastSnapshots"] == {
+            "count": 2,
+            "expiration": 86400000,
+            "deleteEvicted": False,
+        }
         assert state.created_at == 1
         page_state = await service.query_sandboxes_page()
         assert isinstance(page_state.sandboxes[0], SandboxState)
@@ -424,24 +486,34 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         session = await handle.extend_execution_time_limit(2.5)
         assert isinstance(session, sandbox.SandboxRuntimeSession)
         assert session.execution_time_limit == timedelta(minutes=5)
-        assert isinstance(await handle.snapshot(expiration=0), sandbox.Snapshot)
+        assert isinstance(await handle.snapshot(expiration=86400.5), sandbox.Snapshot)
         page = [item async for item in sandbox.query_sandboxes()]
         assert isinstance(page[0], sandbox.Sandbox)
 
     assert json.loads(extend_route.calls.last.request.content) == {"duration": 2500}
-    assert json.loads(snapshot_route.calls.last.request.content) == {"expiration": 0}
+    assert json.loads(snapshot_route.calls.last.request.content) == {"expiration": 86400500}
 
 
 @respx.mock
 def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
     assert not hasattr(sandbox_sync, "SandboxCommand")
+    update_requests: list[httpx.Request] = []
+
+    def update_handler(request: httpx.Request) -> httpx.Response:
+        update_requests.append(request)
+        return httpx.Response(
+            200,
+            json={"sandbox": {"name": "preview", "currentSessionId": "sbx_123"}},
+        )
+
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
+    respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=update_handler)
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
         return_value=httpx.Response(200, json=_command_response())
     )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
+    snapshot_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/snapshot").mock(
         return_value=httpx.Response(
             201,
             json={**_snapshot_response(), "session": _sandbox_response()["session"]},
@@ -453,7 +525,15 @@ def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
         assert isinstance(handle, sandbox_sync.SyncSandbox)
         assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
         assert isinstance(handle.start_command("python"), sandbox_sync.SyncSandboxCommand)
-        assert isinstance(handle.snapshot(), sandbox_sync.SyncSnapshot)
+        assert isinstance(handle.snapshot(expiration=timedelta(days=1)), sandbox_sync.SyncSnapshot)
+        handle.update(tags={})
+        handle.update(snapshot_retention=None)
+
+    assert json.loads(snapshot_route.calls.last.request.content) == {"expiration": 86400000}
+    assert [json.loads(request.content) for request in update_requests] == [
+        {"tags": {}},
+        {"keepLastSnapshots": None},
+    ]
 
 
 @respx.mock

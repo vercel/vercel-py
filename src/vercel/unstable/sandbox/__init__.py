@@ -44,6 +44,8 @@ from vercel._internal.unstable.sandbox.models import (
     SandboxResources,
     SandboxSource,
     SandboxStatus,
+    SnapshotExpiration,
+    SnapshotExpirationInput,
     SnapshotRetention,
     SnapshotSource,
     TagFilter,
@@ -51,6 +53,7 @@ from vercel._internal.unstable.sandbox.models import (
     WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+from vercel._internal.unstable.sandbox.state import SnapshotRetentionState
 from vercel._internal.unstable.session import get_active_session
 
 from . import sync
@@ -69,7 +72,7 @@ def create_sandbox(
     network_policy: JSONValue | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
-    snapshot_expiration: DurationInput = None,
+    snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
 ) -> CreateSandboxOperation:
     return _create_sandbox_operation(
@@ -192,7 +195,9 @@ __all__ = [
     "DirectoryEntry",
     "GitSource",
     "Snapshot",
+    "SnapshotExpiration",
     "SnapshotRetention",
+    "SnapshotRetentionState",
     "SnapshotSource",
     "TagFilter",
     "TarballSource",

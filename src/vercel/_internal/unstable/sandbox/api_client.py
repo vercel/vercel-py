@@ -32,14 +32,18 @@ from vercel._internal.http import (
 from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
 from vercel._internal.unstable.sandbox.errors import SandboxApiError, SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
+    _OMITTED,
     JSONObject,
     JSONValue,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
+    SnapshotExpiration,
     SnapshotRetention,
+    SnapshotRetentionUpdate,
     TagFilter,
     WriteFile,
+    _Omitted,
 )
 from vercel._internal.unstable.sandbox.options import (
     SandboxCredentials,
@@ -52,6 +56,7 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxRouteState,
     SandboxRuntimeSessionState,
     SandboxState,
+    SnapshotRetentionState,
     SnapshotSessionState,
     SnapshotsPageState,
     SnapshotState,
@@ -79,7 +84,11 @@ class _ApiModel(BaseModel):
 
 class _ApiRequestModel(_ApiModel):
     model_config = ConfigDict(
-        extra="forbid", frozen=True, populate_by_name=True, serialize_by_alias=True
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        frozen=True,
+        populate_by_name=True,
+        serialize_by_alias=True,
     )
 
     def to_api_dict(self) -> JSONObject:
@@ -98,16 +107,24 @@ class _CreateSandboxRequest(_ApiRequestModel):
     network_policy: JSONValue | None = Field(default=None, serialization_alias="networkPolicy")
     env: dict[str, str] | None = None
     tags: dict[str, str] | None = None
-    snapshot_expiration: timedelta | None = Field(
+    snapshot_expiration: SnapshotExpiration | None = Field(
         default=None, serialization_alias="snapshotExpiration"
     )
     keep_last_snapshots: SnapshotRetention | None = Field(
         default=None, serialization_alias="keepLastSnapshots"
     )
 
-    @field_serializer("timeout", "snapshot_expiration")
+    @field_serializer("timeout")
     def _serialize_duration(self, value: timedelta | None) -> int | None:
         return None if value is None else to_ms_int(value)
+
+    @field_serializer("snapshot_expiration")
+    def _serialize_snapshot_expiration(self, value: SnapshotExpiration | None) -> int | None:
+        return None if value is None else to_ms_int(value.value)
+
+    @field_serializer("keep_last_snapshots")
+    def _serialize_retention(self, value: SnapshotRetention | None) -> JSONObject | None:
+        return None if value is None else value.to_api_dict()
 
 
 class _UpdateSandboxRequest(_ApiRequestModel):
@@ -119,17 +136,18 @@ class _UpdateSandboxRequest(_ApiRequestModel):
     network_policy: JSONValue | None = Field(default=None, serialization_alias="networkPolicy")
     env: dict[str, str] | None = None
     tags: dict[str, str] | None = None
-    snapshot_expiration: timedelta | None = Field(
+    snapshot_expiration: SnapshotExpiration | None = Field(
         default=None, serialization_alias="snapshotExpiration"
-    )
-    keep_last_snapshots: SnapshotRetention | None = Field(
-        default=None, serialization_alias="keepLastSnapshots"
     )
     current_snapshot_id: str | None = Field(default=None, serialization_alias="currentSnapshotId")
 
-    @field_serializer("timeout", "snapshot_expiration")
+    @field_serializer("timeout")
     def _serialize_duration(self, value: timedelta | None) -> int | None:
         return None if value is None else to_ms_int(value)
+
+    @field_serializer("snapshot_expiration")
+    def _serialize_snapshot_expiration(self, value: SnapshotExpiration | None) -> int | None:
+        return None if value is None else to_ms_int(value.value)
 
 
 class _GetSandboxRequest(_ApiRequestModel):
@@ -171,11 +189,11 @@ class _QuerySnapshotsRequest(_QuerySessionsRequest):
 
 
 class _CreateSnapshotRequest(_ApiRequestModel):
-    expiration: timedelta | None = None
+    expiration: SnapshotExpiration | None = None
 
     @field_serializer("expiration")
-    def _serialize_duration(self, value: timedelta | None) -> int | None:
-        return None if value is None else to_ms_int(value)
+    def _serialize_duration(self, value: SnapshotExpiration | None) -> int | None:
+        return None if value is None else to_ms_int(value.value)
 
 
 class _ExtendTimeoutRequest(_ApiRequestModel):
@@ -280,6 +298,16 @@ class _RuntimeSessionPayload(_ApiModel):
     )
 
 
+class _SnapshotRetentionPayload(_ApiModel):
+    count: int
+    expiration: int | None = None
+    delete_evicted: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("delete_evicted", "deleteEvicted"),
+        serialization_alias="deleteEvicted",
+    )
+
+
 class _SandboxPayload(_ApiModel):
     name: str
     current_session_id: str = Field(
@@ -317,6 +345,11 @@ class _SandboxPayload(_ApiModel):
         default=None,
         validation_alias=AliasChoices("snapshot_expiration", "snapshotExpiration"),
         serialization_alias="snapshotExpiration",
+    )
+    snapshot_retention: _SnapshotRetentionPayload | None = Field(
+        default=None,
+        validation_alias=AliasChoices("snapshot_retention", "keepLastSnapshots"),
+        serialization_alias="keepLastSnapshots",
     )
     status_updated_at: int | None = Field(
         default=None,
@@ -576,6 +609,15 @@ def _sandbox_state(
         execution_time_limit=parse_duration(payload.execution_time_limit, MILLISECOND),
         network_policy=payload.network_policy,
         snapshot_expiration=parse_duration(payload.snapshot_expiration, MILLISECOND),
+        snapshot_retention=(
+            None
+            if payload.snapshot_retention is None
+            else SnapshotRetentionState(
+                count=payload.snapshot_retention.count,
+                expiration=parse_duration(payload.snapshot_retention.expiration, MILLISECOND),
+                delete_evicted=payload.snapshot_retention.delete_evicted,
+            )
+        ),
         status_updated_at=payload.status_updated_at,
         created_at=payload.created_at,
         updated_at=payload.updated_at,
@@ -799,7 +841,7 @@ class SandboxApiClient:
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: timedelta | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -910,8 +952,8 @@ class SandboxApiClient:
         network_policy: JSONValue | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
-        snapshot_expiration: timedelta | None = None,
-        snapshot_retention: SnapshotRetention | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
+        snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -926,15 +968,19 @@ class SandboxApiClient:
             env=dict(env) if env is not None else None,
             tags=dict(tags) if tags is not None else None,
             snapshot_expiration=snapshot_expiration,
-            keep_last_snapshots=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
         )
+        body = request.to_api_dict()
+        if not isinstance(snapshot_retention, _Omitted):
+            body["keepLastSnapshots"] = (
+                None if snapshot_retention is None else snapshot_retention.to_api_dict()
+            )
         data = await self._request_json(
             "PATCH",
             format_url_path("v2/sandboxes/{name}", name=name),
             credentials=credentials,
             params={"projectId": effective_project_id},
-            body=request.to_api_dict(),
+            body=body,
         )
         return _validate_response(_SandboxResponse, data).to_sandbox(
             project_id=effective_project_id,
@@ -1062,7 +1108,7 @@ class SandboxApiClient:
         self,
         *,
         session_id: str,
-        expiration: timedelta | None = None,
+        expiration: SnapshotExpiration | None = None,
     ) -> SnapshotSessionState:
         credentials = await self._credentials_factory()
         body: JSONValue | None = None
