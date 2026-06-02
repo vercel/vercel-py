@@ -14,6 +14,7 @@ from pydantic import BaseModel, ValidationError
 from vercel import unstable as vercel
 from vercel._internal.unstable.errors import VercelSessionClosedError
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
+from vercel._internal.unstable.sandbox.service import get_sandbox_service
 from vercel._internal.unstable.sandbox.state import SandboxRuntimeSessionState, SandboxState
 from vercel._internal.unstable.session import get_active_session
 from vercel.unstable import sandbox
@@ -456,7 +457,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
     )
 
     async with vercel.session(service_options=_session_options()):
-        service = get_active_session().sandbox_service()
+        service = get_sandbox_service(get_active_session())
         state = await service.get_sandbox(name="preview")
         assert isinstance(state, SandboxState)
         assert isinstance(state.current_session, SandboxRuntimeSessionState)
@@ -609,7 +610,7 @@ async def test_session_closure_during_create_polling_is_rejected(mock_env_clear:
     async with vercel.session(service_options=_session_options()):
         session = get_active_session()
         operation = asyncio.create_task(
-            session.sandbox_service().create_sandbox(name="preview", runtime="python3.13")
+            get_sandbox_service(session).create_sandbox(name="preview", runtime="python3.13")
         )
         await asyncio.sleep(0)
         await session.aclose()
@@ -839,7 +840,7 @@ async def test_closed_session_rejects_handles_and_lazy_logs(mock_env_clear: None
     )
 
     async with vercel.session(service_options=_session_options()):
-        service = get_active_session().sandbox_service()
+        service = get_sandbox_service(get_active_session())
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         runtime_session = await handle.session()
         command = await handle.start_command("sleep", ["30"])

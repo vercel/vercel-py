@@ -53,10 +53,15 @@ from vercel._internal.unstable.sandbox.models import (
     WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+from vercel._internal.unstable.sandbox.service import SandboxService, get_sandbox_service
 from vercel._internal.unstable.sandbox.state import SnapshotRetentionState
 from vercel._internal.unstable.session import get_active_session
 
 from . import sync
+
+
+def _service() -> SandboxService:
+    return get_sandbox_service(get_active_session())
 
 
 def create_sandbox(
@@ -76,7 +81,7 @@ def create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
 ) -> CreateSandboxOperation:
     return _create_sandbox_operation(
-        get_active_session().sandbox_service(),
+        _service(),
         project_id=project_id,
         name=name,
         runtime=runtime,
@@ -101,7 +106,7 @@ async def get_sandbox(
     include_system_routes: bool | None = None,
 ) -> Sandbox:
     return await _get_sandbox(
-        get_active_session().sandbox_service(),
+        _service(),
         name=name,
         project_id=project_id,
         resume=resume,
@@ -117,7 +122,7 @@ def query_sandboxes(
     cursor: str | None = None,
 ) -> AsyncIterator[Sandbox]:
     return _query_sandboxes(
-        get_active_session().sandbox_service(),
+        _service(),
         query=query,
         project_id=project_id,
         page_size=page_size,
@@ -134,7 +139,7 @@ def query_sessions(
     sort_order: str | None = None,
 ) -> AsyncIterator[SandboxRuntimeSession]:
     return _query_sessions(
-        get_active_session().sandbox_service(),
+        _service(),
         project_id=project_id,
         name=name,
         page_size=page_size,
@@ -152,7 +157,7 @@ def query_snapshots(
     sort_order: str | None = None,
 ) -> AsyncIterator[Snapshot]:
     return _query_snapshots(
-        get_active_session().sandbox_service(),
+        _service(),
         project_id=project_id,
         name=name,
         page_size=page_size,
@@ -162,7 +167,7 @@ def query_snapshots(
 
 
 async def get_snapshot(*, snapshot_id: str) -> Snapshot:
-    return await _get_snapshot(get_active_session().sandbox_service(), snapshot_id=snapshot_id)
+    return await _get_snapshot(_service(), snapshot_id=snapshot_id)
 
 
 __all__ = [

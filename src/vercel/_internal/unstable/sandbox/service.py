@@ -3,9 +3,8 @@
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
-import anyio
 import httpx
 
 from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
@@ -44,6 +43,9 @@ from vercel._internal.unstable.sandbox.state import (
     SnapshotsPageState,
     SnapshotState,
 )
+
+if TYPE_CHECKING:
+    from vercel._internal.unstable.session import _BaseSdkSession
 
 _READY_SANDBOX_STATUSES = frozenset({SandboxStatus.RUNNING})
 _TERMINAL_SANDBOX_STATUSES = frozenset(
@@ -184,12 +186,12 @@ class SandboxService:
         api_client: SandboxApiClient,
         options: SandboxServiceOptions,
         ensure_open: Callable[[], None],
-        sleep: AsyncSleep | None = None,
+        sleep: AsyncSleep,
     ) -> None:
         self._api_client = api_client
         self._options = options
         self._ensure_open = ensure_open
-        self._sleep = sleep or anyio.sleep
+        self._sleep = sleep
 
     @property
     def api_client(self) -> SandboxApiClient:
@@ -752,3 +754,20 @@ class SandboxService:
         return await self._api_client.command_logs_response(
             session_id=session_id, command_id=command_id
         )
+
+
+def get_sandbox_service(session: "_BaseSdkSession") -> SandboxService:
+    def factory() -> SandboxService:
+        options = session.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
+        return SandboxService(
+            api_client=SandboxApiClient(
+                base_url=options.base_url,
+                credentials_factory=options.credentials_factory,
+                transport=session.get_transport(),
+            ),
+            options=options,
+            ensure_open=session.check_open,
+            sleep=session.sleep,
+        )
+
+    return session.get_or_create_service(SandboxService, factory)

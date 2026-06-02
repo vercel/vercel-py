@@ -12,6 +12,7 @@ from vercel._internal.unstable.errors import (
 )
 from vercel._internal.unstable.options import ServiceOptions
 from vercel._internal.unstable.sandbox.options import DEFAULT_SANDBOX_API_BASE_URL
+from vercel._internal.unstable.sandbox.service import get_sandbox_service
 from vercel._internal.unstable.session import (
     SdkSession,
     SyncSdkSession,
@@ -96,7 +97,7 @@ def test_sync_session_options_inherit_replace_reject_duplicates_and_close() -> N
     assert get_active_sync_session() is parent
     assert outer_session.is_closed
     with pytest.raises(VercelSessionClosedError):
-        outer_session.sandbox_service()
+        get_sandbox_service(outer_session)
 
     with pytest.raises(VercelServiceOptionsError):
         with vercel.session(
@@ -118,21 +119,21 @@ async def test_async_sessions_inherit_factory_and_explicit_none_resets_it() -> N
         return httpx.AsyncClient()
 
     async with vercel.session(httpx_client_factory=factory):
-        get_active_session().sandbox_service()
+        get_sandbox_service(get_active_session())
         async with vercel.session():
             inherited = get_active_session()
             assert inherited.get_setting("httpx_client_factory") is factory
-            inherited.sandbox_service()
+            get_sandbox_service(inherited)
         async with vercel.session(httpx_client_factory=None):
             reset = get_active_session()
             assert reset.get_setting("httpx_client_factory") is None
-            reset.sandbox_service()
+            get_sandbox_service(reset)
 
     assert calls == 2
     assert inherited.is_closed
     assert reset.is_closed
     with pytest.raises(VercelSessionClosedError):
-        inherited.sandbox_service()
+        get_sandbox_service(inherited)
 
 
 def test_default_sessions_are_independent() -> None:
@@ -170,7 +171,7 @@ def test_sync_factory_is_lazy_shared_and_closed_once() -> None:
     with vercel.session(httpx_client_factory=factory):
         session = get_active_sync_session()
         assert clients == []
-        assert session.sandbox_service() is session.sandbox_service()
+        assert get_sandbox_service(session) is get_sandbox_service(session)
         assert len(clients) == 1
 
     assert clients[0].close_calls == 1
@@ -188,8 +189,8 @@ async def test_async_factory_is_lazy_shared_and_closed_once() -> None:
     async with vercel.session(httpx_client_factory=factory):
         session = get_active_session()
         assert clients == []
-        service = session.sandbox_service()
-        assert service is session.sandbox_service()
+        service = get_sandbox_service(session)
+        assert service is get_sandbox_service(session)
         assert not hasattr(service, "aclose")
         assert not hasattr(service.api_client, "aclose")
         assert len(clients) == 1
@@ -203,7 +204,7 @@ async def test_async_session_rejects_and_closes_sync_factory_client() -> None:
 
     async with vercel.session(httpx_client_factory=lambda: client):
         with pytest.raises(VercelSessionError):
-            get_active_session().sandbox_service()
+            get_sandbox_service(get_active_session())
 
     assert client.close_calls == 1
 
@@ -213,6 +214,6 @@ def test_sync_session_rejects_and_closes_async_factory_client() -> None:
 
     with vercel.session(httpx_client_factory=lambda: client):
         with pytest.raises(VercelSessionError):
-            get_active_sync_session().sandbox_service()
+            get_sandbox_service(get_active_sync_session())
 
     assert client.close_calls == 1

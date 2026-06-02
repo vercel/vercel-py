@@ -19,6 +19,8 @@ contract.
   equivalents.
 - Endpoint clients own service base URLs and send absolute URLs through the
   session transport, so multiple services and origins can share one pool.
+- SDK sessions expose generic runtime capabilities and cache services requested
+  by domain-owned constructors.
 - Service configuration lives on the SDK session through
   `service_options=[...]`.
 - Each service has a default options object, so simple calls work without a
@@ -246,6 +248,31 @@ can bridge sync execution through shared service logic, but it does not own
 endpoint base URLs or select service credentials. Supplying
 `httpx_client_factory` customizes the pool wrapped by the session transport;
 it does not replace the transport contract.
+
+## Internal Service Composition
+
+SDK sessions are domain-neutral runtime providers. They validate open state,
+resolve service options, cache one instance per requested service
+implementation type, lend the mode-specific shared transport, and provide an
+async-shaped sleep operation. The sync sleep capability blocks directly so
+async-first service logic remains compatible with `iter_coroutine()`.
+
+Service packages own domain-specific assembly: options defaults, endpoint
+origins, credentials, endpoint clients, and orchestration wiring. Public async
+and sync domain facades resolve their active mode-specific session and pass it
+to the domain-owned constructor.
+
+Add another unstable service with this pattern:
+
+1. Define `<Domain>ServiceOptions(ServiceOptions)` in the domain package.
+2. Implement an async-first neutral `<Domain>Service`.
+3. Add `get_<domain>_service(session)` beside that service.
+4. Construct domain endpoint clients from generic session capabilities.
+5. Cache the result through `session.get_or_create_service(...)`.
+6. Resolve active async or sync sessions only in public domain facades.
+
+A central registry or descriptor abstraction is unnecessary until multiple
+services demonstrate additional repeated structure.
 
 ## Service Options
 

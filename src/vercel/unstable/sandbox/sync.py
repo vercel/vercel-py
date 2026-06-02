@@ -39,6 +39,7 @@ from vercel._internal.unstable.sandbox.models import (
     WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+from vercel._internal.unstable.sandbox.service import SandboxService, get_sandbox_service
 from vercel._internal.unstable.sandbox.state import SnapshotRetentionState
 from vercel._internal.unstable.sandbox.sync_runtime import (
     SyncSandbox,
@@ -54,6 +55,10 @@ from vercel._internal.unstable.sandbox.sync_runtime import (
     query_snapshots as _query_snapshots,
 )
 from vercel._internal.unstable.session import get_active_sync_session
+
+
+def _service() -> SandboxService:
+    return get_sandbox_service(get_active_sync_session())
 
 
 def create_sandbox(
@@ -73,7 +78,7 @@ def create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
 ) -> SyncSandbox:
     return _create_sandbox(
-        get_active_sync_session().sandbox_service(),
+        _service(),
         project_id=project_id,
         name=name,
         runtime=runtime,
@@ -98,7 +103,7 @@ def get_sandbox(
     include_system_routes: bool | None = None,
 ) -> SyncSandbox:
     return _get_sandbox(
-        get_active_sync_session().sandbox_service(),
+        _service(),
         name=name,
         project_id=project_id,
         resume=resume,
@@ -114,7 +119,7 @@ def query_sandboxes(
     cursor: str | None = None,
 ) -> Iterator[SyncSandbox]:
     return _query_sandboxes(
-        get_active_sync_session().sandbox_service(),
+        _service(),
         query=query,
         project_id=project_id,
         page_size=page_size,
@@ -131,7 +136,7 @@ def query_sessions(
     sort_order: str | None = None,
 ) -> Iterator[SyncSandboxRuntimeSession]:
     return _query_sessions(
-        get_active_sync_session().sandbox_service(),
+        _service(),
         project_id=project_id,
         name=name,
         page_size=page_size,
@@ -149,7 +154,7 @@ def query_snapshots(
     sort_order: str | None = None,
 ) -> Iterator[SyncSnapshot]:
     return _query_snapshots(
-        get_active_sync_session().sandbox_service(),
+        _service(),
         project_id=project_id,
         name=name,
         page_size=page_size,
@@ -159,7 +164,7 @@ def query_snapshots(
 
 
 def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
-    return _get_snapshot(get_active_sync_session().sandbox_service(), snapshot_id=snapshot_id)
+    return _get_snapshot(_service(), snapshot_id=snapshot_id)
 
 
 __all__ = [

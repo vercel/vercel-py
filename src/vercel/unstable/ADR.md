@@ -65,11 +65,13 @@ Implementation note:
 Sandbox wire responses are validated and converted into immutable neutral
 domain state in its endpoint API client. `SandboxService` performs shared
 async-first domain orchestration over that state, including polling and
-compound results, without constructing public handles. Each SDK session caches
-a `SandboxService` backed by its matching transport. Separate async and sync
-runtime modules construct their matching public handles and consume command-log
-streams; sync runtime entry points use `iter_coroutine()` to drive service
-operations.
+compound results, without constructing public handles. The Sandbox package
+owns its service constructor, including options, origin, credentials, and
+orchestration wiring. It requests generic runtime capabilities from the SDK
+session and caches one `SandboxService` through that session. Separate async
+and sync runtime modules construct their matching public handles and consume
+command-log streams; sync runtime entry points use `iter_coroutine()` to drive
+service operations.
 
 ## Decision 3: Mode-specific Default Sessions And Scoped Overrides
 
@@ -217,6 +219,25 @@ shutdown, and lends it to endpoint clients. The transport may retain generic
 request encoding, streaming mechanics, and bearer-header injection; endpoint
 clients own origin selection, credential selection, and domain error
 translation.
+
+SDK sessions expose domain-neutral runtime capabilities to service packages:
+open-state validation, option lookup, one cached instance per requested service
+implementation type, a mode-specific shared transport, and an async-shaped
+sleep operation. The sync sleep implementation blocks directly so shared
+async-first service logic remains compatible with `iter_coroutine()`.
+
+Each domain package owns its assembly function beside its neutral service. A
+new unstable service should:
+
+1. Define `<Domain>ServiceOptions(ServiceOptions)` in the domain package.
+2. Implement an async-first neutral `<Domain>Service`.
+3. Add `get_<domain>_service(session)` beside that service.
+4. Construct domain endpoint clients from generic session capabilities.
+5. Cache the result through `session.get_or_create_service(...)`.
+6. Resolve active async or sync sessions only in public domain facades.
+
+No central service registry or descriptor abstraction is needed until multiple
+services demonstrate additional repeated structure.
 
 ## Decision 7: No Operation Policy Objects
 

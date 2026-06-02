@@ -7,6 +7,7 @@ from contextvars import ContextVar, Token
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, overload
 
+import anyio
 import httpx
 
 from vercel._internal.polyfills import Self
@@ -14,10 +15,10 @@ from vercel._internal.unstable.errors import VercelSessionClosedError, VercelSes
 from vercel._internal.unstable.options import ServiceOptions, merge_service_options
 
 if TYPE_CHECKING:
-    from vercel._internal.http import AsyncTransport, SyncTransport
-    from vercel._internal.unstable.sandbox.service import SandboxService
+    from vercel._internal.http import AsyncTransport, BaseTransport, SyncTransport
 
 ServiceOptionsT = TypeVar("ServiceOptionsT", bound=ServiceOptions)
+ServiceT = TypeVar("ServiceT")
 HttpxClientFactory = Callable[[], httpx.AsyncClient] | Callable[[], httpx.Client]
 _UNSET = object()
 
@@ -66,6 +67,22 @@ class _BaseSdkSession:
         if name == "httpx_client_factory":
             return self._httpx_client_factory
         return default
+
+    def get_or_create_service(
+        self, service_type: type[ServiceT], factory: Callable[[], ServiceT]
+    ) -> ServiceT:
+        self.check_open()
+        cached = self._service_cache.get(service_type)
+        if cached is None:
+            cached = factory()
+            self._service_cache[service_type] = cached
+        return cast(ServiceT, cached)
+
+    def get_transport(self) -> "BaseTransport":
+        raise NotImplementedError()
+
+    async def sleep(self, seconds: float) -> None:
+        raise NotImplementedError()
 
     def _clear_services(self) -> None:
         self._service_cache.clear()
@@ -116,7 +133,7 @@ class SdkSession(_BaseSdkSession):
             ),
         )
 
-    def _get_transport(self) -> "AsyncTransport":
+    def get_transport(self) -> "AsyncTransport":
         from vercel._internal.http import (
             DEFAULT_TIMEOUT,
             AsyncTransport,
@@ -152,28 +169,8 @@ class SdkSession(_BaseSdkSession):
         self._transport = AsyncTransport(client)
         return self._transport
 
-    def sandbox_service(self) -> "SandboxService":
-        from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-        from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
-        from vercel._internal.unstable.sandbox.service import SandboxService
-
-        self.check_open()
-
-        cached = self._service_cache.get(SandboxService)
-        if cached is not None:
-            return cast(SandboxService, cached)
-        options = self.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
-        service = SandboxService(
-            api_client=SandboxApiClient(
-                base_url=options.base_url,
-                credentials_factory=options.credentials_factory,
-                transport=self._get_transport(),
-            ),
-            options=options,
-            ensure_open=self.check_open,
-        )
-        self._service_cache[SandboxService] = service
-        return service
+    async def sleep(self, seconds: float) -> None:
+        await anyio.sleep(seconds)
 
     async def aclose(self) -> None:
         if self._closed:
@@ -241,7 +238,7 @@ class SyncSdkSession(_BaseSdkSession):
         else:
             loop.create_task(client.aclose())
 
-    def _get_transport(self) -> "SyncTransport":
+    def get_transport(self) -> "SyncTransport":
         from vercel._internal.http import (
             DEFAULT_TIMEOUT,
             SyncTransport,
@@ -274,33 +271,8 @@ class SyncSdkSession(_BaseSdkSession):
         self._transport = SyncTransport(client)
         return self._transport
 
-    def sandbox_service(self) -> "SandboxService":
-        from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-        from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
-        from vercel._internal.unstable.sandbox.service import SandboxService
-
-        self.check_open()
-
-        cached = self._service_cache.get(SandboxService)
-        if cached is not None:
-            return cast(SandboxService, cached)
-        options = self.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
-
-        async def sync_sleep(seconds: float) -> None:
-            time.sleep(seconds)
-
-        service = SandboxService(
-            api_client=SandboxApiClient(
-                base_url=options.base_url,
-                credentials_factory=options.credentials_factory,
-                transport=self._get_transport(),
-            ),
-            options=options,
-            ensure_open=self.check_open,
-            sleep=sync_sleep,
-        )
-        self._service_cache[SandboxService] = service
-        return service
+    async def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
 
     def close(self) -> None:
         if self._closed:
