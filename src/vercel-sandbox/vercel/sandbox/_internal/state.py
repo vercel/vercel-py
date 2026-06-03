@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
-from vercel.sandbox._internal.models import JSONObject, NetworkPolicy, SandboxStatus
+from vercel.sandbox._internal.models import (
+    JSONObject,
+    NetworkPolicy,
+    SandboxMount,
+    SandboxStatus,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +86,11 @@ class SandboxState:
     created_at: int | None = None
     updated_at: int | None = None
     tags: dict[str, str] | None = None
+    mounts: dict[str, SandboxMount] | None = None
     routes: tuple[SandboxRouteState, ...] = ()
     current_session: SandboxRuntimeSessionState | None = None
     raw: JSONObject | None = None
+    _mounts_attached: bool = True
     _routes_attached: bool = True
     _current_session_attached: bool = True
 
@@ -114,6 +121,19 @@ class SnapshotState:
 
 
 @dataclass(frozen=True, slots=True)
+class DriveState:
+    id: str
+    name: str
+    project_id: str
+    region: str
+    max_size_bytes: int
+    current_session_id: str | None
+    current_sandbox_name: str | None
+    created_at: int
+    updated_at: int
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxesPageState:
     sandboxes: tuple[SandboxState, ...]
     next_cursor: str | None
@@ -128,6 +148,12 @@ class RuntimeSessionsPageState:
 @dataclass(frozen=True, slots=True)
 class SnapshotsPageState:
     snapshots: tuple[SnapshotState, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DrivesPageState:
+    drives: tuple[DriveState, ...]
     next_cursor: str | None
 
 
