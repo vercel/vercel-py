@@ -8,6 +8,7 @@ from httpx2._types import HeaderTypes, QueryParamTypes
 from vercel._internal.core.http import (
     NO_TIMEOUT,
     BaseTransport,
+    BytesBody,
     JSONBody,
     ReadResponsePolicy,
     RequestBody,
@@ -329,6 +330,7 @@ async def test_fork_sandbox_encodes_source_query_and_overrides() -> None:
         "persistent": False,
         "env": {},
         "tags": {},
+        "mounts": {},
     }
 
 
@@ -353,8 +355,8 @@ async def test_private_parameters_are_forwarded_to_sandbox_api() -> None:
 
     assert transport.request is not None
     body = transport.request[4]
-    assert isinstance(body, JSONBody)
-    assert body.data["__networkId"] == "network_123"
+    assert isinstance(body, BytesBody)
+    assert json.loads(body.data)["__networkId"] == "network_123"
 
     await client.fork_sandbox(
         source_sandbox="preview",

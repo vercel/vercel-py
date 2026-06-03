@@ -4,9 +4,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import IntEnum
+from pathlib import PurePosixPath
 from subprocess import CalledProcessError
 from types import MappingProxyType
-from typing import Any, Final, Literal, TypeAlias, cast
+from typing import Any, Final, Literal, Protocol, TypeAlias, TypeVar, cast
 
 from pydantic import (
     BaseModel,
@@ -25,6 +26,7 @@ PrivateSandboxParameters: TypeAlias = Mapping[str, JSONValue]
 NO_PRIVATE_PARAMETERS: Final[PrivateSandboxParameters] = MappingProxyType({})
 DurationInput: TypeAlias = int | float | timedelta | None
 FailoverRegionsInput: TypeAlias = Iterable[str] | None
+RemotePath: TypeAlias = str | PurePosixPath
 _MIN_SNAPSHOT_EXPIRATION = timedelta(days=1)
 _MAX_SNAPSHOT_EXPIRATION = timedelta(days=365 * 10)
 _ZERO_DELTA = timedelta(0)
@@ -573,6 +575,125 @@ class DirectoryEntry:
     kind: Literal["file", "directory", "symlink", "other"]
 
 
+class DriveHandle(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def project_id(self) -> str: ...
+
+    @property
+    def region(self) -> str: ...
+
+
+DriveReference: TypeAlias = str | DriveHandle
+
+
+DriveMountMode: TypeAlias = Literal["snapshot", "read-write"]
+
+
+@dataclass(frozen=True, slots=True)
+class DriveMount:
+    """Configure how a Drive is mounted in a sandbox."""
+
+    drive: DriveReference
+    mode: DriveMountMode = "read-write"
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"snapshot", "read-write"}:
+            raise ValueError("Drive mount mode must be 'snapshot' or 'read-write'")
+
+    def to_api_dict(self) -> JSONObject:
+        name = self.drive if isinstance(self.drive, str) else self.drive.name
+        return {"drive": name, "mode": self.mode}
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxMount:
+    """Drive mount returned as part of a sandbox's actual configuration."""
+
+    drive: str
+    mode: DriveMountMode
+
+
+DriveMountInput: TypeAlias = DriveMount | DriveReference
+_RemotePathT = TypeVar("_RemotePathT", bound=RemotePath)
+DriveMountsInput: TypeAlias = Mapping[_RemotePathT, DriveMountInput]
+_RESERVED_DRIVE_MOUNT_PATHS = frozenset({"/run/cell", "/run/vercel/share"})
+
+
+def _canonicalize_drive_mount_path(path: RemotePath) -> PurePosixPath:
+    if not isinstance(path, (str, PurePosixPath)):
+        raise TypeError("Drive mount paths must be strings or PurePosixPath instances")
+    path = str(path)
+    if not path.startswith("/"):
+        raise ValueError("Drive mount paths must be absolute")
+    if "\x00" in path:
+        raise ValueError("Drive mount paths cannot contain NUL characters")
+
+    parts = path.split("/")
+    if ".." in parts:
+        raise ValueError("Drive mount paths cannot contain '..' components")
+    canonical = "/" + "/".join(part for part in parts if part not in {"", "."})
+    if canonical == "/":
+        raise ValueError("Drive mount paths cannot target the filesystem root")
+    if len(canonical) > 256:
+        raise ValueError("Drive mount paths cannot exceed 256 characters")
+    if canonical in _RESERVED_DRIVE_MOUNT_PATHS:
+        raise ValueError(f"Drive mount path {canonical!r} is reserved")
+    return PurePosixPath(canonical)
+
+
+def _serialize_drive_mounts(
+    mounts: DriveMountsInput[_RemotePathT] | None,
+    *,
+    project_id: str,
+    region: str | None,
+    failover_regions: tuple[str, ...] | None,
+) -> dict[str, JSONObject] | None:
+    if mounts is None:
+        return None
+    mount_entries = tuple(mounts.items())
+    if len(mount_entries) > 4:
+        raise ValueError("A sandbox can mount at most 4 Drives")
+    if mount_entries and failover_regions:
+        raise ValueError("Drive mounts cannot be combined with failover regions")
+
+    paths = [_canonicalize_drive_mount_path(path) for path, _ in mount_entries]
+    if any(
+        left == right or left in right.parents or right in left.parents
+        for index, left in enumerate(paths)
+        for right in paths[index + 1 :]
+    ):
+        raise ValueError("Drive mount paths cannot overlap")
+
+    serialized: dict[str, JSONObject] = {}
+    drive_names: set[str] = set()
+    drive_regions: set[str] = set()
+    for path, (_, value) in zip(paths, mount_entries, strict=True):
+        mount = value if isinstance(value, DriveMount) else DriveMount(value)
+        drive = mount.drive
+        name = drive if isinstance(drive, str) else drive.name
+        if name in drive_names:
+            raise ValueError(f"Drive {name!r} can be mounted only once")
+        drive_names.add(name)
+        if not isinstance(drive, str):
+            if project_id.startswith("prj_") and drive.project_id != project_id:
+                raise ValueError(
+                    f"Drive {drive.name!r} belongs to project {drive.project_id!r}, "
+                    f"not sandbox project {project_id!r}"
+                )
+            drive_regions.add(drive.region)
+        serialized[str(path)] = mount.to_api_dict()
+
+    if len(drive_regions) > 1:
+        raise ValueError("All mounted Drives must use the same region")
+    if region is not None and drive_regions and region != next(iter(drive_regions)):
+        drive_region = next(iter(drive_regions))
+        raise ValueError(f"Sandbox region {region!r} does not match Drive region {drive_region!r}")
+    return serialized
+
+
 class SandboxStatus(StrEnum):
     """Lifecycle status reported for a sandbox or runtime session."""
 
@@ -797,6 +918,28 @@ class ProcessLogStream(StrEnum):
 
     STDOUT = "stdout"
     STDERR = "stderr"
+
+
+class DriveQueryByCreatedAt(_InputModel):
+    """Drive listing ordered by creation time."""
+
+    sort_order: Literal["asc", "desc"] = "desc"
+
+
+class DriveQueryByUpdatedAt(_InputModel):
+    """Drive listing ordered by update time."""
+
+    sort_order: Literal["asc", "desc"] = "desc"
+
+
+class DriveQueryByName(_InputModel):
+    """Drive listing ordered by name."""
+
+    sort_order: Literal["asc", "desc"] = "desc"
+    name_prefix: str | None = None
+
+
+DriveQuery: TypeAlias = DriveQueryByCreatedAt | DriveQueryByUpdatedAt | DriveQueryByName
 
 
 class ProcessLog(BaseModel):

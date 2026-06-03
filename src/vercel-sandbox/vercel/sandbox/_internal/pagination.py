@@ -8,6 +8,7 @@ from vercel._internal.core.polyfills import Self
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50
 MAX_QUERY_SNAPSHOTS_PAGE_SIZE = 50
+MAX_QUERY_DRIVES_PAGE_SIZE = 50
 
 
 PageItemT = TypeVar("PageItemT")
@@ -28,6 +29,12 @@ class QuerySessionsPage(Generic[PageItemT]):
 @dataclass(frozen=True, slots=True)
 class QuerySnapshotsPage(Generic[PageItemT]):
     snapshots: list[PageItemT]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class QueryDrivesPage(Generic[PageItemT]):
+    drives: list[PageItemT]
     next_cursor: str | None
 
 
@@ -106,10 +113,38 @@ class QuerySnapshotsParams:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class QueryDrivesParams:
+    page_size: int | None = None
+    cursor: str | None = None
+
+    def __init__(
+        self,
+        *,
+        page_size: int | None = None,
+        cursor: str | None = None,
+    ) -> None:
+        if page_size is not None and not 1 <= page_size <= MAX_QUERY_DRIVES_PAGE_SIZE:
+            raise ValueError(
+                f"query_drives page_size must be between 1 and {MAX_QUERY_DRIVES_PAGE_SIZE}"
+            )
+        object.__setattr__(self, "page_size", page_size)
+        object.__setattr__(self, "cursor", cursor)
+
+    def with_cursor(self, cursor: str) -> Self:
+        return type(self)(
+            page_size=self.page_size,
+            cursor=cursor,
+        )
+
+
 __all__ = [
+    "MAX_QUERY_DRIVES_PAGE_SIZE",
     "MAX_QUERY_SANDBOXES_PAGE_SIZE",
     "MAX_QUERY_SESSIONS_PAGE_SIZE",
     "MAX_QUERY_SNAPSHOTS_PAGE_SIZE",
+    "QueryDrivesPage",
+    "QueryDrivesParams",
     "QuerySandboxesPage",
     "QuerySandboxesParams",
     "QuerySessionsPage",

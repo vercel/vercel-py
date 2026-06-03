@@ -24,6 +24,11 @@ from vercel.sandbox._internal.models import (
     _OMITTED,
     NO_PRIVATE_PARAMETERS,
     DirectoryEntry,
+    DriveMountsInput,
+    DriveQuery,
+    DriveQueryByCreatedAt,
+    DriveQueryByName,
+    DriveQueryByUpdatedAt,
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
@@ -39,6 +44,7 @@ from vercel.sandbox._internal.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     TagFilter,
+    _RemotePathT,
 )
 from vercel.sandbox._internal.options import (
     SandboxCredentials,
@@ -53,6 +59,8 @@ from vercel.sandbox._internal.runtime_common import (
 )
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
+    DrivesPageState,
+    DriveState,
     ProcessState,
     RuntimeSessionsPageState,
     RuntimeSessionStopState,
@@ -145,6 +153,13 @@ class _SandboxQueryCriteria:
     tag: TagFilter | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _DriveQueryCriteria:
+    sort_by: str | None = None
+    sort_order: str | None = None
+    name_prefix: str | None = None
+
+
 class _SandboxTerminalState(Exception):
     def __init__(self, *, status: SandboxStatus, sandbox: SandboxState) -> None:
         self.status = status
@@ -170,6 +185,22 @@ def _compile_sandbox_query(query: SandboxQuery | None) -> _SandboxQueryCriteria:
     if isinstance(query, SandboxQueryByCurrentSnapshotId):
         return _SandboxQueryCriteria(sort_by="currentSnapshotId", sort_order=query.sort_order)
     raise TypeError(f"Unsupported sandbox query type: {type(query)!r}")
+
+
+def _compile_drive_query(query: DriveQuery | None) -> _DriveQueryCriteria:
+    if query is None:
+        return _DriveQueryCriteria()
+    if isinstance(query, DriveQueryByCreatedAt):
+        return _DriveQueryCriteria(sort_by="createdAt", sort_order=query.sort_order)
+    if isinstance(query, DriveQueryByUpdatedAt):
+        return _DriveQueryCriteria(sort_by="updatedAt", sort_order=query.sort_order)
+    if isinstance(query, DriveQueryByName):
+        return _DriveQueryCriteria(
+            sort_by="name",
+            sort_order=query.sort_order,
+            name_prefix=query.name_prefix,
+        )
+    raise TypeError(f"Unsupported drive query type: {type(query)!r}")
 
 
 def _sandbox_status(sandbox: SandboxState) -> SandboxStatus | None:
@@ -264,6 +295,7 @@ class SandboxService:
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
@@ -283,9 +315,11 @@ class SandboxService:
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
-            region=region or self._options.region,
+            region=region,
+            fallback_region=self._options.region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
@@ -305,6 +339,7 @@ class SandboxService:
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
@@ -324,9 +359,11 @@ class SandboxService:
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
-            region=region or self._options.region,
+            region=region,
+            fallback_region=self._options.region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
@@ -366,6 +403,7 @@ class SandboxService:
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
@@ -373,6 +411,7 @@ class SandboxService:
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> tuple[SandboxState, bool]:
         """Return a named sandbox and whether it had to be created."""
+        stale_snapshot = False
         try:
             sandbox = await self.get_sandbox(
                 name=name,
@@ -385,19 +424,15 @@ class SandboxService:
             if error.status_code == 404:
                 pass
             elif error.status_code == 410 and error.code == "snapshot_not_found":
-                try:
-                    await self.destroy_sandbox(name=name, project_id=project_id)
-                except SandboxApiError as destroy_error:
-                    if destroy_error.status_code != 404:
-                        raise
+                stale_snapshot = True
             else:
                 raise
         else:
             return sandbox, False
 
-        sandbox = await self.create_sandbox(
-            name=name,
+        prepared = await self._api_client.prepare_sandbox_creation(
             project_id=project_id,
+            name=name,
             image=image,
             source=source,
             ports=ports,
@@ -407,12 +442,24 @@ class SandboxService:
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             region=region,
+            fallback_region=self._options.region,
             failover_regions=failover_regions,
             private_parameters=private_parameters,
         )
+        if stale_snapshot:
+            try:
+                await self._api_client.destroy_sandbox_for_prepared_creation(
+                    name=name, prepared=prepared
+                )
+            except SandboxApiError as destroy_error:
+                if destroy_error.status_code != 404:
+                    raise
+        sandbox = await self._api_client.send_prepared_sandbox_creation(prepared)
+        sandbox = await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
         return sandbox, True
 
     async def query_sandboxes_page(
@@ -451,6 +498,7 @@ class SandboxService:
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
@@ -468,6 +516,7 @@ class SandboxService:
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
@@ -553,6 +602,45 @@ class SandboxService:
     ) -> SnapshotSessionState:
         self._ensure_open()
         return await self._api_client.create_snapshot(session_id=session_id, expiration=expiration)
+
+    async def get_or_create_drive(
+        self,
+        *,
+        name: str,
+        project_id: str | None = None,
+        max_size_bytes: int | None = None,
+        region: str | None = None,
+    ) -> DriveState:
+        self._ensure_open()
+        return await self._api_client.get_or_create_drive(
+            name=name,
+            project_id=project_id,
+            max_size_bytes=max_size_bytes,
+            region=region,
+        )
+
+    async def query_drives_page(
+        self,
+        *,
+        query: DriveQuery | None = None,
+        project_id: str | None = None,
+        page_size: int | None = None,
+        cursor: str | None = None,
+    ) -> DrivesPageState:
+        self._ensure_open()
+        criteria = _compile_drive_query(query)
+        return await self._api_client.query_drives(
+            project_id=project_id,
+            limit=page_size,
+            cursor=cursor,
+            sort_by=criteria.sort_by,
+            sort_order=criteria.sort_order,
+            name_prefix=criteria.name_prefix,
+        )
+
+    async def delete_drive(self, *, name: str, project_id: str | None = None) -> DriveState:
+        self._ensure_open()
+        return await self._api_client.delete_drive(name=name, project_id=project_id)
 
     async def query_snapshots_page(
         self,

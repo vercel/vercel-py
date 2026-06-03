@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from examples.sandbox_04_dev_server import git_checkout_cwd
 
 from .conftest import requires_sandbox_credentials
 
