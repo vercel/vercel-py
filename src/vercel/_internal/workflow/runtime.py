@@ -299,7 +299,9 @@ async def workflow_handler(
         return None
 
     # Load all events into memory before running
-    events = await get_all_workflow_run_events(run_id)
+    loaded = await get_all_workflow_run_events(run_id)
+    events = loaded.events
+    events_cursor = loaded.cursor
 
     # Check for any elapsed waits and create wait_completed events
     now = datetime.now(UTC)
@@ -320,16 +322,47 @@ async def workflow_handler(
     # Create all wait_completed events
     for wait_event in waits_to_complete:
         try:
-            result = await world.events_create(
+            await world.events_create(
                 run_id, w.WaitCompletedEvent(correlationId=wait_event.correlation_id)
             )
         except w.EntityConflictError:
             # Another concurrent invocation already completed this wait
             logger.debug(f"Wait {wait_event.correlation_id!r} is already completed")
             continue
-        # Add the event to the events array so the workflow can see it
-        assert result.event is not None
-        events.append(result.event)
+
+    if waits_to_complete:
+        # Reload events after wait completions. Try incremental load first
+        # (using cursor), fall back to full reload if the incremental result
+        # doesn't contain all the wait_completed events we just created.
+        if events_cursor:
+            delta = await get_all_workflow_run_events(run_id, after_cursor=events_cursor)
+            delta_completed_ids = {
+                e.correlation_id for e in delta.events if e.event_type == "wait_completed"
+            }
+            saw_all = all(w_.correlation_id in delta_completed_ids for w_ in waits_to_complete)
+            if saw_all:
+                # Merge delta into existing events, deduplicating by eventId
+                existing_ids = {e.server_props.event_id for e in events if e.server_props}
+                for event in delta.events:
+                    eid = event.server_props.event_id if event.server_props else None
+                    if eid not in existing_ids:
+                        if eid:
+                            existing_ids.add(eid)
+                        events.append(event)
+                events_cursor = delta.cursor or events_cursor
+            else:
+                loaded = await get_all_workflow_run_events(run_id)
+                events = loaded.events
+                events_cursor = loaded.cursor
+        else:
+            loaded = await get_all_workflow_run_events(run_id)
+            events = loaded.events
+            events_cursor = loaded.cursor
+
+        # A concurrent handler may have written a terminal run event after
+        # the initial snapshot. If so, this delivery is done.
+        if _has_terminal_run_event(events, run_id):
+            return None
 
     context = WorkflowOrchestratorContext(
         events, seed=run_id, started_at=workflow_started_at, registry=registry
@@ -635,9 +668,19 @@ def step_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     )
 
 
-async def get_all_workflow_run_events(run_id: str) -> list[w.Event]:
-    all_events = []
-    cursor: str | None = None
+class _LoadedEvents:
+    __slots__ = ("events", "cursor")
+
+    def __init__(self, events: list[w.Event], cursor: str | None) -> None:
+        self.events = events
+        self.cursor = cursor
+
+
+async def get_all_workflow_run_events(
+    run_id: str, *, after_cursor: str | None = None
+) -> _LoadedEvents:
+    all_events: list[w.Event] = []
+    cursor: str | None = after_cursor
     has_more = True
 
     world = w.get_world()
@@ -652,7 +695,17 @@ async def get_all_workflow_run_events(run_id: str) -> list[w.Event]:
         all_events.extend(response.data)
         has_more = response.has_more
         cursor = response.cursor
-    return all_events
+    return _LoadedEvents(all_events, cursor)
+
+
+def _has_terminal_run_event(events: list[w.Event], run_id: str) -> bool:
+    """Check if the event log contains a terminal run event (completed/failed/cancelled)."""
+    return any(
+        e.server_props is not None
+        and e.server_props.run_id == run_id
+        and e.event_type in ("run_completed", "run_failed", "run_cancelled")
+        for e in events
+    )
 
 
 duration_re = re.compile(

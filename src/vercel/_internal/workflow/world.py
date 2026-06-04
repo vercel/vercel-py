@@ -595,6 +595,8 @@ class EventResult(BaseModel):
     step: WorkflowStep | None = None
     hook: Any | None = None
     wait: Any | None = None
+    cursor: str | None = None
+    has_more: bool | None = pydantic.Field(default=None, alias="hasMore")
 
 
 class HTTPRequest(metaclass=abc.ABCMeta):
