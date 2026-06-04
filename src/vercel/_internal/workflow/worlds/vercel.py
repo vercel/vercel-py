@@ -44,6 +44,28 @@ def _cbor_filter_undefined(value: Mapping[Any, Any], shareable: bool = False) ->
     return {k: None if v is cbor2.undefined else v for k, v in value.items()}
 
 
+# Lazy wire schema for EventResult — mirrors the JS SDK's EventResultLazyWireSchema.
+# Uses BaseWorkflowRun (no discriminated union) with loose error typing so that
+# unresolved RemoteRefs in error/input/output fields don't cause validation failures.
+class _LazyWorkflowRun(w.BaseWorkflowRun):
+    """Loose run schema that accepts any error shape (may be a RemoteRef)."""
+
+    error: Any = None
+    input: Any = None
+    output: Any = None
+
+
+class _LazyEventResult(w.EventResult):
+    """Loose EventResult that tolerates unresolved RemoteRefs in nested objects.
+    Event data fields (e.g. payload, input, output) may contain RemoteRef dicts
+    instead of their expected types, so we accept Any for event and run."""
+
+    event: Any = None  # type: ignore[assignment]
+    events: Any = None  # type: ignore[assignment]
+    run: _LazyWorkflowRun | None = None  # type: ignore[assignment]
+    step: Any = None  # type: ignore[assignment]
+
+
 class VercelWorld(w.World):
     def __init__(
         self,
@@ -62,7 +84,7 @@ class VercelWorld(w.World):
         # header if override is set)
         # When not using proxy, use the default workflow-server URL (with /api path appended)
         if self._using_proxy:
-            self._base_url = "https://api.vercel.com/v2/workflow"
+            self._base_url = "https://api.vercel.com/v1/workflow"
         else:
             default_host = WORKFLOW_SERVER_URL_OVERRIDE or "https://vercel-workflow.com"
             self._base_url = f"{default_host}/api"
@@ -126,12 +148,20 @@ class VercelWorld(w.World):
             )
 
         # utils.ts, parseResponseBody
-        if "application/cbor" in resp.headers.get("Content-Type", ""):
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/cbor" in content_type:
             result = cbor2.loads(
                 resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
             )
         else:
-            result = resp.json()
+            try:
+                result = resp.json()
+            except Exception:
+                # Server may return CBOR without the correct Content-Type header
+                # (e.g. through a proxy). Try CBOR decoding as fallback.
+                result = cbor2.loads(
+                    resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
+                )
 
         if resp.is_success:
             if isinstance(schema, pydantic.TypeAdapter):
@@ -139,6 +169,8 @@ class VercelWorld(w.World):
             else:
                 return schema.model_validate(result)
         else:
+            if not isinstance(result, dict):
+                result = {}
             message = (
                 result.get("message")
                 or f"{method} {endpoint} -> HTTP {resp.status_code}: {resp.reason_phrase}"
@@ -198,10 +230,9 @@ class VercelWorld(w.World):
                 deployment_id=deployment_id,
                 token=self._token if self._using_proxy else None,
                 base_url=self._base_url if self._using_proxy else None,
-                # The proxy will strip `/queues` from the path, and add `/api` in front,
-                # so this ends up being `/api/v2/messages` when arriving at the queue server,
-                # which is the same as the default basePath in VQS client.
-                base_path="/queues/v2/messages" if self._using_proxy else None,
+                # The proxy will strip the `/queues-proxy` prefix before forwarding to VQS,
+                # so `/queues-proxy/api/v3/topic` arrives as `/api/v3/topic` at the queue server.
+                base_path="/queues-proxy/api/v3/topic" if self._using_proxy else None,
                 headers=self._headers | headers,
             )
             return response["messageId"]
@@ -320,12 +351,24 @@ class VercelWorld(w.World):
             if data.event_type in {"run_created", "run_started", "step_started"}
             else "lazy"
         )
-        return await self._cbor_request(
-            "POST",
-            f"/v2/runs/{run_id_path}/events",
-            data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
-            schema=w.EventResult,
-        )
+        if remote_ref_behavior == "resolve":
+            return await self._cbor_request(
+                "POST",
+                f"/v3/runs/{run_id_path}/events",
+                data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+                schema=w.EventResult,
+            )
+        else:
+            # Lazy responses may contain unresolved RemoteRefs that fail
+            # the strict EventResult schema. Use the loose _LazyEventResult
+            # schema that tolerates unresolved refs, matching the JS SDK's
+            # EventResultLazyWireSchema.
+            return await self._cbor_request(
+                "POST",
+                f"/v3/runs/{run_id_path}/events",
+                data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+                schema=_LazyEventResult,
+            )
 
     async def events_list(
         self,
@@ -341,6 +384,6 @@ class VercelWorld(w.World):
         query = f"?{query_string}" if query_string else ""
         return await self._cbor_request(
             "GET",
-            f"/v2/runs/{run_id}/events{query}",
+            f"/v3/runs/{run_id}/events{query}",
             schema=w.PaginatedResult[w.Event],
         )
