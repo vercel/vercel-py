@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Run a small sync script-wrapper workflow in an unstable Sandbox."""
 
-import sys
 from datetime import timedelta
 from uuid import uuid4
 
@@ -31,16 +30,13 @@ def run_script(input_text: str, script: str) -> str:
         # `box` already points at the sandbox's current runtime session. Commands
         # live on the handle and workspace operations live on `box.fs`.
         box.fs.mkdir("workspace")
-        box.fs.write_files(
-            [
-                sandbox.WriteFile(path="workspace/tool.py", content=script),
-                sandbox.WriteFile(path="workspace/input.txt", content=input_text),
-            ]
-        )
+        with box.fs.batch() as batch:
+            batch.write_text("workspace/tool.py", script)
+            batch.write_text("workspace/input.txt", input_text)
 
-        # Start the command when you want live logs; use `run_command` when
-        # waiting for completion without streaming is enough.
-        cmd = box.start_command(
+        # `run_process` streams output to this process while waiting. Use
+        # `create_process` when signaling or separate readers are needed.
+        box.run_process(
             "python",
             [
                 "workspace/tool.py",
@@ -50,22 +46,8 @@ def run_script(input_text: str, script: str) -> str:
                 "workspace/output.json",
                 "--uppercase",
             ],
+            check=True,
         )
-
-        # Forward sandbox stdout and stderr to the matching local streams so a
-        # wrapped CLI behaves like a local subprocess.
-        for event in cmd.logs():
-            match event.stream:
-                case sandbox.SandboxCommandLogStream.STDOUT:
-                    sys.stdout.write(event.data)
-                    sys.stdout.flush()
-                case sandbox.SandboxCommandLogStream.STDERR:
-                    sys.stderr.write(event.data)
-                    sys.stderr.flush()
-
-        finished = cmd.wait()
-        if finished.exit_code != 0:
-            raise RuntimeError(f"script failed with exit code {finished.exit_code}")
 
         return box.fs.read_text("workspace/output.json")
 

@@ -1,6 +1,7 @@
 """Shared live scenarios for the experimental Sandbox public API."""
 
 import asyncio
+import subprocess
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -12,11 +13,12 @@ from vercel import unstable as vercel
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
     SandboxApiError,
+    SandboxFilesystemWriteError,
+    SandboxPathNotFoundError,
     SandboxQueryByName,
     SandboxStatus,
     SnapshotSource,
     TagFilter,
-    WriteFile as AsyncWriteFile,
     sync as sandbox_sync,
 )
 
@@ -50,9 +52,21 @@ class PersistentObservation:
     resources_cleaned_up: bool
 
 
-class _ScenarioDriver:
-    write_file_type: type[Any]
+@dataclass(frozen=True, slots=True)
+class ProcessFilesystemObservation:
+    stdout: str
+    stderr: str
+    returncode: int
+    terminated_returncode: int
+    timed_out_returncode: int
+    missing_executable_failed: bool
+    text: str
+    binary: bytes
+    missing_read_failed: bool
+    invalid_write_failed: bool
 
+
+class _ScenarioDriver:
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
         raise NotImplementedError
@@ -101,6 +115,15 @@ class _ScenarioDriver:
     async def read_text(self, box: Any, path: str) -> str:
         raise NotImplementedError
 
+    async def write_text(self, box: Any, path: str, text: str) -> None:
+        raise NotImplementedError
+
+    async def read_bytes(self, box: Any, path: str) -> bytes:
+        raise NotImplementedError
+
+    async def write_bytes(self, box: Any, path: str, data: bytes) -> None:
+        raise NotImplementedError
+
     async def exists(self, box: Any, path: str) -> bool:
         raise NotImplementedError
 
@@ -119,13 +142,30 @@ class _ScenarioDriver:
     async def remove(self, box: Any, path: str) -> None:
         raise NotImplementedError
 
-    async def start_command(self, box: Any, command: str, args: list[str]) -> Any:
+    async def create_process(
+        self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
+    ) -> Any:
         raise NotImplementedError
 
     async def logs(self, command: Any) -> list[tuple[str, str]]:
         raise NotImplementedError
 
     async def wait(self, command: Any) -> int | None:
+        raise NotImplementedError
+
+    async def read_process_streams(self, process: Any) -> tuple[str, str]:
+        raise NotImplementedError
+
+    async def terminate(self, process: Any) -> None:
+        raise NotImplementedError
+
+    async def missing_read_failed(self, box: Any) -> bool:
+        raise NotImplementedError
+
+    async def invalid_write_failed(self, box: Any) -> bool:
+        raise NotImplementedError
+
+    async def missing_executable_failed(self, box: Any) -> bool:
         raise NotImplementedError
 
     async def snapshot(self, box: Any) -> Any:
@@ -142,8 +182,6 @@ class _ScenarioDriver:
 
 
 class AsyncDriver(_ScenarioDriver):
-    write_file_type = AsyncWriteFile
-
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
         async with vercel.session():
@@ -207,13 +245,21 @@ class AsyncDriver(_ScenarioDriver):
     async def write_files(
         self, box: Any, files: list[tuple[str, str]], *, cwd: str | None = None
     ) -> None:
-        await box.fs.write_files(
-            [self.write_file_type(path=path, content=content) for path, content in files],
-            cwd=cwd,
-        )
+        async with box.fs.batch(cwd=cwd) as batch:
+            for path, content in files:
+                batch.write_text(path, content)
 
     async def read_text(self, box: Any, path: str) -> str:
         return await box.fs.read_text(path)
+
+    async def write_text(self, box: Any, path: str, text: str) -> None:
+        await box.fs.write_text(path, text)
+
+    async def read_bytes(self, box: Any, path: str) -> bytes:
+        return await box.fs.read_bytes(path)
+
+    async def write_bytes(self, box: Any, path: str, data: bytes) -> None:
+        await box.fs.write_bytes(path, data)
 
     async def exists(self, box: Any, path: str) -> bool:
         return await box.fs.exists(path)
@@ -233,23 +279,55 @@ class AsyncDriver(_ScenarioDriver):
     async def remove(self, box: Any, path: str) -> None:
         await box.fs.remove(path)
 
-    async def start_command(self, box: Any, command: str, args: list[str]) -> Any:
-        return await box.start_command(command, args)
+    async def create_process(
+        self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
+    ) -> Any:
+        return await box.create_process(command, args, kill_after=kill_after)
 
     async def logs(self, command: Any) -> list[tuple[str, str]]:
         return [(event.stream, event.data) async for event in command.logs()]
 
     async def wait(self, command: Any) -> int | None:
-        return (await command.wait()).exit_code
+        return await command.wait()
+
+    async def read_process_streams(self, process: Any) -> tuple[str, str]:
+        return await process.communicate()
+
+    async def terminate(self, process: Any) -> None:
+        await process.terminate()
+
+    async def missing_read_failed(self, box: Any) -> bool:
+        try:
+            await box.fs.read_bytes("missing")
+        except SandboxPathNotFoundError:
+            return True
+        return False
+
+    async def invalid_write_failed(self, box: Any) -> bool:
+        try:
+            await box.fs.write_text("/", "invalid")
+        except SandboxFilesystemWriteError:
+            return True
+        return False
+
+    async def missing_executable_failed(self, box: Any) -> bool:
+        try:
+            await box.create_process("vercel-py-missing-executable")
+        except SandboxApiError as error:
+            return error.code == "executable_not_found"
+        return False
 
     async def snapshot(self, box: Any) -> Any:
         return await box.snapshot()
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
         async with box.session() as runtime_session:
-            command = await runtime_session.run_command("printf", ["session follow-up\n"])
-            output = await command.stdout()
-            exit_code = command.exit_code
+            command = await runtime_session.run_process(
+                "printf", ["session follow-up\n"], stdout=subprocess.PIPE
+            )
+            assert command.stdout is not None
+            output = command.stdout
+            exit_code = command.returncode
         deadline = time.monotonic() + _SESSION_STOP_TIMEOUT_SECONDS
         while runtime_session.status is not SandboxStatus.STOPPED:
             if time.monotonic() >= deadline:
@@ -266,8 +344,6 @@ class AsyncDriver(_ScenarioDriver):
 
 
 class SyncDriver(_ScenarioDriver):
-    write_file_type = sandbox_sync.WriteFile
-
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
         with vercel.session():
@@ -333,13 +409,21 @@ class SyncDriver(_ScenarioDriver):
     async def write_files(
         self, box: Any, files: list[tuple[str, str]], *, cwd: str | None = None
     ) -> None:
-        box.fs.write_files(
-            [self.write_file_type(path=path, content=content) for path, content in files],
-            cwd=cwd,
-        )
+        with box.fs.batch(cwd=cwd) as batch:
+            for path, content in files:
+                batch.write_text(path, content)
 
     async def read_text(self, box: Any, path: str) -> str:
         return box.fs.read_text(path)
+
+    async def write_text(self, box: Any, path: str, text: str) -> None:
+        box.fs.write_text(path, text)
+
+    async def read_bytes(self, box: Any, path: str) -> bytes:
+        return box.fs.read_bytes(path)
+
+    async def write_bytes(self, box: Any, path: str, data: bytes) -> None:
+        box.fs.write_bytes(path, data)
 
     async def exists(self, box: Any, path: str) -> bool:
         return box.fs.exists(path)
@@ -359,23 +443,55 @@ class SyncDriver(_ScenarioDriver):
     async def remove(self, box: Any, path: str) -> None:
         box.fs.remove(path)
 
-    async def start_command(self, box: Any, command: str, args: list[str]) -> Any:
-        return box.start_command(command, args)
+    async def create_process(
+        self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
+    ) -> Any:
+        return box.create_process(command, args, kill_after=kill_after)
 
     async def logs(self, command: Any) -> list[tuple[str, str]]:
         return [(event.stream, event.data) for event in command.logs()]
 
     async def wait(self, command: Any) -> int | None:
-        return command.wait().exit_code
+        return command.wait()
+
+    async def read_process_streams(self, process: Any) -> tuple[str, str]:
+        return process.communicate()
+
+    async def terminate(self, process: Any) -> None:
+        process.terminate()
+
+    async def missing_read_failed(self, box: Any) -> bool:
+        try:
+            box.fs.read_bytes("missing")
+        except SandboxPathNotFoundError:
+            return True
+        return False
+
+    async def invalid_write_failed(self, box: Any) -> bool:
+        try:
+            box.fs.write_text("/", "invalid")
+        except SandboxFilesystemWriteError:
+            return True
+        return False
+
+    async def missing_executable_failed(self, box: Any) -> bool:
+        try:
+            box.create_process("vercel-py-missing-executable")
+        except SandboxApiError as error:
+            return error.code == "executable_not_found"
+        return False
 
     async def snapshot(self, box: Any) -> Any:
         return box.snapshot()
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
         with box.session() as runtime_session:
-            command = runtime_session.run_command("printf", ["session follow-up\n"])
-            output = command.stdout()
-            exit_code = command.exit_code
+            command = runtime_session.run_process(
+                "printf", ["session follow-up\n"], stdout=subprocess.PIPE
+            )
+            assert command.stdout is not None
+            output = command.stdout
+            exit_code = command.returncode
         deadline = time.monotonic() + _SESSION_STOP_TIMEOUT_SECONDS
         while runtime_session.status is not SandboxStatus.STOPPED:
             if time.monotonic() >= deadline:
@@ -425,7 +541,7 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
             assert await driver.exists(box, "workspace/renamed.txt")
             await driver.remove(box, "workspace/renamed.txt")
             assert not await driver.exists(box, "workspace/renamed.txt")
-            command = await driver.start_command(box, "python", ["workspace/tool.py"])
+            command = await driver.create_process(box, "python", ["workspace/tool.py"])
             logs = await driver.logs(command)
             exit_code = await driver.wait(command)
             output = await driver.read_text(box, "workspace/output.txt")
@@ -440,6 +556,56 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
         output=output,
         exit_code=exit_code,
         context_cleaned_up=context_cleaned_up,
+    )
+
+
+async def process_filesystem_flow(
+    driver: _ScenarioDriver, name: str
+) -> ProcessFilesystemObservation:
+    async with driver.session():
+        async with driver.ephemeral_sandbox(name) as box:
+            await driver.write_text(box, "message.txt", "hello\n")
+            await driver.write_bytes(box, "data.bin", b"\x00\xff")
+
+            process = await driver.create_process(
+                box,
+                "python",
+                [
+                    "-c",
+                    "import sys; print('stdout line'); print('stderr line', file=sys.stderr); "
+                    "raise SystemExit(3)",
+                ],
+            )
+            stdout, stderr = await driver.read_process_streams(process)
+            returncode = await driver.wait(process)
+
+            sleeper = await driver.create_process(box, "sleep", ["60"])
+            await driver.terminate(sleeper)
+            terminated_returncode = await driver.wait(sleeper)
+
+            timed = await driver.create_process(box, "sleep", ["60"], kill_after=2.5)
+            timed_out_returncode = await driver.wait(timed)
+
+            text = await driver.read_text(box, "message.txt")
+            binary = await driver.read_bytes(box, "data.bin")
+            missing_read_failed = await driver.missing_read_failed(box)
+            invalid_write_failed = await driver.invalid_write_failed(box)
+            missing_executable_failed = await driver.missing_executable_failed(box)
+
+    assert returncode is not None
+    assert terminated_returncode is not None
+    assert timed_out_returncode is not None
+    return ProcessFilesystemObservation(
+        stdout=stdout,
+        stderr=stderr,
+        returncode=returncode,
+        terminated_returncode=terminated_returncode,
+        timed_out_returncode=timed_out_returncode,
+        missing_executable_failed=missing_executable_failed,
+        text=text,
+        binary=binary,
+        missing_read_failed=missing_read_failed,
+        invalid_write_failed=invalid_write_failed,
     )
 
 

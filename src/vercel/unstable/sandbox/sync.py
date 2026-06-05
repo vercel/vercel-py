@@ -9,6 +9,7 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxError,
     SandboxFilesystemCommandError,
     SandboxFilesystemError,
+    SandboxFilesystemWriteError,
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
     SandboxResponseError,
@@ -16,12 +17,14 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxTerminalStateError,
 )
 from vercel._internal.unstable.sandbox.models import (
+    CompletedProcess,
     DirectoryEntry,
     DurationInput,
     GitSource,
     JSONValue,
-    SandboxCommandLog,
-    SandboxCommandLogStream,
+    ProcessLog,
+    ProcessLogStream,
+    ProcessStatus,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -36,15 +39,15 @@ from vercel._internal.unstable.sandbox.models import (
     SnapshotSource,
     TagFilter,
     TarballSource,
-    WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
 from vercel._internal.unstable.sandbox.service import SandboxService, get_sandbox_service
 from vercel._internal.unstable.sandbox.state import SnapshotRetentionState
 from vercel._internal.unstable.sandbox.sync_runtime import (
+    SyncProcess,
     SyncSandbox,
-    SyncSandboxCommand,
     SyncSandboxFilesystem,
+    SyncSandboxFilesystemBatch,
     SyncSandboxRuntimeSession,
     SyncSnapshot,
     create_sandbox as _create_sandbox,
@@ -54,6 +57,7 @@ from vercel._internal.unstable.sandbox.sync_runtime import (
     query_sessions as _query_sessions,
     query_snapshots as _query_snapshots,
 )
+from vercel._internal.unstable.sandbox.text_reader import SyncTextReader
 from vercel._internal.unstable.session import get_active_sync_session
 
 
@@ -170,12 +174,15 @@ def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
 __all__ = [
     "SandboxApiError",
     "SandboxCleanupError",
-    "SandboxCommandLog",
-    "SandboxCommandLogStream",
+    "ProcessLog",
+    "ProcessLogStream",
+    "ProcessStatus",
+    "CompletedProcess",
     "SandboxCredentialsError",
     "SandboxError",
     "SandboxFilesystemCommandError",
     "SandboxFilesystemError",
+    "SandboxFilesystemWriteError",
     "SandboxInvalidHandleError",
     "SandboxPathNotFoundError",
     "SandboxResources",
@@ -197,13 +204,14 @@ __all__ = [
     "SnapshotRetentionState",
     "SnapshotSource",
     "SyncSandbox",
-    "SyncSandboxCommand",
+    "SyncProcess",
     "SyncSandboxFilesystem",
+    "SyncSandboxFilesystemBatch",
     "SyncSandboxRuntimeSession",
     "SyncSnapshot",
     "TagFilter",
     "TarballSource",
-    "WriteFile",
+    "SyncTextReader",
     "create_sandbox",
     "get_sandbox",
     "get_snapshot",

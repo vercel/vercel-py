@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import timedelta
+from subprocess import CalledProcessError
 from typing import Literal, TypeAlias, cast
 
 from pydantic import (
@@ -63,9 +64,9 @@ _OMITTED = _Omitted()
 
 
 @dataclass(frozen=True, slots=True)
-class WriteFile:
+class _WriteFile:
     path: str
-    content: str | bytes
+    content: bytes
     mode: int | None = None
 
 
@@ -83,6 +84,35 @@ class SandboxStatus(StrEnum):
     FAILED = "failed"
     ABORTED = "aborted"
     SNAPSHOTTING = "snapshotting"
+
+
+class ProcessStatus(StrEnum):
+    RUNNING = "running"
+    EXITED = "exited"
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedProcess:
+    """The captured result of one completed remote process."""
+
+    id: str
+    name: str
+    args: tuple[str, ...]
+    cwd: str
+    session_id: str
+    started_at: int
+    returncode: int
+    stdout: str | None
+    stderr: str | None
+
+    def check_returncode(self) -> None:
+        if self.returncode:
+            raise CalledProcessError(
+                self.returncode,
+                list(self.args),
+                output=self.stdout,
+                stderr=self.stderr,
+            )
 
 
 class _InputModel(BaseModel):
@@ -203,15 +233,15 @@ SandboxQuery: TypeAlias = (
 )
 
 
-class SandboxCommandLogStream(StrEnum):
-    """Output stream represented by a command log event."""
+class ProcessLogStream(StrEnum):
+    """Output stream represented by a process log event."""
 
     STDOUT = "stdout"
     STDERR = "stderr"
 
 
-class SandboxCommandLog(BaseModel):
-    """One streamed command output event."""
+class ProcessLog(BaseModel):
+    """One streamed process output event."""
 
     data: str
-    stream: SandboxCommandLogStream
+    stream: ProcessLogStream

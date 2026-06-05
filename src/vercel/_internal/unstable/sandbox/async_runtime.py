@@ -6,21 +6,23 @@ from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequenc
 from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
-from typing import Any, Literal
+from typing import Any, TextIO
 
 from vercel._internal.polyfills import Self
 from vercel._internal.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel._internal.unstable.sandbox.errors import (
     SandboxCleanupError,
+    SandboxResponseError,
     SandboxTerminalStateError,
 )
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
+    CompletedProcess,
     DirectoryEntry,
     DurationInput,
     JSONValue,
-    SandboxCommandLog,
+    ProcessLog,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -28,8 +30,8 @@ from vercel._internal.unstable.sandbox.models import (
     SnapshotExpirationInput,
     SnapshotRetention,
     SnapshotRetentionUpdate,
-    WriteFile,
     _parse_snapshot_expiration,
+    _WriteFile,
 )
 from vercel._internal.unstable.sandbox.pagination import (
     QuerySandboxesPage,
@@ -39,23 +41,24 @@ from vercel._internal.unstable.sandbox.pagination import (
     QuerySnapshotsPage,
     QuerySnapshotsParams,
 )
+from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
 from vercel._internal.unstable.sandbox.runtime_common import (
+    RemotePath,
     RuntimeSessionHandleBase,
     SandboxHandleBase,
     SnapshotHandleBase,
-    _CommandHandleState,
-    _log_from_snapshot,
-    _LogSnapshot,
-    _select_output,
+    _coerce_remote_path,
+    _ProcessHandleState,
     _signal_number,
 )
 from vercel._internal.unstable.sandbox.service import SandboxService, _SandboxTerminalState
 from vercel._internal.unstable.sandbox.state import (
-    SandboxCommandState,
+    ProcessState,
     SandboxRuntimeSessionState,
     SandboxState,
     SnapshotState,
 )
+from vercel._internal.unstable.sandbox.text_reader import _text_readers
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -66,65 +69,53 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
     )
 
 
-class SandboxCommand(_CommandHandleState):
-    __slots__ = ("_service",)
+class Process(_ProcessHandleState):
+    __slots__ = ("_service", "stderr", "stdout")
 
-    def __init__(self, *, payload: SandboxCommandState, service: SandboxService) -> None:
+    def __init__(self, *, payload: ProcessState, service: SandboxService) -> None:
         super().__init__(payload)
         self._service = service
-
-    async def refresh(self, *, wait: bool = False) -> Self:
-        payload = await self._service.get_command(
-            session_id=self.session_id, command_id=self.id, wait=wait
+        self.stdout, self.stderr = _text_readers(
+            lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id)
         )
+
+    async def refresh(self) -> Self:
+        payload = await self._service.get_process(session_id=self._session_id, process_id=self.id)
         self._apply_payload(payload)
         return self
 
-    async def wait(self) -> Self:
-        return await self.refresh(wait=True)
+    async def wait(self) -> int:
+        payload = await self._service.get_process(
+            session_id=self._session_id, process_id=self.id, wait=True
+        )
+        self._apply_payload(payload)
+        if self.returncode is None:
+            raise SandboxResponseError("Wait response did not include a process return code")
+        return self.returncode
 
-    async def kill(self, signal: int | str | signal_module.Signals | None = None) -> Self:
-        payload = await self._service.kill_command(
-            session_id=self.session_id,
-            command_id=self.id,
+    async def communicate(self, input: None = None) -> tuple[str, str]:
+        if input is not None:
+            raise NotImplementedError("process stdin is not supported")
+        stdout, stderr = await self.stdout.read(), await self.stderr.read()
+        await self.wait()
+        return stdout, stderr
+
+    async def send_signal(self, signal: int | str | signal_module.Signals) -> None:
+        payload = await self._service.send_process_signal(
+            session_id=self._session_id,
+            process_id=self.id,
             signal=_signal_number(signal),
         )
         self._apply_payload(payload)
-        return self
 
-    def logs(self, *, refresh: bool = False) -> AsyncIterator[SandboxCommandLog]:
-        async def iter_logs() -> AsyncIterator[SandboxCommandLog]:
-            if not refresh and self._log_cache is not None:
-                for snapshot in self._log_cache:
-                    yield _log_from_snapshot(snapshot)
-                return
+    async def terminate(self) -> None:
+        await self.send_signal(signal_module.SIGTERM)
 
-            if refresh:
-                self._log_cache = None
-                self._log_cache_generation += 1
-            generation = self._log_cache_generation
-            staged: list[_LogSnapshot] = []
-            async for event in _command_logs(
-                self._service, session_id=self.session_id, command_id=self.id
-            ):
-                staged.append((event.stream, event.data))
-                yield event
-            if generation == self._log_cache_generation:
-                self._log_cache = tuple(staged)
+    async def kill(self) -> None:
+        await self.send_signal(signal_module.SIGKILL)
 
-        return iter_logs()
-
-    async def output(self, stream: Literal["stdout", "stderr", "both"] = "both") -> str:
-        snapshots: list[_LogSnapshot] = []
-        async for line in self.logs():
-            snapshots.append((line.stream, line.data))
-        return _select_output(snapshots, stream)
-
-    async def stdout(self) -> str:
-        return await self.output("stdout")
-
-    async def stderr(self) -> str:
-        return await self.output("stderr")
+    def logs(self) -> AsyncIterator[ProcessLog]:
+        return _process_logs(self._service, session_id=self._session_id, process_id=self.id)
 
 
 class Snapshot(SnapshotHandleBase):
@@ -148,17 +139,17 @@ class SandboxFilesystem:
         *,
         service: SandboxService,
         session_id: Callable[[], str],
-        write_files_cwd: Callable[[str | None], str],
+        write_files_cwd: Callable[[RemotePath | None], str],
     ) -> None:
         self._service = service
         self._session_id = session_id
         self._write_files_cwd = write_files_cwd
 
-    async def _collect_output(self, command: SandboxCommandState) -> tuple[str, str]:
+    async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
         stdout: list[str] = []
         stderr: list[str] = []
-        async for event in _command_logs(
-            self._service, session_id=command.session_id, command_id=command.id
+        async for event in _process_logs(
+            self._service, session_id=command.session_id, process_id=command.id
         ):
             if event.stream == "stdout":
                 stdout.append(event.data)
@@ -166,104 +157,196 @@ class SandboxFilesystem:
                 stderr.append(event.data)
         return "".join(stdout), "".join(stderr)
 
-    async def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
+    async def mkdir(
+        self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
+    ) -> None:
         await self._service.mkdir(
-            session_id=self._session_id(), path=path, cwd=cwd, recursive=recursive
+            session_id=self._session_id(),
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
+            recursive=recursive,
         )
 
-    async def read_bytes(self, path: str, *, cwd: str | None = None) -> bytes:
-        return await self._service.read_bytes(session_id=self._session_id(), path=path, cwd=cwd)
+    async def read_bytes(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bytes:
+        return await self._service.read_bytes(
+            session_id=self._session_id(),
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
+        )
 
     async def read_text(
-        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
+        self,
+        path: RemotePath,
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str = "utf-8",
+        errors: str = "strict",
     ) -> str:
         return (await self.read_bytes(path, cwd=cwd)).decode(encoding, errors=errors)
 
     async def write_bytes(
-        self, path: str, data: bytes, *, cwd: str | None = None, mode: int | None = None
+        self,
+        path: RemotePath,
+        data: bytes,
+        *,
+        cwd: RemotePath | None = None,
+        mode: int | None = None,
     ) -> None:
-        await self.write_files([WriteFile(path=path, content=data, mode=mode)], cwd=cwd)
+        await self._write_files(
+            [_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode)], cwd=cwd
+        )
 
     async def write_text(
         self,
-        path: str,
+        path: RemotePath,
         text: str,
         *,
-        cwd: str | None = None,
+        cwd: RemotePath | None = None,
         encoding: str = "utf-8",
+        errors: str = "strict",
         mode: int | None = None,
     ) -> None:
-        await self.write_files(
-            [WriteFile(path=path, content=text, mode=mode)], cwd=cwd, encoding=encoding
+        await self._write_files(
+            [
+                _WriteFile(
+                    path=_coerce_remote_path(path),
+                    content=text.encode(encoding, errors=errors),
+                    mode=mode,
+                )
+            ],
+            cwd=cwd,
         )
 
-    async def write_files(
-        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
+    async def _write_files(
+        self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None
     ) -> None:
         await self._service.write_files(
             session_id=self._session_id(),
             files=files,
             cwd=self._write_files_cwd(cwd),
-            encoding=encoding,
         )
 
-    async def exists(self, path: str, *, cwd: str | None = None) -> bool:
+    def batch(self, *, cwd: RemotePath | None = None) -> "SandboxFilesystemBatch":
+        return SandboxFilesystemBatch(filesystem=self, cwd=cwd)
+
+    async def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return await self._service.exists(
             session_id=self._session_id(),
-            path=path,
-            cwd=cwd,
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
             collect_output=self._collect_output,
         )
 
-    async def is_file(self, path: str, *, cwd: str | None = None) -> bool:
+    async def is_file(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return await self._service.is_file(
             session_id=self._session_id(),
-            path=path,
-            cwd=cwd,
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
             collect_output=self._collect_output,
         )
 
-    async def is_dir(self, path: str, *, cwd: str | None = None) -> bool:
+    async def is_dir(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return await self._service.is_dir(
             session_id=self._session_id(),
-            path=path,
-            cwd=cwd,
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
             collect_output=self._collect_output,
         )
 
-    async def listdir(self, path: str = ".", *, cwd: str | None = None) -> list[DirectoryEntry]:
+    async def listdir(
+        self, path: RemotePath = ".", *, cwd: RemotePath | None = None
+    ) -> list[DirectoryEntry]:
         return await self._service.listdir(
             session_id=self._session_id(),
-            path=path,
-            cwd=cwd,
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
             collect_output=self._collect_output,
         )
 
     async def remove(
         self,
-        path: str,
+        path: RemotePath,
         *,
-        cwd: str | None = None,
+        cwd: RemotePath | None = None,
         recursive: bool = False,
         missing_ok: bool = False,
     ) -> None:
         await self._service.remove(
             session_id=self._session_id(),
-            path=path,
-            cwd=cwd,
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
             recursive=recursive,
             missing_ok=missing_ok,
             collect_output=self._collect_output,
         )
 
-    async def rename(self, source: str, destination: str, *, cwd: str | None = None) -> None:
+    async def rename(
+        self,
+        source: RemotePath,
+        destination: RemotePath,
+        *,
+        cwd: RemotePath | None = None,
+    ) -> None:
         await self._service.rename(
             session_id=self._session_id(),
-            source=source,
-            destination=destination,
-            cwd=cwd,
+            source=_coerce_remote_path(source),
+            destination=_coerce_remote_path(destination),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
             collect_output=self._collect_output,
         )
+
+
+class SandboxFilesystemBatch:
+    __slots__ = ("_active", "_cwd", "_files", "_filesystem", "_used")
+
+    def __init__(self, *, filesystem: SandboxFilesystem, cwd: RemotePath | None) -> None:
+        self._filesystem = filesystem
+        self._cwd = cwd
+        self._files: list[_WriteFile] = []
+        self._active = False
+        self._used = False
+
+    def _stage(self, file: _WriteFile) -> None:
+        if not self._active:
+            raise RuntimeError("filesystem batch staging is only allowed inside its context")
+        self._files.append(file)
+
+    def write_bytes(self, path: RemotePath, data: bytes, *, mode: int | None = None) -> None:
+        self._stage(_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode))
+
+    def write_text(
+        self,
+        path: RemotePath,
+        text: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+        mode: int | None = None,
+    ) -> None:
+        self._stage(
+            _WriteFile(
+                path=_coerce_remote_path(path),
+                content=text.encode(encoding, errors=errors),
+                mode=mode,
+            )
+        )
+
+    async def __aenter__(self) -> "SandboxFilesystemBatch":
+        if self._used:
+            raise RuntimeError("filesystem batch contexts can only be entered once")
+        self._used = True
+        self._active = True
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._active = False
+        if exc_type is None and self._files:
+            await self._filesystem._write_files(self._files, cwd=self._cwd)
 
 
 class SandboxRuntimeSession(RuntimeSessionHandleBase):
@@ -278,17 +361,24 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             write_files_cwd=self._write_files_cwd,
         )
 
-    async def run_command(
+    async def run_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SandboxCommand:
-        state = await self._service.run_command(
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> CompletedProcess:
+        output_router = ProcessOutputRouter(
+            stdout=stdout, stderr=stderr, capture_output=capture_output
+        )
+        state = await self._service.run_process(
             session_id=self.id,
             command=command,
             args=args,
@@ -296,39 +386,54 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             env=env,
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
+            output_router=output_router,
         )
-        return SandboxCommand(payload=state, service=self._service)
+        assert state.process.returncode is not None
+        result = CompletedProcess(
+            id=state.process.id,
+            name=state.process.name,
+            args=(state.process.name, *state.process.args),
+            cwd=state.process.cwd,
+            session_id=state.process.session_id,
+            started_at=state.process.started_at,
+            returncode=state.process.returncode,
+            stdout=state.stdout,
+            stderr=state.stderr,
+        )
+        if check:
+            result.check_returncode()
+        return result
 
-    async def start_command(
+    async def create_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SandboxCommand:
-        state = await self._service.start_command(
+    ) -> Process:
+        state = await self._service.create_process(
             session_id=self.id,
             command=command,
-            args=args,
+            args=list(args) if args is not None else None,
             cwd=cwd,
             env=env,
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
         )
-        return SandboxCommand(payload=state, service=self._service)
+        return Process(payload=state, service=self._service)
 
-    async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
-        state = await self._service.get_command(
-            session_id=self.id, command_id=command_id, wait=wait
+    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
+        state = await self._service.get_process(
+            session_id=self.id, process_id=process_id, wait=wait
         )
-        return SandboxCommand(payload=state, service=self._service)
+        return Process(payload=state, service=self._service)
 
-    async def query_commands(self) -> list[SandboxCommand]:
-        states = await self._service.query_commands(session_id=self.id)
-        return [SandboxCommand(payload=state, service=self._service) for state in states]
+    async def query_processes(self) -> list[Process]:
+        states = await self._service.query_processes(session_id=self.id)
+        return [Process(payload=state, service=self._service) for state in states]
 
     async def refresh(self, *, include_system_routes: bool | None = None) -> Self:
         payload = await self._service.get_runtime_session(
@@ -358,9 +463,6 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(result.session)
         return Snapshot(payload=result.snapshot, service=self._service)
 
-    def command_logs(self, command_id: str) -> AsyncIterator[SandboxCommandLog]:
-        return _command_logs(self._service, session_id=self.id, command_id=command_id)
-
     async def stop(self) -> Self:
         payload = await self._service.stop_runtime_session(session_id=self.id)
         self._apply_payload(payload)
@@ -389,17 +491,24 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             project_id=self.project_id,
         )
 
-    async def run_command(
+    async def run_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SandboxCommand:
-        state = await self._service.run_command(
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> CompletedProcess:
+        output_router = ProcessOutputRouter(
+            stdout=stdout, stderr=stderr, capture_output=capture_output
+        )
+        state = await self._service.run_process(
             session_id=self.current_session_id,
             command=command,
             args=args,
@@ -407,39 +516,54 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             env=env,
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
+            output_router=output_router,
         )
-        return SandboxCommand(payload=state, service=self._service)
+        assert state.process.returncode is not None
+        result = CompletedProcess(
+            id=state.process.id,
+            name=state.process.name,
+            args=(state.process.name, *state.process.args),
+            cwd=state.process.cwd,
+            session_id=state.process.session_id,
+            started_at=state.process.started_at,
+            returncode=state.process.returncode,
+            stdout=state.stdout,
+            stderr=state.stderr,
+        )
+        if check:
+            result.check_returncode()
+        return result
 
-    async def start_command(
+    async def create_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SandboxCommand:
-        state = await self._service.start_command(
+    ) -> Process:
+        state = await self._service.create_process(
             session_id=self.current_session_id,
             command=command,
-            args=args,
+            args=list(args) if args is not None else None,
             cwd=cwd,
             env=env,
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
         )
-        return SandboxCommand(payload=state, service=self._service)
+        return Process(payload=state, service=self._service)
 
-    async def get_command(self, command_id: str, *, wait: bool = False) -> SandboxCommand:
-        state = await self._service.get_command(
-            session_id=self.current_session_id, command_id=command_id, wait=wait
+    async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
+        state = await self._service.get_process(
+            session_id=self.current_session_id, process_id=process_id, wait=wait
         )
-        return SandboxCommand(payload=state, service=self._service)
+        return Process(payload=state, service=self._service)
 
-    async def query_commands(self) -> list[SandboxCommand]:
-        states = await self._service.query_commands(session_id=self.current_session_id)
-        return [SandboxCommand(payload=state, service=self._service) for state in states]
+    async def query_processes(self) -> list[Process]:
+        states = await self._service.query_processes(session_id=self.current_session_id)
+        return [Process(payload=state, service=self._service) for state in states]
 
     async def list_sessions(
         self,
@@ -841,11 +965,11 @@ async def get_snapshot(service: SandboxService, *, snapshot_id: str) -> Snapshot
     return Snapshot(payload=await service.get_snapshot(snapshot_id=snapshot_id), service=service)
 
 
-def _command_logs(
-    service: SandboxService, *, session_id: str, command_id: str
-) -> AsyncIterator[SandboxCommandLog]:
-    async def iterate() -> AsyncIterator[SandboxCommandLog]:
-        response = await service.command_logs_response(session_id=session_id, command_id=command_id)
+def _process_logs(
+    service: SandboxService, *, session_id: str, process_id: str
+) -> AsyncIterator[ProcessLog]:
+    async def iterate() -> AsyncIterator[ProcessLog]:
+        response = await service.process_logs_response(session_id=session_id, process_id=process_id)
         try:
             async for line in response.aiter_lines():
                 if line:

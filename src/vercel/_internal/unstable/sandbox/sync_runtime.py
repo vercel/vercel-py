@@ -4,30 +4,32 @@ import signal as signal_module
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import timedelta
 from types import TracebackType
-from typing import Any, Literal
+from typing import Any, TextIO
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.polyfills import Self
 from vercel._internal.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel._internal.unstable.sandbox.errors import (
     SandboxCleanupError,
+    SandboxResponseError,
     SandboxTerminalStateError,
 )
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
+    CompletedProcess,
     DirectoryEntry,
     DurationInput,
     JSONValue,
-    SandboxCommandLog,
+    ProcessLog,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
     SnapshotExpirationInput,
     SnapshotRetention,
     SnapshotRetentionUpdate,
-    WriteFile,
     _parse_snapshot_expiration,
+    _WriteFile,
 )
 from vercel._internal.unstable.sandbox.pagination import (
     QuerySandboxesPage,
@@ -37,23 +39,24 @@ from vercel._internal.unstable.sandbox.pagination import (
     QuerySnapshotsPage,
     QuerySnapshotsParams,
 )
+from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
 from vercel._internal.unstable.sandbox.runtime_common import (
+    RemotePath,
     RuntimeSessionHandleBase,
     SandboxHandleBase,
     SnapshotHandleBase,
-    _CommandHandleState,
-    _log_from_snapshot,
-    _LogSnapshot,
-    _select_output,
+    _coerce_remote_path,
+    _ProcessHandleState,
     _signal_number,
 )
 from vercel._internal.unstable.sandbox.service import SandboxService, _SandboxTerminalState
 from vercel._internal.unstable.sandbox.state import (
-    SandboxCommandState,
+    ProcessState,
     SandboxRuntimeSessionState,
     SandboxState,
     SnapshotState,
 )
+from vercel._internal.unstable.sandbox.text_reader import _sync_text_readers
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -64,65 +67,59 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
     )
 
 
-class SyncSandboxCommand(_CommandHandleState):
-    __slots__ = ("_service",)
+class SyncProcess(_ProcessHandleState):
+    __slots__ = ("_service", "stderr", "stdout")
 
-    def __init__(self, *, payload: SandboxCommandState, service: SandboxService) -> None:
+    def __init__(self, *, payload: ProcessState, service: SandboxService) -> None:
         super().__init__(payload)
         self._service = service
+        self.stdout, self.stderr = _sync_text_readers(
+            lambda: iter_coroutine(
+                service.process_logs_response(session_id=self._session_id, process_id=self.id)
+            )
+        )
 
-    def refresh(self, *, wait: bool = False) -> Self:
+    def refresh(self) -> Self:
         payload = iter_coroutine(
-            self._service.get_command(session_id=self.session_id, command_id=self.id, wait=wait)
+            self._service.get_process(session_id=self._session_id, process_id=self.id)
         )
         self._apply_payload(payload)
         return self
 
-    def wait(self) -> Self:
-        return self.refresh(wait=True)
-
-    def kill(self, signal: int | str | signal_module.Signals | None = None) -> Self:
+    def wait(self) -> int:
         payload = iter_coroutine(
-            self._service.kill_command(
-                session_id=self.session_id,
-                command_id=self.id,
+            self._service.get_process(session_id=self._session_id, process_id=self.id, wait=True)
+        )
+        self._apply_payload(payload)
+        if self.returncode is None:
+            raise SandboxResponseError("Wait response did not include a process return code")
+        return self.returncode
+
+    def communicate(self, input: None = None) -> tuple[str, str]:
+        if input is not None:
+            raise NotImplementedError("process stdin is not supported")
+        stdout, stderr = self.stdout.read(), self.stderr.read()
+        self.wait()
+        return stdout, stderr
+
+    def send_signal(self, signal: int | str | signal_module.Signals) -> None:
+        payload = iter_coroutine(
+            self._service.send_process_signal(
+                session_id=self._session_id,
+                process_id=self.id,
                 signal=_signal_number(signal),
             )
         )
         self._apply_payload(payload)
-        return self
 
-    def logs(self, *, refresh: bool = False) -> Iterator[SandboxCommandLog]:
-        def iter_logs() -> Iterator[SandboxCommandLog]:
-            if not refresh and self._log_cache is not None:
-                for snapshot in self._log_cache:
-                    yield _log_from_snapshot(snapshot)
-                return
+    def terminate(self) -> None:
+        self.send_signal(signal_module.SIGTERM)
 
-            if refresh:
-                self._log_cache = None
-                self._log_cache_generation += 1
-            generation = self._log_cache_generation
-            staged: list[_LogSnapshot] = []
-            for event in _command_logs(
-                self._service, session_id=self.session_id, command_id=self.id
-            ):
-                staged.append((event.stream, event.data))
-                yield event
-            if generation == self._log_cache_generation:
-                self._log_cache = tuple(staged)
+    def kill(self) -> None:
+        self.send_signal(signal_module.SIGKILL)
 
-        return iter_logs()
-
-    def output(self, stream: Literal["stdout", "stderr", "both"] = "both") -> str:
-        snapshots = [(line.stream, line.data) for line in self.logs()]
-        return _select_output(snapshots, stream)
-
-    def stdout(self) -> str:
-        return self.output("stdout")
-
-    def stderr(self) -> str:
-        return self.output("stderr")
+    def logs(self) -> Iterator[ProcessLog]:
+        return _process_logs(self._service, session_id=self._session_id, process_id=self.id)
 
 
 class SyncSnapshot(SnapshotHandleBase):
@@ -146,17 +143,17 @@ class SyncSandboxFilesystem:
         *,
         service: SandboxService,
         session_id: Callable[[], str],
-        write_files_cwd: Callable[[str | None], str],
+        write_files_cwd: Callable[[RemotePath | None], str],
     ) -> None:
         self._service = service
         self._session_id = session_id
         self._write_files_cwd = write_files_cwd
 
-    async def _collect_output(self, command: SandboxCommandState) -> tuple[str, str]:
+    async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
         stdout: list[str] = []
         stderr: list[str] = []
-        for event in _command_logs(
-            self._service, session_id=command.session_id, command_id=command.id
+        for event in _process_logs(
+            self._service, session_id=command.session_id, process_id=command.id
         ):
             if event.stream == "stdout":
                 stdout.append(event.data)
@@ -164,122 +161,212 @@ class SyncSandboxFilesystem:
                 stderr.append(event.data)
         return "".join(stdout), "".join(stderr)
 
-    def mkdir(self, path: str, *, cwd: str | None = None, recursive: bool = True) -> None:
+    def mkdir(
+        self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
+    ) -> None:
         iter_coroutine(
             self._service.mkdir(
-                session_id=self._session_id(), path=path, cwd=cwd, recursive=recursive
+                session_id=self._session_id(),
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
+                recursive=recursive,
             )
         )
 
-    def read_bytes(self, path: str, *, cwd: str | None = None) -> bytes:
+    def read_bytes(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bytes:
         return iter_coroutine(
-            self._service.read_bytes(session_id=self._session_id(), path=path, cwd=cwd)
+            self._service.read_bytes(
+                session_id=self._session_id(),
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
+            )
         )
 
     def read_text(
-        self, path: str, *, cwd: str | None = None, encoding: str = "utf-8", errors: str = "strict"
+        self,
+        path: RemotePath,
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str = "utf-8",
+        errors: str = "strict",
     ) -> str:
         return self.read_bytes(path, cwd=cwd).decode(encoding, errors=errors)
 
     def write_bytes(
-        self, path: str, data: bytes, *, cwd: str | None = None, mode: int | None = None
+        self,
+        path: RemotePath,
+        data: bytes,
+        *,
+        cwd: RemotePath | None = None,
+        mode: int | None = None,
     ) -> None:
-        self.write_files([WriteFile(path=path, content=data, mode=mode)], cwd=cwd)
+        self._write_files(
+            [_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode)], cwd=cwd
+        )
 
     def write_text(
         self,
-        path: str,
+        path: RemotePath,
         text: str,
         *,
-        cwd: str | None = None,
+        cwd: RemotePath | None = None,
         encoding: str = "utf-8",
+        errors: str = "strict",
         mode: int | None = None,
     ) -> None:
-        self.write_files(
-            [WriteFile(path=path, content=text, mode=mode)], cwd=cwd, encoding=encoding
+        self._write_files(
+            [
+                _WriteFile(
+                    path=_coerce_remote_path(path),
+                    content=text.encode(encoding, errors=errors),
+                    mode=mode,
+                )
+            ],
+            cwd=cwd,
         )
 
-    def write_files(
-        self, files: Sequence[WriteFile], *, cwd: str | None = None, encoding: str = "utf-8"
-    ) -> None:
+    def _write_files(self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None) -> None:
         iter_coroutine(
             self._service.write_files(
                 session_id=self._session_id(),
                 files=files,
                 cwd=self._write_files_cwd(cwd),
-                encoding=encoding,
             )
         )
 
-    def exists(self, path: str, *, cwd: str | None = None) -> bool:
+    def batch(self, *, cwd: RemotePath | None = None) -> "SyncSandboxFilesystemBatch":
+        return SyncSandboxFilesystemBatch(filesystem=self, cwd=cwd)
+
+    def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return iter_coroutine(
             self._service.exists(
                 session_id=self._session_id(),
-                path=path,
-                cwd=cwd,
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
                 collect_output=self._collect_output,
             )
         )
 
-    def is_file(self, path: str, *, cwd: str | None = None) -> bool:
+    def is_file(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return iter_coroutine(
             self._service.is_file(
                 session_id=self._session_id(),
-                path=path,
-                cwd=cwd,
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
                 collect_output=self._collect_output,
             )
         )
 
-    def is_dir(self, path: str, *, cwd: str | None = None) -> bool:
+    def is_dir(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return iter_coroutine(
             self._service.is_dir(
                 session_id=self._session_id(),
-                path=path,
-                cwd=cwd,
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
                 collect_output=self._collect_output,
             )
         )
 
-    def listdir(self, path: str = ".", *, cwd: str | None = None) -> list[DirectoryEntry]:
+    def listdir(
+        self, path: RemotePath = ".", *, cwd: RemotePath | None = None
+    ) -> list[DirectoryEntry]:
         return iter_coroutine(
             self._service.listdir(
                 session_id=self._session_id(),
-                path=path,
-                cwd=cwd,
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
                 collect_output=self._collect_output,
             )
         )
 
     def remove(
         self,
-        path: str,
+        path: RemotePath,
         *,
-        cwd: str | None = None,
+        cwd: RemotePath | None = None,
         recursive: bool = False,
         missing_ok: bool = False,
     ) -> None:
         iter_coroutine(
             self._service.remove(
                 session_id=self._session_id(),
-                path=path,
-                cwd=cwd,
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
                 recursive=recursive,
                 missing_ok=missing_ok,
                 collect_output=self._collect_output,
             )
         )
 
-    def rename(self, source: str, destination: str, *, cwd: str | None = None) -> None:
+    def rename(
+        self,
+        source: RemotePath,
+        destination: RemotePath,
+        *,
+        cwd: RemotePath | None = None,
+    ) -> None:
         iter_coroutine(
             self._service.rename(
                 session_id=self._session_id(),
-                source=source,
-                destination=destination,
-                cwd=cwd,
+                source=_coerce_remote_path(source),
+                destination=_coerce_remote_path(destination),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
                 collect_output=self._collect_output,
             )
         )
+
+
+class SyncSandboxFilesystemBatch:
+    __slots__ = ("_active", "_cwd", "_files", "_filesystem", "_used")
+
+    def __init__(self, *, filesystem: SyncSandboxFilesystem, cwd: RemotePath | None) -> None:
+        self._filesystem = filesystem
+        self._cwd = cwd
+        self._files: list[_WriteFile] = []
+        self._active = False
+        self._used = False
+
+    def _stage(self, file: _WriteFile) -> None:
+        if not self._active:
+            raise RuntimeError("filesystem batch staging is only allowed inside its context")
+        self._files.append(file)
+
+    def write_bytes(self, path: RemotePath, data: bytes, *, mode: int | None = None) -> None:
+        self._stage(_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode))
+
+    def write_text(
+        self,
+        path: RemotePath,
+        text: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+        mode: int | None = None,
+    ) -> None:
+        self._stage(
+            _WriteFile(
+                path=_coerce_remote_path(path),
+                content=text.encode(encoding, errors=errors),
+                mode=mode,
+            )
+        )
+
+    def __enter__(self) -> "SyncSandboxFilesystemBatch":
+        if self._used:
+            raise RuntimeError("filesystem batch contexts can only be entered once")
+        self._used = True
+        self._active = True
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._active = False
+        if exc_type is None and self._files:
+            self._filesystem._write_files(self._files, cwd=self._cwd)
 
 
 class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
@@ -314,18 +401,25 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 cause=cleanup_exc,
             ) from cleanup_exc
 
-    def run_command(
+    def run_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SyncSandboxCommand:
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> CompletedProcess:
+        output_router = ProcessOutputRouter(
+            stdout=stdout, stderr=stderr, capture_output=capture_output
+        )
         state = iter_coroutine(
-            self._service.run_command(
+            self._service.run_process(
                 session_id=self.id,
                 command=command,
                 args=args,
@@ -333,42 +427,57 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 env=env,
                 sudo=sudo,
                 kill_after=parse_duration_seconds(kill_after),
+                output_router=output_router,
             )
         )
-        return SyncSandboxCommand(payload=state, service=self._service)
+        assert state.process.returncode is not None
+        result = CompletedProcess(
+            id=state.process.id,
+            name=state.process.name,
+            args=(state.process.name, *state.process.args),
+            cwd=state.process.cwd,
+            session_id=state.process.session_id,
+            started_at=state.process.started_at,
+            returncode=state.process.returncode,
+            stdout=state.stdout,
+            stderr=state.stderr,
+        )
+        if check:
+            result.check_returncode()
+        return result
 
-    def start_command(
+    def create_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SyncSandboxCommand:
+    ) -> SyncProcess:
         state = iter_coroutine(
-            self._service.start_command(
+            self._service.create_process(
                 session_id=self.id,
                 command=command,
-                args=args,
+                args=list(args) if args is not None else None,
                 cwd=cwd,
                 env=env,
                 sudo=sudo,
                 kill_after=parse_duration_seconds(kill_after),
             )
         )
-        return SyncSandboxCommand(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service)
 
-    def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
+    def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         state = iter_coroutine(
-            self._service.get_command(session_id=self.id, command_id=command_id, wait=wait)
+            self._service.get_process(session_id=self.id, process_id=process_id, wait=wait)
         )
-        return SyncSandboxCommand(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service)
 
-    def query_commands(self) -> list[SyncSandboxCommand]:
-        states = iter_coroutine(self._service.query_commands(session_id=self.id))
-        return [SyncSandboxCommand(payload=state, service=self._service) for state in states]
+    def query_processes(self) -> list[SyncProcess]:
+        states = iter_coroutine(self._service.query_processes(session_id=self.id))
+        return [SyncProcess(payload=state, service=self._service) for state in states]
 
     def refresh(self, *, include_system_routes: bool | None = None) -> Self:
         payload = iter_coroutine(
@@ -405,9 +514,6 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         )
         self._apply_payload(result.session)
         return SyncSnapshot(payload=result.snapshot, service=self._service)
-
-    def command_logs(self, command_id: str) -> Iterator[SandboxCommandLog]:
-        return _command_logs(self._service, session_id=self.id, command_id=command_id)
 
     def stop(self) -> Self:
         payload = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
@@ -460,18 +566,25 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         )
         return SyncSandboxRuntimeSession(payload=payload, service=self._service)
 
-    def run_command(
+    def run_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SyncSandboxCommand:
+        check: bool = False,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
+        capture_output: bool = False,
+    ) -> CompletedProcess:
+        output_router = ProcessOutputRouter(
+            stdout=stdout, stderr=stderr, capture_output=capture_output
+        )
         state = iter_coroutine(
-            self._service.run_command(
+            self._service.run_process(
                 session_id=self.current_session_id,
                 command=command,
                 args=args,
@@ -479,44 +592,59 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 env=env,
                 sudo=sudo,
                 kill_after=parse_duration_seconds(kill_after),
+                output_router=output_router,
             )
         )
-        return SyncSandboxCommand(payload=state, service=self._service)
+        assert state.process.returncode is not None
+        result = CompletedProcess(
+            id=state.process.id,
+            name=state.process.name,
+            args=(state.process.name, *state.process.args),
+            cwd=state.process.cwd,
+            session_id=state.process.session_id,
+            started_at=state.process.started_at,
+            returncode=state.process.returncode,
+            stdout=state.stdout,
+            stderr=state.stderr,
+        )
+        if check:
+            result.check_returncode()
+        return result
 
-    def start_command(
+    def create_process(
         self,
         command: str,
-        args: list[str] | None = None,
+        args: Sequence[str] | None = None,
         *,
         cwd: str | None = None,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-    ) -> SyncSandboxCommand:
+    ) -> SyncProcess:
         state = iter_coroutine(
-            self._service.start_command(
+            self._service.create_process(
                 session_id=self.current_session_id,
                 command=command,
-                args=args,
+                args=list(args) if args is not None else None,
                 cwd=cwd,
                 env=env,
                 sudo=sudo,
                 kill_after=parse_duration_seconds(kill_after),
             )
         )
-        return SyncSandboxCommand(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service)
 
-    def get_command(self, command_id: str, *, wait: bool = False) -> SyncSandboxCommand:
+    def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         state = iter_coroutine(
-            self._service.get_command(
-                session_id=self.current_session_id, command_id=command_id, wait=wait
+            self._service.get_process(
+                session_id=self.current_session_id, process_id=process_id, wait=wait
             )
         )
-        return SyncSandboxCommand(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service)
 
-    def query_commands(self) -> list[SyncSandboxCommand]:
-        states = iter_coroutine(self._service.query_commands(session_id=self.current_session_id))
-        return [SyncSandboxCommand(payload=state, service=self._service) for state in states]
+    def query_processes(self) -> list[SyncProcess]:
+        states = iter_coroutine(self._service.query_processes(session_id=self.current_session_id))
+        return [SyncProcess(payload=state, service=self._service) for state in states]
 
     def list_sessions(
         self,
@@ -773,11 +901,11 @@ def get_snapshot(service: SandboxService, *, snapshot_id: str) -> SyncSnapshot:
     )
 
 
-def _command_logs(
-    service: SandboxService, *, session_id: str, command_id: str
-) -> Iterator[SandboxCommandLog]:
+def _process_logs(
+    service: SandboxService, *, session_id: str, process_id: str
+) -> Iterator[ProcessLog]:
     response = iter_coroutine(
-        service.command_logs_response(session_id=session_id, command_id=command_id)
+        service.process_logs_response(session_id=session_id, process_id=process_id)
     )
     try:
         for line in response.iter_lines():

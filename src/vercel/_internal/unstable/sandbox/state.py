@@ -16,14 +16,21 @@ class SandboxRouteState:
 
 
 @dataclass(frozen=True, slots=True)
-class SandboxCommandState:
+class ProcessState:
     id: str
     name: str
     args: tuple[str, ...]
     cwd: str
     session_id: str
-    exit_code: int | None
+    returncode: int | None
     started_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedProcessState:
+    process: ProcessState
+    stdout: str | None
+    stderr: str | None
 
 
 @dataclass(frozen=True, slots=True)

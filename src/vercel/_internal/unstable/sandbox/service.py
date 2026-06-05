@@ -11,6 +11,7 @@ from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
     SandboxFilesystemCommandError,
+    SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
     SandboxResponseError,
 )
@@ -30,12 +31,14 @@ from vercel._internal.unstable.sandbox.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     TagFilter,
-    WriteFile,
+    _WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
+from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
 from vercel._internal.unstable.sandbox.state import (
+    CompletedProcessState,
+    ProcessState,
     RuntimeSessionsPageState,
-    SandboxCommandState,
     SandboxesPageState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -56,7 +59,7 @@ _TRANSITIONAL_SANDBOX_STATUSES = frozenset(
 )
 _READY_POLL_INTERVAL_SECONDS = 0.5
 AsyncSleep = Callable[[float], Awaitable[None]]
-CommandOutputCollector = Callable[[SandboxCommandState], Awaitable[tuple[str, str]]]
+ProcessOutputCollector = Callable[[ProcessState], Awaitable[tuple[str, str]]]
 _MISSING_PATH_ERROR_CODES = frozenset({"not_found", "path_not_found", "file_not_found", "ENOENT"})
 _PREDICATE_SCRIPT = """\
 case "$1" in
@@ -438,7 +441,7 @@ class SandboxService:
         self._ensure_open()
         return await self._api_client.delete_snapshot(snapshot_id=snapshot_id)
 
-    async def _run_command(
+    async def _run_process(
         self,
         *,
         session_id: str,
@@ -449,9 +452,9 @@ class SandboxService:
         sudo: bool = False,
         kill_after: timedelta | None = None,
         wait: bool,
-    ) -> SandboxCommandState:
+    ) -> ProcessState:
         self._ensure_open()
-        started = await self._api_client.run_command(
+        started = await self._api_client.create_process(
             session_id=session_id,
             command=command,
             args=args,
@@ -467,7 +470,7 @@ class SandboxService:
             session_id=session_id, command_id=started.id, wait=True
         )
 
-    async def run_command(
+    async def _wait_process(
         self,
         *,
         session_id: str,
@@ -477,8 +480,8 @@ class SandboxService:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
-    ) -> SandboxCommandState:
-        return await self._run_command(
+    ) -> ProcessState:
+        return await self._run_process(
             session_id=session_id,
             command=command,
             args=args,
@@ -489,7 +492,31 @@ class SandboxService:
             wait=True,
         )
 
-    async def start_command(
+    async def run_process(
+        self,
+        *,
+        session_id: str,
+        command: str,
+        args: Sequence[str] | None = None,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: timedelta | None = None,
+        output_router: ProcessOutputRouter,
+    ) -> CompletedProcessState:
+        self._ensure_open()
+        return await self._api_client.run_process(
+            session_id=session_id,
+            command=command,
+            args=args,
+            cwd=cwd,
+            env=env,
+            sudo=sudo,
+            kill_after=kill_after,
+            output_router=output_router,
+        )
+
+    async def create_process(
         self,
         *,
         session_id: str,
@@ -499,8 +526,8 @@ class SandboxService:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
-    ) -> SandboxCommandState:
-        return await self._run_command(
+    ) -> ProcessState:
+        return await self._run_process(
             session_id=session_id,
             command=command,
             args=args,
@@ -511,15 +538,15 @@ class SandboxService:
             wait=False,
         )
 
-    async def get_command(
-        self, *, session_id: str, command_id: str, wait: bool = False
-    ) -> SandboxCommandState:
+    async def get_process(
+        self, *, session_id: str, process_id: str, wait: bool = False
+    ) -> ProcessState:
         self._ensure_open()
         return await self._api_client.get_command(
-            session_id=session_id, command_id=command_id, wait=wait
+            session_id=session_id, command_id=process_id, wait=wait
         )
 
-    async def query_commands(self, *, session_id: str) -> list[SandboxCommandState]:
+    async def query_processes(self, *, session_id: str) -> list[ProcessState]:
         self._ensure_open()
         return await self._api_client.query_commands(session_id=session_id)
 
@@ -553,14 +580,16 @@ class SandboxService:
         self,
         *,
         session_id: str,
-        files: Sequence[WriteFile],
+        files: Sequence[_WriteFile],
         cwd: str,
-        encoding: str = "utf-8",
     ) -> None:
         self._ensure_open()
-        await self._api_client.write_files(
-            session_id=session_id, files=files, cwd=cwd, encoding=encoding
-        )
+        try:
+            await self._api_client.write_files(session_id=session_id, files=files, cwd=cwd)
+        except SandboxApiError as error:
+            raise SandboxFilesystemWriteError(
+                paths=tuple(file.path for file in files), cwd=cwd, cause=error
+            ) from error
 
     async def _filesystem_command(
         self,
@@ -570,9 +599,9 @@ class SandboxService:
         script: str,
         args: list[str],
         cwd: str | None,
-        collect_output: CommandOutputCollector,
-    ) -> tuple[SandboxCommandState, str, str]:
-        command = await self.run_command(
+        collect_output: ProcessOutputCollector,
+    ) -> tuple[ProcessState, str, str]:
+        command = await self._wait_process(
             session_id=session_id,
             command="sh",
             args=["-c", script, f"vercel-fs-{operation}", *args],
@@ -589,7 +618,7 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: CommandOutputCollector,
+        collect_output: ProcessOutputCollector,
     ) -> bool:
         command, stdout, stderr = await self._filesystem_command(
             operation=operation,
@@ -599,14 +628,14 @@ class SandboxService:
             cwd=cwd,
             collect_output=collect_output,
         )
-        if command.exit_code == 0:
+        if command.returncode == 0:
             return True
-        if command.exit_code == 1:
+        if command.returncode == 1:
             return False
         raise SandboxFilesystemCommandError(
             operation,
             paths=(path,),
-            exit_code=command.exit_code,
+            exit_code=command.returncode,
             stdout=stdout,
             stderr=stderr,
         )
@@ -617,7 +646,7 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: CommandOutputCollector,
+        collect_output: ProcessOutputCollector,
     ) -> bool:
         return await self._predicate(
             operation="exists",
@@ -634,7 +663,7 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: CommandOutputCollector,
+        collect_output: ProcessOutputCollector,
     ) -> bool:
         return await self._predicate(
             operation="is_file",
@@ -651,7 +680,7 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: CommandOutputCollector,
+        collect_output: ProcessOutputCollector,
     ) -> bool:
         return await self._predicate(
             operation="is_dir",
@@ -668,7 +697,7 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None,
-        collect_output: CommandOutputCollector,
+        collect_output: ProcessOutputCollector,
     ) -> list[DirectoryEntry]:
         command, stdout, stderr = await self._filesystem_command(
             operation="listdir",
@@ -678,11 +707,11 @@ class SandboxService:
             cwd=cwd,
             collect_output=collect_output,
         )
-        if command.exit_code != 0:
+        if command.returncode != 0:
             raise SandboxFilesystemCommandError(
                 "listdir",
                 paths=(path,),
-                exit_code=command.exit_code,
+                exit_code=command.returncode,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -696,7 +725,7 @@ class SandboxService:
         cwd: str | None,
         recursive: bool,
         missing_ok: bool,
-        collect_output: CommandOutputCollector,
+        collect_output: ProcessOutputCollector,
     ) -> None:
         command, stdout, stderr = await self._filesystem_command(
             operation="remove",
@@ -706,11 +735,11 @@ class SandboxService:
             cwd=cwd,
             collect_output=collect_output,
         )
-        if command.exit_code != 0:
+        if command.returncode != 0:
             raise SandboxFilesystemCommandError(
                 "remove",
                 paths=(path,),
-                exit_code=command.exit_code,
+                exit_code=command.returncode,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -722,7 +751,7 @@ class SandboxService:
         source: str,
         destination: str,
         cwd: str | None,
-        collect_output: CommandOutputCollector,
+        collect_output: ProcessOutputCollector,
     ) -> None:
         command, stdout, stderr = await self._filesystem_command(
             operation="rename",
@@ -732,27 +761,27 @@ class SandboxService:
             cwd=cwd,
             collect_output=collect_output,
         )
-        if command.exit_code != 0:
+        if command.returncode != 0:
             raise SandboxFilesystemCommandError(
                 "rename",
                 paths=(source, destination),
-                exit_code=command.exit_code,
+                exit_code=command.returncode,
                 stdout=stdout,
                 stderr=stderr,
             )
 
-    async def kill_command(
-        self, *, session_id: str, command_id: str, signal: int
-    ) -> SandboxCommandState:
+    async def send_process_signal(
+        self, *, session_id: str, process_id: str, signal: int
+    ) -> ProcessState:
         self._ensure_open()
         return await self._api_client.kill_command(
-            session_id=session_id, command_id=command_id, signal=signal
+            session_id=session_id, command_id=process_id, signal=signal
         )
 
-    async def command_logs_response(self, *, session_id: str, command_id: str) -> httpx.Response:
+    async def process_logs_response(self, *, session_id: str, process_id: str) -> httpx.Response:
         self._ensure_open()
         return await self._api_client.command_logs_response(
-            session_id=session_id, command_id=command_id
+            session_id=session_id, command_id=process_id
         )
 
 

@@ -15,12 +15,11 @@ from dotenv import load_dotenv
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
     GitSource,
+    Process,
+    ProcessLog,
+    ProcessLogStream,
     Sandbox,
     SandboxApiError,
-    SandboxCommand,
-    SandboxCommandLog,
-    SandboxCommandLogStream,
-    WriteFile,
 )
 
 load_dotenv()
@@ -142,9 +141,7 @@ def marker_payload(
 
 
 async def run_shell(box: Sandbox, command: str, *, cwd: str) -> None:
-    result = await box.run_command("sh", ["-lc", command], cwd=cwd)
-    if result.exit_code != 0:
-        raise RuntimeError(f"{command!r} failed with exit code {result.exit_code}")
+    await box.run_process("sh", ["-lc", command], cwd=cwd, check=True)
 
 
 async def install_dependencies(
@@ -172,30 +169,26 @@ async def install_dependencies(
     print(f"running install: {install}")
     await run_shell(box, install, cwd=cwd)
     await box.fs.mkdir(".vercel-py-dev-server", cwd=cwd)
-    await box.fs.write_files(
-        [
-            WriteFile(
-                path=MARKER_PATH,
-                content=json.dumps(
-                    marker_payload(
-                        repo=repo,
-                        ref=ref,
-                        runtime=runtime,
-                        install=install,
-                        cwd=cwd,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-            )
-        ],
+    await box.fs.write_text(
+        MARKER_PATH,
+        json.dumps(
+            marker_payload(
+                repo=repo,
+                ref=ref,
+                runtime=runtime,
+                install=install,
+                cwd=cwd,
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
         cwd=cwd,
     )
     print("wrote install marker")
 
 
-async def stream_logs_for(command: SandboxCommand, *, seconds: float) -> None:
+async def stream_logs_for(command: Process, *, seconds: float) -> None:
     events = command.logs()
     deadline = time.monotonic() + seconds
 
@@ -214,15 +207,15 @@ async def stream_logs_for(command: SandboxCommand, *, seconds: float) -> None:
         write_log_event(event)
 
 
-async def anext_event(events: AsyncIterator[SandboxCommandLog]) -> SandboxCommandLog:
+async def anext_event(events: AsyncIterator[ProcessLog]) -> ProcessLog:
     return await anext(events)
 
 
-def write_log_event(event: SandboxCommandLog) -> None:
-    if event.stream is SandboxCommandLogStream.STDOUT:
+def write_log_event(event: ProcessLog) -> None:
+    if event.stream is ProcessLogStream.STDOUT:
         sys.stdout.write(event.data)
         sys.stdout.flush()
-    elif event.stream is SandboxCommandLogStream.STDERR:
+    elif event.stream is ProcessLogStream.STDERR:
         sys.stderr.write(event.data)
         sys.stderr.flush()
 
@@ -245,7 +238,7 @@ async def run_entrypoint(
         print("prepared sandbox; pass --entrypoint to start a dev server")
         return
 
-    command = await box.start_command("sh", ["-lc", entrypoint], cwd=cwd)
+    command = await box.create_process("sh", ["-lc", entrypoint], cwd=cwd)
     print(f"started command {command.id}")
 
     url = route_url(box, port)

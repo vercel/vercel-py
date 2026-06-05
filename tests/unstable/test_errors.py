@@ -19,5 +19,5 @@ def test_unstable_error_inheritance() -> None:
     assert sandbox.sync.SandboxStreamError is sandbox.SandboxStreamError
     assert sandbox.sync.DirectoryEntry is sandbox.DirectoryEntry
     assert sandbox.sync.SandboxFilesystemCommandError is sandbox.SandboxFilesystemCommandError
-    assert sandbox.sync.SandboxCommandLogStream is sandbox.SandboxCommandLogStream
+    assert sandbox.sync.ProcessLogStream is sandbox.ProcessLogStream
     assert issubclass(sandbox.SandboxTerminalStateError, sandbox.SandboxError)

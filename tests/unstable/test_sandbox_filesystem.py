@@ -1,6 +1,7 @@
 import io
 import json
 import tarfile
+from pathlib import PurePosixPath
 from typing import cast
 
 import httpx
@@ -14,6 +15,7 @@ from vercel.unstable.sandbox import (
     DirectoryEntry,
     SandboxApiError,
     SandboxFilesystemCommandError,
+    SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
     SandboxServiceOptions,
     sync as sandbox_sync,
@@ -110,12 +112,14 @@ async def test_async_filesystem_native_operations_and_write_composition(
             assert not hasattr(box, method)
             assert not hasattr(box.current_session, method)
 
-        await box.fs.mkdir("parent", recursive=False)
-        assert await box.fs.read_bytes("data.bin") == b"bytes"
+        await box.fs.mkdir(PurePosixPath("parent"), recursive=False)
+        assert await box.fs.read_bytes(PurePosixPath("data.bin")) == b"bytes"
         assert await box.fs.read_text("message.txt") == "text"
         await box.fs.write_bytes("data.bin", b"\x00\x01", mode=0o600)
         await box.fs.write_text("message.txt", "hello", mode=0o640)
-        await box.fs.write_text("file.txt", "relative", cwd="workspace")
+        await box.fs.write_text(
+            PurePosixPath("file.txt"), "relative", cwd=PurePosixPath("workspace")
+        )
 
     assert json.loads(mkdir.calls[0].request.content) == {
         "path": "parent",
@@ -132,6 +136,30 @@ async def test_async_filesystem_native_operations_and_write_composition(
     assert _tar_entries(writes.calls[2].request.content) == {
         "vercel/sandbox/workspace/file.txt": (b"relative", 0o644)
     }
+
+
+@respx.mock
+async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(
+            413, json={"error": {"code": "too_large", "message": "too large"}}
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(SandboxFilesystemWriteError) as exc_info:
+            async with box.fs.batch(cwd=PurePosixPath("workspace")) as batch:
+                batch.write_text(PurePosixPath("a.txt"), "a")
+                batch.write_bytes("b.bin", b"b")
+
+    error = exc_info.value
+    assert error.paths == ("a.txt", "b.bin")
+    assert error.cwd == "/vercel/sandbox/workspace"
+    assert error.cause.code == "too_large"
 
 
 @respx.mock
@@ -162,6 +190,42 @@ async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
 
     assert second.call_count == 1
     assert first.call_count == 1
+
+
+@respx.mock
+async def test_async_filesystem_batch_stages_one_request_and_skips_aborted_or_empty_batches(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        staged = box.fs.batch(cwd="workspace")
+        with pytest.raises(RuntimeError):
+            staged.write_text("outside.txt", "no")
+        async with staged as batch:
+            batch.write_text("message.txt", "cafe", encoding="ascii", mode=0o640)
+            batch.write_bytes("data.bin", b"\x00", mode=0o600)
+        with pytest.raises(RuntimeError):
+            staged.write_bytes("after.bin", b"no")
+
+        async with box.fs.batch():
+            pass
+        with pytest.raises(ValueError):
+            async with box.fs.batch() as batch:
+                batch.write_text("ignored.txt", "ignored")
+                raise ValueError("abort")
+
+    assert writes.call_count == 1
+    assert _tar_entries(writes.calls[0].request.content) == {
+        "vercel/sandbox/workspace/data.bin": (b"\x00", 0o600),
+        "vercel/sandbox/workspace/message.txt": (b"cafe", 0o640),
+    }
 
 
 @respx.mock
@@ -278,3 +342,25 @@ def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> 
         for method in ("mkdir", "read_file", "read_text", "write_files"):
             assert not hasattr(box, method)
             assert not hasattr(box.current_session, method)
+
+
+@respx.mock
+def test_sync_filesystem_batch_stages_one_request(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        with box.fs.batch(cwd="/tmp") as batch:
+            batch.write_text("message.txt", "hello")
+            batch.write_bytes("data.bin", b"\x01", mode=0o600)
+
+    assert writes.call_count == 1
+    assert _tar_entries(writes.calls[0].request.content) == {
+        "tmp/data.bin": (b"\x01", 0o600),
+        "tmp/message.txt": (b"hello", 0o644),
+    }

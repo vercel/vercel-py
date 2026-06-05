@@ -3,21 +3,21 @@
 import copy
 import posixpath
 import signal as signal_module
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
+from pathlib import PurePosixPath
 from typing import Generic, Literal, TypeAlias, TypeVar
 
 from vercel._internal.unstable.sandbox.errors import SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
     JSONObject,
     JSONValue,
-    SandboxCommandLog,
-    SandboxCommandLogStream,
+    ProcessStatus,
     SandboxStatus,
 )
 from vercel._internal.unstable.sandbox.state import (
-    SandboxCommandState,
+    ProcessState,
     SandboxRouteState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -25,18 +25,25 @@ from vercel._internal.unstable.sandbox.state import (
     SnapshotState,
 )
 
-_LogSnapshot: TypeAlias = tuple[SandboxCommandLogStream, str]
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
+RemotePath: TypeAlias = str | PurePosixPath
 
 
-def _resolve_write_files_cwd(cwd: str | None, *, default: str) -> str:
+def _coerce_remote_path(path: RemotePath) -> str:
+    if not isinstance(path, (str, PurePosixPath)):
+        raise TypeError("path must be a string or PurePosixPath")
+    return str(path)
+
+
+def _resolve_write_files_cwd(cwd: RemotePath | None, *, default: str) -> str:
     if not posixpath.isabs(default):
         raise ValueError("default cwd must be an absolute path")
     if cwd is None:
         return posixpath.normpath(default)
-    if posixpath.isabs(cwd):
-        return posixpath.normpath(cwd)
-    return posixpath.normpath(posixpath.join(default, cwd))
+    normalized_cwd = _coerce_remote_path(cwd)
+    if posixpath.isabs(normalized_cwd):
+        return posixpath.normpath(normalized_cwd)
+    return posixpath.normpath(posixpath.join(default, normalized_cwd))
 
 
 def _signal_number(value: int | str | signal_module.Signals | None) -> int:
@@ -55,24 +62,11 @@ def _signal_number(value: int | str | signal_module.Signals | None) -> int:
         raise ValueError(f"Unknown signal: {value!r}") from exc
 
 
-def _log_from_snapshot(snapshot: _LogSnapshot) -> SandboxCommandLog:
-    stream, data = snapshot
-    return SandboxCommandLog(stream=stream, data=data)
+class _ProcessHandleState:
+    __slots__ = ("_payload",)
 
-
-def _select_output(
-    snapshots: Sequence[_LogSnapshot], stream: Literal["stdout", "stderr", "both"]
-) -> str:
-    return "".join(data for source, data in snapshots if stream == "both" or source == stream)
-
-
-class _CommandHandleState:
-    __slots__ = ("_payload", "_log_cache", "_log_cache_generation")
-
-    def __init__(self, payload: SandboxCommandState) -> None:
+    def __init__(self, payload: ProcessState) -> None:
         self._payload = payload
-        self._log_cache: tuple[_LogSnapshot, ...] | None = None
-        self._log_cache_generation = 0
 
     @property
     def id(self) -> str:
@@ -95,21 +89,29 @@ class _CommandHandleState:
         return self._payload.session_id
 
     @property
-    def exit_code(self) -> int | None:
-        return self._payload.exit_code
+    def _session_id(self) -> str:
+        return self._payload.session_id
+
+    @property
+    def returncode(self) -> int | None:
+        return self._payload.returncode
 
     @property
     def started_at(self) -> int:
         return self._payload.started_at
 
     @property
-    def status(self) -> Literal["running", "exited"]:
-        return "running" if self._payload.exit_code is None else "exited"
+    def status(self) -> ProcessStatus:
+        return ProcessStatus.RUNNING if self.returncode is None else ProcessStatus.EXITED
 
-    def _apply_payload(self, payload: SandboxCommandState) -> None:
+    @property
+    def stdin(self) -> None:
+        return None
+
+    def _apply_payload(self, payload: ProcessState) -> None:
         if payload.id != self._payload.id or payload.session_id != self._payload.session_id:
             raise SandboxResponseError(
-                "Sandbox command mutation response returned a different command identity",
+                "Sandbox process mutation response returned a different process identity",
                 data=payload,
             )
         self._payload = payload
@@ -244,7 +246,7 @@ class RuntimeSessionHandleBase:
             )
         self._payload = payload
 
-    def _write_files_cwd(self, cwd: str | None) -> str:
+    def _write_files_cwd(self, cwd: RemotePath | None) -> str:
         return _resolve_write_files_cwd(cwd, default=self.cwd or "/vercel/sandbox")
 
 
@@ -399,7 +401,7 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
             self._current_session._apply_payload(payload)
         return self._current_session
 
-    def _write_files_cwd(self, cwd: str | None) -> str:
+    def _write_files_cwd(self, cwd: RemotePath | None) -> str:
         if self.current_session is not None and self.current_session.cwd is not None:
             default = self.current_session.cwd
         else:

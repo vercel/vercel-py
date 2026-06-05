@@ -407,11 +407,11 @@ Project-wide session listing is a module-level operation
 `sandbox.query_sessions(...)`; named sandbox-scoped listing lives on
 `Sandbox.list_sessions(...)`.
 
-`Sandbox.run_command(...)`, `Sandbox.start_command(...)`, and their
+`Sandbox.run_process(...)`, `Sandbox.create_process(...)`, and their
 `SandboxRuntimeSession` equivalents accept `kill_after` as a numeric duration
 in seconds or a `timedelta`. This is a per-command exec-time limit: expiry
 kills that command with `SIGKILL`, including commands returned immediately by
-`start_command(...)`. The name intentionally distinguishes this server-side
+`create_process(...)`. The name intentionally distinguishes this server-side
 command policy from session `execution_time_limit` and local waiting policy.
 
 Rationale:
@@ -461,49 +461,49 @@ Rationale:
 A single SDK root gives callers one catch point. Domain bases preserve useful
 service-level handling.
 
-## Decision 15: Command Log Observation
+## Decision 15: Process Output Observation
 
-`SandboxCommand.logs()` and its sync mirror yield only output records.
-`SandboxCommandLog.stream` is the exported string-compatible
-`SandboxCommandLogStream` enum, with `STDOUT` and `STDERR` members serialized
+`Process.logs()` and its sync mirror yield only output records.
+`ProcessLog.stream` is the exported string-compatible
+`ProcessLogStream` enum, with `STDOUT` and `STDERR` members serialized
 to the wire strings `"stdout"` and `"stderr"`. A valid structured wire error
 record terminates iteration by raising `SandboxStreamError`, which inherits
 from `SandboxError` and carries the wire `code`. Malformed and unsupported
 records do not become public events.
 
-A command handle caches a cleanly consumed log stream as ordered local observed
-state. Cached `output("both")` retains stdout/stderr arrival order, and
-`stdout()` or `stderr()` select records from that same observation.
-`logs(refresh=True)` starts a fresh observation, clearing the old cache when
-iteration begins and committing replacement state only after clean EOF.
-Partial, cancelled, failed, or superseded reads do not populate the cache.
+Each `Process.logs()` call opens a fresh combined ordered stream. `Process`
+also owns stable one-shot `stdout` and `stderr` text readers. Each reader lazily
+filters one shared combined-log request. Reader iteration and
+`receive()` yield logical lines preserving newlines; `read()` and `readline()`
+share one cursor per stream. Explicitly closing one reader preserves its peer.
 
-Cached command log state remains readable after its originating SDK session is
-closed. Operations that need a new request, including an uncached `logs()`
-read and `logs(refresh=True)`, still fail through normal session validity
-checks. `SandboxRuntimeSession.command_logs(command_id)` remains an uncached
-endpoint-level stream.
+Readers reject concurrent reads with `anyio.BusyResourceError`, reads after
+explicit closure with `anyio.ClosedResourceError`, and `receive()` at EOF with
+`anyio.EndOfStream`. Cancellation, transport failure, and in-band stream errors
+break both readers; later reads raise `anyio.BrokenResourceError`. Process
+output is not cached.
 
 Rationale:
 
-Command output is an ordered stream rather than two independent strings.
-Caching only complete observations provides stable helper results without
-turning partial or failed reads into authoritative state.
+Combined logs preserve backend ordering while a shared transport provides the
+Python-familiar per-stream interface with one backend request.
 
 ## Decision 16: Sandbox Filesystem Capability
 
 Unstable workspace filesystem access is exposed through `Sandbox.fs` and
 `SandboxRuntimeSession.fs`, implemented by `SandboxFilesystem` and its sync
 mirror `SyncSandboxFilesystem`. Direct `mkdir`, `read_file`, `read_text`, and
-`write_files` methods do not live on sandbox or runtime-session handles.
+`write_files` methods and public write-file value types do not exist.
 
 `Sandbox.fs` targets `current_session_id` at operation time so retained
 capabilities follow current-session changes. `SandboxRuntimeSession.fs` is
-bound to that runtime session identity. The capability includes native-backed
-directory creation, reads, and tarball writes, plus command-backed predicates,
-direct-child listing, removal, and rename. `DirectoryEntry` is a passive,
-sorted listing result with coarse `file`, `directory`, `symlink`, or `other`
-classification.
+bound to that runtime session identity. Single-file `write_bytes()` and
+`write_text()` methods submit one file. `batch()` stages files synchronously
+inside an async or sync context and submits one tarball only on clean, non-empty
+exit. The capability also includes native-backed directory creation and reads,
+plus command-backed predicates, direct-child listing, removal, and rename.
+`DirectoryEntry` is a passive, sorted listing result with coarse `file`,
+`directory`, `symlink`, or `other` classification.
 
 Command-backed methods execute fixed portable shell scripts with user paths
 passed as positional arguments. Relative operands are prefixed within those
@@ -518,6 +518,10 @@ structured backend error data proves a missing path; otherwise the ordinary
 `SandboxFilesystemCommandError` reports failed command-backed list, remove,
 and rename operations with operation name, paths, exit code, stdout, and
 stderr.
+`SandboxFilesystemWriteError` wraps native batch-write API failures and retains
+the submitted paths, resolved cwd, and original `SandboxApiError`. Tar uploads
+remain memory-buffered; converting the completed archive to the transport body
+currently makes one additional copy until streaming uploads are available.
 
 Rationale:
 

@@ -7,9 +7,11 @@ import pytest
 from ._unstable_scenarios import (
     AsyncDriver,
     PersistentObservation,
+    ProcessFilesystemObservation,
     SyncDriver,
     WorkspaceObservation,
     persistent_snapshot_flow,
+    process_filesystem_flow,
     workspace_command_flow,
 )
 from .conftest import requires_sandbox_credentials
@@ -47,6 +49,19 @@ def _assert_persistent(result: PersistentObservation) -> None:
     )
 
 
+def _assert_process_filesystem(result: ProcessFilesystemObservation) -> None:
+    assert result.stdout == "stdout line\n"
+    assert result.stderr == "stderr line\n"
+    assert result.returncode == 3
+    assert result.terminated_returncode != 0
+    assert result.timed_out_returncode != 0
+    assert result.missing_executable_failed
+    assert result.text == "hello\n"
+    assert result.binary == b"\x00\xff"
+    assert result.missing_read_failed
+    assert result.invalid_write_failed
+
+
 @requires_sandbox_credentials
 @pytest.mark.live
 @pytest.mark.asyncio
@@ -57,6 +72,17 @@ async def test_workspace_command_flow_has_sync_async_semantic_parity() -> None:
     _assert_workspace(async_result)
     _assert_workspace(sync_result)
     assert async_result == sync_result
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_process_filesystem_flow_has_sync_async_semantic_parity() -> None:
+    async_result = await process_filesystem_flow(AsyncDriver(), _name("process-fs", "async"))
+    sync_result = await process_filesystem_flow(SyncDriver(), _name("process-fs", "sync"))
+
+    _assert_process_filesystem(async_result)
+    _assert_process_filesystem(sync_result)
 
 
 @requires_sandbox_credentials

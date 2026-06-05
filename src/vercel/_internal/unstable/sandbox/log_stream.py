@@ -3,10 +3,10 @@
 import json
 
 from vercel._internal.unstable.sandbox.errors import SandboxStreamError
-from vercel._internal.unstable.sandbox.models import SandboxCommandLog
+from vercel._internal.unstable.sandbox.models import ProcessLog
 
 
-def _parse_command_log_record(line: str) -> SandboxCommandLog | None:
+def _parse_command_log_record(line: str) -> ProcessLog | None:
     """Decode one wire log record, skipping unsupported or malformed input."""
     try:
         record = json.loads(line)
@@ -18,7 +18,7 @@ def _parse_command_log_record(line: str) -> SandboxCommandLog | None:
     stream = record.get("stream")
     data = record.get("data")
     if stream in {"stdout", "stderr"} and isinstance(data, str):
-        return SandboxCommandLog(stream=stream, data=data)
+        return ProcessLog(stream=stream, data=data)
     if stream != "error" or not isinstance(data, dict):
         return None
 

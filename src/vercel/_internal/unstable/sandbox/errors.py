@@ -107,6 +107,22 @@ class SandboxFilesystemCommandError(SandboxFilesystemError):
         self.stderr = stderr
 
 
+class SandboxFilesystemWriteError(SandboxFilesystemError):
+    """Raised when the native filesystem write endpoint rejects a batch."""
+
+    def __init__(
+        self,
+        *,
+        paths: tuple[str, ...],
+        cwd: str,
+        cause: SandboxApiError,
+    ) -> None:
+        super().__init__(f"Sandbox filesystem write failed for {len(paths)} path(s)")
+        self.paths = paths
+        self.cwd = cwd
+        self.cause = cause
+
+
 class SandboxPathNotFoundError(SandboxFilesystemError):
     """Raised when a native filesystem operation proves a missing path."""
 

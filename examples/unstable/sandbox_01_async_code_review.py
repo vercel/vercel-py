@@ -2,18 +2,16 @@
 """Run a small async code-review workflow in an unstable Sandbox."""
 
 import asyncio
-import sys
 from datetime import timedelta
 
 from dotenv import load_dotenv
 
 from vercel.unstable import sandbox
-from vercel.unstable.sandbox import SandboxCommandLogStream, WriteFile
 
 load_dotenv()
 
 
-async def review_code(files: list[WriteFile], review_agent: str) -> str:
+async def review_code(files: list[tuple[str, str]], review_agent: str) -> str:
     # `async with sandbox.create_sandbox(...)` gives you automatic cleanup:
     # leaving the block destroys the sandbox, even if the workflow raises.
     #
@@ -29,31 +27,19 @@ async def review_code(files: list[WriteFile], review_agent: str) -> str:
         # methods on `box.fs`; creating an explicit `box.session()` is an advanced
         # operation for separate runtime-session lifecycles.
         await box.fs.mkdir("workspace")
-        await box.fs.write_files(
-            [
-                *files,
-                WriteFile(path="workspace/review_agent.py", content=review_agent),
-            ]
+        async with box.fs.batch() as batch:
+            for path, content in files:
+                batch.write_text(path, content)
+            batch.write_text("workspace/review_agent.py", review_agent)
+
+        # `run_process` streams output to this process by default and waits for
+        # completion. Use `create_process` when a live process handle is needed.
+        await box.run_process(
+            "python",
+            ["workspace/review_agent.py", "workspace"],
+            kill_after=timedelta(seconds=30),
+            check=True,
         )
-
-        # Start the review command so the example can stream logs while the
-        # process runs. `run_command` is simpler when you only need the result.
-        cmd = await box.start_command("python", ["workspace/review_agent.py", "workspace"])
-
-        # Sandbox log events preserve the original stream
-        async for event in cmd.logs():
-            match event.stream:
-                case SandboxCommandLogStream.STDOUT:
-                    sys.stdout.write(event.data)
-                    sys.stdout.flush()
-                case SandboxCommandLogStream.STDERR:
-                    sys.stderr.write(event.data)
-                    sys.stderr.flush()
-
-        finished = await cmd.wait()
-        if finished.exit_code != 0:
-            raise RuntimeError(f"review failed with exit code {finished.exit_code}")
-
         return await box.fs.read_text("workspace/review.md")
 
 
@@ -62,17 +48,17 @@ async def main() -> None:
     # shows the SDK shape, then the concrete files used for this demo.
     report = await review_code(
         [
-            WriteFile(
-                path="workspace/app.py",
-                content=(
+            (
+                "workspace/app.py",
+                (
                     "def greet(name: str) -> str:\n"
                     "    # TODO: support localized greetings.\n"
                     "    return f'hello, {name}'\n"
                 ),
             ),
-            WriteFile(
-                path="workspace/test_app.py",
-                content=(
+            (
+                "workspace/test_app.py",
+                (
                     "from app import greet\n\n"
                     "\n"
                     "def test_greet() -> None:\n"

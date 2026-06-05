@@ -1,16 +1,17 @@
 """Internal Sandbox v2 API client."""
 
 import io
+import json
 import platform
 import posixpath
 import sys
 import tarfile
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Literal, TypeVar, cast
 
-from httpx import Response
+from httpx import AsyncByteStream, Response
 from httpx._types import QueryParamTypes
 from pydantic import (
     AliasChoices,
@@ -30,11 +31,17 @@ from vercel._internal.http import (
     extract_structured_error,
 )
 from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
-from vercel._internal.unstable.sandbox.errors import SandboxApiError, SandboxResponseError
+from vercel._internal.unstable.sandbox.errors import (
+    SandboxApiError,
+    SandboxResponseError,
+    SandboxStreamError,
+)
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
     JSONObject,
     JSONValue,
+    ProcessLog,
+    ProcessLogStream,
     SandboxResources,
     SandboxSource,
     SandboxStatus,
@@ -42,16 +49,18 @@ from vercel._internal.unstable.sandbox.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     TagFilter,
-    WriteFile,
     _Omitted,
+    _WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import (
     SandboxCredentials,
     SandboxCredentialsFactory,
 )
+from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
 from vercel._internal.unstable.sandbox.state import (
+    CompletedProcessState,
+    ProcessState,
     RuntimeSessionsPageState,
-    SandboxCommandState,
     SandboxesPageState,
     SandboxRouteState,
     SandboxRuntimeSessionState,
@@ -210,6 +219,8 @@ class _RunCommandRequest(_ApiRequestModel):
     cwd: str | None = None
     env: dict[str, str] | None = None
     sudo: bool | None = None
+    wait: bool | None = None
+    logs: bool | None = None
     timeout: timedelta | None = None
 
     @field_serializer("timeout")
@@ -420,7 +431,7 @@ class _Pagination(_ApiModel):
 class _CommandResponse(_ApiModel):
     command: _CommandPayload | None = None
 
-    def to_command(self) -> SandboxCommandState:
+    def to_command(self) -> ProcessState:
         if self.command is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'command'",
@@ -553,14 +564,14 @@ def _route_state(payload: _SandboxRoutePayload) -> SandboxRouteState:
     )
 
 
-def _command_state(payload: _CommandPayload) -> SandboxCommandState:
-    return SandboxCommandState(
+def _command_state(payload: _CommandPayload) -> ProcessState:
+    return ProcessState(
         id=payload.id,
         name=payload.name,
         args=tuple(payload.args),
         cwd=payload.cwd,
         session_id=payload.session_id,
-        exit_code=payload.exit_code,
+        returncode=payload.exit_code,
         started_at=payload.started_at,
     )
 
@@ -675,22 +686,21 @@ def _normalize_tar_path(path: str, *, cwd: str) -> str:
 
 
 def _build_write_files_tarball(
-    files: Sequence[WriteFile],
+    files: Sequence[_WriteFile],
     *,
     cwd: str,
-    encoding: str,
 ) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
         for file in files:
-            content = file.content
-            data = content.encode(encoding) if isinstance(content, str) else content
             info = tarfile.TarInfo(name=_normalize_tar_path(file.path, cwd=cwd))
             mode = _normalize_mode(file.mode)
             if mode is not None:
                 info.mode = mode
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
+            info.size = len(file.content)
+            tar.addfile(info, io.BytesIO(file.content))
+    # BytesBody currently requires bytes, so finalizing the in-memory archive
+    # makes one additional copy. Streaming uploads are intentionally deferred.
     return buffer.getvalue()
 
 
@@ -702,6 +712,38 @@ def _validate_response(model: type[ResponseModelT], data: JSONObject) -> Respons
             "Sandbox API response did not match the expected v2 shape",
             data=data,
         ) from exc
+
+
+def _parse_run_process_record(line: str) -> JSONObject:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise SandboxResponseError(
+            "Sandbox process response included malformed NDJSON",
+            data=line,
+        ) from exc
+    if not isinstance(record, dict):
+        raise SandboxResponseError(
+            "Sandbox process response included a non-object NDJSON record",
+            data=record,
+        )
+    return cast(JSONObject, record)
+
+
+async def _response_lines(response: Response) -> AsyncIterator[str]:
+    if isinstance(response.stream, AsyncByteStream):
+        async for line in response.aiter_lines():
+            yield line
+    else:
+        for line in response.iter_lines():
+            yield line
+
+
+async def _close_stream_response(response: Response) -> None:
+    if isinstance(response.stream, AsyncByteStream):
+        await response.aclose()
+    else:
+        response.close()
 
 
 class SandboxApiClient:
@@ -1170,7 +1212,7 @@ class SandboxApiClient:
         )
         return _validate_response(_SnapshotResponse, data).to_snapshot()
 
-    async def run_command(
+    async def create_process(
         self,
         *,
         session_id: str,
@@ -1180,7 +1222,7 @@ class SandboxApiClient:
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: timedelta | None = None,
-    ) -> SandboxCommandState:
+    ) -> ProcessState:
         credentials = await self._credentials_factory()
         request = _RunCommandRequest(
             command=command,
@@ -1198,13 +1240,104 @@ class SandboxApiClient:
         )
         return _validate_response(_CommandResponse, data).to_command()
 
+    async def run_process(
+        self,
+        *,
+        session_id: str,
+        command: str,
+        args: Sequence[str] | None = None,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        sudo: bool = False,
+        kill_after: timedelta | None = None,
+        output_router: ProcessOutputRouter,
+    ) -> CompletedProcessState:
+        credentials = await self._credentials_factory()
+        request = _RunCommandRequest(
+            command=command,
+            args=list(args) if args is not None else None,
+            cwd=cwd,
+            env=dict(env) if env is not None else None,
+            sudo=sudo,
+            wait=True,
+            logs=True,
+            timeout=kill_after,
+        )
+        response = await self._request_stream(
+            "POST",
+            format_url_path("v2/sandboxes/sessions/{session_id}/cmd", session_id=session_id),
+            credentials=credentials,
+            params={"wait": "true", "logs": "true"},
+            body=JSONBody(request.to_api_dict()),
+            headers={"connection": "close"},
+        )
+
+        initial: ProcessState | None = None
+        final: ProcessState | None = None
+        try:
+            async for line in _response_lines(response):
+                if not line:
+                    continue
+                record = _parse_run_process_record(line)
+                if "command" in record:
+                    process = _validate_response(_CommandResponse, record).to_command()
+                    if initial is None:
+                        initial = process
+                    elif final is None:
+                        final = process
+                    else:
+                        raise SandboxResponseError(
+                            "Sandbox process response included extra process metadata",
+                            data=record,
+                        )
+                    continue
+
+                stream = record.get("stream")
+                data = record.get("data")
+                if (stream == "stdout" or stream == "stderr") and isinstance(data, str):
+                    if initial is None or final is not None:
+                        raise SandboxResponseError(
+                            "Sandbox process response included output outside process metadata",
+                            data=record,
+                        )
+                    output_router.route(ProcessLog(stream=ProcessLogStream(stream), data=data))
+                    continue
+                if stream == "error" and isinstance(data, dict):
+                    code = data.get("code")
+                    message = data.get("message")
+                    if isinstance(code, str) and isinstance(message, str):
+                        raise SandboxStreamError(message, code=code)
+                raise SandboxResponseError(
+                    "Sandbox process response included an unexpected NDJSON record",
+                    data=record,
+                )
+        finally:
+            await _close_stream_response(response)
+
+        if initial is None:
+            raise SandboxResponseError("Sandbox process response is missing initial metadata")
+        if final is None:
+            raise SandboxResponseError("Sandbox process response is missing final metadata")
+        if initial.id != final.id or initial.session_id != final.session_id:
+            raise SandboxResponseError(
+                "Sandbox process response returned a different final process identity",
+                data={"initial": initial, "final": final},
+            )
+        if final.returncode is None:
+            raise SandboxResponseError(
+                "Sandbox process response final metadata is missing a return code",
+                data=final,
+            )
+        stdout, stderr = output_router.captured()
+        return CompletedProcessState(process=final, stdout=stdout, stderr=stderr)
+
     async def get_command(
         self,
         *,
         session_id: str,
         command_id: str,
         wait: bool = True,
-    ) -> SandboxCommandState:
+    ) -> ProcessState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
@@ -1218,7 +1351,7 @@ class SandboxApiClient:
         )
         return _validate_response(_CommandResponse, data).to_command()
 
-    async def query_commands(self, *, session_id: str) -> list[SandboxCommandState]:
+    async def query_commands(self, *, session_id: str) -> list[ProcessState]:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "GET",
@@ -1266,12 +1399,11 @@ class SandboxApiClient:
         self,
         *,
         session_id: str,
-        files: Sequence[WriteFile],
+        files: Sequence[_WriteFile],
         cwd: str,
-        encoding: str = "utf-8",
     ) -> None:
         credentials = await self._credentials_factory()
-        payload = _build_write_files_tarball(files, cwd=cwd, encoding=encoding)
+        payload = _build_write_files_tarball(files, cwd=cwd)
         await self._request(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/write", session_id=session_id),
@@ -1286,7 +1418,7 @@ class SandboxApiClient:
         session_id: str,
         command_id: str,
         signal: int,
-    ) -> SandboxCommandState:
+    ) -> ProcessState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -1315,4 +1447,5 @@ class SandboxApiClient:
                 command_id=command_id,
             ),
             credentials=credentials,
+            headers={"connection": "close"},
         )

@@ -7,7 +7,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 
 from vercel.unstable import sandbox
-from vercel.unstable.sandbox import SnapshotSource, WriteFile
+from vercel.unstable.sandbox import SnapshotSource
 
 load_dotenv()
 
@@ -21,9 +21,7 @@ async def main() -> None:
 
     async with sandbox.create_sandbox(name=base_name, runtime="python3.13") as base:
         try:
-            await base.fs.write_files(
-                [WriteFile(path="state/message.txt", content="restored from snapshot\n")]
-            )
+            await base.fs.write_text("state/message.txt", "restored from snapshot\n")
             snapshot = await base.snapshot()
 
             restored = await sandbox.create_sandbox(

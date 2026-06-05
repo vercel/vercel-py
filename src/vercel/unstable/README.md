@@ -81,7 +81,7 @@ async def main() -> None:
 
         # create_sandbox always waits for ready or terminal.
         # There is no wait=True / wait=False argument.
-        await ready_sandbox.run_command("python", ["--version"])
+        await ready_sandbox.run_process("python", ["--version"])
 
     # `async with` creates an async scoped SDK session. Its client factory
     # must return httpx.AsyncClient; the session validates before first use.
@@ -119,7 +119,7 @@ async def main() -> None:
                 runtime="python3.13",
                 name="inner-preview",
             )
-            await inner.run_command("python", ["--version"])
+            await inner.run_process("python", ["--version"])
 
         # `inner` was created by the nested SDK session. That session is closed,
         # so later calls through `inner` raise VercelSessionClosedError.
@@ -134,7 +134,7 @@ async def main() -> None:
         runtime="python3.13",
         name="scratch",
     ) as scratch:
-        await scratch.run_command("python", ["--version"])
+        await scratch.run_process("python", ["--version"])
 
     # Cleanup was requested remotely and its successful response was applied
     # to `scratch`. The retained handle remains request-capable while its
@@ -150,11 +150,11 @@ async def main() -> None:
     # request-capable while its SDK session remains open; the API decides
     # whether the resource can be used.
     async with persistent.session() as runtime_session:
-        await runtime_session.run_command("python", ["--version"])
+        await runtime_session.run_process("python", ["--version"])
 
     # Do not use its context manager when this code should not request cleanup.
     surviving_session = await persistent.session()
-    await surviving_session.run_command("python", ["--version"])
+    await surviving_session.run_process("python", ["--version"])
 
     sandboxes = [
         item
@@ -363,15 +363,26 @@ await runtime_session.stop()
 await sandbox_.destroy()
 ```
 
-Sandbox identity methods such as `session()`, `run_command(...)`,
-`start_command(...)`, `update(...)`, `list_sessions(...)`,
+Sandbox identity methods such as `session()`, `run_process(...)`,
+`create_process(...)`, `update(...)`, `list_sessions(...)`,
 `extend_execution_time_limit(...)`, `update_network_policy(...)`, and
 `destroy()` live on `Sandbox`. Session-scoped methods such as
-`run_command(...)`, `start_command(...)`, `refresh()`,
-`get_command(...)`, `query_commands(...)`, `snapshot(...)`,
+`run_process(...)`, `create_process(...)`, `refresh()`,
+`get_process(...)`, `query_processes(...)`, `snapshot(...)`,
 `extend_execution_time_limit(...)`, `update_network_policy(...)`, and `stop()`
-live on `SandboxRuntimeSession`. Command handles expose `wait()`, `kill()`,
-`logs()`, `output()`, `stdout()`, and `stderr()`. Low-level endpoint
+live on `SandboxRuntimeSession`. `run_process()` uses one streaming request,
+forwards stdout and stderr to the current Python process by default, waits for
+completion, and returns a frozen `CompletedProcess`. It accepts the familiar
+`subprocess.PIPE`, `subprocess.DEVNULL`, and `stderr=subprocess.STDOUT` routing
+sentinels, writable text streams, `capture_output=True`, and `check=True`.
+Only streams routed to `PIPE` are populated on `CompletedProcess`; other output
+fields are `None`. `check=True` raises `subprocess.CalledProcessError` with the
+same captured values.
+
+`create_process()` instead returns a live `Process` handle for explicit
+lifecycle and output consumption. `Process` exposes stable `stdout` and
+`stderr` `TextReader` instances, plus `wait()`, `send_signal()`, `terminate()`,
+`kill()`, `refresh()`, `communicate()`, and `logs()`. Low-level endpoint
 composition, response binding, and polling stay inside the internal Sandbox
 service layer.
 
@@ -388,28 +399,29 @@ entries = await sandbox_.fs.listdir("workspace")
 retained capability follows a later current session. `SandboxRuntimeSession.fs`
 remains bound to that specific runtime session. The async `SandboxFilesystem`
 and sync `SyncSandboxFilesystem` expose `mkdir`, `read_bytes`, `read_text`,
-`write_bytes`, `write_text`, `write_files`, `exists`, `is_file`, `is_dir`,
-`listdir`, `remove`, and `rename`. `listdir()` returns sorted
+`write_bytes`, `write_text`, `batch`, `exists`, `is_file`, `is_dir`, `listdir`,
+`remove`, and `rename`. A batch stages files synchronously inside its context
+and submits one tarball on clean exit. `listdir()` returns sorted
 `DirectoryEntry(path=..., kind=...)` values, where `kind` is `file`,
 `directory`, `symlink`, or `other`.
 
-`SandboxCommand.logs()` yields `SandboxCommandLog` output events whose
-`stream` is `SandboxCommandLogStream.STDOUT` or
-`SandboxCommandLogStream.STDERR`. These string-compatible enum values
+`Process.logs()` yields `ProcessLog` output events whose
+`stream` is `ProcessLogStream.STDOUT` or
+`ProcessLogStream.STDERR`. These string-compatible enum values
 serialize to JSON/wire values `"stdout"` and `"stderr"`. A structured
 in-band stream failure raises `SandboxStreamError`, which exposes the server
 `code` and uses the server
-message as its exception message. Once one complete `logs()` iteration
-finishes, command handles replay those ordered events locally: `output("both")`
-preserves stdout/stderr arrival order, while `stdout()` and `stderr()` filter
-the same observation without another request. Use `logs(refresh=True)` to
-discard an existing complete observation and read the stream again.
-`SandboxRuntimeSession.command_logs(command_id)` is an uncached raw stream.
+message as its exception message. Each `logs()` call opens a fresh combined,
+ordered stream. `stdout` and `stderr` are one-shot readers backed by one shared
+lazy combined-log request. Closing one preserves the other; transport failure
+breaks both. Direct reader
+iteration and `receive()` yield logical lines while `read()` and `readline()`
+share one cursor.
 
-`run_command(...)` and `start_command(...)` accept `kill_after` as a numeric
+`run_process(...)` and `create_process(...)` accept `kill_after` as a numeric
 duration in seconds or a `timedelta`. The sandbox enforces this per-command
 limit from exec time and kills the process with `SIGKILL` when it expires,
-including commands started with `start_command(...)`. This is distinct from
+including commands started with `create_process(...)`. This is distinct from
 the sandbox session's `execution_time_limit` and from local waiting policy.
 
 All unstable Sandbox duration inputs follow the same convention: numeric
@@ -457,12 +469,10 @@ async with vercel.session(service_options=[...]):
 preview = await sandbox.get_sandbox(name="preview")
 ```
 
-The exception is complete command-log state already observed by the handle:
-cached `command.logs()`, `command.output()`, `command.stdout()`, and
-`command.stderr()` remain readable after session closure. An uncached log read,
-`command.logs(refresh=True)`, or
-`runtime_session.command_logs(command_id)` still requires an open originating
-SDK session.
+Process output is never cached. Opening a reader or calling `process.logs()`
+after session closure raises `VercelSessionClosedError`; already buffered reader
+text remains available until that reader reaches data requiring another
+request read.
 
 Context-managed cleanup, explicit `destroy()` / `stop()` / `delete()`, and
 snapshot responses reporting a stopped runtime do not locally revoke handles.
@@ -481,7 +491,6 @@ each domain package.
 ```python
 from itertools import islice
 
-from vercel.unstable.sandbox import WriteFile
 from vercel.unstable.sandbox import sync as sandbox
 
 
@@ -489,19 +498,11 @@ with sandbox.create_sandbox(
     runtime="python3.13",
     name="sync-preview",
 ) as sandbox_:
-    sandbox_.fs.write_files(
-        [
-            WriteFile(
-                path="hello.py",
-                content="print('hello from sync sandbox')\n",
-            )
-        ]
-    )
-    command = sandbox_.start_command("python", ["hello.py"])
-    for event in command.logs():
-        print(event.data, end="")
-    finished = command.wait()
-    assert finished.exit_code == 0
+    sandbox_.fs.write_text("hello.py", "print('hello from sync sandbox')\n")
+    command = sandbox_.create_process("python", ["hello.py"])
+    for line in command.stdout:
+        print(line, end="")
+    assert command.wait() == 0
 
     sessions = sandbox_.list_sessions(page_size=10)
 
