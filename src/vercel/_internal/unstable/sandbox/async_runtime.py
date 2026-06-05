@@ -2,7 +2,7 @@
 
 import signal as signal_module
 import warnings
-from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
@@ -227,7 +227,7 @@ class SandboxFilesystem:
         )
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SandboxFilesystemBatch":
-        return SandboxFilesystemBatch(filesystem=self, cwd=cwd)
+        return SandboxFilesystemBatch(write_files=lambda files: self._write_files(files, cwd=cwd))
 
     async def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return await self._service.exists(
@@ -297,11 +297,10 @@ class SandboxFilesystem:
 
 
 class SandboxFilesystemBatch:
-    __slots__ = ("_active", "_cwd", "_files", "_filesystem", "_used")
+    __slots__ = ("_active", "_files", "_used", "_write_files")
 
-    def __init__(self, *, filesystem: SandboxFilesystem, cwd: RemotePath | None) -> None:
-        self._filesystem = filesystem
-        self._cwd = cwd
+    def __init__(self, *, write_files: Callable[[Sequence[_WriteFile]], Awaitable[None]]) -> None:
+        self._write_files = write_files
         self._files: list[_WriteFile] = []
         self._active = False
         self._used = False
@@ -346,7 +345,7 @@ class SandboxFilesystemBatch:
     ) -> None:
         self._active = False
         if exc_type is None and self._files:
-            await self._filesystem._write_files(self._files, cwd=self._cwd)
+            await self._write_files(self._files)
 
 
 class SandboxRuntimeSession(RuntimeSessionHandleBase):

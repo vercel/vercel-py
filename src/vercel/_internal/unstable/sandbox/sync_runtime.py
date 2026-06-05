@@ -235,7 +235,9 @@ class SyncSandboxFilesystem:
         )
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SyncSandboxFilesystemBatch":
-        return SyncSandboxFilesystemBatch(filesystem=self, cwd=cwd)
+        return SyncSandboxFilesystemBatch(
+            write_files=lambda files: self._write_files(files, cwd=cwd)
+        )
 
     def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
         return iter_coroutine(
@@ -317,11 +319,10 @@ class SyncSandboxFilesystem:
 
 
 class SyncSandboxFilesystemBatch:
-    __slots__ = ("_active", "_cwd", "_files", "_filesystem", "_used")
+    __slots__ = ("_active", "_files", "_used", "_write_files")
 
-    def __init__(self, *, filesystem: SyncSandboxFilesystem, cwd: RemotePath | None) -> None:
-        self._filesystem = filesystem
-        self._cwd = cwd
+    def __init__(self, *, write_files: Callable[[Sequence[_WriteFile]], None]) -> None:
+        self._write_files = write_files
         self._files: list[_WriteFile] = []
         self._active = False
         self._used = False
@@ -366,7 +367,7 @@ class SyncSandboxFilesystemBatch:
     ) -> None:
         self._active = False
         if exc_type is None and self._files:
-            self._filesystem._write_files(self._files, cwd=self._cwd)
+            self._write_files(self._files)
 
 
 class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
