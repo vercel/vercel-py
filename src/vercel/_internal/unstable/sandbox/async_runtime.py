@@ -48,8 +48,8 @@ from vercel._internal.unstable.sandbox.runtime_common import (
     SandboxHandleBase,
     SnapshotHandleBase,
     _coerce_remote_path,
-    _FilesystemBatchState,
     _ProcessHandleState,
+    _SandboxFilesystemBatchBase,
     _signal_number,
 )
 from vercel._internal.unstable.sandbox.service import SandboxService, _SandboxTerminalState
@@ -297,43 +297,15 @@ class SandboxFilesystem:
         )
 
 
-class SandboxFilesystemBatch:
-    __slots__ = ("_files", "_state", "_write_files")
+class SandboxFilesystemBatch(_SandboxFilesystemBatchBase):
+    __slots__ = ("_write_files",)
 
     def __init__(self, *, write_files: Callable[[Sequence[_WriteFile]], Awaitable[None]]) -> None:
+        super().__init__()
         self._write_files = write_files
-        self._files: list[_WriteFile] = []
-        self._state = _FilesystemBatchState.CREATED
-
-    def _stage(self, file: _WriteFile) -> None:
-        if self._state is not _FilesystemBatchState.ACTIVE:
-            raise RuntimeError("filesystem batch staging is only allowed inside its context")
-        self._files.append(file)
-
-    def write_bytes(self, path: RemotePath, data: bytes, *, mode: int | None = None) -> None:
-        self._stage(_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode))
-
-    def write_text(
-        self,
-        path: RemotePath,
-        text: str,
-        *,
-        encoding: str = "utf-8",
-        errors: str = "strict",
-        mode: int | None = None,
-    ) -> None:
-        self._stage(
-            _WriteFile(
-                path=_coerce_remote_path(path),
-                content=text.encode(encoding, errors=errors),
-                mode=mode,
-            )
-        )
 
     async def __aenter__(self) -> "SandboxFilesystemBatch":
-        if self._state is not _FilesystemBatchState.CREATED:
-            raise RuntimeError("filesystem batch contexts can only be entered once")
-        self._state = _FilesystemBatchState.ACTIVE
+        self._enter()
         return self
 
     async def __aexit__(
@@ -342,9 +314,9 @@ class SandboxFilesystemBatch:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self._state = _FilesystemBatchState.CLOSED
-        if exc_type is None and self._files:
-            await self._write_files(self._files)
+        files = self._close()
+        if exc_type is None and files:
+            await self._write_files(files)
 
 
 class SandboxRuntimeSession(RuntimeSessionHandleBase):
