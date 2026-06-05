@@ -46,6 +46,7 @@ from vercel._internal.unstable.sandbox.runtime_common import (
     SandboxHandleBase,
     SnapshotHandleBase,
     _coerce_remote_path,
+    _FilesystemBatchState,
     _ProcessHandleState,
     _signal_number,
 )
@@ -319,16 +320,15 @@ class SyncSandboxFilesystem:
 
 
 class SyncSandboxFilesystemBatch:
-    __slots__ = ("_active", "_files", "_used", "_write_files")
+    __slots__ = ("_files", "_state", "_write_files")
 
     def __init__(self, *, write_files: Callable[[Sequence[_WriteFile]], None]) -> None:
         self._write_files = write_files
         self._files: list[_WriteFile] = []
-        self._active = False
-        self._used = False
+        self._state = _FilesystemBatchState.CREATED
 
     def _stage(self, file: _WriteFile) -> None:
-        if not self._active:
+        if self._state is not _FilesystemBatchState.ACTIVE:
             raise RuntimeError("filesystem batch staging is only allowed inside its context")
         self._files.append(file)
 
@@ -353,10 +353,9 @@ class SyncSandboxFilesystemBatch:
         )
 
     def __enter__(self) -> "SyncSandboxFilesystemBatch":
-        if self._used:
+        if self._state is not _FilesystemBatchState.CREATED:
             raise RuntimeError("filesystem batch contexts can only be entered once")
-        self._used = True
-        self._active = True
+        self._state = _FilesystemBatchState.ACTIVE
         return self
 
     def __exit__(
@@ -365,7 +364,7 @@ class SyncSandboxFilesystemBatch:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self._active = False
+        self._state = _FilesystemBatchState.CLOSED
         if exc_type is None and self._files:
             self._write_files(self._files)
 

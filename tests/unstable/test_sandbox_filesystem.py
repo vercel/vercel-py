@@ -213,6 +213,9 @@ async def test_async_filesystem_batch_stages_one_request_and_skips_aborted_or_em
             batch.write_bytes("data.bin", b"\x00", mode=0o600)
         with pytest.raises(RuntimeError):
             staged.write_bytes("after.bin", b"no")
+        with pytest.raises(RuntimeError):
+            async with staged:
+                pass
 
         async with box.fs.batch():
             pass
@@ -355,9 +358,13 @@ def test_sync_filesystem_batch_stages_one_request(mock_env_clear: None) -> None:
 
     with vercel.session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
-        with box.fs.batch(cwd="/tmp") as batch:
+        staged = box.fs.batch(cwd="/tmp")
+        with staged as batch:
             batch.write_text("message.txt", "hello")
             batch.write_bytes("data.bin", b"\x01", mode=0o600)
+        with pytest.raises(RuntimeError):
+            with staged:
+                pass
 
     assert writes.call_count == 1
     assert _tar_entries(writes.calls[0].request.content) == {

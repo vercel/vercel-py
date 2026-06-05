@@ -6,6 +6,7 @@ import signal as signal_module
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
+from enum import Enum, auto
 from pathlib import PurePosixPath
 from typing import Generic, Literal, TypeAlias, TypeVar
 
@@ -27,6 +28,12 @@ from vercel._internal.unstable.sandbox.state import (
 
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
 RemotePath: TypeAlias = str | PurePosixPath
+
+
+class _FilesystemBatchState(Enum):
+    CREATED = auto()
+    ACTIVE = auto()
+    CLOSED = auto()
 
 
 def _coerce_remote_path(path: RemotePath) -> str:
