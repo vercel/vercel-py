@@ -77,34 +77,58 @@ class _TextBuffer:
 
 
 class TextReader(anyio.abc.ObjectReceiveStream[str], ABC):
-    """A one-shot asynchronous reader for one process text stream."""
+    """Read one remote process output stream asynchronously.
+
+    A reader consumes its stream once. Use ``read`` for buffered reads,
+    ``readline`` or async iteration for line-oriented reads, and ``aclose`` to
+    release the underlying response early.
+    """
 
     @property
     @abstractmethod
-    def closed(self) -> bool: ...
+    def closed(self) -> bool:
+        """Return whether this reader has been closed."""
+        ...
 
     @abstractmethod
-    async def read(self, size: int = -1) -> str: ...
+    async def read(self, size: int = -1) -> str:
+        """Read up to ``size`` characters, or the remaining stream."""
+        ...
 
     @abstractmethod
-    async def readline(self) -> str: ...
+    async def readline(self) -> str:
+        """Read through the next newline or return the remaining text at EOF."""
+        ...
 
 
 class SyncTextReader(ABC):
-    """A one-shot synchronous reader for one process text stream."""
+    """Read one remote process output stream synchronously.
+
+    A reader consumes its stream once. Use ``read`` for buffered reads,
+    ``readline`` or iteration for line-oriented reads, and ``close`` to release
+    the underlying response early.
+    """
 
     @property
     @abstractmethod
-    def closed(self) -> bool: ...
+    def closed(self) -> bool:
+        """Return whether this reader has been closed."""
+        ...
 
     @abstractmethod
-    def read(self, size: int = -1) -> str: ...
+    def read(self, size: int = -1) -> str:
+        """Read up to ``size`` characters, or the remaining stream."""
+        ...
 
     @abstractmethod
-    def readline(self) -> str: ...
+    def readline(self) -> str:
+        """Read through the next newline or return the remaining text at EOF."""
+        ...
 
     @abstractmethod
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Close the reader and discard unread output from this stream."""
+        ...
 
     def __iter__(self) -> Iterator[str]:
         while line := self.readline():

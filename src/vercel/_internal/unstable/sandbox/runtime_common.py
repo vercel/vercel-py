@@ -50,6 +50,16 @@ class _SandboxFilesystemBatchBase:
         self._files.append(file)
 
     def write_bytes(self, path: RemotePath, data: bytes, *, mode: int | None = None) -> None:
+        """Stage a byte file for writing when the batch exits.
+
+        Args:
+            path: Absolute path or path relative to the batch working directory.
+            data: File contents.
+            mode: Optional POSIX permission bits for the file.
+
+        Raises:
+            RuntimeError: If called outside the batch context.
+        """
         self._stage(_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode))
 
     def write_text(
@@ -61,6 +71,18 @@ class _SandboxFilesystemBatchBase:
         errors: str = "strict",
         mode: int | None = None,
     ) -> None:
+        """Encode and stage a text file for writing when the batch exits.
+
+        Args:
+            path: Absolute path or path relative to the batch working directory.
+            text: Text to write.
+            encoding: Text encoding used to encode ``text``.
+            errors: Encoding error policy.
+            mode: Optional POSIX permission bits for the file.
+
+        Raises:
+            RuntimeError: If called outside the batch context.
+        """
         self._stage(
             _WriteFile(
                 path=_coerce_remote_path(path),

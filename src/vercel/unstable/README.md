@@ -145,16 +145,17 @@ async def main() -> None:
         name="persistent",
     )
 
-    # A context-managed sandbox runtime session is destroyed on exit.
+    # Resolves the current session and stops it on exit.
     # The successful stop response updates `runtime_session`. It is still
     # request-capable while its SDK session remains open; the API decides
     # whether the resource can be used.
     async with persistent.session() as runtime_session:
         await runtime_session.run_process("python", ["--version"])
 
-    # Do not use its context manager when this code should not request cleanup.
-    surviving_session = await persistent.session()
-    await surviving_session.run_process("python", ["--version"])
+    # The sandbox is now stopped. Resolving its session again resumes it from
+    # the latest snapshot and returns the replacement current session.
+    resumed_session = await persistent.session()
+    await resumed_session.run_process("python", ["--version"])
 
     sandboxes = [
         item
@@ -338,7 +339,7 @@ Context manager syntax means scoped remote ownership:
 async with sandbox.create_sandbox(runtime="python3.13") as sandbox_:
     ...
 
-# Destroys the sandbox runtime session on exit.
+# Resolves the sandbox's current session and stops it on exit.
 sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
 async with sandbox_.session() as runtime_session:
     ...
@@ -379,6 +380,19 @@ Only streams routed to `PIPE` are populated on `CompletedProcess`; other output
 fields are `None`. `check=True` raises `subprocess.CalledProcessError` with the
 same captured values.
 
+A sandbox has at most one active current runtime session. `Sandbox.session()`
+returns that session while it remains usable. If it has stopped or otherwise
+cannot accept commands, the backend resumes the sandbox from its latest
+snapshot, records the new session as `currentSessionId`, and returns that
+replacement. Older sessions remain available through session history APIs but
+are not additional active sessions. Concurrent resume requests converge on the
+same replacement session.
+
+The session handle returned by `Sandbox.session()` is independent from the
+`Sandbox` handle. Resuming can change the backend's current session without
+refreshing state cached by an existing `Sandbox` handle. Fetch the sandbox
+again to obtain a handle bound to the replacement current session.
+
 `create_process()` instead returns a live `Process` handle for explicit
 lifecycle and output consumption. `Process` exposes stable `stdout` and
 `stderr` `TextReader` instances, plus `wait()`, `send_signal()`, `terminate()`,
@@ -395,15 +409,16 @@ content = await sandbox_.fs.read_text("workspace/input.txt")
 entries = await sandbox_.fs.listdir("workspace")
 ```
 
-`Sandbox.fs` resolves the current runtime session on every operation; a
-retained capability follows a later current session. `SandboxRuntimeSession.fs`
-remains bound to that specific runtime session. The async `SandboxFilesystem`
-and sync `SyncSandboxFilesystem` expose `mkdir`, `read_bytes`, `read_text`,
-`write_bytes`, `write_text`, `batch`, `exists`, `is_file`, `is_dir`, `listdir`,
-`remove`, and `rename`. A batch stages files synchronously inside its context
-and submits one tarball on clean exit. `listdir()` returns sorted
-`DirectoryEntry(path=..., kind=...)` values, where `kind` is `file`,
-`directory`, `symlink`, or `other`.
+`Sandbox.fs` resolves the runtime session ID recorded by its owning `Sandbox`
+handle on every operation. It follows a replacement current session only after
+new sandbox state has been applied to that handle. `SandboxRuntimeSession.fs`
+remains bound to that specific historical session identity. The async
+`SandboxFilesystem` and sync `SyncSandboxFilesystem` expose `mkdir`,
+`read_bytes`, `read_text`, `write_bytes`, `write_text`, `batch`, `exists`,
+`is_file`, `is_dir`, `listdir`, `remove`, and `rename`. A batch stages files
+synchronously inside its context and submits one tarball on clean exit.
+`listdir()` returns sorted `DirectoryEntry(path=..., kind=...)` values, where
+`kind` is `file`, `directory`, `symlink`, or `other`.
 
 `Process.logs()` yields `ProcessLog` output events whose
 `stream` is `ProcessLogStream.STDOUT` or

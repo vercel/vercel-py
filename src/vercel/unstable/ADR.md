@@ -315,10 +315,22 @@ not synchronized automatically.
 
 `Sandbox.current_session` is a nested bound handle. Sandbox convenience
 operations targeting that current session update and return the existing
-matching nested handle. `Sandbox.session()` returns an independent runtime
-session handle and does not replace `current_session`. Creating a snapshot
-returns a new snapshot handle while updating the addressed existing runtime
-session handle with the session state included in the successful response.
+matching nested handle.
+
+A named sandbox has at most one active current runtime session.
+`Sandbox.session()` resolves that session through the get-or-resume endpoint.
+It returns the existing session while it remains usable; otherwise the backend
+creates a replacement from the latest snapshot and updates the sandbox's
+`currentSessionId`. Concurrent resume requests converge on the same replacement
+session. Previous sessions remain historical resources, not additional active
+sessions.
+
+`Sandbox.session()` returns an independent runtime session handle. It does not
+apply the get-or-resume response to the existing `Sandbox` handle, so a
+replacement backend session does not automatically replace that handle's
+cached `current_session`. Creating a snapshot returns a new snapshot handle
+while updating the addressed existing runtime session handle with the session
+state included in the successful response.
 
 Closing a `vercel.session(...)` scope closes its `SdkSession` or
 `SyncSdkSession`; later requests through its handles or an already-captured
@@ -353,8 +365,8 @@ async with sandbox.create_sandbox(runtime="python3.13") as sandbox_:
     ...
 ```
 
-Creating a sandbox runtime session as a context manager destroys that runtime
-session on exit:
+Resolving a sandbox runtime session as a context manager stops that session on
+exit:
 
 ```python
 async with sandbox_.session() as session:

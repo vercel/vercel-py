@@ -53,6 +53,8 @@ class SandboxRuntimeSessionState:
 
 @dataclass(frozen=True, slots=True)
 class SnapshotRetentionState:
+    """Describe the snapshot retention policy returned by the service."""
+
     count: int
     expiration: timedelta | None = None
     delete_evicted: bool = True

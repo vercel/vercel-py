@@ -71,6 +71,12 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
 
 
 class Process(_ProcessHandleState):
+    """Control and inspect an asynchronously running sandbox process.
+
+    The ``stdout`` and ``stderr`` readers consume the process log stream and
+    may each be read only once.
+    """
+
     __slots__ = ("_service", "stderr", "stdout")
 
     def __init__(self, *, payload: ProcessState, service: SandboxService) -> None:
@@ -81,11 +87,13 @@ class Process(_ProcessHandleState):
         )
 
     async def refresh(self) -> Self:
+        """Refresh the process state and return this handle."""
         payload = await self._service.get_process(session_id=self._session_id, process_id=self.id)
         self._apply_payload(payload)
         return self
 
     async def wait(self) -> int:
+        """Wait for the process to exit and return its exit code."""
         payload = await self._service.get_process(
             session_id=self._session_id, process_id=self.id, wait=True
         )
@@ -95,6 +103,18 @@ class Process(_ProcessHandleState):
         return self.returncode
 
     async def communicate(self, input: None = None) -> tuple[str, str]:
+        """Read all output and wait for the process to exit.
+
+        Args:
+            input: Reserved for subprocess compatibility. Process standard
+                input is not supported and must be ``None``.
+
+        Returns:
+            A ``(stdout, stderr)`` tuple.
+
+        Raises:
+            NotImplementedError: If ``input`` is not ``None``.
+        """
         if input is not None:
             raise NotImplementedError("process stdin is not supported")
         stdout, stderr = await self.stdout.read(), await self.stderr.read()
@@ -102,6 +122,12 @@ class Process(_ProcessHandleState):
         return stdout, stderr
 
     async def send_signal(self, signal: int | str | signal_module.Signals) -> None:
+        """Send a signal to the running process.
+
+        Args:
+            signal: Numeric signal, ``Signals`` member, or name such as
+                ``"TERM"`` or ``"SIGTERM"``.
+        """
         payload = await self._service.send_process_signal(
             session_id=self._session_id,
             process_id=self.id,
@@ -110,16 +136,21 @@ class Process(_ProcessHandleState):
         self._apply_payload(payload)
 
     async def terminate(self) -> None:
+        """Request graceful process termination with ``SIGTERM``."""
         await self.send_signal(signal_module.SIGTERM)
 
     async def kill(self) -> None:
+        """Terminate the process immediately with ``SIGKILL``."""
         await self.send_signal(signal_module.SIGKILL)
 
     def logs(self) -> AsyncIterator[ProcessLog]:
+        """Iterate over interleaved stdout and stderr log events."""
         return _process_logs(self._service, session_id=self._session_id, process_id=self.id)
 
 
 class Snapshot(SnapshotHandleBase):
+    """Represent a sandbox filesystem snapshot."""
+
     __slots__ = ("_service",)
 
     def __init__(self, *, payload: SnapshotState, service: SandboxService) -> None:
@@ -127,12 +158,15 @@ class Snapshot(SnapshotHandleBase):
         self._service = service
 
     async def delete(self) -> Self:
+        """Delete the snapshot and refresh this handle."""
         payload = await self._service.delete_snapshot(snapshot_id=self.id)
         self._apply_payload(payload)
         return self
 
 
 class SandboxFilesystem:
+    """Perform filesystem operations in a sandbox runtime session."""
+
     __slots__ = ("_service", "_session_id", "_write_files_cwd")
 
     def __init__(
@@ -161,6 +195,13 @@ class SandboxFilesystem:
     async def mkdir(
         self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
     ) -> None:
+        """Create a directory.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+            recursive: Whether to create missing parent directories.
+        """
         await self._service.mkdir(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -169,6 +210,15 @@ class SandboxFilesystem:
         )
 
     async def read_bytes(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bytes:
+        """Read a file as bytes.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+
+        Returns:
+            The complete file contents.
+        """
         return await self._service.read_bytes(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -183,6 +233,17 @@ class SandboxFilesystem:
         encoding: str = "utf-8",
         errors: str = "strict",
     ) -> str:
+        """Read and decode a text file.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+            encoding: Text encoding used to decode the file.
+            errors: Decoding error policy.
+
+        Returns:
+            The decoded file contents.
+        """
         return (await self.read_bytes(path, cwd=cwd)).decode(encoding, errors=errors)
 
     async def write_bytes(
@@ -193,6 +254,14 @@ class SandboxFilesystem:
         cwd: RemotePath | None = None,
         mode: int | None = None,
     ) -> None:
+        """Write bytes to a file, replacing any existing contents.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            data: File contents.
+            cwd: Base directory for a relative path.
+            mode: Optional POSIX permission bits for the file.
+        """
         await self._write_files(
             [_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode)], cwd=cwd
         )
@@ -207,6 +276,16 @@ class SandboxFilesystem:
         errors: str = "strict",
         mode: int | None = None,
     ) -> None:
+        """Encode and write text to a file.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            text: Text to write.
+            cwd: Base directory for a relative path.
+            encoding: Text encoding used to encode ``text``.
+            errors: Encoding error policy.
+            mode: Optional POSIX permission bits for the file.
+        """
         await self._write_files(
             [
                 _WriteFile(
@@ -228,9 +307,18 @@ class SandboxFilesystem:
         )
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SandboxFilesystemBatch":
+        """Create an async context manager for one atomic write request.
+
+        Args:
+            cwd: Base directory shared by staged relative paths.
+
+        Returns:
+            A batch that uploads its staged files on successful context exit.
+        """
         return SandboxFilesystemBatch(write_files=lambda files: self._write_files(files, cwd=cwd))
 
     async def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
+        """Return whether a filesystem entry exists."""
         return await self._service.exists(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -239,6 +327,7 @@ class SandboxFilesystem:
         )
 
     async def is_file(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
+        """Return whether a path exists and is a regular file."""
         return await self._service.is_file(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -247,6 +336,7 @@ class SandboxFilesystem:
         )
 
     async def is_dir(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
+        """Return whether a path exists and is a directory."""
         return await self._service.is_dir(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -257,6 +347,15 @@ class SandboxFilesystem:
     async def listdir(
         self, path: RemotePath = ".", *, cwd: RemotePath | None = None
     ) -> list[DirectoryEntry]:
+        """List the direct children of a directory.
+
+        Args:
+            path: Directory to list.
+            cwd: Base directory for a relative path.
+
+        Returns:
+            The directory entries returned by the remote filesystem.
+        """
         return await self._service.listdir(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -272,6 +371,14 @@ class SandboxFilesystem:
         recursive: bool = False,
         missing_ok: bool = False,
     ) -> None:
+        """Remove a file or directory.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+            recursive: Whether to recursively remove a directory.
+            missing_ok: Whether a missing path should be ignored.
+        """
         await self._service.remove(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -288,6 +395,13 @@ class SandboxFilesystem:
         *,
         cwd: RemotePath | None = None,
     ) -> None:
+        """Rename or move a filesystem entry.
+
+        Args:
+            source: Existing absolute or relative path.
+            destination: New absolute or relative path.
+            cwd: Base directory for relative paths.
+        """
         await self._service.rename(
             session_id=self._session_id(),
             source=_coerce_remote_path(source),
@@ -298,6 +412,12 @@ class SandboxFilesystem:
 
 
 class SandboxFilesystemBatch(_SandboxFilesystemBatchBase):
+    """Stage multiple file writes for one async filesystem request.
+
+    Create batches with ``SandboxFilesystem.batch`` and use them only inside
+    their async context.
+    """
+
     __slots__ = ("_write_files",)
 
     def __init__(self, *, write_files: Callable[[Sequence[_WriteFile]], Awaitable[None]]) -> None:
@@ -320,6 +440,14 @@ class SandboxFilesystemBatch(_SandboxFilesystemBatchBase):
 
 
 class SandboxRuntimeSession(RuntimeSessionHandleBase):
+    """Represent one execution session in a sandbox's session history.
+
+    A sandbox has at most one active current session. A session owns its process
+    namespace and filesystem access. Calling ``stop`` ends the session without
+    destroying the parent sandbox; a later resume creates a replacement current
+    session from the sandbox's latest snapshot.
+    """
+
     __slots__ = ("_service", "fs")
 
     def __init__(self, *, payload: SandboxRuntimeSessionState, service: SandboxService) -> None:
@@ -345,6 +473,30 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedProcess:
+        """Run a process to completion.
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process.
+            sudo: Whether to run with elevated privileges.
+            kill_after: Duration after which the service kills the process.
+            check: Whether to raise for a nonzero exit code.
+            stdout: Writable text stream or subprocess output sentinel for
+                stdout. ``None`` inherits the local stdout stream.
+            stderr: Writable text stream or subprocess output sentinel for
+                stderr. ``None`` inherits the local stderr stream; ``STDOUT``
+                merges stderr into the stdout destination.
+            capture_output: Whether to capture stdout and stderr in the result.
+
+        Returns:
+            The completed process result.
+
+        Raises:
+            subprocess.CalledProcessError: If ``check`` is true and the process
+                exits unsuccessfully.
+        """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
@@ -384,6 +536,11 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
     ) -> Process:
+        """Start a process without waiting for it to exit.
+
+        Returns:
+            A handle for monitoring and controlling the process.
+        """
         state = await self._service.create_process(
             session_id=self.id,
             command=command,
@@ -396,16 +553,27 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return Process(payload=state, service=self._service)
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
+        """Get a process in this session.
+
+        Args:
+            process_id: Process identifier.
+            wait: Whether the API call should wait for process completion.
+
+        Returns:
+            A process handle populated with the latest state.
+        """
         state = await self._service.get_process(
             session_id=self.id, process_id=process_id, wait=wait
         )
         return Process(payload=state, service=self._service)
 
     async def query_processes(self) -> list[Process]:
+        """Return handles for the processes in this session."""
         states = await self._service.query_processes(session_id=self.id)
         return [Process(payload=state, service=self._service) for state in states]
 
     async def refresh(self, *, include_system_routes: bool | None = None) -> Self:
+        """Refresh this session's state and return the same handle."""
         payload = await self._service.get_runtime_session(
             session_id=self.id, include_system_routes=include_system_routes
         )
@@ -413,6 +581,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> Self:
+        """Increase the session execution time limit by a duration."""
         payload = await self._service.extend_runtime_session_timeout(
             session_id=self.id, duration=parse_required_duration_seconds(duration)
         )
@@ -420,6 +589,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     async def update_network_policy(self, network_policy: JSONValue) -> Self:
+        """Replace the session network policy."""
         payload = await self._service.update_runtime_session_network_policy(
             session_id=self.id, network_policy=network_policy
         )
@@ -427,6 +597,14 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     async def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> Snapshot:
+        """Create a filesystem snapshot from this session.
+
+        Args:
+            expiration: Snapshot lifetime, or zero to disable expiration.
+
+        Returns:
+            A handle for the created snapshot.
+        """
         result = await self._service.create_snapshot(
             session_id=self.id, expiration=_parse_snapshot_expiration(expiration)
         )
@@ -434,12 +612,21 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return Snapshot(payload=result.snapshot, service=self._service)
 
     async def stop(self) -> Self:
+        """Stop this runtime session and refresh the handle."""
         payload = await self._service.stop_runtime_session(session_id=self.id)
         self._apply_payload(payload)
         return self
 
 
 class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
+    """Control an asynchronous Vercel Sandbox.
+
+    A sandbox has at most one active current session. Process and filesystem
+    operations target the session recorded by this handle. Use ``session`` to
+    resolve that session, resuming the sandbox into a replacement session when
+    needed, and ``destroy`` to permanently remove the sandbox.
+    """
+
     __slots__ = ("_service", "fs")
 
     def __init__(self, *, payload: SandboxState, service: SandboxService) -> None:
@@ -455,6 +642,18 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         )
 
     def session(self) -> "CreateRuntimeSessionOperation":
+        """Prepare a single-use current-session operation.
+
+        Awaiting returns the sandbox's active current session. If the current
+        session is stopped or otherwise unusable, the backend resumes the
+        sandbox from its latest snapshot and returns the replacement session.
+        Using the operation as an async context manager stops the returned
+        session on exit.
+
+        The returned session handle is independent. If resuming replaces the
+        backend's current session, this existing ``Sandbox`` handle is not
+        refreshed automatically.
+        """
         return CreateRuntimeSessionOperation(
             service=self._service,
             sandbox_name=self.name,
@@ -475,6 +674,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedProcess:
+        """Run a process to completion in the current session.
+
+        See ``SandboxRuntimeSession.run_process`` for argument behavior.
+        """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
@@ -514,6 +717,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
     ) -> Process:
+        """Start a process in the current session without waiting for it."""
         state = await self._service.create_process(
             session_id=self.current_session_id,
             command=command,
@@ -526,12 +730,14 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return Process(payload=state, service=self._service)
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
+        """Get a process from the current session."""
         state = await self._service.get_process(
             session_id=self.current_session_id, process_id=process_id, wait=wait
         )
         return Process(payload=state, service=self._service)
 
     async def query_processes(self) -> list[Process]:
+        """Return handles for processes in the current session."""
         states = await self._service.query_processes(session_id=self.current_session_id)
         return [Process(payload=state, service=self._service) for state in states]
 
@@ -542,6 +748,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[SandboxRuntimeSession]:
+        """Return one page of runtime sessions belonging to this sandbox."""
         page = await query_sessions_page(
             self._service,
             project_id=self.project_id,
@@ -559,6 +766,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[Snapshot]:
+        """Return one page of snapshots belonging to this sandbox."""
         page = await query_snapshots_page(
             self._service,
             project_id=self.project_id,
@@ -570,6 +778,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return page.snapshots
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> SandboxRuntimeSession:
+        """Increase the current session's execution time limit."""
         payload = await self._service.extend_runtime_session_timeout(
             session_id=self.current_session_id,
             duration=parse_required_duration_seconds(duration),
@@ -577,12 +786,14 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return self._apply_current_session_payload(payload)
 
     async def update_network_policy(self, network_policy: JSONValue) -> SandboxRuntimeSession:
+        """Replace the current session's network policy."""
         payload = await self._service.update_runtime_session_network_policy(
             session_id=self.current_session_id, network_policy=network_policy
         )
         return self._apply_current_session_payload(payload)
 
     async def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> Snapshot:
+        """Create a filesystem snapshot from the current session."""
         result = await self._service.create_snapshot(
             session_id=self.current_session_id,
             expiration=_parse_snapshot_expiration(expiration),
@@ -591,6 +802,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return Snapshot(payload=result.snapshot, service=self._service)
 
     async def destroy(self) -> Self:
+        """Permanently destroy the sandbox and refresh this handle."""
         payload = await self._service.destroy_sandbox(name=self.name, project_id=self.project_id)
         self._apply_payload(payload)
         return self
@@ -610,6 +822,14 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
     ) -> Self:
+        """Update mutable sandbox configuration.
+
+        Only non-``None`` values are sent, except ``snapshot_retention`` where
+        explicitly passing ``None`` removes the retention policy.
+
+        Returns:
+            This handle refreshed with the updated sandbox state.
+        """
         payload = await self._service.update_sandbox(
             name=self.name,
             project_id=self.project_id,
@@ -647,6 +867,13 @@ class _CreateSandboxParams:
 
 
 class CreateSandboxOperation:
+    """Manage one asynchronous sandbox creation request.
+
+    Await the operation to create a sandbox that remains alive, or use it as an
+    async context manager to destroy the created sandbox on exit. An operation
+    can be consumed only once.
+    """
+
     def __init__(self, *, service: SandboxService, params: _CreateSandboxParams) -> None:
         self._service = service
         self._params = params
@@ -718,6 +945,14 @@ class CreateSandboxOperation:
 
 
 class CreateRuntimeSessionOperation:
+    """Manage one asynchronous current-session request.
+
+    Await the operation to return the active current session, resuming the
+    sandbox into a replacement session when necessary. Use it as an async
+    context manager to stop the returned session on exit. An operation can be
+    consumed only once.
+    """
+
     def __init__(
         self, *, service: SandboxService, sandbox_name: str, project_id: str | None
     ) -> None:

@@ -69,6 +69,12 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
 
 
 class SyncProcess(_ProcessHandleState):
+    """Control and inspect a synchronously running sandbox process.
+
+    The ``stdout`` and ``stderr`` readers consume the process log stream and
+    may each be read only once.
+    """
+
     __slots__ = ("_service", "stderr", "stdout")
 
     def __init__(self, *, payload: ProcessState, service: SandboxService) -> None:
@@ -81,6 +87,7 @@ class SyncProcess(_ProcessHandleState):
         )
 
     def refresh(self) -> Self:
+        """Refresh the process state and return this handle."""
         payload = iter_coroutine(
             self._service.get_process(session_id=self._session_id, process_id=self.id)
         )
@@ -88,6 +95,7 @@ class SyncProcess(_ProcessHandleState):
         return self
 
     def wait(self) -> int:
+        """Wait for the process to exit and return its exit code."""
         payload = iter_coroutine(
             self._service.get_process(session_id=self._session_id, process_id=self.id, wait=True)
         )
@@ -97,6 +105,18 @@ class SyncProcess(_ProcessHandleState):
         return self.returncode
 
     def communicate(self, input: None = None) -> tuple[str, str]:
+        """Read all output and wait for the process to exit.
+
+        Args:
+            input: Reserved for subprocess compatibility. Process standard
+                input is not supported and must be ``None``.
+
+        Returns:
+            A ``(stdout, stderr)`` tuple.
+
+        Raises:
+            NotImplementedError: If ``input`` is not ``None``.
+        """
         if input is not None:
             raise NotImplementedError("process stdin is not supported")
         stdout, stderr = self.stdout.read(), self.stderr.read()
@@ -104,6 +124,7 @@ class SyncProcess(_ProcessHandleState):
         return stdout, stderr
 
     def send_signal(self, signal: int | str | signal_module.Signals) -> None:
+        """Send a numeric or named signal to the running process."""
         payload = iter_coroutine(
             self._service.send_process_signal(
                 session_id=self._session_id,
@@ -114,16 +135,21 @@ class SyncProcess(_ProcessHandleState):
         self._apply_payload(payload)
 
     def terminate(self) -> None:
+        """Request graceful process termination with ``SIGTERM``."""
         self.send_signal(signal_module.SIGTERM)
 
     def kill(self) -> None:
+        """Terminate the process immediately with ``SIGKILL``."""
         self.send_signal(signal_module.SIGKILL)
 
     def logs(self) -> Iterator[ProcessLog]:
+        """Iterate over interleaved stdout and stderr log events."""
         return _process_logs(self._service, session_id=self._session_id, process_id=self.id)
 
 
 class SyncSnapshot(SnapshotHandleBase):
+    """Represent a sandbox filesystem snapshot."""
+
     __slots__ = ("_service",)
 
     def __init__(self, *, payload: SnapshotState, service: SandboxService) -> None:
@@ -131,12 +157,15 @@ class SyncSnapshot(SnapshotHandleBase):
         self._service = service
 
     def delete(self) -> Self:
+        """Delete the snapshot and refresh this handle."""
         payload = iter_coroutine(self._service.delete_snapshot(snapshot_id=self.id))
         self._apply_payload(payload)
         return self
 
 
 class SyncSandboxFilesystem:
+    """Perform synchronous filesystem operations in a sandbox session."""
+
     __slots__ = ("_service", "_session_id", "_write_files_cwd")
 
     def __init__(
@@ -165,6 +194,7 @@ class SyncSandboxFilesystem:
     def mkdir(
         self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
     ) -> None:
+        """Create a directory, optionally including missing parents."""
         iter_coroutine(
             self._service.mkdir(
                 session_id=self._session_id(),
@@ -175,6 +205,7 @@ class SyncSandboxFilesystem:
         )
 
     def read_bytes(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bytes:
+        """Read a file as bytes."""
         return iter_coroutine(
             self._service.read_bytes(
                 session_id=self._session_id(),
@@ -191,6 +222,7 @@ class SyncSandboxFilesystem:
         encoding: str = "utf-8",
         errors: str = "strict",
     ) -> str:
+        """Read and decode a text file."""
         return self.read_bytes(path, cwd=cwd).decode(encoding, errors=errors)
 
     def write_bytes(
@@ -201,6 +233,7 @@ class SyncSandboxFilesystem:
         cwd: RemotePath | None = None,
         mode: int | None = None,
     ) -> None:
+        """Write bytes to a file, replacing any existing contents."""
         self._write_files(
             [_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode)], cwd=cwd
         )
@@ -215,6 +248,7 @@ class SyncSandboxFilesystem:
         errors: str = "strict",
         mode: int | None = None,
     ) -> None:
+        """Encode and write text to a file."""
         self._write_files(
             [
                 _WriteFile(
@@ -236,11 +270,20 @@ class SyncSandboxFilesystem:
         )
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SyncSandboxFilesystemBatch":
+        """Create a context manager for one atomic write request.
+
+        Args:
+            cwd: Base directory shared by staged relative paths.
+
+        Returns:
+            A batch that uploads its staged files on successful context exit.
+        """
         return SyncSandboxFilesystemBatch(
             write_files=lambda files: self._write_files(files, cwd=cwd)
         )
 
     def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
+        """Return whether a filesystem entry exists."""
         return iter_coroutine(
             self._service.exists(
                 session_id=self._session_id(),
@@ -251,6 +294,7 @@ class SyncSandboxFilesystem:
         )
 
     def is_file(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
+        """Return whether a path exists and is a regular file."""
         return iter_coroutine(
             self._service.is_file(
                 session_id=self._session_id(),
@@ -261,6 +305,7 @@ class SyncSandboxFilesystem:
         )
 
     def is_dir(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
+        """Return whether a path exists and is a directory."""
         return iter_coroutine(
             self._service.is_dir(
                 session_id=self._session_id(),
@@ -273,6 +318,7 @@ class SyncSandboxFilesystem:
     def listdir(
         self, path: RemotePath = ".", *, cwd: RemotePath | None = None
     ) -> list[DirectoryEntry]:
+        """List the direct children of a directory."""
         return iter_coroutine(
             self._service.listdir(
                 session_id=self._session_id(),
@@ -290,6 +336,7 @@ class SyncSandboxFilesystem:
         recursive: bool = False,
         missing_ok: bool = False,
     ) -> None:
+        """Remove a file or directory."""
         iter_coroutine(
             self._service.remove(
                 session_id=self._session_id(),
@@ -308,6 +355,7 @@ class SyncSandboxFilesystem:
         *,
         cwd: RemotePath | None = None,
     ) -> None:
+        """Rename or move a filesystem entry."""
         iter_coroutine(
             self._service.rename(
                 session_id=self._session_id(),
@@ -320,6 +368,12 @@ class SyncSandboxFilesystem:
 
 
 class SyncSandboxFilesystemBatch(_SandboxFilesystemBatchBase):
+    """Stage multiple file writes for one synchronous filesystem request.
+
+    Create batches with ``SyncSandboxFilesystem.batch`` and use them only
+    inside their context.
+    """
+
     __slots__ = ("_write_files",)
 
     def __init__(self, *, write_files: Callable[[Sequence[_WriteFile]], None]) -> None:
@@ -342,6 +396,12 @@ class SyncSandboxFilesystemBatch(_SandboxFilesystemBatchBase):
 
 
 class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
+    """Represent one session in a sandbox's execution history.
+
+    A sandbox has at most one active current session. The handle is a context
+    manager that stops this session on exit.
+    """
+
     __slots__ = ("_service", "fs")
 
     def __init__(self, *, payload: SandboxRuntimeSessionState, service: SandboxService) -> None:
@@ -387,6 +447,30 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedProcess:
+        """Run a process to completion.
+
+        Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process.
+            sudo: Whether to run with elevated privileges.
+            kill_after: Duration after which the service kills the process.
+            check: Whether to raise for a nonzero exit code.
+            stdout: Writable text stream or subprocess output sentinel for
+                stdout. ``None`` inherits the local stdout stream.
+            stderr: Writable text stream or subprocess output sentinel for
+                stderr. ``None`` inherits the local stderr stream; ``STDOUT``
+                merges stderr into the stdout destination.
+            capture_output: Whether to capture stdout and stderr in the result.
+
+        Returns:
+            The completed process result.
+
+        Raises:
+            subprocess.CalledProcessError: If ``check`` is true and the process
+                exits unsuccessfully.
+        """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
@@ -428,6 +512,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
     ) -> SyncProcess:
+        """Start a process without waiting for it to exit."""
         state = iter_coroutine(
             self._service.create_process(
                 session_id=self.id,
@@ -442,16 +527,19 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return SyncProcess(payload=state, service=self._service)
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
+        """Get a process in this session."""
         state = iter_coroutine(
             self._service.get_process(session_id=self.id, process_id=process_id, wait=wait)
         )
         return SyncProcess(payload=state, service=self._service)
 
     def query_processes(self) -> list[SyncProcess]:
+        """Return handles for the processes in this session."""
         states = iter_coroutine(self._service.query_processes(session_id=self.id))
         return [SyncProcess(payload=state, service=self._service) for state in states]
 
     def refresh(self, *, include_system_routes: bool | None = None) -> Self:
+        """Refresh this session's state and return the same handle."""
         payload = iter_coroutine(
             self._service.get_runtime_session(
                 session_id=self.id, include_system_routes=include_system_routes
@@ -461,6 +549,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     def extend_execution_time_limit(self, duration: DurationInput) -> Self:
+        """Increase the session execution time limit by a duration."""
         payload = iter_coroutine(
             self._service.extend_runtime_session_timeout(
                 session_id=self.id, duration=parse_required_duration_seconds(duration)
@@ -470,6 +559,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     def update_network_policy(self, network_policy: JSONValue) -> Self:
+        """Replace the session network policy."""
         payload = iter_coroutine(
             self._service.update_runtime_session_network_policy(
                 session_id=self.id, network_policy=network_policy
@@ -479,6 +569,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
+        """Create a filesystem snapshot from this session."""
         result = iter_coroutine(
             self._service.create_snapshot(
                 session_id=self.id, expiration=_parse_snapshot_expiration(expiration)
@@ -488,12 +579,20 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return SyncSnapshot(payload=result.snapshot, service=self._service)
 
     def stop(self) -> Self:
+        """Stop this runtime session and refresh the handle."""
         payload = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
         self._apply_payload(payload)
         return self
 
 
 class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
+    """Control a synchronous Vercel Sandbox.
+
+    A sandbox has at most one active current session. Process and filesystem
+    operations target the session recorded by this handle. The handle is a
+    context manager that destroys the sandbox on exit.
+    """
+
     __slots__ = ("_service", "fs")
 
     def __init__(self, *, payload: SandboxState, service: SandboxService) -> None:
@@ -533,6 +632,13 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             ) from cleanup_exc
 
     def session(self) -> SyncSandboxRuntimeSession:
+        """Return the current session, resuming the sandbox when needed.
+
+        If the current session is stopped or otherwise unusable, the backend
+        resumes the sandbox from its latest snapshot and returns the replacement
+        session. The returned session handle is independent; this existing
+        ``SyncSandbox`` handle is not refreshed automatically.
+        """
         payload = iter_coroutine(
             self._service.create_runtime_session(name=self.name, project_id=self.project_id)
         )
@@ -552,6 +658,10 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         stderr: TextIO | int | None = None,
         capture_output: bool = False,
     ) -> CompletedProcess:
+        """Run a process to completion in the current session.
+
+        See ``SyncSandboxRuntimeSession.run_process`` for argument behavior.
+        """
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
@@ -593,6 +703,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
     ) -> SyncProcess:
+        """Start a process in the current session without waiting for it."""
         state = iter_coroutine(
             self._service.create_process(
                 session_id=self.current_session_id,
@@ -607,6 +718,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return SyncProcess(payload=state, service=self._service)
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
+        """Get a process from the current session."""
         state = iter_coroutine(
             self._service.get_process(
                 session_id=self.current_session_id, process_id=process_id, wait=wait
@@ -615,6 +727,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return SyncProcess(payload=state, service=self._service)
 
     def query_processes(self) -> list[SyncProcess]:
+        """Return handles for processes in the current session."""
         states = iter_coroutine(self._service.query_processes(session_id=self.current_session_id))
         return [SyncProcess(payload=state, service=self._service) for state in states]
 
@@ -625,6 +738,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[SyncSandboxRuntimeSession]:
+        """Return one page of runtime sessions belonging to this sandbox."""
         return query_sessions_page(
             self._service,
             project_id=self.project_id,
@@ -641,6 +755,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         cursor: str | None = None,
         sort_order: str | None = None,
     ) -> list[SyncSnapshot]:
+        """Return one page of snapshots belonging to this sandbox."""
         return query_snapshots_page(
             self._service,
             project_id=self.project_id,
@@ -651,6 +766,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         ).snapshots
 
     def extend_execution_time_limit(self, duration: DurationInput) -> SyncSandboxRuntimeSession:
+        """Increase the current session's execution time limit."""
         payload = iter_coroutine(
             self._service.extend_runtime_session_timeout(
                 session_id=self.current_session_id,
@@ -660,6 +776,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return self._apply_current_session_payload(payload)
 
     def update_network_policy(self, network_policy: JSONValue) -> SyncSandboxRuntimeSession:
+        """Replace the current session's network policy."""
         payload = iter_coroutine(
             self._service.update_runtime_session_network_policy(
                 session_id=self.current_session_id, network_policy=network_policy
@@ -668,6 +785,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return self._apply_current_session_payload(payload)
 
     def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
+        """Create a filesystem snapshot from the current session."""
         result = iter_coroutine(
             self._service.create_snapshot(
                 session_id=self.current_session_id,
@@ -678,6 +796,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return SyncSnapshot(payload=result.snapshot, service=self._service)
 
     def destroy(self) -> Self:
+        """Permanently destroy the sandbox and refresh this handle."""
         payload = iter_coroutine(
             self._service.destroy_sandbox(name=self.name, project_id=self.project_id)
         )
@@ -699,6 +818,14 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
     ) -> Self:
+        """Update mutable sandbox configuration.
+
+        Only non-``None`` values are sent, except ``snapshot_retention`` where
+        explicitly passing ``None`` removes the retention policy.
+
+        Returns:
+            This handle refreshed with the updated sandbox state.
+        """
         payload = iter_coroutine(
             self._service.update_sandbox(
                 name=self.name,

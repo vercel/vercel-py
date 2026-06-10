@@ -81,6 +81,34 @@ def create_sandbox(
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
 ) -> SyncSandbox:
+    """Create a sandbox and wait until it is ready.
+
+    The returned handle is also a context manager that destroys the sandbox on
+    exit.
+
+    Args:
+        project_id: Project that owns the sandbox. Uses the active credentials
+            when omitted.
+        name: Requested sandbox name. The service generates one when omitted.
+        runtime: Runtime image or runtime identifier.
+        source: Git, tarball, or snapshot source used to initialize the sandbox.
+        ports: Ports to expose from the sandbox.
+        execution_time_limit: Maximum session runtime in seconds or as a
+            duration.
+        resources: Requested CPU and memory resources.
+        persistent: Whether the sandbox persists beyond its current session.
+        network_policy: Network access policy sent to the Sandbox API.
+        env: Environment variables for the sandbox.
+        tags: Metadata tags used to organize and query sandboxes.
+        snapshot_expiration: Default lifetime for snapshots.
+        snapshot_retention: Automatic snapshot retention policy.
+
+    Returns:
+        A handle for the newly created sandbox.
+
+    Raises:
+        SandboxTerminalStateError: If creation reaches a terminal failure state.
+    """
     return _create_sandbox(
         _service(),
         project_id=project_id,
@@ -106,6 +134,20 @@ def get_sandbox(
     resume: bool = True,
     include_system_routes: bool | None = None,
 ) -> SyncSandbox:
+    """Get a sandbox by name.
+
+    Args:
+        name: Sandbox name.
+        project_id: Project that owns the sandbox.
+        resume: Whether to resume the sandbox when it has no running session.
+        include_system_routes: Whether to include platform-managed routes.
+
+    Returns:
+        A handle for the requested sandbox.
+
+    Raises:
+        SandboxApiError: If the sandbox cannot be retrieved or resumed.
+    """
     return _get_sandbox(
         _service(),
         name=name,
@@ -122,6 +164,17 @@ def query_sandboxes(
     page_size: int | None = None,
     cursor: str | None = None,
 ) -> Iterator[SyncSandbox]:
+    """Iterate over sandboxes matching a query.
+
+    Args:
+        query: Ordering and filtering options.
+        project_id: Project whose sandboxes should be queried.
+        page_size: Maximum number of sandboxes fetched per API request.
+        cursor: Cursor at which to begin pagination.
+
+    Returns:
+        An iterator that transparently follows pagination cursors.
+    """
     return _query_sandboxes(
         _service(),
         query=query,
@@ -139,6 +192,18 @@ def query_sessions(
     cursor: str | None = None,
     sort_order: str | None = None,
 ) -> Iterator[SyncSandboxRuntimeSession]:
+    """Iterate over runtime sessions.
+
+    Args:
+        project_id: Project whose sessions should be queried.
+        name: Sandbox name used to restrict the results.
+        page_size: Maximum number of sessions fetched per API request.
+        cursor: Cursor at which to begin pagination.
+        sort_order: Result order, either ``"asc"`` or ``"desc"``.
+
+    Returns:
+        An iterator that transparently follows pagination cursors.
+    """
     return _query_sessions(
         _service(),
         project_id=project_id,
@@ -157,6 +222,18 @@ def query_snapshots(
     cursor: str | None = None,
     sort_order: str | None = None,
 ) -> Iterator[SyncSnapshot]:
+    """Iterate over snapshots.
+
+    Args:
+        project_id: Project whose snapshots should be queried.
+        name: Sandbox name used to restrict the results.
+        page_size: Maximum number of snapshots fetched per API request.
+        cursor: Cursor at which to begin pagination.
+        sort_order: Result order, either ``"asc"`` or ``"desc"``.
+
+    Returns:
+        An iterator that transparently follows pagination cursors.
+    """
     return _query_snapshots(
         _service(),
         project_id=project_id,
@@ -168,6 +245,17 @@ def query_snapshots(
 
 
 def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
+    """Get a snapshot by identifier.
+
+    Args:
+        snapshot_id: Snapshot identifier.
+
+    Returns:
+        A handle for the requested snapshot.
+
+    Raises:
+        SandboxApiError: If the snapshot cannot be retrieved.
+    """
     return _get_snapshot(_service(), snapshot_id=snapshot_id)
 
 
