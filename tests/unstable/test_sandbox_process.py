@@ -152,8 +152,6 @@ def test_public_process_exports() -> None:
         "Process",
         "ProcessStatus",
         "TextReader",
-        "ProcessLog",
-        "ProcessLogStream",
     ):
         assert name in sandbox.__all__
     for name in (
@@ -161,14 +159,12 @@ def test_public_process_exports() -> None:
         "ProcessStatus",
         "SyncProcess",
         "SyncTextReader",
-        "ProcessLog",
-        "ProcessLogStream",
     ):
         assert name in sandbox_sync.__all__
 
 
 @respx.mock
-async def test_async_process_readers_logs_wait_and_signals(mock_env_clear: None) -> None:
+async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -205,17 +201,11 @@ async def test_async_process_readers_logs_wait_and_signals(mock_env_clear: None)
         assert process.status is sandbox.ProcessStatus.RUNNING
         assert process.stdin is None
         assert process.returncode is None
+        assert process.stdout is not None
+        assert process.stderr is not None
         assert await process.stdout.readline() == "out-1\n"
         assert await process.stdout.read() == "out-2"
         assert await process.stderr.read() == "err\n"
-        assert [(event.stream, event.data) async for event in process.logs()] == [
-            ("stdout", "out-1\nout-2"),
-            ("stderr", "err\n"),
-        ]
-        assert [(event.stream, event.data) async for event in process.logs()] == [
-            ("stdout", "out-1\nout-2"),
-            ("stderr", "err\n"),
-        ]
         assert await process.refresh() is process
         assert await process.wait() == 7
         assert process.returncode == 7
@@ -226,7 +216,7 @@ async def test_async_process_readers_logs_wait_and_signals(mock_env_clear: None)
 
     assert get_process.calls[0].request.url.params["wait"] == "false"
     assert get_process.calls[1].request.url.params["wait"] == "true"
-    assert logs.call_count == 3
+    assert logs.call_count == 1
     assert all(call.request.headers["connection"] == "close" for call in logs.calls)
     assert signals == [signal.SIGTERM, signal.SIGKILL, signal.SIGINT]
 
@@ -264,6 +254,182 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
         process.kill()
 
     assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+@respx.mock
+async def test_async_create_process_merges_stderr_into_stdout_reader(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        side_effect=lambda _request: _logs_response()
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        process = await box.create_process("python", stderr=subprocess.STDOUT)
+        assert process.stderr is None
+        assert process.stdout is not None
+        assert await process.communicate() == ("out-1\nout-2err\n", None)
+        assert process.returncode == 0
+
+    assert logs.call_count == 1
+
+
+@respx.mock
+async def test_async_create_process_devnull_drops_reader(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        side_effect=lambda _request: _logs_response()
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        process = await box.create_process("python", stderr=subprocess.DEVNULL)
+        assert process.stderr is None
+        assert await process.communicate() == ("out-1\nout-2", None)
+
+
+@pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
+@respx.mock
+async def test_async_create_process_with_no_readers_never_requests_logs(
+    mock_env_clear: None, stderr: int
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        process = await box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
+        assert process.stdout is None
+        assert process.stderr is None
+        assert await process.communicate() == (None, None)
+        assert process.returncode == 0
+
+    assert logs.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"stdout": subprocess.STDOUT},
+        {"stdout": None},
+        {"stderr": None},
+        {"stdout": 42},
+        {"stderr": 42},
+        {"stdout": io.StringIO()},
+        {"stderr": io.BytesIO()},
+    ],
+)
+@respx.mock
+async def test_create_process_rejects_output_options_before_request(
+    mock_env_clear: None, kwargs: dict[str, object]
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises((TypeError, ValueError)):
+            await box.create_process("python", **kwargs)  # type: ignore[arg-type]
+
+    assert create.call_count == 0
+
+
+@respx.mock
+def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        side_effect=lambda _request: _logs_response()
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        process = box.create_process("python", stderr=subprocess.STDOUT)
+        assert process.stderr is None
+        assert process.stdout is not None
+        assert process.communicate() == ("out-1\nout-2err\n", None)
+        assert process.returncode == 0
+
+    assert logs.call_count == 1
+
+
+@pytest.mark.parametrize("stderr", [subprocess.DEVNULL, subprocess.STDOUT])
+@respx.mock
+def test_sync_create_process_with_no_readers_never_requests_logs(
+    mock_env_clear: None, stderr: int
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        process = box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
+        assert process.stdout is None
+        assert process.stderr is None
+        assert process.communicate() == (None, None)
+        assert process.returncode == 0
+
+    assert logs.call_count == 0
+
+
+@respx.mock
+def test_sync_create_process_rejects_output_options_before_request(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(ValueError, match="STDOUT is only supported for stderr"):
+            box.create_process("python", stdout=subprocess.STDOUT)
+
+    assert create.call_count == 0
 
 
 @respx.mock

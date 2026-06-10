@@ -831,7 +831,7 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
 
 
 @respx.mock
-async def test_closed_session_rejects_handles_and_lazy_logs(mock_env_clear: None) -> None:
+async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -853,7 +853,6 @@ async def test_closed_session_rejects_handles_and_lazy_logs(mock_env_clear: None
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         runtime_session = await handle.session()
         command = await handle.create_process("sleep", ["30"])
-        logs = command.logs()
         snapshot = await handle.snapshot()
 
     with pytest.raises(VercelSessionClosedError):
@@ -862,8 +861,11 @@ async def test_closed_session_rejects_handles_and_lazy_logs(mock_env_clear: None
         await runtime_session.create_process("true")
     with pytest.raises(VercelSessionClosedError):
         await command.refresh()
+    assert command.stdout is not None
     with pytest.raises(VercelSessionClosedError):
-        await anext(logs)
+        # The reader opens its log response lazily, so the first read observes
+        # the closed session.
+        await command.stdout.read()
     with pytest.raises(VercelSessionClosedError):
         await snapshot.delete()
     with pytest.raises(VercelSessionClosedError):

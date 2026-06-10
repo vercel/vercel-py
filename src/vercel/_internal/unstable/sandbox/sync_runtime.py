@@ -1,6 +1,7 @@
 """Sync runtime handles and entry points for unstable Sandbox operations."""
 
 import signal as signal_module
+import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import timedelta
 from types import TracebackType
@@ -39,7 +40,10 @@ from vercel._internal.unstable.sandbox.pagination import (
     QuerySnapshotsPage,
     QuerySnapshotsParams,
 )
-from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
+from vercel._internal.unstable.sandbox.process_output import (
+    ProcessOutputRouter,
+    _validate_reader_destination,
+)
 from vercel._internal.unstable.sandbox.runtime_common import (
     RemotePath,
     RuntimeSessionHandleBase,
@@ -57,7 +61,7 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxState,
     SnapshotState,
 )
-from vercel._internal.unstable.sandbox.text_reader import _sync_text_readers
+from vercel._internal.unstable.sandbox.text_reader import SyncTextReader, _sync_text_readers
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -72,18 +76,31 @@ class SyncProcess(_ProcessHandleState):
     """Control and inspect a synchronously running sandbox process.
 
     The ``stdout`` and ``stderr`` readers consume the process log stream and
-    may each be read only once.
+    may each be read only once. A reader is ``None`` when its stream was
+    dropped with ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
     """
 
     __slots__ = ("_service", "stderr", "stdout")
 
-    def __init__(self, *, payload: ProcessState, service: SandboxService) -> None:
+    stdout: SyncTextReader | None
+    stderr: SyncTextReader | None
+
+    def __init__(
+        self,
+        *,
+        payload: ProcessState,
+        service: SandboxService,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> None:
         super().__init__(payload)
         self._service = service
         self.stdout, self.stderr = _sync_text_readers(
             lambda: iter_coroutine(
                 service.process_logs_response(session_id=self._session_id, process_id=self.id)
-            )
+            ),
+            stdout=stdout,
+            stderr=stderr,
         )
 
     def refresh(self) -> Self:
@@ -104,7 +121,7 @@ class SyncProcess(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    def communicate(self, input: None = None) -> tuple[str, str]:
+    def communicate(self, input: None = None) -> tuple[str | None, str | None]:
         """Read all output and wait for the process to exit.
 
         Args:
@@ -112,14 +129,17 @@ class SyncProcess(_ProcessHandleState):
                 input is not supported and must be ``None``.
 
         Returns:
-            A ``(stdout, stderr)`` tuple.
+            A ``(stdout, stderr)`` tuple. A stream without a reader is
+            ``None``, so merging with ``stderr=subprocess.STDOUT`` returns
+            ``(merged, None)``.
 
         Raises:
             NotImplementedError: If ``input`` is not ``None``.
         """
         if input is not None:
             raise NotImplementedError("process stdin is not supported")
-        stdout, stderr = self.stdout.read(), self.stderr.read()
+        stdout = None if self.stdout is None else self.stdout.read()
+        stderr = None if self.stderr is None else self.stderr.read()
         self.wait()
         return stdout, stderr
 
@@ -141,10 +161,6 @@ class SyncProcess(_ProcessHandleState):
     def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         self.send_signal(signal_module.SIGKILL)
-
-    def logs(self) -> Iterator[ProcessLog]:
-        """Iterate over interleaved stdout and stderr log events."""
-        return _process_logs(self._service, session_id=self._session_id, process_id=self.id)
 
 
 class SyncSnapshot(SnapshotHandleBase):
@@ -511,8 +527,20 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
     ) -> SyncProcess:
-        """Start a process without waiting for it to exit."""
+        """Start a process without waiting for it to exit.
+
+        Args:
+            stdout: ``subprocess.PIPE`` (default) for a live reader or
+                ``subprocess.DEVNULL`` to drop the stream.
+            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
+                ``subprocess.STDOUT`` to merge stderr into the stdout reader
+                in arrival order.
+        """
+        stdout = _validate_reader_destination(stdout, name="stdout")
+        stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
         state = iter_coroutine(
             self._service.create_process(
                 session_id=self.id,
@@ -524,7 +552,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 kill_after=parse_duration_seconds(kill_after),
             )
         )
-        return SyncProcess(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process in this session."""
@@ -702,8 +730,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
     ) -> SyncProcess:
-        """Start a process in the current session without waiting for it."""
+        """Start a process in the current session without waiting for it.
+
+        Args:
+            stdout: ``subprocess.PIPE`` (default) for a live reader or
+                ``subprocess.DEVNULL`` to drop the stream.
+            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
+                ``subprocess.STDOUT`` to merge stderr into the stdout reader
+                in arrival order.
+        """
+        stdout = _validate_reader_destination(stdout, name="stdout")
+        stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
         state = iter_coroutine(
             self._service.create_process(
                 session_id=self.current_session_id,
@@ -715,7 +755,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 kill_after=parse_duration_seconds(kill_after),
             )
         )
-        return SyncProcess(payload=state, service=self._service)
+        return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process from the current session."""

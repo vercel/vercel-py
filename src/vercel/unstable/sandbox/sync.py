@@ -22,8 +22,6 @@ from vercel._internal.unstable.sandbox.models import (
     DurationInput,
     GitSource,
     JSONValue,
-    ProcessLog,
-    ProcessLogStream,
     ProcessStatus,
     SandboxQuery,
     SandboxQueryByCreatedAt,
@@ -262,8 +260,6 @@ def get_snapshot(*, snapshot_id: str) -> SyncSnapshot:
 __all__ = [
     "SandboxApiError",
     "SandboxCleanupError",
-    "ProcessLog",
-    "ProcessLogStream",
     "ProcessStatus",
     "CompletedProcess",
     "SandboxCredentialsError",

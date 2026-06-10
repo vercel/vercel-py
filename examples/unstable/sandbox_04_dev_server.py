@@ -5,9 +5,8 @@ import argparse
 import asyncio
 import hashlib
 import json
+import subprocess
 import sys
-import time
-from collections.abc import AsyncIterator
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -15,9 +14,6 @@ from dotenv import load_dotenv
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
     GitSource,
-    Process,
-    ProcessLog,
-    ProcessLogStream,
     Sandbox,
     SandboxApiError,
 )
@@ -188,38 +184,6 @@ async def install_dependencies(
     print("wrote install marker")
 
 
-async def stream_logs_for(command: Process, *, seconds: float) -> None:
-    events = command.logs()
-    deadline = time.monotonic() + seconds
-
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-
-        try:
-            event = await asyncio.wait_for(anext_event(events), timeout=remaining)
-        except TimeoutError:
-            return
-        except StopAsyncIteration:
-            return
-
-        write_log_event(event)
-
-
-async def anext_event(events: AsyncIterator[ProcessLog]) -> ProcessLog:
-    return await anext(events)
-
-
-def write_log_event(event: ProcessLog) -> None:
-    if event.stream is ProcessLogStream.STDOUT:
-        sys.stdout.write(event.data)
-        sys.stdout.flush()
-    elif event.stream is ProcessLogStream.STDERR:
-        sys.stderr.write(event.data)
-        sys.stderr.flush()
-
-
 def route_url(box: Sandbox, port: int) -> str | None:
     for route in box.routes:
         if route.port == port:
@@ -238,22 +202,28 @@ async def run_entrypoint(
         print("prepared sandbox; pass --entrypoint to start a dev server")
         return
 
-    command = await box.create_process("sh", ["-lc", entrypoint], cwd=cwd)
+    command = await box.create_process(
+        "sh",
+        ["-lc", entrypoint],
+        cwd=cwd,
+        stderr=subprocess.STDOUT,
+        kill_after=timedelta(seconds=10),
+    )
     print(f"started command {command.id}")
+    assert command.stdout is not None
 
     url = route_url(box, port)
     if url is not None:
         print(f"port {port}: {url}")
 
-    try:
-        await stream_logs_for(command, seconds=10)
-    finally:
-        try:
-            await command.kill()
-        except SandboxApiError as error:
-            if error.status_code not in {404, 409}:
-                raise
-        print(f"stopped command {command.id}")
+    # kill_after stops the process server-side, which drives the merged output
+    # stream to EOF and ends this loop. Never cancel a pending read (e.g. via
+    # asyncio.wait_for) to stop early: that marks the shared log transport as
+    # broken.
+    async for line in command.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    print(f"stopped command {command.id}")
 
 
 async def main() -> None:

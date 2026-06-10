@@ -394,11 +394,10 @@ refreshing state cached by an existing `Sandbox` handle. Fetch the sandbox
 again to obtain a handle bound to the replacement current session.
 
 `create_process()` instead returns a live `Process` handle for explicit
-lifecycle and output consumption. `Process` exposes stable `stdout` and
-`stderr` `TextReader` instances, plus `wait()`, `send_signal()`, `terminate()`,
-`kill()`, `refresh()`, `communicate()`, and `logs()`. Low-level endpoint
-composition, response binding, and polling stay inside the internal Sandbox
-service layer.
+lifecycle and output consumption. `Process` exposes `stdout` and `stderr`
+`TextReader` instances, plus `wait()`, `send_signal()`, `terminate()`,
+`kill()`, `refresh()`, and `communicate()`. Low-level endpoint composition,
+response binding, and polling stay inside the internal Sandbox service layer.
 
 Workspace filesystem operations live on the `fs` capability of either handle:
 
@@ -420,16 +419,24 @@ synchronously inside its context and submits one tarball on clean exit.
 `listdir()` returns sorted `DirectoryEntry(path=..., kind=...)` values, where
 `kind` is `file`, `directory`, `symlink`, or `other`.
 
-`Process.logs()` yields `ProcessLog` output events whose
-`stream` is `ProcessLogStream.STDOUT` or
-`ProcessLogStream.STDERR`. These string-compatible enum values
-serialize to JSON/wire values `"stdout"` and `"stderr"`. A structured
+`create_process(...)` accepts the `subprocess.Popen` output sentinels.
+`stdout` accepts `subprocess.PIPE` (default) or `subprocess.DEVNULL`; `stderr`
+additionally accepts `subprocess.STDOUT`, which merges stderr output into the
+`stdout` reader in arrival order. `Process.stdout` and `Process.stderr` are
+`TextReader | None`: a stream routed to `DEVNULL` — or merged via
+`stderr=subprocess.STDOUT` — has no reader and its attribute is `None`,
+matching `Popen`. As in `Popen`, `stderr=subprocess.STDOUT` follows stdout's
+destination, so combining it with `stdout=subprocess.DEVNULL` discards both.
+`communicate()` returns `(stdout, stderr)` where each value is `None` when
+that stream has no reader. When neither stream has a reader the combined-log
+request is never issued.
+
+`stdout` and `stderr` are one-shot readers backed by one shared lazy
+combined-log request. Closing one preserves the other; transport failure
+breaks both — including cancelling a pending read, so drain readers in a
+dedicated task rather than wrapping reads in `asyncio.wait_for`. A structured
 in-band stream failure raises `SandboxStreamError`, which exposes the server
-`code` and uses the server
-message as its exception message. Each `logs()` call opens a fresh combined,
-ordered stream. `stdout` and `stderr` are one-shot readers backed by one shared
-lazy combined-log request. Closing one preserves the other; transport failure
-breaks both. Direct reader
+`code` and uses the server message as its exception message. Direct reader
 iteration and `receive()` yield logical lines while `read()` and `readline()`
 share one cursor.
 
@@ -484,10 +491,10 @@ async with vercel.session(service_options=[...]):
 preview = await sandbox.get_sandbox(name="preview")
 ```
 
-Process output is never cached. Opening a reader or calling `process.logs()`
-after session closure raises `VercelSessionClosedError`; already buffered reader
-text remains available until that reader reaches data requiring another
-request read.
+Process output is never cached. Reading from a process reader after session
+closure raises `VercelSessionClosedError`; already buffered reader text
+remains available until that reader reaches data requiring another request
+read.
 
 Context-managed cleanup, explicit `destroy()` / `stop()` / `delete()`, and
 snapshot responses reporting a stopped runtime do not locally revoke handles.

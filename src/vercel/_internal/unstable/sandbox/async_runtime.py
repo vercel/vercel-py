@@ -1,6 +1,7 @@
 """Async runtime handles and entry points for unstable Sandbox operations."""
 
 import signal as signal_module
+import subprocess
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
@@ -41,7 +42,10 @@ from vercel._internal.unstable.sandbox.pagination import (
     QuerySnapshotsPage,
     QuerySnapshotsParams,
 )
-from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
+from vercel._internal.unstable.sandbox.process_output import (
+    ProcessOutputRouter,
+    _validate_reader_destination,
+)
 from vercel._internal.unstable.sandbox.runtime_common import (
     RemotePath,
     RuntimeSessionHandleBase,
@@ -59,7 +63,7 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxState,
     SnapshotState,
 )
-from vercel._internal.unstable.sandbox.text_reader import _text_readers
+from vercel._internal.unstable.sandbox.text_reader import TextReader, _text_readers
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -74,16 +78,29 @@ class Process(_ProcessHandleState):
     """Control and inspect an asynchronously running sandbox process.
 
     The ``stdout`` and ``stderr`` readers consume the process log stream and
-    may each be read only once.
+    may each be read only once. A reader is ``None`` when its stream was
+    dropped with ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
     """
 
     __slots__ = ("_service", "stderr", "stdout")
 
-    def __init__(self, *, payload: ProcessState, service: SandboxService) -> None:
+    stdout: TextReader | None
+    stderr: TextReader | None
+
+    def __init__(
+        self,
+        *,
+        payload: ProcessState,
+        service: SandboxService,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
+    ) -> None:
         super().__init__(payload)
         self._service = service
         self.stdout, self.stderr = _text_readers(
-            lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id)
+            lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
+            stdout=stdout,
+            stderr=stderr,
         )
 
     async def refresh(self) -> Self:
@@ -102,7 +119,7 @@ class Process(_ProcessHandleState):
             raise SandboxResponseError("Wait response did not include a process return code")
         return self.returncode
 
-    async def communicate(self, input: None = None) -> tuple[str, str]:
+    async def communicate(self, input: None = None) -> tuple[str | None, str | None]:
         """Read all output and wait for the process to exit.
 
         Args:
@@ -110,14 +127,17 @@ class Process(_ProcessHandleState):
                 input is not supported and must be ``None``.
 
         Returns:
-            A ``(stdout, stderr)`` tuple.
+            A ``(stdout, stderr)`` tuple. A stream without a reader is
+            ``None``, so merging with ``stderr=subprocess.STDOUT`` returns
+            ``(merged, None)``.
 
         Raises:
             NotImplementedError: If ``input`` is not ``None``.
         """
         if input is not None:
             raise NotImplementedError("process stdin is not supported")
-        stdout, stderr = await self.stdout.read(), await self.stderr.read()
+        stdout = None if self.stdout is None else await self.stdout.read()
+        stderr = None if self.stderr is None else await self.stderr.read()
         await self.wait()
         return stdout, stderr
 
@@ -142,10 +162,6 @@ class Process(_ProcessHandleState):
     async def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
         await self.send_signal(signal_module.SIGKILL)
-
-    def logs(self) -> AsyncIterator[ProcessLog]:
-        """Iterate over interleaved stdout and stderr log events."""
-        return _process_logs(self._service, session_id=self._session_id, process_id=self.id)
 
 
 class Snapshot(SnapshotHandleBase):
@@ -535,12 +551,23 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
     ) -> Process:
         """Start a process without waiting for it to exit.
+
+        Args:
+            stdout: ``subprocess.PIPE`` (default) for a live reader or
+                ``subprocess.DEVNULL`` to drop the stream.
+            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
+                ``subprocess.STDOUT`` to merge stderr into the stdout reader
+                in arrival order.
 
         Returns:
             A handle for monitoring and controlling the process.
         """
+        stdout = _validate_reader_destination(stdout, name="stdout")
+        stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
         state = await self._service.create_process(
             session_id=self.id,
             command=command,
@@ -550,7 +577,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process in this session.
@@ -716,8 +743,20 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
+        stdout: int = subprocess.PIPE,
+        stderr: int = subprocess.PIPE,
     ) -> Process:
-        """Start a process in the current session without waiting for it."""
+        """Start a process in the current session without waiting for it.
+
+        Args:
+            stdout: ``subprocess.PIPE`` (default) for a live reader or
+                ``subprocess.DEVNULL`` to drop the stream.
+            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
+                ``subprocess.STDOUT`` to merge stderr into the stdout reader
+                in arrival order.
+        """
+        stdout = _validate_reader_destination(stdout, name="stdout")
+        stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
         state = await self._service.create_process(
             session_id=self.current_session_id,
             command=command,
@@ -727,7 +766,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             sudo=sudo,
             kill_after=parse_duration_seconds(kill_after),
         )
-        return Process(payload=state, service=self._service)
+        return Process(payload=state, service=self._service, stdout=stdout, stderr=stderr)
 
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process from the current session."""

@@ -147,9 +147,6 @@ class _ScenarioDriver:
     ) -> Any:
         raise NotImplementedError
 
-    async def logs(self, command: Any) -> list[tuple[str, str]]:
-        raise NotImplementedError
-
     async def wait(self, command: Any) -> int | None:
         raise NotImplementedError
 
@@ -283,9 +280,6 @@ class AsyncDriver(_ScenarioDriver):
         self, box: Any, command: str, args: list[str], *, kill_after: float | None = None
     ) -> Any:
         return await box.create_process(command, args, kill_after=kill_after)
-
-    async def logs(self, command: Any) -> list[tuple[str, str]]:
-        return [(event.stream, event.data) async for event in command.logs()]
 
     async def wait(self, command: Any) -> int | None:
         return await command.wait()
@@ -448,9 +442,6 @@ class SyncDriver(_ScenarioDriver):
     ) -> Any:
         return box.create_process(command, args, kill_after=kill_after)
 
-    async def logs(self, command: Any) -> list[tuple[str, str]]:
-        return [(event.stream, event.data) for event in command.logs()]
-
     async def wait(self, command: Any) -> int | None:
         return command.wait()
 
@@ -508,7 +499,6 @@ class SyncDriver(_ScenarioDriver):
 
 
 async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> WorkspaceObservation:
-    logs: list[tuple[str, str]]
     context_cleaned_up = False
     async with driver.session():
         async with driver.ephemeral_sandbox(name) as box:
@@ -542,7 +532,7 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
             await driver.remove(box, "workspace/renamed.txt")
             assert not await driver.exists(box, "workspace/renamed.txt")
             command = await driver.create_process(box, "python", ["workspace/tool.py"])
-            logs = await driver.logs(command)
+            stdout, stderr = await driver.read_process_streams(command)
             exit_code = await driver.wait(command)
             output = await driver.read_text(box, "workspace/output.txt")
         try:
@@ -551,8 +541,8 @@ async def workspace_command_flow(driver: _ScenarioDriver, name: str) -> Workspac
             context_cleaned_up = error.status_code == 404
 
     return WorkspaceObservation(
-        stdout="".join(data for stream, data in logs if stream == "stdout"),
-        stderr="".join(data for stream, data in logs if stream == "stderr"),
+        stdout=stdout,
+        stderr=stderr,
         output=output,
         exit_code=exit_code,
         context_cleaned_up=context_cleaned_up,

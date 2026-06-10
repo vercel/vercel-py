@@ -475,19 +475,26 @@ service-level handling.
 
 ## Decision 15: Process Output Observation
 
-`Process.logs()` and its sync mirror yield only output records.
-`ProcessLog.stream` is the exported string-compatible
-`ProcessLogStream` enum, with `STDOUT` and `STDERR` members serialized
-to the wire strings `"stdout"` and `"stderr"`. A valid structured wire error
-record terminates iteration by raising `SandboxStreamError`, which inherits
-from `SandboxError` and carries the wire `code`. Malformed and unsupported
-records do not become public events.
+Process output observation is exclusively Popen-shaped. `Process` owns
+one-shot `stdout` and `stderr` text readers; there is no event-stream method
+and the wire-event types (`ProcessLog`, `ProcessLogStream`) stay internal.
+`create_process(...)` accepts the `subprocess.Popen` routing sentinels:
+`stdout` takes `subprocess.PIPE` (default) or `subprocess.DEVNULL`; `stderr`
+additionally takes `subprocess.STDOUT`, which routes stderr records into the
+stdout reader in backend arrival order. A stream without a destination reader
+has its attribute set to `None`, and `stderr=subprocess.STDOUT` follows
+stdout's destination, as in `Popen`. `communicate()` returns `None` for a
+stream with no reader. Destination validation happens client-side before the
+process-creation request; routing requires no Sandbox API parameters.
 
-Each `Process.logs()` call opens a fresh combined ordered stream. `Process`
-also owns stable one-shot `stdout` and `stderr` text readers. Each reader lazily
-filters one shared combined-log request. Reader iteration and
-`receive()` yield logical lines preserving newlines; `read()` and `readline()`
-share one cursor per stream. Explicitly closing one reader preserves its peer.
+Each reader lazily filters one shared combined-log request; when no reader
+exists that request is never issued. Reader iteration and `receive()` yield
+logical lines preserving newlines; `read()` and `readline()` share one cursor
+per stream. Explicitly closing one reader preserves its peer; the shared
+response is released once every reader is closed. A valid structured wire
+error record raises `SandboxStreamError`, which inherits from `SandboxError`
+and carries the wire `code`. Malformed and unsupported records do not become
+public output.
 
 Readers reject concurrent reads with `anyio.BusyResourceError`, reads after
 explicit closure with `anyio.ClosedResourceError`, and `receive()` at EOF with
@@ -497,8 +504,13 @@ output is not cached.
 
 Rationale:
 
-Combined logs preserve backend ordering while a shared transport provides the
-Python-familiar per-stream interface with one backend request.
+One stdlib idiom covers both execution paths: `run_process` mirrors
+`subprocess.run` and `create_process` mirrors `Popen`, so output routing reads
+identically across them. The merge sentinel subsumes the removed `logs()`
+event stream — the shared transport already observes records in backend
+arrival order — while keeping the public surface smaller and the wire-event
+types private. Client-side routing keeps the service layer free of output
+concerns.
 
 ## Decision 16: Sandbox Filesystem Capability
 

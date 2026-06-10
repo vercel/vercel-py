@@ -1,8 +1,9 @@
 """Text reader contracts and private process log stream implementations."""
 
+import subprocess
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from types import TracebackType
 
 import anyio
@@ -148,18 +149,25 @@ class SyncTextReader(ABC):
         self.close()
 
 
-class _AsyncTextTransport:
-    __slots__ = ("_broken", "_buffers", "_closed", "_lines", "_lock", "_open_response", "_response")
+def _distinct_buffers(
+    routes: Mapping[ProcessLogStream, "_TextBuffer | None"],
+) -> "list[_TextBuffer]":
+    return list({id(buffer): buffer for buffer in routes.values() if buffer is not None}.values())
 
-    def __init__(self, open_response: Callable[[], Awaitable[httpx.Response]]) -> None:
+
+class _AsyncTextTransport:
+    __slots__ = ("_broken", "_lines", "_live", "_lock", "_open_response", "_response", "_routes")
+
+    def __init__(
+        self,
+        open_response: Callable[[], Awaitable[httpx.Response]],
+        routes: Mapping[ProcessLogStream, _TextBuffer | None],
+    ) -> None:
         self._open_response = open_response
         self._response: httpx.Response | None = None
         self._lines: AsyncIterator[str] | None = None
-        self._buffers = {
-            ProcessLogStream.STDOUT: _TextBuffer(),
-            ProcessLogStream.STDERR: _TextBuffer(),
-        }
-        self._closed: set[ProcessLogStream] = set()
+        self._routes = dict(routes)
+        self._live = len(_distinct_buffers(routes))
         self._broken = False
         self._lock = anyio.Lock()
 
@@ -186,7 +194,7 @@ class _AsyncTextTransport:
                     try:
                         line = await anext(self._lines)
                     except StopAsyncIteration:
-                        for buffer in self._buffers.values():
+                        for buffer in _distinct_buffers(self._routes):
                             buffer.eof = True
                         await self._cleanup()
                         return
@@ -194,31 +202,34 @@ class _AsyncTextTransport:
                         continue
                     event = _parse_command_log_record(line)
                     if event is not None:
-                        if event.stream not in self._closed:
-                            self._buffers[event.stream].append(event.data)
+                        target = self._routes[event.stream]
+                        if target is not None:
+                            target.append(event.data)
                         return
             except BaseException:
                 self._broken = True
-                for buffer in self._buffers.values():
+                for buffer in _distinct_buffers(self._routes):
                     buffer.eof = True
                 await self._cleanup()
                 raise
 
-    async def close(self, stream: ProcessLogStream) -> None:
-        self._closed.add(stream)
-        self._buffers[stream].clear()
-        self._buffers[stream].eof = True
-        if len(self._closed) == 2:
+    async def close(self, buffer: _TextBuffer) -> None:
+        buffer.clear()
+        buffer.eof = True
+        for stream, target in self._routes.items():
+            if target is buffer:
+                self._routes[stream] = None
+        self._live -= 1
+        if self._live == 0:
             await self._cleanup()
 
 
 class _TextReader(TextReader):
-    __slots__ = ("_buffer", "_closed", "_guard", "_stream", "_transport")
+    __slots__ = ("_buffer", "_closed", "_guard", "_transport")
 
-    def __init__(self, transport: _AsyncTextTransport, stream: ProcessLogStream) -> None:
+    def __init__(self, transport: _AsyncTextTransport, buffer: _TextBuffer) -> None:
         self._transport = transport
-        self._stream = stream
-        self._buffer = transport._buffers[stream]
+        self._buffer = buffer
         self._closed = False
         self._guard = anyio.ResourceGuard("reading from")
 
@@ -261,21 +272,22 @@ class _TextReader(TextReader):
     async def aclose(self) -> None:
         if not self._closed:
             self._closed = True
-            await self._transport.close(self._stream)
+            await self._transport.close(self._buffer)
 
 
 class _SyncTextTransport:
-    __slots__ = ("_broken", "_buffers", "_closed", "_lines", "_open_response", "_response")
+    __slots__ = ("_broken", "_lines", "_live", "_open_response", "_response", "_routes")
 
-    def __init__(self, open_response: Callable[[], httpx.Response]) -> None:
+    def __init__(
+        self,
+        open_response: Callable[[], httpx.Response],
+        routes: Mapping[ProcessLogStream, _TextBuffer | None],
+    ) -> None:
         self._open_response = open_response
         self._response: httpx.Response | None = None
         self._lines: Iterator[str] | None = None
-        self._buffers = {
-            ProcessLogStream.STDOUT: _TextBuffer(),
-            ProcessLogStream.STDERR: _TextBuffer(),
-        }
-        self._closed: set[ProcessLogStream] = set()
+        self._routes = dict(routes)
+        self._live = len(_distinct_buffers(routes))
         self._broken = False
 
     def _cleanup(self) -> None:
@@ -296,7 +308,7 @@ class _SyncTextTransport:
                 try:
                     line = next(self._lines)
                 except StopIteration:
-                    for buffer in self._buffers.values():
+                    for buffer in _distinct_buffers(self._routes):
                         buffer.eof = True
                     self._cleanup()
                     return
@@ -304,31 +316,34 @@ class _SyncTextTransport:
                     continue
                 event = _parse_command_log_record(line)
                 if event is not None:
-                    if event.stream not in self._closed:
-                        self._buffers[event.stream].append(event.data)
+                    target = self._routes[event.stream]
+                    if target is not None:
+                        target.append(event.data)
                     return
         except BaseException:
             self._broken = True
-            for buffer in self._buffers.values():
+            for buffer in _distinct_buffers(self._routes):
                 buffer.eof = True
             self._cleanup()
             raise
 
-    def close(self, stream: ProcessLogStream) -> None:
-        self._closed.add(stream)
-        self._buffers[stream].clear()
-        self._buffers[stream].eof = True
-        if len(self._closed) == 2:
+    def close(self, buffer: _TextBuffer) -> None:
+        buffer.clear()
+        buffer.eof = True
+        for stream, target in self._routes.items():
+            if target is buffer:
+                self._routes[stream] = None
+        self._live -= 1
+        if self._live == 0:
             self._cleanup()
 
 
 class _SyncTextReader(SyncTextReader):
-    __slots__ = ("_buffer", "_closed", "_guard", "_stream", "_transport")
+    __slots__ = ("_buffer", "_closed", "_guard", "_transport")
 
-    def __init__(self, transport: _SyncTextTransport, stream: ProcessLogStream) -> None:
+    def __init__(self, transport: _SyncTextTransport, buffer: _TextBuffer) -> None:
         self._transport = transport
-        self._stream = stream
-        self._buffer = transport._buffers[stream]
+        self._buffer = buffer
         self._closed = False
         self._guard = anyio.ResourceGuard("reading from")
 
@@ -365,24 +380,62 @@ class _SyncTextReader(SyncTextReader):
     def close(self) -> None:
         if not self._closed:
             self._closed = True
-            self._transport.close(self._stream)
+            self._transport.close(self._buffer)
+
+
+def _reader_buffers(stdout: int, stderr: int) -> tuple[_TextBuffer | None, _TextBuffer | None]:
+    """Resolve validated Popen-style destinations to per-stream buffers.
+
+    ``subprocess.STDOUT`` makes stderr share stdout's buffer (or its absence),
+    and ``subprocess.DEVNULL`` drops a stream entirely.
+    """
+    stdout_buffer = _TextBuffer() if stdout == subprocess.PIPE else None
+    if stderr == subprocess.STDOUT:
+        stderr_buffer = stdout_buffer
+    elif stderr == subprocess.PIPE:
+        stderr_buffer = _TextBuffer()
+    else:
+        stderr_buffer = None
+    return stdout_buffer, stderr_buffer
 
 
 def _text_readers(
     open_response: Callable[[], Awaitable[httpx.Response]],
-) -> tuple[TextReader, TextReader]:
-    transport = _AsyncTextTransport(open_response)
+    *,
+    stdout: int = subprocess.PIPE,
+    stderr: int = subprocess.PIPE,
+) -> tuple[TextReader | None, TextReader | None]:
+    stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
+    if stdout_buffer is None and stderr_buffer is None:
+        return None, None
+    transport = _AsyncTextTransport(
+        open_response,
+        {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
+    )
     return (
-        _TextReader(transport, ProcessLogStream.STDOUT),
-        _TextReader(transport, ProcessLogStream.STDERR),
+        None if stdout_buffer is None else _TextReader(transport, stdout_buffer),
+        None
+        if stderr_buffer is None or stderr_buffer is stdout_buffer
+        else _TextReader(transport, stderr_buffer),
     )
 
 
 def _sync_text_readers(
     open_response: Callable[[], httpx.Response],
-) -> tuple[SyncTextReader, SyncTextReader]:
-    transport = _SyncTextTransport(open_response)
+    *,
+    stdout: int = subprocess.PIPE,
+    stderr: int = subprocess.PIPE,
+) -> tuple[SyncTextReader | None, SyncTextReader | None]:
+    stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
+    if stdout_buffer is None and stderr_buffer is None:
+        return None, None
+    transport = _SyncTextTransport(
+        open_response,
+        {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
+    )
     return (
-        _SyncTextReader(transport, ProcessLogStream.STDOUT),
-        _SyncTextReader(transport, ProcessLogStream.STDERR),
+        None if stdout_buffer is None else _SyncTextReader(transport, stdout_buffer),
+        None
+        if stderr_buffer is None or stderr_buffer is stdout_buffer
+        else _SyncTextReader(transport, stderr_buffer),
     )

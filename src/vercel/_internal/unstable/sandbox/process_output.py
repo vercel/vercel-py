@@ -61,6 +61,26 @@ class ProcessOutputRouter:
         return stdout, stderr
 
 
+def _validate_reader_destination(
+    destination: object, *, name: str, allow_stdout_merge: bool = False
+) -> int:
+    """Validate a Popen-style destination for a live process reader.
+
+    Live readers support only the ``subprocess`` sentinels: ``PIPE``,
+    ``DEVNULL``, and (for stderr) ``STDOUT``. Inherit and file-sink modes
+    exist only on ``run_process``, which routes completed output.
+    """
+    if isinstance(destination, int):
+        if destination == subprocess.STDOUT:
+            if allow_stdout_merge:
+                return subprocess.STDOUT
+            raise ValueError("STDOUT is only supported for stderr")
+        if destination == subprocess.PIPE or destination == subprocess.DEVNULL:
+            return destination
+        raise ValueError(f"unsupported {name} value: {destination}")
+    raise TypeError(f"{name} must be subprocess.PIPE, subprocess.DEVNULL, or subprocess.STDOUT")
+
+
 def _resolve_target(
     destination: TextIO | int | None, *, inherited: TextIO, name: str
 ) -> _OutputTarget:
