@@ -80,7 +80,12 @@ class _WriteFile:
 
 @dataclass(frozen=True, slots=True)
 class DirectoryEntry:
-    """Describe one entry returned by a sandbox directory listing."""
+    """Describe one entry returned by a sandbox directory listing.
+
+    Attributes:
+        path: Entry name relative to the listed directory, not a full path.
+        kind: Filesystem entry type.
+    """
 
     path: str
     kind: Literal["file", "directory", "symlink", "other"]
@@ -193,7 +198,7 @@ class SnapshotRetention(_InputModel):
     """Configure automatic snapshot retention.
 
     Attributes:
-        count: Maximum number of retained snapshots.
+        count: Maximum number of retained snapshots, between 1 and 100.
         expiration: Lifetime applied to retained snapshots.
         delete_evicted: Whether snapshots removed from the retention window are
             deleted from the project.

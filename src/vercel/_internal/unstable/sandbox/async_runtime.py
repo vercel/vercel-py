@@ -77,9 +77,10 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
 class Process(_ProcessHandleState):
     """Control and inspect an asynchronously running sandbox process.
 
-    The ``stdout`` and ``stderr`` readers consume the process log stream and
-    may each be read only once. A reader is ``None`` when its stream was
-    dropped with ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
+    The ``stdout`` and ``stderr`` readers each consume their process log
+    stream once; reads make forward progress through the stream and cannot
+    rewind. A reader is ``None`` when its stream was dropped with
+    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
     """
 
     __slots__ = ("_service", "stderr", "stdout")
@@ -110,7 +111,12 @@ class Process(_ProcessHandleState):
         return self
 
     async def wait(self) -> int:
-        """Wait for the process to exit and return its exit code."""
+        """Wait for the process to exit and return its exit code.
+
+        Raises:
+            SandboxResponseError: If the service response omits the process
+                return code.
+        """
         payload = await self._service.get_process(
             session_id=self._session_id, process_id=self.id, wait=True
         )
@@ -217,6 +223,10 @@ class SandboxFilesystem:
             path: Absolute path or path relative to ``cwd``.
             cwd: Base directory for a relative path.
             recursive: Whether to create missing parent directories.
+
+        Raises:
+            SandboxPathNotFoundError: If a parent directory is missing and
+                ``recursive`` is false.
         """
         await self._service.mkdir(
             session_id=self._session_id(),
@@ -234,6 +244,9 @@ class SandboxFilesystem:
 
         Returns:
             The complete file contents.
+
+        Raises:
+            SandboxPathNotFoundError: If the file does not exist.
         """
         return await self._service.read_bytes(
             session_id=self._session_id(),
@@ -259,6 +272,9 @@ class SandboxFilesystem:
 
         Returns:
             The decoded file contents.
+
+        Raises:
+            SandboxPathNotFoundError: If the file does not exist.
         """
         return (await self.read_bytes(path, cwd=cwd)).decode(encoding, errors=errors)
 
@@ -277,6 +293,9 @@ class SandboxFilesystem:
             data: File contents.
             cwd: Base directory for a relative path.
             mode: Optional POSIX permission bits for the file.
+
+        Raises:
+            SandboxFilesystemWriteError: If the write request fails.
         """
         await self._write_files(
             [_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode)], cwd=cwd
@@ -301,6 +320,9 @@ class SandboxFilesystem:
             encoding: Text encoding used to encode ``text``.
             errors: Encoding error policy.
             mode: Optional POSIX permission bits for the file.
+
+        Raises:
+            SandboxFilesystemWriteError: If the write request fails.
         """
         await self._write_files(
             [
@@ -323,7 +345,10 @@ class SandboxFilesystem:
         )
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SandboxFilesystemBatch":
-        """Create an async context manager for one atomic write request.
+        """Create an async context manager that stages files for one write request.
+
+        The staged files are uploaded together, but the upload is not
+        all-or-nothing: a failure partway through can leave some files written.
 
         Args:
             cwd: Base directory shared by staged relative paths.
@@ -334,7 +359,11 @@ class SandboxFilesystem:
         return SandboxFilesystemBatch(write_files=lambda files: self._write_files(files, cwd=cwd))
 
     async def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
-        """Return whether a filesystem entry exists."""
+        """Return whether a filesystem entry exists.
+
+        Raises:
+            SandboxFilesystemCommandError: If the remote check fails.
+        """
         return await self._service.exists(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -343,7 +372,11 @@ class SandboxFilesystem:
         )
 
     async def is_file(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
-        """Return whether a path exists and is a regular file."""
+        """Return whether a path exists and is a regular file.
+
+        Raises:
+            SandboxFilesystemCommandError: If the remote check fails.
+        """
         return await self._service.is_file(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -352,7 +385,11 @@ class SandboxFilesystem:
         )
 
     async def is_dir(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
-        """Return whether a path exists and is a directory."""
+        """Return whether a path exists and is a directory.
+
+        Raises:
+            SandboxFilesystemCommandError: If the remote check fails.
+        """
         return await self._service.is_dir(
             session_id=self._session_id(),
             path=_coerce_remote_path(path),
@@ -371,6 +408,10 @@ class SandboxFilesystem:
 
         Returns:
             The directory entries returned by the remote filesystem.
+
+        Raises:
+            SandboxFilesystemCommandError: If the listing fails, including
+                when the directory does not exist.
         """
         return await self._service.listdir(
             session_id=self._session_id(),
@@ -394,6 +435,10 @@ class SandboxFilesystem:
             cwd: Base directory for a relative path.
             recursive: Whether to recursively remove a directory.
             missing_ok: Whether a missing path should be ignored.
+
+        Raises:
+            SandboxFilesystemCommandError: If removal fails, including when
+                the path is missing and ``missing_ok`` is false.
         """
         await self._service.remove(
             session_id=self._session_id(),
@@ -417,6 +462,9 @@ class SandboxFilesystem:
             source: Existing absolute or relative path.
             destination: New absolute or relative path.
             cwd: Base directory for relative paths.
+
+        Raises:
+            SandboxFilesystemCommandError: If the rename fails.
         """
         await self._service.rename(
             session_id=self._session_id(),
@@ -431,7 +479,8 @@ class SandboxFilesystemBatch(_SandboxFilesystemBatchBase):
     """Stage multiple file writes for one async filesystem request.
 
     Create batches with ``SandboxFilesystem.batch`` and use them only inside
-    their async context.
+    their async context. Exiting the context uploads the staged files and
+    raises ``SandboxFilesystemWriteError`` if the write request fails.
     """
 
     __slots__ = ("_write_files",)
@@ -497,7 +546,8 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             cwd: Process working directory.
             env: Environment variables added to the process.
             sudo: Whether to run with elevated privileges.
-            kill_after: Duration after which the service kills the process.
+            kill_after: Duration after which the service kills the process
+                with ``SIGKILL``.
             check: Whether to raise for a nonzero exit code.
             stdout: Writable text stream or subprocess output sentinel for
                 stdout. ``None`` inherits the local stdout stream.
@@ -557,6 +607,13 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         """Start a process without waiting for it to exit.
 
         Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process.
+            sudo: Whether to run with elevated privileges.
+            kill_after: Duration after which the service kills the process
+                with ``SIGKILL``.
             stdout: ``subprocess.PIPE`` (default) for a live reader or
                 ``subprocess.DEVNULL`` to drop the stream.
             stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
@@ -608,7 +665,10 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> Self:
-        """Increase the session execution time limit by a duration."""
+        """Increase the session execution time limit by a duration.
+
+        The service rejects durations shorter than one second.
+        """
         payload = await self._service.extend_runtime_session_timeout(
             session_id=self.id, duration=parse_required_duration_seconds(duration)
         )
@@ -748,12 +808,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     ) -> Process:
         """Start a process in the current session without waiting for it.
 
-        Args:
-            stdout: ``subprocess.PIPE`` (default) for a live reader or
-                ``subprocess.DEVNULL`` to drop the stream.
-            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
-                ``subprocess.STDOUT`` to merge stderr into the stdout reader
-                in arrival order.
+        See ``SandboxRuntimeSession.create_process`` for argument behavior.
+
+        Returns:
+            A handle for monitoring and controlling the process.
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
@@ -817,7 +875,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return page.snapshots
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> SandboxRuntimeSession:
-        """Increase the current session's execution time limit."""
+        """Increase the current session's execution time limit.
+
+        The service rejects durations shorter than one second.
+        """
         payload = await self._service.extend_runtime_session_timeout(
             session_id=self.current_session_id,
             duration=parse_required_duration_seconds(duration),
@@ -866,6 +927,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         Only non-``None`` values are sent, except ``snapshot_retention`` where
         explicitly passing ``None`` removes the retention policy.
 
+        Args:
+            current_snapshot_id: Snapshot the sandbox restores from on its
+                next resume.
+
         Returns:
             This handle refreshed with the updated sandbox state.
         """
@@ -910,7 +975,8 @@ class CreateSandboxOperation:
 
     Await the operation to create a sandbox that remains alive, or use it as an
     async context manager to destroy the created sandbox on exit. An operation
-    can be consumed only once.
+    can be consumed only once. Exiting the context raises
+    ``SandboxCleanupError`` if destroying the sandbox fails.
     """
 
     def __init__(self, *, service: SandboxService, params: _CreateSandboxParams) -> None:
@@ -989,7 +1055,8 @@ class CreateRuntimeSessionOperation:
     Await the operation to return the active current session, resuming the
     sandbox into a replacement session when necessary. Use it as an async
     context manager to stop the returned session on exit. An operation can be
-    consumed only once.
+    consumed only once. Exiting the context raises ``SandboxCleanupError`` if
+    stopping the session fails.
     """
 
     def __init__(

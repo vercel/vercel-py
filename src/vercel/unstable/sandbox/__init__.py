@@ -84,8 +84,9 @@ def create_sandbox(
 ) -> CreateSandboxOperation:
     """Prepare an asynchronous sandbox creation operation.
 
-    The returned operation may be awaited to keep the sandbox alive, or used
-    as an async context manager to destroy the sandbox on exit.
+    Awaiting the returned operation creates a sandbox that is not destroyed
+    automatically; using it as an async context manager destroys the sandbox
+    on exit instead.
 
     Args:
         project_id: Project that owns the sandbox. Uses the active credentials
@@ -101,11 +102,16 @@ def create_sandbox(
         network_policy: Network access policy sent to the Sandbox API.
         env: Environment variables for the sandbox.
         tags: Metadata tags used to organize and query sandboxes.
-        snapshot_expiration: Default lifetime for snapshots.
+        snapshot_expiration: Default lifetime for snapshots created from this
+            sandbox.
         snapshot_retention: Automatic snapshot retention policy.
 
     Returns:
         A single-use awaitable and async context manager for the new sandbox.
+
+    Raises:
+        SandboxTerminalStateError: If creation reaches a terminal failure
+            state. Raised when the operation is awaited or entered.
     """
     return _create_sandbox_operation(
         _service(),
@@ -197,7 +203,8 @@ def query_sessions(
         name: Sandbox name used to restrict the results.
         page_size: Maximum number of sessions fetched per API request.
         cursor: Cursor at which to begin pagination.
-        sort_order: Result order, either ``"asc"`` or ``"desc"``.
+        sort_order: Result order by creation time, either ``"asc"`` or
+            ``"desc"``.
 
     Returns:
         An async iterator that transparently follows pagination cursors.
@@ -227,7 +234,8 @@ def query_snapshots(
         name: Sandbox name used to restrict the results.
         page_size: Maximum number of snapshots fetched per API request.
         cursor: Cursor at which to begin pagination.
-        sort_order: Result order, either ``"asc"`` or ``"desc"``.
+        sort_order: Result order by creation time, either ``"asc"`` or
+            ``"desc"``.
 
     Returns:
         An async iterator that transparently follows pagination cursors.

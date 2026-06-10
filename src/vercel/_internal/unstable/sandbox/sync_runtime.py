@@ -75,9 +75,10 @@ def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTer
 class SyncProcess(_ProcessHandleState):
     """Control and inspect a synchronously running sandbox process.
 
-    The ``stdout`` and ``stderr`` readers consume the process log stream and
-    may each be read only once. A reader is ``None`` when its stream was
-    dropped with ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
+    The ``stdout`` and ``stderr`` readers each consume their process log
+    stream once; reads make forward progress through the stream and cannot
+    rewind. A reader is ``None`` when its stream was dropped with
+    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
     """
 
     __slots__ = ("_service", "stderr", "stdout")
@@ -112,7 +113,12 @@ class SyncProcess(_ProcessHandleState):
         return self
 
     def wait(self) -> int:
-        """Wait for the process to exit and return its exit code."""
+        """Wait for the process to exit and return its exit code.
+
+        Raises:
+            SandboxResponseError: If the service response omits the process
+                return code.
+        """
         payload = iter_coroutine(
             self._service.get_process(session_id=self._session_id, process_id=self.id, wait=True)
         )
@@ -144,7 +150,12 @@ class SyncProcess(_ProcessHandleState):
         return stdout, stderr
 
     def send_signal(self, signal: int | str | signal_module.Signals) -> None:
-        """Send a numeric or named signal to the running process."""
+        """Send a signal to the running process.
+
+        Args:
+            signal: Numeric signal, ``Signals`` member, or name such as
+                ``"TERM"`` or ``"SIGTERM"``.
+        """
         payload = iter_coroutine(
             self._service.send_process_signal(
                 session_id=self._session_id,
@@ -210,7 +221,17 @@ class SyncSandboxFilesystem:
     def mkdir(
         self, path: RemotePath, *, cwd: RemotePath | None = None, recursive: bool = True
     ) -> None:
-        """Create a directory, optionally including missing parents."""
+        """Create a directory.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+            recursive: Whether to create missing parent directories.
+
+        Raises:
+            SandboxPathNotFoundError: If a parent directory is missing and
+                ``recursive`` is false.
+        """
         iter_coroutine(
             self._service.mkdir(
                 session_id=self._session_id(),
@@ -221,7 +242,18 @@ class SyncSandboxFilesystem:
         )
 
     def read_bytes(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bytes:
-        """Read a file as bytes."""
+        """Read a file as bytes.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+
+        Returns:
+            The complete file contents.
+
+        Raises:
+            SandboxPathNotFoundError: If the file does not exist.
+        """
         return iter_coroutine(
             self._service.read_bytes(
                 session_id=self._session_id(),
@@ -238,7 +270,20 @@ class SyncSandboxFilesystem:
         encoding: str = "utf-8",
         errors: str = "strict",
     ) -> str:
-        """Read and decode a text file."""
+        """Read and decode a text file.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+            encoding: Text encoding used to decode the file.
+            errors: Decoding error policy.
+
+        Returns:
+            The decoded file contents.
+
+        Raises:
+            SandboxPathNotFoundError: If the file does not exist.
+        """
         return self.read_bytes(path, cwd=cwd).decode(encoding, errors=errors)
 
     def write_bytes(
@@ -249,7 +294,17 @@ class SyncSandboxFilesystem:
         cwd: RemotePath | None = None,
         mode: int | None = None,
     ) -> None:
-        """Write bytes to a file, replacing any existing contents."""
+        """Write bytes to a file, replacing any existing contents.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            data: File contents.
+            cwd: Base directory for a relative path.
+            mode: Optional POSIX permission bits for the file.
+
+        Raises:
+            SandboxFilesystemWriteError: If the write request fails.
+        """
         self._write_files(
             [_WriteFile(path=_coerce_remote_path(path), content=data, mode=mode)], cwd=cwd
         )
@@ -264,7 +319,19 @@ class SyncSandboxFilesystem:
         errors: str = "strict",
         mode: int | None = None,
     ) -> None:
-        """Encode and write text to a file."""
+        """Encode and write text to a file.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            text: Text to write.
+            cwd: Base directory for a relative path.
+            encoding: Text encoding used to encode ``text``.
+            errors: Encoding error policy.
+            mode: Optional POSIX permission bits for the file.
+
+        Raises:
+            SandboxFilesystemWriteError: If the write request fails.
+        """
         self._write_files(
             [
                 _WriteFile(
@@ -286,7 +353,10 @@ class SyncSandboxFilesystem:
         )
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SyncSandboxFilesystemBatch":
-        """Create a context manager for one atomic write request.
+        """Create a context manager that stages files for one write request.
+
+        The staged files are uploaded together, but the upload is not
+        all-or-nothing: a failure partway through can leave some files written.
 
         Args:
             cwd: Base directory shared by staged relative paths.
@@ -299,7 +369,11 @@ class SyncSandboxFilesystem:
         )
 
     def exists(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
-        """Return whether a filesystem entry exists."""
+        """Return whether a filesystem entry exists.
+
+        Raises:
+            SandboxFilesystemCommandError: If the remote check fails.
+        """
         return iter_coroutine(
             self._service.exists(
                 session_id=self._session_id(),
@@ -310,7 +384,11 @@ class SyncSandboxFilesystem:
         )
 
     def is_file(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
-        """Return whether a path exists and is a regular file."""
+        """Return whether a path exists and is a regular file.
+
+        Raises:
+            SandboxFilesystemCommandError: If the remote check fails.
+        """
         return iter_coroutine(
             self._service.is_file(
                 session_id=self._session_id(),
@@ -321,7 +399,11 @@ class SyncSandboxFilesystem:
         )
 
     def is_dir(self, path: RemotePath, *, cwd: RemotePath | None = None) -> bool:
-        """Return whether a path exists and is a directory."""
+        """Return whether a path exists and is a directory.
+
+        Raises:
+            SandboxFilesystemCommandError: If the remote check fails.
+        """
         return iter_coroutine(
             self._service.is_dir(
                 session_id=self._session_id(),
@@ -334,7 +416,19 @@ class SyncSandboxFilesystem:
     def listdir(
         self, path: RemotePath = ".", *, cwd: RemotePath | None = None
     ) -> list[DirectoryEntry]:
-        """List the direct children of a directory."""
+        """List the direct children of a directory.
+
+        Args:
+            path: Directory to list.
+            cwd: Base directory for a relative path.
+
+        Returns:
+            The directory entries returned by the remote filesystem.
+
+        Raises:
+            SandboxFilesystemCommandError: If the listing fails, including
+                when the directory does not exist.
+        """
         return iter_coroutine(
             self._service.listdir(
                 session_id=self._session_id(),
@@ -352,7 +446,18 @@ class SyncSandboxFilesystem:
         recursive: bool = False,
         missing_ok: bool = False,
     ) -> None:
-        """Remove a file or directory."""
+        """Remove a file or directory.
+
+        Args:
+            path: Absolute path or path relative to ``cwd``.
+            cwd: Base directory for a relative path.
+            recursive: Whether to recursively remove a directory.
+            missing_ok: Whether a missing path should be ignored.
+
+        Raises:
+            SandboxFilesystemCommandError: If removal fails, including when
+                the path is missing and ``missing_ok`` is false.
+        """
         iter_coroutine(
             self._service.remove(
                 session_id=self._session_id(),
@@ -371,7 +476,16 @@ class SyncSandboxFilesystem:
         *,
         cwd: RemotePath | None = None,
     ) -> None:
-        """Rename or move a filesystem entry."""
+        """Rename or move a filesystem entry.
+
+        Args:
+            source: Existing absolute or relative path.
+            destination: New absolute or relative path.
+            cwd: Base directory for relative paths.
+
+        Raises:
+            SandboxFilesystemCommandError: If the rename fails.
+        """
         iter_coroutine(
             self._service.rename(
                 session_id=self._session_id(),
@@ -387,7 +501,8 @@ class SyncSandboxFilesystemBatch(_SandboxFilesystemBatchBase):
     """Stage multiple file writes for one synchronous filesystem request.
 
     Create batches with ``SyncSandboxFilesystem.batch`` and use them only
-    inside their context.
+    inside their context. Exiting the context uploads the staged files and
+    raises ``SandboxFilesystemWriteError`` if the write request fails.
     """
 
     __slots__ = ("_write_files",)
@@ -415,7 +530,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
     """Represent one session in a sandbox's execution history.
 
     A sandbox has at most one active current session. The handle is a context
-    manager that stops this session on exit.
+    manager that stops this session on exit; exiting raises
+    ``SandboxCleanupError`` if stopping the session fails.
     """
 
     __slots__ = ("_service", "fs")
@@ -471,7 +587,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             cwd: Process working directory.
             env: Environment variables added to the process.
             sudo: Whether to run with elevated privileges.
-            kill_after: Duration after which the service kills the process.
+            kill_after: Duration after which the service kills the process
+                with ``SIGKILL``.
             check: Whether to raise for a nonzero exit code.
             stdout: Writable text stream or subprocess output sentinel for
                 stdout. ``None`` inherits the local stdout stream.
@@ -533,11 +650,21 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         """Start a process without waiting for it to exit.
 
         Args:
+            command: Executable or command name.
+            args: Command arguments, excluding the executable.
+            cwd: Process working directory.
+            env: Environment variables added to the process.
+            sudo: Whether to run with elevated privileges.
+            kill_after: Duration after which the service kills the process
+                with ``SIGKILL``.
             stdout: ``subprocess.PIPE`` (default) for a live reader or
                 ``subprocess.DEVNULL`` to drop the stream.
             stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
                 ``subprocess.STDOUT`` to merge stderr into the stdout reader
                 in arrival order.
+
+        Returns:
+            A handle for monitoring and controlling the process.
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
@@ -577,7 +704,10 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
     def extend_execution_time_limit(self, duration: DurationInput) -> Self:
-        """Increase the session execution time limit by a duration."""
+        """Increase the session execution time limit by a duration.
+
+        The service rejects durations shorter than one second.
+        """
         payload = iter_coroutine(
             self._service.extend_runtime_session_timeout(
                 session_id=self.id, duration=parse_required_duration_seconds(duration)
@@ -618,7 +748,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
 
     A sandbox has at most one active current session. Process and filesystem
     operations target the session recorded by this handle. The handle is a
-    context manager that destroys the sandbox on exit.
+    context manager that destroys the sandbox on exit; exiting raises
+    ``SandboxCleanupError`` if destroying the sandbox fails.
     """
 
     __slots__ = ("_service", "fs")
@@ -735,12 +866,10 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     ) -> SyncProcess:
         """Start a process in the current session without waiting for it.
 
-        Args:
-            stdout: ``subprocess.PIPE`` (default) for a live reader or
-                ``subprocess.DEVNULL`` to drop the stream.
-            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
-                ``subprocess.STDOUT`` to merge stderr into the stdout reader
-                in arrival order.
+        See ``SyncSandboxRuntimeSession.create_process`` for argument behavior.
+
+        Returns:
+            A handle for monitoring and controlling the process.
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
@@ -806,7 +935,10 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         ).snapshots
 
     def extend_execution_time_limit(self, duration: DurationInput) -> SyncSandboxRuntimeSession:
-        """Increase the current session's execution time limit."""
+        """Increase the current session's execution time limit.
+
+        The service rejects durations shorter than one second.
+        """
         payload = iter_coroutine(
             self._service.extend_runtime_session_timeout(
                 session_id=self.current_session_id,
@@ -862,6 +994,10 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
 
         Only non-``None`` values are sent, except ``snapshot_retention`` where
         explicitly passing ``None`` removes the retention policy.
+
+        Args:
+            current_snapshot_id: Snapshot the sandbox restores from on its
+                next resume.
 
         Returns:
             This handle refreshed with the updated sandbox state.

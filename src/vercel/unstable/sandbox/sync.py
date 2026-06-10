@@ -98,7 +98,8 @@ def create_sandbox(
         network_policy: Network access policy sent to the Sandbox API.
         env: Environment variables for the sandbox.
         tags: Metadata tags used to organize and query sandboxes.
-        snapshot_expiration: Default lifetime for snapshots.
+        snapshot_expiration: Default lifetime for snapshots created from this
+            sandbox.
         snapshot_retention: Automatic snapshot retention policy.
 
     Returns:
@@ -197,7 +198,8 @@ def query_sessions(
         name: Sandbox name used to restrict the results.
         page_size: Maximum number of sessions fetched per API request.
         cursor: Cursor at which to begin pagination.
-        sort_order: Result order, either ``"asc"`` or ``"desc"``.
+        sort_order: Result order by creation time, either ``"asc"`` or
+            ``"desc"``.
 
     Returns:
         An iterator that transparently follows pagination cursors.
@@ -227,7 +229,8 @@ def query_snapshots(
         name: Sandbox name used to restrict the results.
         page_size: Maximum number of snapshots fetched per API request.
         cursor: Cursor at which to begin pagination.
-        sort_order: Result order, either ``"asc"`` or ``"desc"``.
+        sort_order: Result order by creation time, either ``"asc"`` or
+            ``"desc"``.
 
     Returns:
         An iterator that transparently follows pagination cursors.
