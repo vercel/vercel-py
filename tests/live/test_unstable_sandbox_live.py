@@ -6,10 +6,12 @@ import pytest
 
 from ._unstable_scenarios import (
     AsyncDriver,
+    NetworkPolicyObservation,
     PersistentObservation,
     ProcessFilesystemObservation,
     SyncDriver,
     WorkspaceObservation,
+    network_policy_flow,
     persistent_snapshot_flow,
     process_filesystem_flow,
     workspace_command_flow,
@@ -62,6 +64,16 @@ def _assert_process_filesystem(result: ProcessFilesystemObservation) -> None:
     assert result.invalid_write_failed
 
 
+def _assert_network_policy(result: NetworkPolicyObservation) -> None:
+    assert result == NetworkPolicyObservation(
+        allow_all_created=True,
+        custom_returned=True,
+        header_names_redacted=True,
+        deny_all_returned=True,
+        resources_cleaned_up=True,
+    )
+
+
 @requires_sandbox_credentials
 @pytest.mark.live
 @pytest.mark.asyncio
@@ -83,6 +95,18 @@ async def test_process_filesystem_flow_has_sync_async_semantic_parity() -> None:
 
     _assert_process_filesystem(async_result)
     _assert_process_filesystem(sync_result)
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_network_policy_flow_has_sync_async_semantic_parity() -> None:
+    async_result = await network_policy_flow(AsyncDriver(), _name("network-policy", "async"))
+    sync_result = await network_policy_flow(SyncDriver(), _name("network-policy", "sync"))
+
+    _assert_network_policy(async_result)
+    _assert_network_policy(sync_result)
+    assert async_result == sync_result
 
 
 @requires_sandbox_credentials

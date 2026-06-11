@@ -2,16 +2,45 @@
 """Run a small async code-review workflow in an unstable Sandbox."""
 
 import asyncio
+import os
 from datetime import timedelta
 
 from dotenv import load_dotenv
 
 from vercel.unstable import sandbox
+from vercel.unstable.sandbox import (
+    NetworkPolicy,
+    NetworkPolicyRule,
+    NetworkPolicyTransform,
+)
 
 load_dotenv()
 
 
-async def review_code(files: list[tuple[str, str]], review_agent: str) -> str:
+def github_network_policy(github_token: str | None) -> NetworkPolicy:
+    rules: tuple[NetworkPolicyRule, ...] = ()
+    if github_token:
+        rules = (
+            NetworkPolicyRule(
+                transform=[
+                    NetworkPolicyTransform(
+                        headers={
+                            "Authorization": f"Bearer {github_token}",
+                            "X-GitHub-Api-Version": "2022-11-28",
+                        }
+                    )
+                ]
+            ),
+        )
+
+    return NetworkPolicy.custom(allow={"api.github.com": rules})
+
+
+async def review_code(
+    files: list[tuple[str, str]],
+    review_agent: str,
+    github_token: str | None = None,
+) -> str:
     # `async with sandbox.create_sandbox(...)` gives you automatic cleanup:
     # leaving the block destroys the sandbox, even if the workflow raises.
     #
@@ -21,6 +50,9 @@ async def review_code(files: list[tuple[str, str]], review_agent: str) -> str:
     async with sandbox.create_sandbox(
         runtime="python3.13",
         execution_time_limit=timedelta(minutes=1),
+        # The token is injected into requests to api.github.com by the network
+        # policy. It is never exposed to the sandbox process or filesystem.
+        network_policy=github_network_policy(github_token),
     ) as box:
         # The sandbox returned by `create_sandbox` already has a current runtime
         # session. Most workflows can call commands on `box` and filesystem
@@ -66,6 +98,7 @@ async def main() -> None:
                 ),
             ),
         ],
+        github_token=os.getenv("GITHUB_TOKEN"),
         review_agent="""\
 import sys
 from pathlib import Path

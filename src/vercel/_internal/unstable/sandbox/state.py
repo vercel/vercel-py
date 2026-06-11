@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
-from vercel._internal.unstable.sandbox.models import JSONObject, JSONValue, SandboxStatus
+from vercel._internal.unstable.sandbox.models import JSONObject, NetworkPolicy, SandboxStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +45,7 @@ class SandboxRuntimeSessionState:
     memory: int | None = None
     vcpus: int | None = None
     execution_time_limit: timedelta | None = None
-    network_policy: JSONValue | None = None
+    network_policy: NetworkPolicy | None = None
     requested_at: int | None = None
     started_at: int | None = None
     stopped_at: int | None = None
@@ -74,7 +74,7 @@ class SandboxState:
     memory: int | None = None
     vcpus: int | None = None
     execution_time_limit: timedelta | None = None
-    network_policy: JSONValue | None = None
+    network_policy: NetworkPolicy | None = None
     snapshot_expiration: timedelta | None = None
     snapshot_retention: SnapshotRetentionState | None = None
     status_updated_at: int | None = None

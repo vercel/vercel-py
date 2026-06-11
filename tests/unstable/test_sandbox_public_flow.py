@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from itertools import islice
+from typing import Any
 
 import httpx
 import pytest
@@ -19,6 +20,13 @@ from vercel._internal.unstable.session import get_active_session
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
     GitSource,
+    NetworkPolicy,
+    NetworkPolicyKeyValueMatcher,
+    NetworkPolicyMatcher,
+    NetworkPolicyRequestMatcher,
+    NetworkPolicyRule,
+    NetworkPolicySubnets,
+    NetworkPolicyTransform,
     SandboxApiError,
     SandboxCleanupError,
     SandboxQuery,
@@ -49,7 +57,7 @@ def _sandbox_response(
     status: str = "running",
     session_status: str | None = None,
     project_id: str = "prj_123",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "sandbox": {
             "name": name,
@@ -151,6 +159,120 @@ def _logs_response(*records: object) -> httpx.Response:
             record if isinstance(record, str) else json.dumps(record) for record in records
         )
         + "\n",
+    )
+
+
+def _network_policy_matcher() -> NetworkPolicyRequestMatcher:
+    return NetworkPolicyRequestMatcher(
+        path=NetworkPolicyMatcher.starts_with("/v1/"),
+        method=["POST"],
+        query=[
+            NetworkPolicyKeyValueMatcher(
+                key=NetworkPolicyMatcher.exact("stream"),
+                value=NetworkPolicyMatcher.regex("^(true|false)$"),
+            )
+        ],
+        headers=[
+            NetworkPolicyKeyValueMatcher(
+                key=NetworkPolicyMatcher.exact("authorization"),
+                value=NetworkPolicyMatcher.starts_with("Bearer "),
+            )
+        ],
+    )
+
+
+def _authored_network_policy() -> NetworkPolicy:
+    matcher = _network_policy_matcher()
+    return NetworkPolicy.custom(
+        allow={
+            "example.com": (),
+            "api.example.com": [
+                NetworkPolicyRule(
+                    match=matcher,
+                    transform=[
+                        NetworkPolicyTransform(
+                            headers={"Authorization": "Bearer secret", "X-Trace": "one"}
+                        ),
+                        NetworkPolicyTransform(headers={"X-Trace": "two"}),
+                    ],
+                    forward_url="https://forward-proxy.internal/ingress/",
+                ),
+                NetworkPolicyRule(
+                    transform=[NetworkPolicyTransform(headers={"X-Fallback": "fallback"})]
+                ),
+            ],
+        },
+        subnets=NetworkPolicySubnets(
+            allow=["10.0.0.0/8"],
+            deny=["10.1.0.0/16"],
+        ),
+    )
+
+
+def _normalized_network_policy_response() -> dict[str, object]:
+    match = {
+        "path": {"startsWith": "/v1/"},
+        "method": ["POST"],
+        "queryString": [
+            {
+                "key": {"exact": "stream"},
+                "value": {"regex": "^(true|false)$"},
+            }
+        ],
+        "headers": [
+            {
+                "key": {"exact": "authorization"},
+                "value": {"startsWith": "Bearer "},
+            }
+        ],
+    }
+    return {
+        "mode": "custom",
+        "allowedDomains": ["example.com", "api.example.com"],
+        "allowedCIDRs": ["10.0.0.0/8"],
+        "deniedCIDRs": ["10.1.0.0/16"],
+        "injectionRules": [
+            {
+                "domain": "api.example.com",
+                "headerNames": ["Authorization", "X-Trace"],
+                "match": match,
+            },
+            {
+                "domain": "api.example.com",
+                "headerNames": ["X-Fallback"],
+            },
+        ],
+        "forwardRules": [
+            {
+                "domain": "api.example.com",
+                "forwardURL": "https://forward-proxy.internal/ingress/",
+                "match": match,
+            }
+        ],
+    }
+
+
+def _parsed_network_policy_response() -> NetworkPolicy:
+    matcher = _network_policy_matcher()
+    return NetworkPolicy.custom(
+        allow={
+            "example.com": (),
+            "api.example.com": [
+                NetworkPolicyRule(
+                    match=matcher,
+                    transform=[NetworkPolicyTransform(header_names=["Authorization", "X-Trace"])],
+                ),
+                NetworkPolicyRule(transform=[NetworkPolicyTransform(header_names=["X-Fallback"])]),
+                NetworkPolicyRule(
+                    match=matcher,
+                    forward_url="https://forward-proxy.internal/ingress/",
+                ),
+            ],
+        },
+        subnets=NetworkPolicySubnets(
+            allow=["10.0.0.0/8"],
+            deny=["10.1.0.0/16"],
+        ),
     )
 
 
@@ -313,6 +435,316 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
     assert handle.current_session.project_id == "prj_other"
     assert handle.routes == ()
     assert not hasattr(handle, "model_dump")
+
+
+@respx.mock
+async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_sandbox_response(),
+                "sandbox": {
+                    **_sandbox_response()["sandbox"],
+                    "networkPolicy": {"mode": "allow-all"},
+                },
+                "session": {
+                    **_sandbox_response()["session"],
+                    "networkPolicy": {"mode": "allow-all"},
+                },
+            },
+        )
+    )
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_sandbox_response(),
+                "sandbox": {
+                    **_sandbox_response()["sandbox"],
+                    "networkPolicy": {
+                        "allow": {"docs.example.com": []},
+                        "subnets": {"deny": ["192.0.2.0/24"]},
+                    },
+                },
+            },
+        )
+    )
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sandbox": {
+                    "name": "preview",
+                    "currentSessionId": "sbx_123",
+                    "networkPolicy": _normalized_network_policy_response(),
+                }
+            },
+        )
+    )
+    session_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/network-policy"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": {
+                    **_sandbox_response()["session"],
+                    "networkPolicy": {"mode": "deny-all"},
+                }
+            },
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(
+            name="preview",
+            runtime="python3.13",
+            network_policy=NetworkPolicy.allow_all(),
+        )
+        assert handle.network_policy == NetworkPolicy.allow_all()
+        assert handle.current_session is not None
+        assert handle.current_session.network_policy == NetworkPolicy.allow_all()
+
+        inspected = await sandbox.get_sandbox(name="preview")
+        assert inspected.network_policy == NetworkPolicy.custom(
+            allow={"docs.example.com": ()},
+            subnets=NetworkPolicySubnets(deny=["192.0.2.0/24"]),
+        )
+
+        authored = _authored_network_policy()
+        await handle.update(network_policy=authored)
+        assert handle.network_policy == _parsed_network_policy_response()
+
+        session = await handle.update_network_policy(NetworkPolicy.deny_all())
+        assert session.network_policy == NetworkPolicy.deny_all()
+        assert handle.current_session is session
+
+    assert json.loads(create_route.calls.last.request.content)["networkPolicy"] == {
+        "mode": "allow-all"
+    }
+    assert json.loads(update_route.calls.last.request.content)["networkPolicy"] == {
+        "allow": {
+            "example.com": [],
+            "api.example.com": [
+                {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
+                    "transform": [
+                        {
+                            "headers": {
+                                "Authorization": "Bearer secret",
+                                "X-Trace": "one",
+                            }
+                        },
+                        {"headers": {"X-Trace": "two"}},
+                    ],
+                    "forwardURL": "https://forward-proxy.internal/ingress/",
+                },
+                {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
+            ],
+        },
+        "subnets": {
+            "allow": ["10.0.0.0/8"],
+            "deny": ["10.1.0.0/16"],
+        },
+    }
+    assert json.loads(session_route.calls.last.request.content) == {"mode": "deny-all"}
+    assert get_route.called
+
+
+@respx.mock
+def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
+    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_sandbox_response(),
+                "sandbox": {
+                    **_sandbox_response()["sandbox"],
+                    "networkPolicy": _normalized_network_policy_response(),
+                },
+                "session": {
+                    **_sandbox_response()["session"],
+                    "networkPolicy": _normalized_network_policy_response(),
+                },
+            },
+        )
+    )
+
+    with vercel.session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(
+            name="preview",
+            runtime="python3.13",
+            network_policy=_authored_network_policy(),
+        )
+
+    assert handle.network_policy == _parsed_network_policy_response()
+    assert handle.current_session is not None
+    assert handle.current_session.network_policy == handle.network_policy
+    assert sandbox_sync.NetworkPolicy is NetworkPolicy
+    assert json.loads(route.calls.last.request.content)["networkPolicy"] == {
+        "allow": {
+            "example.com": [],
+            "api.example.com": [
+                {
+                    "match": {
+                        "path": {"startsWith": "/v1/"},
+                        "method": ["POST"],
+                        "queryString": [
+                            {
+                                "key": {"exact": "stream"},
+                                "value": {"regex": "^(true|false)$"},
+                            }
+                        ],
+                        "headers": [
+                            {
+                                "key": {"exact": "authorization"},
+                                "value": {"startsWith": "Bearer "},
+                            }
+                        ],
+                    },
+                    "transform": [
+                        {
+                            "headers": {
+                                "Authorization": "Bearer secret",
+                                "X-Trace": "one",
+                            }
+                        },
+                        {"headers": {"X-Trace": "two"}},
+                    ],
+                    "forwardURL": "https://forward-proxy.internal/ingress/",
+                },
+                {"transform": [{"headers": {"X-Fallback": "fallback"}}]},
+            ],
+        },
+        "subnets": {
+            "allow": ["10.0.0.0/8"],
+            "deny": ["10.1.0.0/16"],
+        },
+    }
+
+
+@respx.mock
+async def test_network_policy_structural_validation(mock_env_clear: None) -> None:
+    with pytest.raises(ValueError, match="headers and header_names"):
+        NetworkPolicyTransform(headers={"X": "secret"}, header_names=["X"])
+    with pytest.raises(ValueError, match="requires a key or value"):
+        NetworkPolicyKeyValueMatcher()
+    with pytest.raises(ValueError, match="at least one matching dimension"):
+        NetworkPolicyRequestMatcher()
+
+    headers = {"X-Secret": "value"}
+    rules = [NetworkPolicyRule(transform=[NetworkPolicyTransform(headers=headers)])]
+    allow = {"example.com": rules}
+    copied = NetworkPolicy.custom(allow=allow)
+    headers["X-Secret"] = "changed"
+    rules.clear()
+    allow.clear()
+    assert copied.allow["example.com"][0].transform[0].headers == {"X-Secret": "value"}
+    with pytest.raises(TypeError):
+        hash(copied)
+    with pytest.raises(TypeError):
+        copied.allow["other.example.com"] = ()  # type: ignore[index]
+
+    malformed_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    **_sandbox_response(),
+                    "sandbox": {
+                        **_sandbox_response()["sandbox"],
+                        "networkPolicy": {
+                            "mode": "custom",
+                            "injectionRules": [
+                                {
+                                    "domain": "example.com",
+                                    "headerNames": "X-Secret",
+                                }
+                            ],
+                        },
+                    },
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    **_sandbox_response(),
+                    "sandbox": {
+                        **_sandbox_response()["sandbox"],
+                        "networkPolicy": {
+                            "allow": {
+                                "example.com": [
+                                    {
+                                        "match": {
+                                            "path": {
+                                                "exact": "/v1",
+                                                "regex": "^/v1$",
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                    },
+                },
+            ),
+        ]
+    )
+    update_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_123/network-policy"
+    ).mock(return_value=httpx.Response(200, json={"session": _sandbox_response()["session"]}))
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        with pytest.raises(TypeError, match="must be a NetworkPolicy"):
+            await sandbox.create_sandbox(
+                name="preview",
+                network_policy={"mode": "allow-all"},  # type: ignore[arg-type]
+            )
+
+        with pytest.raises(SandboxResponseError, match="malformed network policy"):
+            await sandbox.get_sandbox(name="preview")
+        with pytest.raises(SandboxResponseError, match="malformed network policy"):
+            await sandbox.get_sandbox(name="preview")
+
+        redacted = NetworkPolicy.custom(
+            allow={
+                "example.com": [
+                    NetworkPolicyRule(transform=[NetworkPolicyTransform(header_names=["X-Secret"])])
+                ]
+            }
+        )
+        handle = sandbox.Sandbox(
+            payload=SandboxState(
+                name="preview",
+                current_session_id="sbx_123",
+            ),
+            service=get_sandbox_service(get_active_session()),
+        )
+        with pytest.raises(ValueError, match="redacted"):
+            await handle.update_network_policy(redacted)
+
+    assert malformed_route.called
+    assert not create_route.called
+    assert not update_route.called
 
 
 @respx.mock

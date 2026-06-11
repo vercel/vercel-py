@@ -20,6 +20,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_serializer,
+    field_validator,
 )
 
 from vercel._internal.http import (
@@ -40,6 +41,7 @@ from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
     JSONObject,
     JSONValue,
+    NetworkPolicy,
     ProcessLog,
     ProcessLogStream,
     SandboxResources,
@@ -50,6 +52,8 @@ from vercel._internal.unstable.sandbox.models import (
     SnapshotRetentionUpdate,
     TagFilter,
     _Omitted,
+    _parse_network_policy,
+    _serialize_network_policy,
     _WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import (
@@ -113,7 +117,7 @@ class _CreateSandboxRequest(_ApiRequestModel):
     timeout: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
-    network_policy: JSONValue | None = Field(default=None, serialization_alias="networkPolicy")
+    network_policy: NetworkPolicy | None = Field(default=None, serialization_alias="networkPolicy")
     env: dict[str, str] | None = None
     tags: dict[str, str] | None = None
     snapshot_expiration: SnapshotExpiration | None = Field(
@@ -135,6 +139,17 @@ class _CreateSandboxRequest(_ApiRequestModel):
     def _serialize_retention(self, value: SnapshotRetention | None) -> JSONObject | None:
         return None if value is None else value.to_api_dict()
 
+    @field_serializer("network_policy")
+    def _serialize_network_policy(self, value: NetworkPolicy | None) -> JSONObject | None:
+        return None if value is None else _serialize_network_policy(value)
+
+    @field_validator("network_policy", mode="before")
+    @classmethod
+    def _validate_network_policy(cls, value: object) -> NetworkPolicy | None:
+        if value is None or isinstance(value, NetworkPolicy):
+            return value
+        raise TypeError("network_policy must be a NetworkPolicy")
+
 
 class _UpdateSandboxRequest(_ApiRequestModel):
     runtime: str | None = None
@@ -142,7 +157,7 @@ class _UpdateSandboxRequest(_ApiRequestModel):
     timeout: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
-    network_policy: JSONValue | None = Field(default=None, serialization_alias="networkPolicy")
+    network_policy: NetworkPolicy | None = Field(default=None, serialization_alias="networkPolicy")
     env: dict[str, str] | None = None
     tags: dict[str, str] | None = None
     snapshot_expiration: SnapshotExpiration | None = Field(
@@ -157,6 +172,17 @@ class _UpdateSandboxRequest(_ApiRequestModel):
     @field_serializer("snapshot_expiration")
     def _serialize_snapshot_expiration(self, value: SnapshotExpiration | None) -> int | None:
         return None if value is None else to_ms_int(value.value)
+
+    @field_serializer("network_policy")
+    def _serialize_network_policy(self, value: NetworkPolicy | None) -> JSONObject | None:
+        return None if value is None else _serialize_network_policy(value)
+
+    @field_validator("network_policy", mode="before")
+    @classmethod
+    def _validate_network_policy(cls, value: object) -> NetworkPolicy | None:
+        if value is None or isinstance(value, NetworkPolicy):
+            return value
+        raise TypeError("network_policy must be a NetworkPolicy")
 
 
 class _GetSandboxRequest(_ApiRequestModel):
@@ -588,7 +614,7 @@ def _runtime_session_state(payload: _RuntimeSessionPayload) -> SandboxRuntimeSes
         memory=payload.memory,
         vcpus=payload.vcpus,
         execution_time_limit=parse_duration(payload.execution_time_limit, MILLISECOND),
-        network_policy=payload.network_policy,
+        network_policy=_parse_response_network_policy(payload.network_policy),
         requested_at=payload.requested_at,
         started_at=payload.started_at,
         stopped_at=payload.stopped_at,
@@ -618,7 +644,7 @@ def _sandbox_state(
         memory=payload.memory,
         vcpus=payload.vcpus,
         execution_time_limit=parse_duration(payload.execution_time_limit, MILLISECOND),
-        network_policy=payload.network_policy,
+        network_policy=_parse_response_network_policy(payload.network_policy),
         snapshot_expiration=parse_duration(payload.snapshot_expiration, MILLISECOND),
         snapshot_retention=(
             None
@@ -639,6 +665,16 @@ def _sandbox_state(
         _routes_attached=routes_attached,
         _current_session_attached=current_session_attached,
     )
+
+
+def _parse_response_network_policy(value: object) -> NetworkPolicy | None:
+    try:
+        return _parse_network_policy(value)
+    except (TypeError, ValueError) as exc:
+        raise SandboxResponseError(
+            "Sandbox API response included a malformed network policy",
+            data=value,
+        ) from exc
 
 
 def _snapshot_state(payload: _SnapshotPayload) -> SnapshotState:
@@ -880,7 +916,7 @@ class SandboxApiClient:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
-        network_policy: JSONValue | None = None,
+        network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
@@ -991,7 +1027,7 @@ class SandboxApiClient:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
-        network_policy: JSONValue | None = None,
+        network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
@@ -1132,7 +1168,7 @@ class SandboxApiClient:
         self,
         *,
         session_id: str,
-        network_policy: JSONValue,
+        network_policy: NetworkPolicy,
     ) -> SandboxRuntimeSessionState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
@@ -1142,7 +1178,7 @@ class SandboxApiClient:
                 session_id=session_id,
             ),
             credentials=credentials,
-            body=network_policy,
+            body=_serialize_network_policy(network_policy),
         )
         return _validate_response(_RuntimeSessionResponse, data).to_runtime_session()
 

@@ -13,7 +13,7 @@ from typing import Generic, Literal, TypeAlias, TypeVar
 from vercel._internal.unstable.sandbox.errors import SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
     JSONObject,
-    JSONValue,
+    NetworkPolicy,
     ProcessStatus,
     SandboxStatus,
     _WriteFile,
@@ -295,8 +295,8 @@ class RuntimeSessionHandleBase:
         return self._payload.execution_time_limit
 
     @property
-    def network_policy(self) -> JSONValue | None:
-        return copy.deepcopy(self._payload.network_policy)
+    def network_policy(self) -> NetworkPolicy | None:
+        return self._payload.network_policy
 
     @property
     def requested_at(self) -> int | None:
@@ -389,8 +389,8 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         return self._payload.execution_time_limit
 
     @property
-    def network_policy(self) -> JSONValue | None:
-        return copy.deepcopy(self._payload.network_policy)
+    def network_policy(self) -> NetworkPolicy | None:
+        return self._payload.network_policy
 
     @property
     def snapshot_expiration(self) -> timedelta | None:

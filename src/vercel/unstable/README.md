@@ -457,6 +457,63 @@ Snapshot expiration values accept `0` for no expiration or values from one day
 through ten years inclusive. Pass `snapshot_retention=None` explicitly to
 `Sandbox.update(...)` to clear an existing retention policy; omit the keyword
 to preserve the policy.
+
+Network policies use immutable typed values:
+
+```python
+from vercel.unstable.sandbox import (
+    NetworkPolicy,
+    NetworkPolicyRule,
+    NetworkPolicySubnets,
+    NetworkPolicyTransform,
+)
+
+
+allow_all = NetworkPolicy.allow_all()
+deny_all = NetworkPolicy.deny_all()
+custom = NetworkPolicy.custom(
+    allow={
+        "example.com": (),
+        "api.github.com": [
+            NetworkPolicyRule(
+                transform=[
+                    NetworkPolicyTransform(
+                        headers={"Authorization": "Bearer secret"}
+                    )
+                ]
+            )
+        ],
+    },
+    subnets=NetworkPolicySubnets(
+        allow=["1.1.1.1/32"],
+        deny=["192.0.2.0/24"],
+    ),
+)
+
+sandbox_ = await sandbox.create_sandbox(
+    runtime="python3.13",
+    network_policy=allow_all,
+)
+session = await sandbox_.update_network_policy(custom)
+```
+
+`NetworkPolicy.custom()` accepts a domain-to-rules mapping. Use an empty rule
+sequence to allow a domain without interception behavior. Empty custom
+policies are valid and deny all traffic. Inputs are defensively copied;
+published mappings and sequences are immutable.
+
+Authored `NetworkPolicyTransform` values contain `headers`. API responses
+redact those values and return `header_names` instead. A policy containing
+`header_names` is response state and cannot be submitted again.
+
+Layer-7 matching uses `NetworkPolicyRequestMatcher`,
+`NetworkPolicyKeyValueMatcher`, and `NetworkPolicyMatcher.exact(...)`,
+`.starts_with(...)`, or `.regex(...)`. Rules may also set `forward_url`.
+Matching and forwarding require backend feature enablement. The primary async
+example in `examples/unstable/sandbox_01_async_code_review.py` shows ordinary
+header injection for brokering an optional `GITHUB_TOKEN` without exposing it
+to the sandbox process or filesystem.
+
 `SandboxRuntimeSession.update_network_policy(...)` and
 `SandboxRuntimeSession.extend_execution_time_limit(...)` change the currently
 running session. Use `sandbox.query_sessions(...)` for project-level session

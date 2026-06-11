@@ -18,7 +18,7 @@ from vercel._internal.unstable.sandbox.errors import (
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
     DirectoryEntry,
-    JSONValue,
+    NetworkPolicy,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -238,7 +238,7 @@ class SandboxService:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
-        network_policy: JSONValue | None = None,
+        network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
@@ -312,7 +312,7 @@ class SandboxService:
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
-        network_policy: JSONValue | None = None,
+        network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
@@ -402,7 +402,7 @@ class SandboxService:
         )
 
     async def update_runtime_session_network_policy(
-        self, *, session_id: str, network_policy: JSONValue
+        self, *, session_id: str, network_policy: NetworkPolicy
     ) -> SandboxRuntimeSessionState:
         self._ensure_open()
         return await self._api_client.update_runtime_session_network_policy(

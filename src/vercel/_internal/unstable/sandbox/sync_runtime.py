@@ -21,7 +21,7 @@ from vercel._internal.unstable.sandbox.models import (
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
-    JSONValue,
+    NetworkPolicy,
     ProcessLog,
     SandboxQuery,
     SandboxResources,
@@ -716,7 +716,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(payload)
         return self
 
-    def update_network_policy(self, network_policy: JSONValue) -> Self:
+    def update_network_policy(self, network_policy: NetworkPolicy) -> Self:
         """Replace the session network policy."""
         payload = iter_coroutine(
             self._service.update_runtime_session_network_policy(
@@ -947,7 +947,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         )
         return self._apply_current_session_payload(payload)
 
-    def update_network_policy(self, network_policy: JSONValue) -> SyncSandboxRuntimeSession:
+    def update_network_policy(self, network_policy: NetworkPolicy) -> SyncSandboxRuntimeSession:
         """Replace the current session's network policy."""
         payload = iter_coroutine(
             self._service.update_runtime_session_network_policy(
@@ -983,7 +983,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         execution_time_limit: DurationInput = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
-        network_policy: JSONValue | None = None,
+        network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
@@ -1034,7 +1034,7 @@ def create_sandbox(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
-    network_policy: JSONValue | None = None,
+    network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,

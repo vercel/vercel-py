@@ -12,6 +12,10 @@ from typing import Any
 from vercel import unstable as vercel
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
+    NetworkPolicy,
+    NetworkPolicyRule,
+    NetworkPolicySubnets,
+    NetworkPolicyTransform,
     SandboxApiError,
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
@@ -66,6 +70,15 @@ class ProcessFilesystemObservation:
     invalid_write_failed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class NetworkPolicyObservation:
+    allow_all_created: bool
+    custom_returned: bool
+    header_names_redacted: bool
+    deny_all_returned: bool
+    resources_cleaned_up: bool
+
+
 class _ScenarioDriver:
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
@@ -78,6 +91,12 @@ class _ScenarioDriver:
         yield
 
     async def create_persistent(self, name: str, tags: dict[str, str]) -> Any:
+        raise NotImplementedError
+
+    async def create_with_network_policy(self, name: str, network_policy: NetworkPolicy) -> Any:
+        raise NotImplementedError
+
+    async def update_network_policy(self, box: Any, network_policy: NetworkPolicy) -> Any:
         raise NotImplementedError
 
     async def update(
@@ -202,6 +221,17 @@ class AsyncDriver(_ScenarioDriver):
             execution_time_limit=timedelta(minutes=2),
             tags=tags,
         )
+
+    async def create_with_network_policy(self, name: str, network_policy: NetworkPolicy) -> Any:
+        return await sandbox.create_sandbox(
+            name=name,
+            runtime="python3.13",
+            execution_time_limit=timedelta(minutes=2),
+            network_policy=network_policy,
+        )
+
+    async def update_network_policy(self, box: Any, network_policy: NetworkPolicy) -> Any:
+        return await box.update_network_policy(network_policy)
 
     async def update(
         self,
@@ -361,6 +391,17 @@ class SyncDriver(_ScenarioDriver):
             execution_time_limit=timedelta(minutes=2),
             tags=tags,
         )
+
+    async def create_with_network_policy(self, name: str, network_policy: NetworkPolicy) -> Any:
+        return sandbox_sync.create_sandbox(
+            name=name,
+            runtime="python3.13",
+            execution_time_limit=timedelta(minutes=2),
+            network_policy=network_policy,
+        )
+
+    async def update_network_policy(self, box: Any, network_policy: NetworkPolicy) -> Any:
+        return box.update_network_policy(network_policy)
 
     async def update(
         self,
@@ -596,6 +637,70 @@ async def process_filesystem_flow(
         binary=binary,
         missing_read_failed=missing_read_failed,
         invalid_write_failed=invalid_write_failed,
+    )
+
+
+async def network_policy_flow(driver: _ScenarioDriver, name: str) -> NetworkPolicyObservation:
+    box = None
+    allow_all_created = False
+    custom_returned = False
+    header_names_redacted = False
+    deny_all_returned = False
+    cleanup_complete = False
+    custom = NetworkPolicy.custom(
+        allow={
+            "example.com": (),
+            "api.github.com": [
+                NetworkPolicyRule(
+                    transform=[NetworkPolicyTransform(headers={"X-Sandbox-Live": "configured"})]
+                )
+            ],
+        },
+        subnets=NetworkPolicySubnets(
+            allow=["1.1.1.1/32"],
+            deny=["192.0.2.0/24"],
+        ),
+    )
+
+    async with driver.session():
+        try:
+            box = await driver.create_with_network_policy(name, NetworkPolicy.allow_all())
+            allow_all_created = box.network_policy == NetworkPolicy.allow_all()
+
+            session = await driver.update_network_policy(box, custom)
+            returned = session.network_policy
+            custom_returned = (
+                returned is not None
+                and returned.mode == "custom"
+                and tuple(returned.allow) == ("example.com", "api.github.com")
+                and returned.subnets
+                == NetworkPolicySubnets(
+                    allow=["1.1.1.1/32"],
+                    deny=["192.0.2.0/24"],
+                )
+            )
+            transform = (
+                None if returned is None else returned.allow["api.github.com"][0].transform[0]
+            )
+            header_names_redacted = (
+                transform is not None
+                and transform.headers is None
+                and transform.header_names == ("X-Sandbox-Live",)
+            )
+
+            session = await driver.update_network_policy(box, NetworkPolicy.deny_all())
+            deny_all_returned = session.network_policy == NetworkPolicy.deny_all()
+        finally:
+            if box is not None:
+                await driver.destroy(box)
+            cleanup_complete = True
+
+    return NetworkPolicyObservation(
+        allow_all_created=allow_all_created,
+        custom_returned=custom_returned,
+        header_names_redacted=header_names_redacted,
+        deny_all_returned=deny_all_returned,
+        resources_cleaned_up=cleanup_complete,
     )
 
 

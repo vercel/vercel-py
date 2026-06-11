@@ -22,7 +22,7 @@ from vercel._internal.unstable.sandbox.models import (
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
-    JSONValue,
+    NetworkPolicy,
     ProcessLog,
     SandboxQuery,
     SandboxResources,
@@ -675,7 +675,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         self._apply_payload(payload)
         return self
 
-    async def update_network_policy(self, network_policy: JSONValue) -> Self:
+    async def update_network_policy(self, network_policy: NetworkPolicy) -> Self:
         """Replace the session network policy."""
         payload = await self._service.update_runtime_session_network_policy(
             session_id=self.id, network_policy=network_policy
@@ -885,7 +885,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         )
         return self._apply_current_session_payload(payload)
 
-    async def update_network_policy(self, network_policy: JSONValue) -> SandboxRuntimeSession:
+    async def update_network_policy(self, network_policy: NetworkPolicy) -> SandboxRuntimeSession:
         """Replace the current session's network policy."""
         payload = await self._service.update_runtime_session_network_policy(
             session_id=self.current_session_id, network_policy=network_policy
@@ -915,7 +915,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         execution_time_limit: DurationInput = None,
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
-        network_policy: JSONValue | None = None,
+        network_policy: NetworkPolicy | None = None,
         env: dict[str, str] | None = None,
         tags: dict[str, str] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
@@ -963,7 +963,7 @@ class _CreateSandboxParams:
     execution_time_limit: timedelta | None = None
     resources: SandboxResources | None = None
     persistent: bool | None = None
-    network_policy: JSONValue | None = None
+    network_policy: NetworkPolicy | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
@@ -1127,7 +1127,7 @@ def create_sandbox_operation(
     execution_time_limit: DurationInput = None,
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
-    network_policy: JSONValue | None = None,
+    network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
