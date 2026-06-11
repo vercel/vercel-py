@@ -33,7 +33,8 @@ from vercel.unstable import sandbox
 from vercel.unstable.sandbox import SandboxQueryByName, TagFilter
 
 sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
-sandbox_ = await sandbox.get_sandbox(name="preview")
+fetched = await sandbox.get_sandbox(name="preview")
+sandbox_ = await sandbox.resume_sandbox(name="preview")
 sandboxes = [
     item
     async for item in sandbox.query_sandboxes(
@@ -318,26 +319,26 @@ operations targeting that current session update and return the existing
 matching nested handle.
 
 A named sandbox has at most one active current runtime session.
-`Sandbox.session()` resolves that session through the get-or-resume endpoint.
-It returns the existing session while it remains usable; otherwise the backend
-creates a replacement from the latest snapshot and updates the sandbox's
-`currentSessionId`. Concurrent resume requests converge on the same replacement
-session. Previous sessions remain historical resources, not additional active
-sessions.
+`get_sandbox()` is a pure state fetch. `resume_sandbox()` uses the backend's
+get-or-resume endpoint and returns a new sandbox handle with the active current
+session attached. The backend returns the existing session while it remains
+usable; otherwise it creates a replacement from the latest snapshot and
+updates `currentSessionId`. Concurrent resume requests converge on the same
+replacement session. Previous sessions remain historical resources, not
+additional active sessions.
 
-`Sandbox.session()` returns an independent runtime session handle. It does not
-apply the get-or-resume response to the existing `Sandbox` handle, so a
-replacement backend session does not automatically replace that handle's
-cached `current_session`. Creating a snapshot returns a new snapshot handle
-while updating the addressed existing runtime session handle with the session
-state included in the successful response.
+Sandbox handles returned by fetch and resume are independent. A replacement
+backend session does not automatically replace another handle's cached
+`current_session`. Creating a snapshot returns a new snapshot handle while
+updating the addressed existing runtime session handle with the session state
+included in the successful response.
 
 Closing a `vercel.session(...)` scope closes its `SdkSession` or
 `SyncSdkSession`; later requests through its handles or an already-captured
 service raise `VercelSessionClosedError`.
 
 Terminal state is observed state rather than local revocation.
-Context-managed cleanup and explicit `Sandbox.destroy()`,
+Context-managed cleanup and explicit `Sandbox.stop()`, `Sandbox.destroy()`,
 `SandboxRuntimeSession.stop()`, and `Snapshot.delete()` do not locally revoke
 handles. Snapshot responses reporting a stopped runtime likewise do not revoke
 the previous runtime-session handle. Remote existence and terminal state are
@@ -358,36 +359,45 @@ guessing at server-side resource lifetime.
 
 Context managers own remote cleanup.
 
-Creating a sandbox as a context manager destroys that sandbox on exit:
+Creating a sandbox as a context manager stops and destroys that sandbox on
+exit by default:
 
 ```python
 async with sandbox.create_sandbox(runtime="python3.13") as sandbox_:
     ...
 ```
 
-Resolving a sandbox runtime session as a context manager stops that session on
-exit:
+Creation can retain the named sandbox while still stopping its current session:
 
 ```python
-async with sandbox_.session() as session:
+async with sandbox.create_sandbox(
+    runtime="python3.13",
+    destroy=False,
+) as sandbox_:
+    ...
+```
+
+Resuming a sandbox as a context manager stops its current session on exit
+without destroying the sandbox:
+
+```python
+async with sandbox.resume_sandbox(name="preview") as sandbox_:
     ...
 ```
 
 Context manager exit awaits cleanup and surfaces cleanup failures. It expresses
 remote cleanup ownership, not reliable knowledge of future resource usability.
 When cleanup succeeds, its response is applied to the managed handle before
-exit returns.
-Callers who do not want that cleanup requested should not use the context
-manager.
+exit returns. Awaiting create or resume performs no automatic cleanup.
 
 Live verification observes sandbox cleanup as absence: a post-exit
-`get_sandbox(name=..., resume=False)` must return not found. Runtime-session
-cleanup has a different observable contract: after its context exits, the
-retained runtime-session handle records `SandboxStatus.STOPPED` from the stop
-response.
+`get_sandbox(name=...)` must return not found. Stop-only cleanup has a different
+observable contract: after its context exits, the retained sandbox's
+`current_session` records `SandboxStatus.STOPPED` from the stop response.
 
-The same remote cleanup can be requested explicitly with `Sandbox.destroy()` or
-`SandboxRuntimeSession.stop()`. Sandbox identity behavior belongs on `Sandbox`,
+The same remote cleanup can be requested explicitly with `Sandbox.stop()` and
+`Sandbox.destroy()`. Session handles remain available for inspection and
+advanced workflows. Sandbox identity behavior belongs on `Sandbox`,
 session-scoped lifecycle and command behavior belongs on
 `SandboxRuntimeSession`, filesystem behavior belongs on each handle's `fs`
 capability, and endpoint composition belongs in the internal Sandbox service.
@@ -447,7 +457,9 @@ sandbox_ = sandbox.create_sandbox(runtime="python3.13")
 
 The sync mirror resolves `SyncSdkSession` rather than `SdkSession`, and follows
 the same service option, waiting, cleanup, and session-bound handle rules as
-the async API.
+the async API. Sync `create_sandbox()` and `resume_sandbox()` return private
+managed subclasses with context-manager cleanup; `get_sandbox()` returns a
+plain `SyncSandbox` without cleanup ownership.
 
 Rationale:
 

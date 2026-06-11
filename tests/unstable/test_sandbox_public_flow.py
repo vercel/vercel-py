@@ -1240,26 +1240,151 @@ async def test_public_api_error_propagates_status_code_code_and_data(mock_env_cl
 
 @respx.mock
 async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
+            },
+        )
+    )
+    destroy_route = respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(status="stopped", session_status="stopped")
+        )
     )
 
     async with vercel.session(service_options=_session_options()):
         operation = sandbox.create_sandbox(name="preview", runtime="python3.13")
-        await operation
+        created = await operation
+        assert created.current_session is not None
         with pytest.raises(RuntimeError, match="can only be used once"):
             await operation
 
+        resume_operation = sandbox.resume_sandbox(name="preview")
+        resumed = await resume_operation
+        assert resumed.current_session is not None
+        with pytest.raises(RuntimeError, match="can only be used once"):
+            await resume_operation
+
+    assert create_route.called
+    assert dict(resume_route.calls.last.request.url.params)["resume"] == "true"
+    assert not stop_route.called
+    assert not destroy_route.called
+
     async with vercel.session():
         captured = sandbox.create_sandbox(name="preview", runtime="python3.13")
+        captured_resume = sandbox.resume_sandbox(name="preview")
 
     with pytest.raises(VercelSessionClosedError):
         await captured
+    with pytest.raises(VercelSessionClosedError):
+        await captured_resume
 
     with pytest.warns(RuntimeWarning, match="never awaited or entered"):
         unconsumed = sandbox.create_sandbox(name="preview", runtime="python3.13")
         del unconsumed
         gc.collect()
+    with pytest.warns(RuntimeWarning, match="never awaited or entered"):
+        unconsumed_resume = sandbox.resume_sandbox(name="preview")
+        del unconsumed_resume
+        gc.collect()
+
+
+@respx.mock
+async def test_async_get_fetches_and_resume_ensures_active_session(
+    mock_env_clear: None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.params["resume"] == "true":
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_resumed"))
+        return httpx.Response(
+            200,
+            json=_sandbox_response(status="stopped", session_status="stopped"),
+        )
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=handler)
+
+    async with vercel.session(service_options=_session_options()):
+        fetched = await sandbox.get_sandbox(
+            name="preview",
+            project_id="prj_other",
+            include_system_routes=True,
+        )
+        resumed = await sandbox.resume_sandbox(
+            name="preview",
+            project_id="prj_other",
+            include_system_routes=True,
+        )
+
+    assert fetched.current_session is not None
+    assert fetched.current_session.status is SandboxStatus.STOPPED
+    assert resumed.current_session is not None
+    assert resumed.current_session.id == "sbx_resumed"
+    assert [dict(request.url.params) for request in requests] == [
+        {
+            "teamId": "team_123",
+            "projectId": "prj_other",
+            "resume": "false",
+            "__includeSystemRoutes": "true",
+        },
+        {
+            "teamId": "team_123",
+            "projectId": "prj_other",
+            "resume": "true",
+            "__includeSystemRoutes": "true",
+        },
+    ]
+
+
+@respx.mock
+def test_sync_get_is_plain_handle_and_create_resume_are_managed(
+    mock_env_clear: None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def get_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_sandbox_response())
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=get_handler)
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
+            },
+        )
+    )
+    destroy_route = respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(status="stopped", session_status="stopped")
+        )
+    )
+
+    with vercel.session(service_options=_session_options()):
+        fetched = sandbox_sync.get_sandbox(name="preview")
+        created = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        resumed = sandbox_sync.resume_sandbox(name="preview")
+
+    assert not hasattr(fetched, "__enter__")
+    assert hasattr(created, "__enter__")
+    assert hasattr(resumed, "__enter__")
+    assert [request.url.params["resume"] for request in requests] == ["false", "true"]
+    assert not stop_route.called
+    assert not destroy_route.called
 
 
 @respx.mock
@@ -1283,7 +1408,9 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
     async with vercel.session(service_options=_session_options()):
         service = get_sandbox_service(get_active_session())
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
-        runtime_session = await handle.session()
+        resumed = await sandbox.resume_sandbox(name="preview")
+        assert resumed.current_session is not None
+        runtime_session = resumed.current_session
         command = await handle.create_process("sleep", ["30"])
         snapshot = await handle.snapshot()
 
@@ -1305,9 +1432,185 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
 
 
 @respx.mock
+async def test_async_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None:
+    events: list[str] = []
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        name = body["name"]
+        return httpx.Response(200, json=_sandbox_response(name=name, session_id=f"sbx_{name}"))
+
+    respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/resumed").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(name="resumed", session_id="sbx_resumed")
+        )
+    )
+
+    def stop_handler(request: httpx.Request, *, name: str) -> httpx.Response:
+        events.append(f"stop:{name}")
+        return httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(
+                    name=name,
+                    session_id=f"sbx_{name}",
+                    status="stopped",
+                    session_status="stopped",
+                )["session"]
+            },
+        )
+
+    for name in ("default", "retained", "resumed"):
+        respx.post(f"https://sandbox.test/v2/sandboxes/sessions/sbx_{name}/stop").mock(
+            side_effect=lambda request, name=name: stop_handler(request, name=name)
+        )
+
+    def destroy_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("destroy:default")
+        return httpx.Response(
+            200,
+            json=_sandbox_response(
+                name="default",
+                session_id="sbx_default",
+                status="stopped",
+                session_status="stopped",
+            ),
+        )
+
+    default_destroy = respx.delete("https://sandbox.test/v2/sandboxes/default").mock(
+        side_effect=destroy_handler
+    )
+    retained_destroy = respx.delete("https://sandbox.test/v2/sandboxes/retained").mock(
+        return_value=httpx.Response(500)
+    )
+    resumed_destroy = respx.delete("https://sandbox.test/v2/sandboxes/resumed").mock(
+        return_value=httpx.Response(500)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        async with sandbox.create_sandbox(name="default", runtime="python3.13") as default:
+            pass
+        async with sandbox.create_sandbox(
+            name="retained", runtime="python3.13", destroy=False
+        ) as retained:
+            pass
+        async with sandbox.resume_sandbox(name="resumed") as resumed:
+            pass
+
+    assert events == [
+        "stop:default",
+        "destroy:default",
+        "stop:retained",
+        "stop:resumed",
+    ]
+    assert default.current_session is not None
+    assert default.current_session.status is SandboxStatus.STOPPED
+    assert retained.current_session is not None
+    assert retained.current_session.status is SandboxStatus.STOPPED
+    assert resumed.current_session is not None
+    assert resumed.current_session.status is SandboxStatus.STOPPED
+    assert default_destroy.called
+    assert not retained_destroy.called
+    assert not resumed_destroy.called
+
+
+@respx.mock
+def test_sync_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None:
+    events: list[str] = []
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        name = body["name"]
+        return httpx.Response(200, json=_sandbox_response(name=name, session_id=f"sbx_{name}"))
+
+    respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/resumed").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(name="resumed", session_id="sbx_resumed")
+        )
+    )
+
+    def stop_handler(request: httpx.Request, *, name: str) -> httpx.Response:
+        events.append(f"stop:{name}")
+        return httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(
+                    name=name,
+                    session_id=f"sbx_{name}",
+                    status="stopped",
+                    session_status="stopped",
+                )["session"]
+            },
+        )
+
+    for name in ("default", "retained", "resumed"):
+        respx.post(f"https://sandbox.test/v2/sandboxes/sessions/sbx_{name}/stop").mock(
+            side_effect=lambda request, name=name: stop_handler(request, name=name)
+        )
+
+    def destroy_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("destroy:default")
+        return httpx.Response(
+            200,
+            json=_sandbox_response(
+                name="default",
+                session_id="sbx_default",
+                status="stopped",
+                session_status="stopped",
+            ),
+        )
+
+    default_destroy = respx.delete("https://sandbox.test/v2/sandboxes/default").mock(
+        side_effect=destroy_handler
+    )
+    retained_destroy = respx.delete("https://sandbox.test/v2/sandboxes/retained").mock(
+        return_value=httpx.Response(500)
+    )
+    resumed_destroy = respx.delete("https://sandbox.test/v2/sandboxes/resumed").mock(
+        return_value=httpx.Response(500)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        with sandbox_sync.create_sandbox(name="default", runtime="python3.13") as default:
+            pass
+        with sandbox_sync.create_sandbox(
+            name="retained", runtime="python3.13", destroy=False
+        ) as retained:
+            pass
+        with sandbox_sync.resume_sandbox(name="resumed") as resumed:
+            pass
+
+    assert events == [
+        "stop:default",
+        "destroy:default",
+        "stop:retained",
+        "stop:resumed",
+    ]
+    assert default.current_session is not None
+    assert default.current_session.status is SandboxStatus.STOPPED
+    assert retained.current_session is not None
+    assert retained.current_session.status is SandboxStatus.STOPPED
+    assert resumed.current_session is not None
+    assert resumed.current_session.status is SandboxStatus.STOPPED
+    assert default_destroy.called
+    assert not retained_destroy.called
+    assert not resumed_destroy.called
+
+
+@respx.mock
 async def test_async_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
+            },
+        )
     )
     respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(
@@ -1332,6 +1635,14 @@ def test_sync_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
+            },
+        )
+    )
     respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(
             500,
@@ -1348,6 +1659,64 @@ def test_sync_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
     assert exc_info.value.resource_id == "preview"
     assert isinstance(exc_info.value.cause, SandboxApiError)
     assert exc_info.value.cause.code == "sandbox_failed"
+
+
+@respx.mock
+async def test_create_cleanup_attempts_destroy_after_stop_failure(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            500,
+            json={"error": {"code": "stop_failed", "message": "stop failed"}},
+        )
+    )
+    destroy_route = respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(status="stopped", session_status="stopped")
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        with pytest.raises(SandboxCleanupError) as exc_info:
+            async with sandbox.create_sandbox(name="preview", runtime="python3.13"):
+                pass
+
+    assert destroy_route.called
+    assert isinstance(exc_info.value.cause, SandboxApiError)
+    assert exc_info.value.cause.code == "stop_failed"
+
+
+@respx.mock
+def test_sync_create_cleanup_attempts_destroy_after_stop_failure(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            500,
+            json={"error": {"code": "stop_failed", "message": "stop failed"}},
+        )
+    )
+    destroy_route = respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(status="stopped", session_status="stopped")
+        )
+    )
+
+    with vercel.session(service_options=_session_options()):
+        with pytest.raises(SandboxCleanupError) as exc_info:
+            with sandbox_sync.create_sandbox(name="preview", runtime="python3.13"):
+                pass
+
+    assert destroy_route.called
+    assert isinstance(exc_info.value.cause, SandboxApiError)
+    assert exc_info.value.cause.code == "stop_failed"
 
 
 @respx.mock
@@ -1374,34 +1743,49 @@ async def test_destroyed_async_handles_continue_issuing_requests(mock_env_clear:
 
 
 @respx.mock
-async def test_stopped_runtime_session_continues_issuing_requests(mock_env_clear: None) -> None:
+async def test_stopped_async_sandbox_is_inspectable_and_backend_authoritative(
+    mock_env_clear: None,
+) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/stop").mock(
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
         return_value=httpx.Response(
             200,
             json={
-                "session": _sandbox_response(
-                    session_id="sbx_runtime", status="stopped", session_status="stopped"
-                )["session"]
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
             },
         )
     )
-    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response(session_id="sbx_runtime"))
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+        )
+    )
+    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+        )
     )
 
     async with vercel.session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
-        runtime_session = await handle.session()
-        assert await runtime_session.stop() is runtime_session
-        assert (await runtime_session.create_process("python", ["--version"])).id == "cmd_123"
+        retained_session = handle.current_session
+        assert retained_session is not None
+        assert await handle.stop() is handle
+        assert handle.current_session is retained_session
+        assert handle.current_session.status is SandboxStatus.STOPPED
+        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
+            await handle.create_process("python", ["--version"])
+        with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
+            await handle.fs.read_bytes("message.txt")
 
     assert command_route.called
+    assert read_route.called
+    assert process_exc.value.code == "session_stopped"
+    assert fs_exc.value.code == "session_stopped"
 
 
 @respx.mock
@@ -1414,48 +1798,63 @@ def test_destroyed_sync_handles_continue_issuing_requests(mock_env_clear: None) 
             200, json=_sandbox_response(status="stopped", session_status="stopped")
         )
     )
-    session_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response())
     )
 
     with vercel.session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         assert handle.destroy() is handle
         assert handle.status is SandboxStatus.STOPPED
-        assert handle.session().id == "sbx_runtime"
+        assert handle.create_process("python", ["--version"]).id == "cmd_123"
 
-    assert session_route.called
+    assert command_route.called
 
 
 @respx.mock
-def test_stopped_sync_runtime_session_continues_issuing_requests(mock_env_clear: None) -> None:
+def test_stopped_sync_sandbox_is_inspectable_and_backend_authoritative(
+    mock_env_clear: None,
+) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_runtime"))
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/stop").mock(
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
         return_value=httpx.Response(
             200,
             json={
-                "session": _sandbox_response(
-                    session_id="sbx_runtime", status="stopped", session_status="stopped"
-                )["session"]
+                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
             },
         )
     )
-    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_runtime/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response(session_id="sbx_runtime"))
+    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+        )
+    )
+    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+        )
     )
 
     with vercel.session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
-        runtime_session = handle.session()
-        assert runtime_session.stop() is runtime_session
-        assert runtime_session.create_process("python", ["--version"]).id == "cmd_123"
+        retained_session = handle.current_session
+        assert retained_session is not None
+        assert handle.stop() is handle
+        assert handle.current_session is retained_session
+        assert handle.current_session.status is SandboxStatus.STOPPED
+        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
+            handle.create_process("python", ["--version"])
+        with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
+            handle.fs.read_bytes("message.txt")
 
     assert command_route.called
+    assert read_route.called
+    assert process_exc.value.code == "session_stopped"
+    assert fs_exc.value.code == "session_stopped"
 
 
 @respx.mock

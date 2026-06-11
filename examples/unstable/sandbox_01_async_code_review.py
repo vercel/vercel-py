@@ -42,7 +42,8 @@ async def review_code(
     github_token: str | None = None,
 ) -> str:
     # `async with sandbox.create_sandbox(...)` gives you automatic cleanup:
-    # leaving the block destroys the sandbox, even if the workflow raises.
+    # leaving the block stops and destroys the sandbox, even if the workflow
+    # raises.
     #
     # If you want a persistent sandbox instead, use:
     #
@@ -56,8 +57,8 @@ async def review_code(
     ) as box:
         # The sandbox returned by `create_sandbox` already has a current runtime
         # session. Most workflows can call commands on `box` and filesystem
-        # methods on `box.fs`; creating an explicit `box.session()` is an advanced
-        # operation for separate runtime-session lifecycles.
+        # methods on `box.fs`. Use `sandbox.resume_sandbox(...)` when reopening
+        # a stopped persistent sandbox.
         await box.fs.mkdir("workspace")
         async with box.fs.batch() as batch:
             for path, content in files:

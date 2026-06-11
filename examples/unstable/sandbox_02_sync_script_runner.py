@@ -15,7 +15,8 @@ def run_script(input_text: str, script: str) -> str:
     name = f"vercel-py-script-{uuid4().hex[:12]}"
 
     # The sync API mirrors the async API for scripts and CLIs that do not run an
-    # event loop. Using the sandbox as a context manager destroys it on exit.
+    # event loop. Using the sandbox as a context manager stops and destroys it
+    # on exit.
     #
     # To keep a sandbox around across calls, create it without `with`:
     #

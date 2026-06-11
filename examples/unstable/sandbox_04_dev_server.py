@@ -64,7 +64,7 @@ async def get_or_create_sandbox(
     port: int,
 ) -> Sandbox:
     try:
-        box = await sandbox.get_sandbox(name=name)
+        box = await sandbox.resume_sandbox(name=name)
         print(f"resumed sandbox {box.name}")
         return box
     except SandboxApiError as error:

@@ -129,7 +129,7 @@ async def main() -> None:
     # `preview` is also bound to a closed scoped SDK session.
     preview = await sandbox.get_sandbox(name="preview")
 
-    # A context-managed sandbox is destroyed on exit.
+    # A context-managed sandbox is stopped, then destroyed on exit.
     async with sandbox.create_sandbox(
         runtime="python3.13",
         name="scratch",
@@ -145,17 +145,17 @@ async def main() -> None:
         name="persistent",
     )
 
-    # Resolves the current session and stops it on exit.
-    # The successful stop response updates `runtime_session`. It is still
+    # Resumes the sandbox if needed and stops it on exit.
+    # The successful stop response updates `active`. It is still
     # request-capable while its SDK session remains open; the API decides
     # whether the resource can be used.
-    async with persistent.session() as runtime_session:
-        await runtime_session.run_process("python", ["--version"])
+    async with sandbox.resume_sandbox(name=persistent.name) as active:
+        await active.run_process("python", ["--version"])
 
-    # The sandbox is now stopped. Resolving its session again resumes it from
-    # the latest snapshot and returns the replacement current session.
-    resumed_session = await persistent.session()
-    await resumed_session.run_process("python", ["--version"])
+    # The sandbox is now stopped. Resuming it again returns a fresh Sandbox
+    # handle with the replacement current session attached.
+    persistent = await sandbox.resume_sandbox(name=persistent.name)
+    await persistent.run_process("python", ["--version"])
 
     sandboxes = [
         item
@@ -184,6 +184,7 @@ async def main() -> None:
     project_snapshots = [item async for item in sandbox.query_snapshots(page_size=10)]
     fetched_snapshot = await sandbox.get_snapshot(snapshot_id=snapshot.id)
     await fetched_snapshot.delete()
+    await persistent.stop()
 ```
 
 ## SDK Sessions And Transports
@@ -335,37 +336,43 @@ async with asyncio.timeout(90):
 Context manager syntax means scoped remote ownership:
 
 ```python
-# Destroys the sandbox on exit.
+# Stops the sandbox, then destroys it on exit.
 async with sandbox.create_sandbox(runtime="python3.13") as sandbox_:
     ...
 
-# Resolves the sandbox's current session and stops it on exit.
-sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
-async with sandbox_.session() as runtime_session:
+# Stops without destroying on exit.
+async with sandbox.create_sandbox(
+    runtime="python3.13",
+    destroy=False,
+) as sandbox_:
+    ...
+
+# Resumes if needed and stops on exit without destroying.
+async with sandbox.resume_sandbox(name="persistent") as sandbox_:
     ...
 ```
 
 Context manager exit awaits cleanup. Cleanup failures raise
 `SandboxCleanupError`, whose `cause` points at the underlying failure. Context
 managers express ownership of a remote cleanup request, not reliable knowledge
-of whether a resource can answer a later API request.
+of whether a resource can answer a later API request. Awaiting
+`create_sandbox(...)` or `resume_sandbox(...)` does not request cleanup.
 
 For a sandbox context manager, observe deletion by fetching its unique name
-with `resume=False` and receiving a not-found API response. For a runtime
-session context manager, the retained session handle reflects the successful
-stop response as `SandboxStatus.STOPPED`.
+with `get_sandbox(...)` and receiving a not-found API response. For a
+stop-only context, the retained sandbox's `current_session` reflects the
+successful stop response as `SandboxStatus.STOPPED`.
 
 Explicit cleanup requests termination or deletion through the API:
 
 ```python
 sandbox_ = await sandbox.create_sandbox(runtime="python3.13")
-runtime_session = await sandbox_.session()
-await runtime_session.stop()
+await sandbox_.stop()
 await sandbox_.destroy()
 ```
 
-Sandbox identity methods such as `session()`, `run_process(...)`,
-`create_process(...)`, `update(...)`, `list_sessions(...)`,
+Sandbox identity methods such as `run_process(...)`, `create_process(...)`,
+`update(...)`, `list_sessions(...)`, `stop()`,
 `extend_execution_time_limit(...)`, `update_network_policy(...)`, and
 `destroy()` live on `Sandbox`. Session-scoped methods such as
 `run_process(...)`, `create_process(...)`, `refresh()`,
@@ -380,18 +387,16 @@ Only streams routed to `PIPE` are populated on `CompletedProcess`; other output
 fields are `None`. `check=True` raises `subprocess.CalledProcessError` with the
 same captured values.
 
-A sandbox has at most one active current runtime session. `Sandbox.session()`
-returns that session while it remains usable. If it has stopped or otherwise
-cannot accept commands, the backend resumes the sandbox from its latest
-snapshot, records the new session as `currentSessionId`, and returns that
-replacement. Older sessions remain available through session history APIs but
-are not additional active sessions. Concurrent resume requests converge on the
+`get_sandbox(...)` is a pure state fetch and never resumes a stopped sandbox.
+`resume_sandbox(...)` returns a new `Sandbox` handle with an active
+`current_session`, resuming from the latest snapshot when needed. Older
+sessions remain available through `current_session`, `list_sessions()`, and
+`query_sessions()` for inspection. Concurrent resume requests converge on the
 same replacement session.
 
-The session handle returned by `Sandbox.session()` is independent from the
-`Sandbox` handle. Resuming can change the backend's current session without
-refreshing state cached by an existing `Sandbox` handle. Fetch the sandbox
-again to obtain a handle bound to the replacement current session.
+Sandbox handles are independent. Resuming can change the backend's current
+session without refreshing state cached by an existing handle; use the handle
+returned by `resume_sandbox(...)` for subsequent operations.
 
 `create_process()` instead returns a live `Process` handle for explicit
 lifecycle and output consumption. `Process` exposes `stdout` and `stderr`
@@ -587,6 +592,10 @@ with sandbox.create_sandbox(
 
     first_five = list(islice(sandbox.query_sandboxes(page_size=10), 5))
 ```
+
+Only handles returned by sync `create_sandbox()` and `resume_sandbox()` are
+cleanup contexts. A plain `get_sandbox()` handle is inspectable but is not a
+context manager.
 
 Scoped service options work the same way in sync code:
 

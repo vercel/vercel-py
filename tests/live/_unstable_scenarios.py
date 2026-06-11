@@ -258,7 +258,7 @@ class AsyncDriver(_ScenarioDriver):
         ]
 
     async def get_sandbox(self, name: str) -> Any:
-        return await sandbox.get_sandbox(name=name, resume=False)
+        return await sandbox.get_sandbox(name=name)
 
     async def query_snapshots(self, name: str) -> list[Any]:
         return [item async for item in sandbox.query_snapshots(name=name)]
@@ -345,13 +345,15 @@ class AsyncDriver(_ScenarioDriver):
         return await box.snapshot()
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
-        async with box.session() as runtime_session:
-            command = await runtime_session.run_process(
+        async with sandbox.resume_sandbox(name=box.name, project_id=box.project_id) as resumed:
+            command = await resumed.run_process(
                 "printf", ["session follow-up\n"], stdout=subprocess.PIPE
             )
             assert command.stdout is not None
             output = command.stdout
             exit_code = command.returncode
+            runtime_session = resumed.current_session
+            assert runtime_session is not None
         deadline = time.monotonic() + _SESSION_STOP_TIMEOUT_SECONDS
         while runtime_session.status is not SandboxStatus.STOPPED:
             if time.monotonic() >= deadline:
@@ -430,7 +432,7 @@ class SyncDriver(_ScenarioDriver):
         )
 
     async def get_sandbox(self, name: str) -> Any:
-        return sandbox_sync.get_sandbox(name=name, resume=False)
+        return sandbox_sync.get_sandbox(name=name)
 
     async def query_snapshots(self, name: str) -> list[Any]:
         return list(sandbox_sync.query_snapshots(name=name))
@@ -517,13 +519,13 @@ class SyncDriver(_ScenarioDriver):
         return box.snapshot()
 
     async def run_independent_session(self, box: Any) -> tuple[str, int | None, bool]:
-        with box.session() as runtime_session:
-            command = runtime_session.run_process(
-                "printf", ["session follow-up\n"], stdout=subprocess.PIPE
-            )
+        with sandbox_sync.resume_sandbox(name=box.name, project_id=box.project_id) as resumed:
+            command = resumed.run_process("printf", ["session follow-up\n"], stdout=subprocess.PIPE)
             assert command.stdout is not None
             output = command.stdout
             exit_code = command.returncode
+            runtime_session = resumed.current_session
+            assert runtime_session is not None
         deadline = time.monotonic() + _SESSION_STOP_TIMEOUT_SECONDS
         while runtime_session.status is not SandboxStatus.STOPPED:
             if time.monotonic() >= deadline:

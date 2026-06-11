@@ -54,12 +54,14 @@ from vercel._internal.unstable.sandbox.sync_runtime import (
     SyncSandboxFilesystemBatch,
     SyncSandboxRuntimeSession,
     SyncSnapshot,
+    _ManagedSyncSandbox,
     create_sandbox as _create_sandbox,
     get_sandbox as _get_sandbox,
     get_snapshot as _get_snapshot,
     query_sandboxes as _query_sandboxes,
     query_sessions as _query_sessions,
     query_snapshots as _query_snapshots,
+    resume_sandbox as _resume_sandbox,
 )
 from vercel._internal.unstable.sandbox.text_reader import SyncTextReader
 from vercel._internal.unstable.session import get_active_sync_session
@@ -84,11 +86,13 @@ def create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-) -> SyncSandbox:
+    destroy: bool = True,
+) -> _ManagedSyncSandbox:
     """Create a sandbox and wait until it is ready.
 
-    The returned handle is also a context manager that destroys the sandbox on
-    exit.
+    The returned handle is also a context manager that stops the sandbox on
+    exit and destroys it by default. Calling this function without entering
+    the handle performs no automatic cleanup.
 
     Args:
         project_id: Project that owns the sandbox. Uses the active credentials
@@ -107,6 +111,8 @@ def create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
+        destroy: Whether context-manager exit destroys the sandbox after
+            stopping it.
 
     Returns:
         A handle for the newly created sandbox.
@@ -129,6 +135,7 @@ def create_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
+        destroy=destroy,
     )
 
 
@@ -136,28 +143,56 @@ def get_sandbox(
     *,
     name: str,
     project_id: str | None = None,
-    resume: bool = True,
     include_system_routes: bool | None = None,
 ) -> SyncSandbox:
-    """Get a sandbox by name.
+    """Fetch a sandbox by name without resuming it.
 
     Args:
         name: Sandbox name.
         project_id: Project that owns the sandbox.
-        resume: Whether to resume the sandbox when it has no running session.
         include_system_routes: Whether to include platform-managed routes.
 
     Returns:
         A handle for the requested sandbox.
 
     Raises:
-        SandboxApiError: If the sandbox cannot be retrieved or resumed.
+        SandboxApiError: If the sandbox cannot be retrieved.
     """
     return _get_sandbox(
         _service(),
         name=name,
         project_id=project_id,
-        resume=resume,
+        include_system_routes=include_system_routes,
+    )
+
+
+def resume_sandbox(
+    *,
+    name: str,
+    project_id: str | None = None,
+    include_system_routes: bool | None = None,
+) -> _ManagedSyncSandbox:
+    """Resume a sandbox and return a managed handle.
+
+    The returned handle is a context manager that stops the active session on
+    exit. Calling this function without entering the handle performs no
+    automatic cleanup.
+
+    Args:
+        name: Sandbox name.
+        project_id: Project that owns the sandbox.
+        include_system_routes: Whether to include platform-managed routes.
+
+    Returns:
+        A sandbox handle with an active current session.
+
+    Raises:
+        SandboxApiError: If the sandbox cannot be resumed.
+    """
+    return _resume_sandbox(
+        _service(),
+        name=name,
+        project_id=project_id,
         include_system_routes=include_system_routes,
     )
 
@@ -318,4 +353,5 @@ __all__ = [
     "query_sandboxes",
     "query_sessions",
     "query_snapshots",
+    "resume_sandbox",
 ]

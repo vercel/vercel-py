@@ -747,9 +747,9 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     """Control a synchronous Vercel Sandbox.
 
     A sandbox has at most one active current session. Process and filesystem
-    operations target the session recorded by this handle. The handle is a
-    context manager that destroys the sandbox on exit; exiting raises
-    ``SandboxCleanupError`` if destroying the sandbox fails.
+    operations target the session recorded by this handle. Use
+    ``sandbox.resume_sandbox`` to ensure the sandbox has an active session,
+    ``stop`` to stop it, and ``destroy`` to permanently remove the sandbox.
     """
 
     __slots__ = ("_service", "fs")
@@ -767,41 +767,6 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             session_id=lambda: self.current_session_id,
             write_files_cwd=self._write_files_cwd,
         )
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        try:
-            payload = iter_coroutine(
-                self._service.destroy_sandbox(name=self.name, project_id=self.project_id)
-            )
-            self._apply_payload(payload)
-        except Exception as cleanup_exc:
-            raise SandboxCleanupError(
-                f"Failed to clean up sandbox {self.name!r}",
-                resource_type="sandbox",
-                resource_id=self.name,
-                cause=cleanup_exc,
-            ) from cleanup_exc
-
-    def session(self) -> SyncSandboxRuntimeSession:
-        """Return the current session, resuming the sandbox when needed.
-
-        If the current session is stopped or otherwise unusable, the backend
-        resumes the sandbox from its latest snapshot and returns the replacement
-        session. The returned session handle is independent; this existing
-        ``SyncSandbox`` handle is not refreshed automatically.
-        """
-        payload = iter_coroutine(
-            self._service.create_runtime_session(name=self.name, project_id=self.project_id)
-        )
-        return SyncSandboxRuntimeSession(payload=payload, service=self._service)
 
     def run_process(
         self,
@@ -967,6 +932,14 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         self._apply_current_session_payload(result.session)
         return SyncSnapshot(payload=result.snapshot, service=self._service)
 
+    def stop(self) -> Self:
+        """Stop the current session and return this sandbox handle."""
+        payload = iter_coroutine(
+            self._service.stop_runtime_session(session_id=self.current_session_id)
+        )
+        self._apply_current_session_payload(payload)
+        return self
+
     def destroy(self) -> Self:
         """Permanently destroy the sandbox and refresh this handle."""
         payload = iter_coroutine(
@@ -1023,6 +996,54 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         return self
 
 
+def _cleanup_managed_sandbox(handle: SyncSandbox, *, destroy: bool) -> None:
+    cleanup_error: Exception | None = None
+    try:
+        handle.stop()
+    except Exception as exc:
+        cleanup_error = exc
+
+    if destroy:
+        try:
+            handle.destroy()
+        except Exception as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+    if cleanup_error is not None:
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox {handle.name!r}",
+            resource_type="sandbox",
+            resource_id=handle.name,
+            cause=cleanup_error,
+        ) from cleanup_error
+
+
+class _ManagedSyncSandbox(SyncSandbox):
+    __slots__ = ("_destroy_on_exit",)
+
+    def __init__(
+        self,
+        *,
+        payload: SandboxState,
+        service: SandboxService,
+        destroy_on_exit: bool,
+    ) -> None:
+        super().__init__(payload=payload, service=service)
+        self._destroy_on_exit = destroy_on_exit
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        _cleanup_managed_sandbox(self, destroy=self._destroy_on_exit)
+
+
 def create_sandbox(
     service: SandboxService,
     *,
@@ -1039,7 +1060,8 @@ def create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-) -> SyncSandbox:
+    destroy: bool = True,
+) -> _ManagedSyncSandbox:
     try:
         state = iter_coroutine(
             service.create_sandbox(
@@ -1058,13 +1080,25 @@ def create_sandbox(
                 snapshot_retention=snapshot_retention,
             )
         )
-        return SyncSandbox(payload=state, service=service)
+        return _ManagedSyncSandbox(
+            payload=state,
+            service=service,
+            destroy_on_exit=destroy,
+        )
     except _SandboxTerminalState as error:
         raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
 
 
 def get_sandbox(service: SandboxService, **kwargs: Any) -> SyncSandbox:
     return SyncSandbox(payload=iter_coroutine(service.get_sandbox(**kwargs)), service=service)
+
+
+def resume_sandbox(service: SandboxService, **kwargs: Any) -> _ManagedSyncSandbox:
+    return _ManagedSyncSandbox(
+        payload=iter_coroutine(service.resume_sandbox(**kwargs)),
+        service=service,
+        destroy_on_exit=False,
+    )
 
 
 def query_sandboxes_page(service: SandboxService, **kwargs: Any) -> QuerySandboxesPage[SyncSandbox]:

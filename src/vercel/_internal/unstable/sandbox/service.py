@@ -224,7 +224,6 @@ class SandboxService:
             sandbox = await self.get_sandbox(
                 name=sandbox.name,
                 project_id=project_id or sandbox.project_id,
-                resume=False,
             )
 
     async def create_sandbox(
@@ -267,7 +266,7 @@ class SandboxService:
         *,
         name: str,
         project_id: str | None = None,
-        resume: bool = True,
+        resume: bool = False,
         include_system_routes: bool | None = None,
     ) -> SandboxState:
         self._ensure_open()
@@ -336,26 +335,24 @@ class SandboxService:
             current_snapshot_id=current_snapshot_id,
         )
 
-    async def create_runtime_session(
+    async def resume_sandbox(
         self,
         *,
         name: str,
         project_id: str | None = None,
-        resume: bool = True,
         include_system_routes: bool | None = None,
-    ) -> SandboxRuntimeSessionState:
+    ) -> SandboxState:
         self._ensure_open()
-        sandbox = await self._api_client.create_runtime_session(
+        sandbox = await self._api_client.resume_sandbox(
             name=name,
             project_id=project_id,
-            resume=resume,
             include_system_routes=include_system_routes,
         )
         if sandbox.current_session is None:
             raise SandboxResponseError(
                 "Sandbox API response is missing object field 'session'", data=sandbox.raw
             )
-        return sandbox.current_session
+        return sandbox
 
     async def stop_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
         self._ensure_open()

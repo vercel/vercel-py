@@ -709,9 +709,9 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     """Control an asynchronous Vercel Sandbox.
 
     A sandbox has at most one active current session. Process and filesystem
-    operations target the session recorded by this handle. Use ``session`` to
-    resolve that session, resuming the sandbox into a replacement session when
-    needed, and ``destroy`` to permanently remove the sandbox.
+    operations target the session recorded by this handle. Use
+    ``sandbox.resume_sandbox`` to ensure the sandbox has an active session,
+    ``stop`` to stop it, and ``destroy`` to permanently remove the sandbox.
     """
 
     __slots__ = ("_service", "fs")
@@ -726,25 +726,6 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             service=service,
             session_id=lambda: self.current_session_id,
             write_files_cwd=self._write_files_cwd,
-        )
-
-    def session(self) -> "CreateRuntimeSessionOperation":
-        """Prepare a single-use current-session operation.
-
-        Awaiting returns the sandbox's active current session. If the current
-        session is stopped or otherwise unusable, the backend resumes the
-        sandbox from its latest snapshot and returns the replacement session.
-        Using the operation as an async context manager stops the returned
-        session on exit.
-
-        The returned session handle is independent. If resuming replaces the
-        backend's current session, this existing ``Sandbox`` handle is not
-        refreshed automatically.
-        """
-        return CreateRuntimeSessionOperation(
-            service=self._service,
-            sandbox_name=self.name,
-            project_id=self.project_id,
         )
 
     async def run_process(
@@ -901,6 +882,12 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         self._apply_current_session_payload(result.session)
         return Snapshot(payload=result.snapshot, service=self._service)
 
+    async def stop(self) -> Self:
+        """Stop the current session and return this sandbox handle."""
+        payload = await self._service.stop_runtime_session(session_id=self.current_session_id)
+        self._apply_current_session_payload(payload)
+        return self
+
     async def destroy(self) -> Self:
         """Permanently destroy the sandbox and refresh this handle."""
         payload = await self._service.destroy_sandbox(name=self.name, project_id=self.project_id)
@@ -974,14 +961,21 @@ class CreateSandboxOperation:
     """Manage one asynchronous sandbox creation request.
 
     Await the operation to create a sandbox that remains alive, or use it as an
-    async context manager to destroy the created sandbox on exit. An operation
-    can be consumed only once. Exiting the context raises
-    ``SandboxCleanupError`` if destroying the sandbox fails.
+    async context manager to stop the created sandbox and optionally destroy it
+    on exit. An operation can be consumed only once. Exiting the context raises
+    ``SandboxCleanupError`` if cleanup fails.
     """
 
-    def __init__(self, *, service: SandboxService, params: _CreateSandboxParams) -> None:
+    def __init__(
+        self,
+        *,
+        service: SandboxService,
+        params: _CreateSandboxParams,
+        destroy: bool,
+    ) -> None:
         self._service = service
         self._params = params
+        self._destroy = destroy
         self._consumed = False
         self._handle: Sandbox | None = None
 
@@ -1025,18 +1019,7 @@ class CreateSandboxOperation:
     ) -> None:
         if self._handle is None:
             return None
-        try:
-            payload = await self._service.destroy_sandbox(
-                name=self._handle.name, project_id=self._handle.project_id
-            )
-            self._handle._apply_payload(payload)
-        except Exception as cleanup_exc:
-            raise SandboxCleanupError(
-                f"Failed to clean up sandbox {self._handle.name!r}",
-                resource_type="sandbox",
-                resource_id=self._handle.name,
-                cause=cleanup_exc,
-            ) from cleanup_exc
+        await _cleanup_managed_sandbox(self._handle, destroy=self._destroy)
         return None
 
     def __del__(self) -> None:
@@ -1049,41 +1032,46 @@ class CreateSandboxOperation:
         )
 
 
-class CreateRuntimeSessionOperation:
-    """Manage one asynchronous current-session request.
+@dataclass(frozen=True, slots=True)
+class _ResumeSandboxParams:
+    name: str
+    project_id: str | None = None
+    include_system_routes: bool | None = None
 
-    Await the operation to return the active current session, resuming the
-    sandbox into a replacement session when necessary. Use it as an async
-    context manager to stop the returned session on exit. An operation can be
-    consumed only once. Exiting the context raises ``SandboxCleanupError`` if
-    stopping the session fails.
+
+class ResumeSandboxOperation:
+    """Manage one asynchronous sandbox resume request.
+
+    Await the operation to return a sandbox with an active current session, or
+    use it as an async context manager to stop that session on exit. An
+    operation can be consumed only once. Exiting the context raises
+    ``SandboxCleanupError`` if stopping the sandbox fails.
     """
 
-    def __init__(
-        self, *, service: SandboxService, sandbox_name: str, project_id: str | None
-    ) -> None:
+    def __init__(self, *, service: SandboxService, params: _ResumeSandboxParams) -> None:
         self._service = service
-        self._sandbox_name = sandbox_name
-        self._project_id = project_id
+        self._params = params
         self._consumed = False
-        self._handle: SandboxRuntimeSession | None = None
+        self._handle: Sandbox | None = None
 
     def _mark_consumed(self) -> None:
         if self._consumed:
-            raise RuntimeError("sandbox runtime-session operations can only be used once")
+            raise RuntimeError("sandbox.resume_sandbox(...) operations can only be used once")
         self._consumed = True
 
-    async def _run_once(self) -> SandboxRuntimeSession:
+    async def _run_once(self) -> Sandbox:
         self._mark_consumed()
-        payload = await self._service.create_runtime_session(
-            name=self._sandbox_name, project_id=self._project_id
+        return await resume_sandbox(
+            self._service,
+            name=self._params.name,
+            project_id=self._params.project_id,
+            include_system_routes=self._params.include_system_routes,
         )
-        return SandboxRuntimeSession(payload=payload, service=self._service)
 
-    def __await__(self) -> Generator[Any, None, SandboxRuntimeSession]:
+    def __await__(self) -> Generator[Any, None, Sandbox]:
         return self._run_once().__await__()
 
-    async def __aenter__(self) -> SandboxRuntimeSession:
+    async def __aenter__(self) -> Sandbox:
         handle = await self._run_once()
         self._handle = handle
         return handle
@@ -1096,17 +1084,40 @@ class CreateRuntimeSessionOperation:
     ) -> None:
         if self._handle is None:
             return None
-        try:
-            payload = await self._service.stop_runtime_session(session_id=self._handle.id)
-            self._handle._apply_payload(payload)
-        except Exception as cleanup_exc:
-            raise SandboxCleanupError(
-                f"Failed to clean up sandbox runtime session {self._handle.id!r}",
-                resource_type="sandbox_runtime_session",
-                resource_id=self._handle.id,
-                cause=cleanup_exc,
-            ) from cleanup_exc
+        await _cleanup_managed_sandbox(self._handle, destroy=False)
         return None
+
+    def __del__(self) -> None:
+        if self._consumed:
+            return
+        warnings.warn(
+            "sandbox.resume_sandbox(...) operation was never awaited or entered",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
+async def _cleanup_managed_sandbox(handle: Sandbox, *, destroy: bool) -> None:
+    cleanup_error: Exception | None = None
+    try:
+        await handle.stop()
+    except Exception as exc:
+        cleanup_error = exc
+
+    if destroy:
+        try:
+            await handle.destroy()
+        except Exception as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+    if cleanup_error is not None:
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox {handle.name!r}",
+            resource_type="sandbox",
+            resource_id=handle.name,
+            cause=cleanup_error,
+        ) from cleanup_error
 
 
 async def _create_sandbox(service: SandboxService, **kwargs: Any) -> Sandbox:
@@ -1132,6 +1143,7 @@ def create_sandbox_operation(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    destroy: bool = True,
 ) -> CreateSandboxOperation:
     return CreateSandboxOperation(
         service=service,
@@ -1150,11 +1162,33 @@ def create_sandbox_operation(
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
         ),
+        destroy=destroy,
     )
 
 
 async def get_sandbox(service: SandboxService, **kwargs: Any) -> Sandbox:
     return Sandbox(payload=await service.get_sandbox(**kwargs), service=service)
+
+
+async def resume_sandbox(service: SandboxService, **kwargs: Any) -> Sandbox:
+    return Sandbox(payload=await service.resume_sandbox(**kwargs), service=service)
+
+
+def resume_sandbox_operation(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    include_system_routes: bool | None = None,
+) -> ResumeSandboxOperation:
+    return ResumeSandboxOperation(
+        service=service,
+        params=_ResumeSandboxParams(
+            name=name,
+            project_id=project_id,
+            include_system_routes=include_system_routes,
+        ),
+    )
 
 
 async def query_sandboxes_page(

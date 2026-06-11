@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Mapping
 from vercel._internal.unstable.sandbox.async_runtime import (
     CreateSandboxOperation,
     Process,
+    ResumeSandboxOperation,
     Sandbox,
     SandboxFilesystem,
     SandboxFilesystemBatch,
@@ -16,6 +17,7 @@ from vercel._internal.unstable.sandbox.async_runtime import (
     query_sandboxes as _query_sandboxes,
     query_sessions as _query_sessions,
     query_snapshots as _query_snapshots,
+    resume_sandbox_operation as _resume_sandbox_operation,
 )
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
@@ -87,12 +89,13 @@ def create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    destroy: bool = True,
 ) -> CreateSandboxOperation:
     """Prepare an asynchronous sandbox creation operation.
 
-    Awaiting the returned operation creates a sandbox that is not destroyed
-    automatically; using it as an async context manager destroys the sandbox
-    on exit instead.
+    Awaiting the returned operation performs no automatic cleanup. Using it as
+    an async context manager stops the sandbox on exit and destroys it by
+    default.
 
     Args:
         project_id: Project that owns the sandbox. Uses the active credentials
@@ -111,6 +114,8 @@ def create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
+        destroy: Whether context-manager exit destroys the sandbox after
+            stopping it. Awaiting the operation never triggers cleanup.
 
     Returns:
         A single-use awaitable and async context manager for the new sandbox.
@@ -134,6 +139,7 @@ def create_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
+        destroy=destroy,
     )
 
 
@@ -141,28 +147,56 @@ async def get_sandbox(
     *,
     name: str,
     project_id: str | None = None,
-    resume: bool = True,
     include_system_routes: bool | None = None,
 ) -> Sandbox:
-    """Get a sandbox by name.
+    """Fetch a sandbox by name without resuming it.
 
     Args:
         name: Sandbox name.
         project_id: Project that owns the sandbox.
-        resume: Whether to resume the sandbox when it has no running session.
         include_system_routes: Whether to include platform-managed routes.
 
     Returns:
         A handle for the requested sandbox.
 
     Raises:
-        SandboxApiError: If the sandbox cannot be retrieved or resumed.
+        SandboxApiError: If the sandbox cannot be retrieved.
     """
     return await _get_sandbox(
         _service(),
         name=name,
         project_id=project_id,
-        resume=resume,
+        include_system_routes=include_system_routes,
+    )
+
+
+def resume_sandbox(
+    *,
+    name: str,
+    project_id: str | None = None,
+    include_system_routes: bool | None = None,
+) -> ResumeSandboxOperation:
+    """Prepare an asynchronous sandbox resume operation.
+
+    Awaiting the returned operation performs no automatic cleanup. Using it as
+    an async context manager stops the active session on exit.
+
+    Args:
+        name: Sandbox name.
+        project_id: Project that owns the sandbox.
+        include_system_routes: Whether to include platform-managed routes.
+
+    Returns:
+        A single-use awaitable and async context manager for the sandbox.
+
+    Raises:
+        SandboxApiError: If the sandbox cannot be resumed. Raised when the
+            operation is awaited or entered.
+    """
+    return _resume_sandbox_operation(
+        _service(),
+        name=name,
+        project_id=project_id,
         include_system_routes=include_system_routes,
     )
 
@@ -301,6 +335,7 @@ __all__ = [
     "SandboxQueryByName",
     "SandboxQueryByStatusUpdatedAt",
     "SandboxResponseError",
+    "ResumeSandboxOperation",
     "SandboxStreamError",
     "SandboxRuntimeSession",
     "SandboxServiceOptions",
@@ -323,5 +358,6 @@ __all__ = [
     "query_sandboxes",
     "query_sessions",
     "query_snapshots",
+    "resume_sandbox",
     "sync",
 ]

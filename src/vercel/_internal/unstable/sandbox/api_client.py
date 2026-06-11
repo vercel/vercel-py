@@ -187,7 +187,7 @@ class _UpdateSandboxRequest(_ApiRequestModel):
 
 class _GetSandboxRequest(_ApiRequestModel):
     project_id: str = Field(serialization_alias="projectId")
-    resume: bool = True
+    resume: bool = False
     include_system_routes: bool | None = Field(
         default=None, serialization_alias="__includeSystemRoutes"
     )
@@ -948,7 +948,7 @@ class SandboxApiClient:
         *,
         name: str,
         project_id: str | None = None,
-        resume: bool = True,
+        resume: bool = False,
         include_system_routes: bool | None = None,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
@@ -1065,18 +1065,17 @@ class SandboxApiClient:
             sparse_attachments=True,
         )
 
-    async def create_runtime_session(
+    async def resume_sandbox(
         self,
         *,
         name: str,
         project_id: str | None = None,
-        resume: bool = True,
         include_system_routes: bool | None = None,
     ) -> SandboxState:
         return await self.get_sandbox(
             name=name,
             project_id=project_id,
-            resume=resume,
+            resume=True,
             include_system_routes=include_system_routes,
         )
 
