@@ -4,17 +4,34 @@ from __future__ import annotations
 
 import abc
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
-from typing import Any
+from typing import Any, TypeAlias
 
 import httpx
 from httpx import USE_CLIENT_DEFAULT
-from httpx._types import HeaderTypes, QueryParamTypes
 
 from vercel._internal.polyfills import StrEnum
 from vercel._internal.time import to_seconds_float
+
+PrimitiveData: TypeAlias = str | int | float | bool | None
+HeaderTypes: TypeAlias = (
+    httpx.Headers
+    | Mapping[str, str]
+    | Mapping[bytes, bytes]
+    | Sequence[tuple[str, str]]
+    | Sequence[tuple[bytes, bytes]]
+)
+QueryParamTypes: TypeAlias = (
+    httpx.QueryParams
+    | Mapping[str, PrimitiveData | Sequence[PrimitiveData]]
+    | list[tuple[str, PrimitiveData]]
+    | tuple[tuple[str, PrimitiveData], ...]
+    | str
+    | bytes
+)
 
 
 def _normalize_path(path: str) -> str:
@@ -54,28 +71,6 @@ class TransportOptions:
     base_url: str | None
     max_connections: int
     enable_http2: bool
-
-
-def _build_request(
-    *,
-    body: RequestBody,
-    headers: HeaderTypes | None,
-) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {}
-    request_headers = httpx.Headers(headers)
-
-    if isinstance(body, JSONBody):
-        kwargs["json"] = body.data
-    elif isinstance(body, BytesBody):
-        kwargs["content"] = body.data
-        request_headers.setdefault("content-type", body.content_type)
-    elif isinstance(body, RawBody):
-        kwargs["content"] = body.data
-
-    if request_headers:
-        kwargs["headers"] = request_headers
-
-    return kwargs
 
 
 class BaseTransport(abc.ABC):
@@ -249,7 +244,7 @@ class AsyncTransport(BaseTransport):
         await self.aclose()
 
 
-def extract_structured_error(response: httpx.Response) -> tuple[str, object]:
+def extract_structured_error(response: httpx.Response) -> tuple[str, object | None]:
     error_body = response.text
 
     # Parse a helpful error message

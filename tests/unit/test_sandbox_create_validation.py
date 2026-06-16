@@ -169,6 +169,21 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
     ]
 
 
+def test_sandbox_create_warns_with_source_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _RecordingSyncSandboxOpsClient()
+
+    monkeypatch.setattr(sandbox_module, "SyncSandboxOpsClient", lambda **_: client)
+
+    with pytest.warns(
+        DeprecationWarning,
+        match="pass a typed Source model instead",
+    ):
+        with pytest.raises(SandboxValidationError, match="source.type: is required"):
+            SyncSandbox.create(source=cast(Any, {}))
+
+
 def test_sandbox_create_does_not_warn_for_typed_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

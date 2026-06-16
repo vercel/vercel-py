@@ -89,7 +89,7 @@ def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) 
                 return "SnapshotSource"
             case _:
                 return "Source"
-    return name
+    return "Source"
 
 
 @dataclass
