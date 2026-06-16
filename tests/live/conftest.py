@@ -188,8 +188,7 @@ def cleanup_registry() -> Generator[CleanupRegistry, None, None]:
             from vercel.sandbox import Sandbox
 
             vercel_token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
-            team_id = os.getenv("VERCEL_TEAM_ID")
-            if vercel_token and team_id:
+            if vercel_token:
                 for sandbox_id in sandbox_ids:
                     try:
                         sandbox = Sandbox.get(

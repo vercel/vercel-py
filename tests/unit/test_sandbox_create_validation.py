@@ -111,10 +111,6 @@ class _RecordingSyncSandboxOpsClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def resolve_project_id(self) -> str:
-        self.calls.append({"method": "resolve_project_id"})
-        return "project_123"
-
     async def create_sandbox(self, **kwargs: object) -> SandboxAndRoutesResponse:
         self.calls.append(kwargs)
         return SandboxAndRoutesResponse(
@@ -160,10 +156,7 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
     ]
     assert client.calls == [
         {
-            "method": "resolve_project_id",
-        },
-        {
-            "project_id": "project_123",
+            "project_id": None,
             "source": GitSource(type="git", url="https://github.com/vercel/vercel-py"),
             "ports": None,
             "timeout": None,

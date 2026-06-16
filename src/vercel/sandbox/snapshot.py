@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from vercel._internal.auth import TokenProvider, static_token_provider
+from vercel._internal.auth import TokenProvider
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.constants import MIN_SNAPSHOT_EXPIRATION
-from vercel._internal.sandbox.core import make_public_sandbox_project_id_provider
+from vercel._internal.sandbox.core import (
+    make_public_sandbox_credentials_factory,
+)
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
 from vercel._internal.sandbox.pagination import SnapshotListParams
 from vercel._internal.sandbox.snapshot import SnapshotExpiration as _SnapshotExpiration
@@ -17,19 +19,6 @@ from vercel._internal.time import to_ms_int
 
 MIN_SNAPSHOT_EXPIRATION_MS = to_ms_int(MIN_SNAPSHOT_EXPIRATION)
 SnapshotExpiration = _SnapshotExpiration
-
-
-def _make_public_token_provider(
-    *,
-    token: str | TokenProvider | None,
-) -> TokenProvider | None:
-    if token is None:
-        return None
-    if isinstance(token, str):
-        return static_token_provider(token)
-    if not callable(token):
-        raise TypeError("token must be a string, TokenProvider, or None")
-    return token
 
 
 @dataclass
@@ -75,9 +64,16 @@ class AsyncSnapshot:
         snapshot_id: str,
         token: str | TokenProvider | None = None,
         project_id: str | None = None,
+        team_id: str | None = None,
     ) -> AsyncSnapshot:
         """Retrieve an existing snapshot by ID."""
-        client = AsyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
+        client = AsyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
         resp = await client.get_snapshot(
             snapshot_id=snapshot_id,
         )
@@ -92,6 +88,7 @@ class AsyncSnapshot:
         until: datetime | int | None = None,
         token: str | TokenProvider | None = None,
         project_id: str | None = None,
+        team_id: str | None = None,
     ) -> AsyncIterator[SnapshotModel]:
         """List snapshots as an async iterable of snapshot models.
 
@@ -102,14 +99,14 @@ class AsyncSnapshot:
 
         async def iter_snapshots() -> AsyncIterator[SnapshotModel]:
             async with AsyncSandboxOpsClient(
-                token_provider=_make_public_token_provider(token=token),
-                project_id_provider=make_public_sandbox_project_id_provider(token),
+                credentials_factory=make_public_sandbox_credentials_factory(
+                    token=token,
+                    project_id=project_id,
+                    team_id=team_id,
+                ),
             ) as client:
-                list_project_id = project_id
-                if list_project_id is None:
-                    list_project_id = await client.resolve_project_id()
                 current_params = SnapshotListParams(
-                    project_id=list_project_id,
+                    project_id=project_id,
                     limit=limit,
                     internal_page_size=_internal_page_size,
                     since=since,
@@ -188,9 +185,16 @@ class Snapshot:
         snapshot_id: str,
         token: str | TokenProvider | None = None,
         project_id: str | None = None,
+        team_id: str | None = None,
     ) -> Snapshot:
         """Retrieve an existing snapshot by ID."""
-        client = SyncSandboxOpsClient(token_provider=_make_public_token_provider(token=token))
+        client = SyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
         resp = iter_coroutine(
             client.get_snapshot(
                 snapshot_id=snapshot_id,
@@ -207,6 +211,7 @@ class Snapshot:
         until: datetime | int | None = None,
         token: str | TokenProvider | None = None,
         project_id: str | None = None,
+        team_id: str | None = None,
     ) -> Iterator[SnapshotModel]:
         """List snapshots as an iterable of snapshot models.
 
@@ -217,14 +222,14 @@ class Snapshot:
 
         def iter_snapshots() -> Iterator[SnapshotModel]:
             with SyncSandboxOpsClient(
-                token_provider=_make_public_token_provider(token=token),
-                project_id_provider=make_public_sandbox_project_id_provider(token),
+                credentials_factory=make_public_sandbox_credentials_factory(
+                    token=token,
+                    project_id=project_id,
+                    team_id=team_id,
+                ),
             ) as client:
-                list_project_id = project_id
-                if list_project_id is None:
-                    list_project_id = iter_coroutine(client.resolve_project_id())
                 current_params = SnapshotListParams(
-                    project_id=list_project_id,
+                    project_id=project_id,
                     limit=limit,
                     internal_page_size=_internal_page_size,
                     since=since,

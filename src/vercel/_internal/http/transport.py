@@ -13,6 +13,7 @@ import httpx
 from httpx import USE_CLIENT_DEFAULT
 from httpx._types import HeaderTypes, QueryParamTypes
 
+from vercel._internal.polyfills import StrEnum
 from vercel._internal.time import to_seconds_float
 
 
@@ -41,10 +42,16 @@ class RawBody:
 RequestBody = JSONBody | BytesBody | RawBody | None
 
 
+class ReadResponsePolicy(StrEnum):
+    ALWAYS = "always"
+    NON_SUCCESS_ONLY = "non_success_only"
+    NEVER = "never"
+
+
 @dataclass(frozen=True, slots=True)
 class TransportOptions:
     timeout: timedelta
-    base_url: str
+    base_url: str | None
     max_connections: int
     enable_http2: bool
 
@@ -87,6 +94,7 @@ class BaseTransport(abc.ABC):
         timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         raise NotImplementedError()
 
@@ -157,17 +165,23 @@ class SyncTransport(BaseTransport):
         timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         request = self._build_request(
             method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
         )
-        return self._client.send(
+        response = self._client.send(
             request,
             stream=stream,
             follow_redirects=follow_redirects
             if follow_redirects is not None
             else USE_CLIENT_DEFAULT,
         )
+        if read_response is ReadResponsePolicy.ALWAYS or (
+            read_response is ReadResponsePolicy.NON_SUCCESS_ONLY and not response.is_success
+        ):
+            response.read()
+        return response
 
     def close(self) -> None:
         self._client.close()
@@ -202,17 +216,23 @@ class AsyncTransport(BaseTransport):
         timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         request = self._build_request(
             method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
         )
-        return await self._client.send(
+        response = await self._client.send(
             request,
             stream=stream,
             follow_redirects=follow_redirects
             if follow_redirects is not None
             else USE_CLIENT_DEFAULT,
         )
+        if read_response is ReadResponsePolicy.ALWAYS or (
+            read_response is ReadResponsePolicy.NON_SUCCESS_ONLY and not response.is_success
+        ):
+            await response.aread()
+        return response
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -271,6 +291,7 @@ __all__ = [
     "JSONBody",
     "BytesBody",
     "RawBody",
+    "ReadResponsePolicy",
     "RequestBody",
     "extract_structured_error",
 ]

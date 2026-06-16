@@ -7,10 +7,10 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from vercel._internal.http import BaseTransport
+from vercel._internal.http import BaseTransport, ReadResponsePolicy
 from vercel._internal.http.transport import HeaderTypes, QueryParamTypes, RequestBody
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.sandbox.core import SandboxRequestClient
+from vercel._internal.sandbox.core import SandboxCredentials, SandboxRequestClient
 from vercel._internal.sandbox.errors import (
     APIError,
     SandboxAuthError,
@@ -47,6 +47,7 @@ class StaticTransport(BaseTransport):
         timeout: timedelta | None = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         return self.response
 
@@ -65,14 +66,14 @@ def _make_response(
     )
 
 
-async def _fake_token_provider() -> str:
-    return "test-token"
+async def _fake_credentials_factory() -> SandboxCredentials:
+    return SandboxCredentials(token="test-token", project_id=None, team_id=None)
 
 
 def _make_request_client(response: httpx.Response) -> SandboxRequestClient:
     return SandboxRequestClient(
         transport=StaticTransport(response),
-        token_provider=_fake_token_provider,
+        credentials_factory=_fake_credentials_factory,
     )
 
 

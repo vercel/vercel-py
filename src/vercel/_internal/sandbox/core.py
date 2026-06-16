@@ -16,6 +16,7 @@ import sys
 import tarfile
 from collections.abc import AsyncGenerator, AsyncIterator, Generator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, Protocol, TypeAlias, cast
@@ -34,6 +35,7 @@ from vercel._internal.http import (
     BaseTransport,
     BytesBody,
     JSONBody,
+    ReadResponsePolicy,
     SyncTransport,
     TransportOptions,
     create_base_async_client,
@@ -89,54 +91,59 @@ RequestQuery: TypeAlias = dict[str, str | int | float | bool | None]
 # ---------------------------------------------------------------------------
 
 
-class ProjectIdProvider(Protocol):
-    async def __call__(self) -> str: ...
+@dataclass(frozen=True, slots=True)
+class SandboxCredentials:
+    token: str
+    team_id: str | None
+    project_id: str | None
 
 
-def _make_sandbox_token_provider() -> TokenProvider:
-    from vercel.oidc import get_credentials
-
-    async def _provider() -> str:
-        return get_credentials().token
-
-    return _provider
+class SandboxCredentialsFactory(Protocol):
+    async def __call__(self) -> SandboxCredentials: ...
 
 
-def _make_sandbox_project_id_provider() -> ProjectIdProvider:
-    from vercel.oidc import get_credentials
+def _scope_from_token(token: str, claim: str) -> str | None:
+    from vercel.oidc import decode_oidc_payload
 
-    async def _provider() -> str:
-        return get_credentials().project_id
+    try:
+        value = decode_oidc_payload(token).get(claim)
+    except Exception:
+        return None
+    return value if isinstance(value, str) else None
 
-    return _provider
 
-
-def make_public_sandbox_project_id_provider(
+def make_public_sandbox_credentials_factory(
+    *,
     token: str | TokenProvider | None,
-) -> ProjectIdProvider | None:
-    match token:
-        case None:
-            return None
-        case str() as resolved_token:
+    project_id: str | None = None,
+    team_id: str | None = None,
+) -> SandboxCredentialsFactory:
+    if token is not None and not isinstance(token, str) and not callable(token):
+        raise TypeError("token must be a string, TokenProvider, or None")
 
-            async def _static_project_id_provider() -> str:
-                from vercel.oidc import get_credentials
+    async def _factory() -> SandboxCredentials:
+        if token is None:
+            from vercel.oidc import get_credentials
 
-                return get_credentials(token=resolved_token).project_id
+            credentials = get_credentials(project_id=project_id, team_id=team_id)
+            return SandboxCredentials(
+                token=credentials.token,
+                team_id=credentials.team_id,
+                project_id=credentials.project_id,
+            )
 
-            return _static_project_id_provider
-        case _ if callable(token):
-            token_provider = cast(TokenProvider, token)
+        resolved_token = token if isinstance(token, str) else await token()
+        return SandboxCredentials(
+            token=resolved_token,
+            team_id=team_id
+            or os.getenv("VERCEL_TEAM_ID")
+            or _scope_from_token(resolved_token, "owner_id"),
+            project_id=project_id
+            or os.getenv("VERCEL_PROJECT_ID")
+            or _scope_from_token(resolved_token, "project_id"),
+        )
 
-            async def _dynamic_project_id_provider() -> str:
-                from vercel.oidc import get_credentials
-
-                resolved_token = await token_provider()
-                return get_credentials(token=resolved_token).project_id
-
-            return _dynamic_project_id_provider
-        case _:
-            raise TypeError("token must be a string, TokenProvider, or None")
+    return _factory
 
 
 # ---------------------------------------------------------------------------
@@ -155,17 +162,21 @@ class SandboxRequestClient:
         self,
         *,
         transport: BaseTransport,
-        token_provider: TokenProvider,
+        credentials_factory: SandboxCredentialsFactory,
         base_headers: dict[str, str] | None = None,
     ) -> None:
         self._transport = transport
-        self._token_provider = token_provider
+        self._credentials_factory = credentials_factory
         self._base_headers = dict(base_headers or {})
 
-    async def resolve_token(self, token: str | None = None) -> str:
+    async def resolve_credentials(self, token: str | None = None) -> SandboxCredentials:
         if token is not None:
-            return token
-        return await self._token_provider()
+            return SandboxCredentials(
+                token=token,
+                team_id=os.getenv("VERCEL_TEAM_ID") or _scope_from_token(token, "owner_id"),
+                project_id=os.getenv("VERCEL_PROJECT_ID") or _scope_from_token(token, "project_id"),
+            )
+        return await self._credentials_factory()
 
     def _merge_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
         merged = dict(self._base_headers)
@@ -178,28 +189,29 @@ class SandboxRequestClient:
         method: str,
         path: str,
         *,
+        credentials: SandboxCredentials | None = None,
         token: str | None = None,
         headers: dict[str, str] | None = None,
         params: RequestQuery | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
     ) -> httpx.Response:
-        resolved_token = await self.resolve_token(token)
+        credentials = credentials or await self.resolve_credentials(token)
+        request_params = dict(params or {})
+        if credentials.team_id is not None:
+            request_params.setdefault("teamId", credentials.team_id)
         response = await self._transport.send(
             method,
             path,
-            token=resolved_token,
+            token=credentials.token,
             headers=self._merge_headers(headers),
-            params=params,
+            params=request_params,
             body=body,
             stream=stream,
+            read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
         )
 
         if not response.is_success:
-            try:
-                response.read()
-            except RuntimeError:
-                await response.aread()
             raise _build_sandbox_error(response)
 
         return response
@@ -209,6 +221,7 @@ class SandboxRequestClient:
         method: str,
         path: str,
         *,
+        credentials: SandboxCredentials | None = None,
         token: str | None = None,
         headers: dict[str, str] | None = None,
         params: RequestQuery | None = None,
@@ -221,6 +234,7 @@ class SandboxRequestClient:
         r = await self.request(
             method,
             path,
+            credentials=credentials,
             token=token,
             headers=headers,
             params=params,
@@ -322,25 +336,22 @@ class BaseSandboxOpsClient:
         *,
         request_client: SandboxRequestClient,
         filesystem_client: FilesystemClient[Any],
-        project_id_provider: ProjectIdProvider | None = None,
     ) -> None:
         self._request_client = request_client
         self._filesystem_client = filesystem_client
-        self._project_id_provider = project_id_provider or _make_sandbox_project_id_provider()
-
-    async def resolve_project_id(self) -> str:
-        return await self._project_id_provider()
 
     async def _get(
         self,
         path: str,
         *,
+        credentials: SandboxCredentials | None = None,
         token: str | None = None,
         params: RequestQuery | None = None,
     ) -> JSONValue:
         return await self._request_client.request_json(
             "GET",
             path,
+            credentials=credentials,
             token=token,
             params=params,
         )
@@ -349,6 +360,7 @@ class BaseSandboxOpsClient:
         self,
         path: str,
         *,
+        credentials: SandboxCredentials | None = None,
         token: str | None = None,
         body: JSONBody | BytesBody | None = None,
         stream: bool = False,
@@ -356,6 +368,7 @@ class BaseSandboxOpsClient:
         return await self._request_client.request_json(
             "POST",
             path,
+            credentials=credentials,
             token=token,
             body=body,
             stream=stream,
@@ -364,7 +377,7 @@ class BaseSandboxOpsClient:
     async def create_sandbox(
         self,
         *,
-        project_id: str,
+        project_id: str | None = None,
         token: str | None = None,
         ports: list[int] | None = None,
         source: Source | None = None,
@@ -375,8 +388,12 @@ class BaseSandboxOpsClient:
         interactive: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxAndRoutesResponse:
+        credentials = await self._request_client.resolve_credentials(token)
+        effective_project_id = project_id or credentials.project_id
+        if effective_project_id is None:
+            raise RuntimeError("Sandbox credentials did not include a project ID")
         body = CreateSandboxRequest(
-            project_id=project_id,
+            project_id=effective_project_id,
             ports=ports if ports else None,
             source=source,
             timeout=timeout,
@@ -388,7 +405,7 @@ class BaseSandboxOpsClient:
         ).model_dump(by_alias=True, exclude_none=True)
         data = await self._post(
             "/v1/sandboxes",
-            token=token,
+            credentials=credentials,
             body=JSONBody(body),
         )
         return SandboxAndRoutesResponse.model_validate(data)
@@ -414,15 +431,16 @@ class BaseSandboxOpsClient:
         since: int | None = None,
         until: int | None = None,
     ) -> SandboxesResponse:
+        credentials = await self._request_client.resolve_credentials(token)
         params: RequestQuery = {
-            "project": project_id,
+            "project": project_id or credentials.project_id,
             "limit": limit,
             "since": since,
             "until": until,
         }
         data = await self._get(
             "/v1/sandboxes",
-            token=token,
+            credentials=credentials,
             params={k: v for k, v in params.items() if v is not None},
         )
         return SandboxesResponse.model_validate(data)
@@ -713,15 +731,16 @@ class BaseSandboxOpsClient:
         since: int | None = None,
         until: int | None = None,
     ) -> SnapshotsResponse:
+        credentials = await self._request_client.resolve_credentials(token)
         params: RequestQuery = {
-            "project": project_id,
+            "project": project_id or credentials.project_id,
             "limit": limit,
             "since": since,
             "until": until,
         }
         data = await self._get(
             "/v1/sandboxes/snapshots",
-            token=token,
+            credentials=credentials,
             params={k: v for k, v in params.items() if v is not None},
         )
         return SnapshotsResponse.model_validate(data)
@@ -766,8 +785,7 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
-        token_provider: TokenProvider | None = None,
-        project_id_provider: ProjectIdProvider | None = None,
+        credentials_factory: SandboxCredentialsFactory | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -779,11 +797,11 @@ class SyncSandboxOpsClient(BaseSandboxOpsClient):
         super().__init__(
             request_client=SandboxRequestClient(
                 transport=transport,
-                token_provider=token_provider or _make_sandbox_token_provider(),
+                credentials_factory=credentials_factory
+                or make_public_sandbox_credentials_factory(token=None),
                 base_headers={"user-agent": USER_AGENT},
             ),
             filesystem_client=filesystem_client or create_filesystem_client(),
-            project_id_provider=project_id_provider or _make_sandbox_project_id_provider(),
         )
 
     def get_logs(
@@ -879,8 +897,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         *,
         host: str = "https://api.vercel.com",
         filesystem_client: FilesystemClient[Any] | None = None,
-        token_provider: TokenProvider | None = None,
-        project_id_provider: ProjectIdProvider | None = None,
+        credentials_factory: SandboxCredentialsFactory | None = None,
     ) -> None:
         transport_options = TransportOptions(
             timeout=timedelta(seconds=180),
@@ -892,11 +909,11 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
         super().__init__(
             request_client=SandboxRequestClient(
                 transport=transport,
-                token_provider=token_provider or _make_sandbox_token_provider(),
+                credentials_factory=credentials_factory
+                or make_public_sandbox_credentials_factory(token=None),
                 base_headers={"user-agent": USER_AGENT},
             ),
             filesystem_client=filesystem_client or create_async_filesystem_client(),
-            project_id_provider=project_id_provider or _make_sandbox_project_id_provider(),
         )
 
     async def get_logs(
@@ -980,5 +997,7 @@ class AsyncSandboxOpsClient(BaseSandboxOpsClient):
 __all__ = [
     "SyncSandboxOpsClient",
     "AsyncSandboxOpsClient",
-    "make_public_sandbox_project_id_provider",
+    "SandboxCredentials",
+    "SandboxCredentialsFactory",
+    "make_public_sandbox_credentials_factory",
 ]

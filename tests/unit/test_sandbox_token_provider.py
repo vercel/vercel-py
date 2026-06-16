@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable
 from typing import Any, cast
@@ -8,13 +9,34 @@ import httpx
 import respx
 
 from vercel._internal.fs import create_filesystem_client
-from vercel._internal.http.transport import BaseTransport
+from vercel._internal.http.transport import BaseTransport, ReadResponsePolicy
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.sandbox.core import BaseSandboxOpsClient, SandboxRequestClient
+from vercel._internal.sandbox.core import (
+    BaseSandboxOpsClient,
+    SandboxCredentials,
+    SandboxRequestClient,
+    make_public_sandbox_credentials_factory,
+)
 from vercel.sandbox.sandbox import AsyncSandbox, Sandbox
 from vercel.sandbox.snapshot import AsyncSnapshot, Snapshot
 
 SANDBOX_API_BASE = "https://api.vercel.com"
+
+
+def _credentials_factory(
+    provider: Callable[[], Any],
+    *,
+    project_id: str | None = None,
+    team_id: str | None = None,
+):
+    async def factory() -> SandboxCredentials:
+        return SandboxCredentials(
+            token=await provider(),
+            project_id=project_id,
+            team_id=team_id,
+        )
+
+    return factory
 
 
 class RecordingTransport(BaseTransport):
@@ -34,6 +56,7 @@ class RecordingTransport(BaseTransport):
         timeout: Any = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         self.requests.append(
             {
@@ -116,7 +139,10 @@ async def test_request_client_resolves_fresh_token_for_each_default_request() ->
         return f"token-{calls}"
 
     transport = RecordingTransport([{"ok": True}, {"ok": True}])
-    client = SandboxRequestClient(transport=transport, token_provider=provider)
+    client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=_credentials_factory(provider),
+    )
 
     await client.request_json("GET", "/one")
     await client.request_json("GET", "/two")
@@ -137,7 +163,10 @@ async def test_request_client_token_override_skips_token_provider() -> None:
         return "fallback-token"
 
     transport = RecordingTransport([{"ok": True}])
-    client = SandboxRequestClient(transport=transport, token_provider=provider)
+    client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=_credentials_factory(provider),
+    )
 
     await client.request_json("GET", "/one", token="pinned-token")
 
@@ -154,7 +183,10 @@ async def test_request_client_token_override_is_per_call_only() -> None:
         return "fallback-token"
 
     transport = RecordingTransport([{"ok": True}, {"ok": True}])
-    client = SandboxRequestClient(transport=transport, token_provider=provider)
+    client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=_credentials_factory(provider),
+    )
 
     await client.request_json("GET", "/one", token="pinned-token")
     await client.request_json("GET", "/two")
@@ -173,7 +205,7 @@ async def test_request_client_merges_user_agent_base_header() -> None:
     transport = RecordingTransport([{"ok": True}])
     client = SandboxRequestClient(
         transport=transport,
-        token_provider=provider,
+        credentials_factory=_credentials_factory(provider),
         base_headers={"user-agent": "vercel/sandbox/test"},
     )
 
@@ -196,9 +228,6 @@ def test_sync_handles_use_token_provider_after_override_call() -> None:
         calls += 1
         return f"ambient-{calls}"
 
-    async def project_id_provider() -> str:
-        return "project"
-
     transport = RecordingTransport(
         [
             {"sandbox": _sandbox_payload(), "routes": []},
@@ -208,11 +237,13 @@ def test_sync_handles_use_token_provider_after_override_call() -> None:
             {"snapshot": _snapshot_payload(status="deleted")},
         ]
     )
-    request_client = SandboxRequestClient(transport=transport, token_provider=provider)
+    request_client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=_credentials_factory(provider, project_id="project"),
+    )
     ops = BaseSandboxOpsClient(
         request_client=request_client,
         filesystem_client=create_filesystem_client(),
-        project_id_provider=project_id_provider,
     )
 
     created = iter_coroutine(ops.create_sandbox(project_id="project", token="pinned-token"))
@@ -251,9 +282,6 @@ async def test_async_handles_use_token_provider_after_override_call() -> None:
         calls += 1
         return f"ambient-{calls}"
 
-    async def project_id_provider() -> str:
-        return "project"
-
     transport = RecordingTransport(
         [
             {"sandbox": _sandbox_payload(), "routes": []},
@@ -263,11 +291,13 @@ async def test_async_handles_use_token_provider_after_override_call() -> None:
             {"snapshot": _snapshot_payload(status="deleted")},
         ]
     )
-    request_client = SandboxRequestClient(transport=transport, token_provider=provider)
+    request_client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=_credentials_factory(provider, project_id="project"),
+    )
     ops = BaseSandboxOpsClient(
         request_client=request_client,
         filesystem_client=create_filesystem_client(),
-        project_id_provider=project_id_provider,
     )
 
     created = await ops.create_sandbox(project_id="project", token="pinned-token")
@@ -432,14 +462,22 @@ def test_public_lookup_and_list_methods_use_token_provider() -> None:
     ]
 
 
-async def test_list_sandboxes_omits_team_id_query_param() -> None:
+async def test_list_sandboxes_includes_team_id_query_param() -> None:
     async def provider() -> str:
         return "token"
 
     transport = RecordingTransport(
         [{"sandboxes": [], "pagination": {"count": 0, "next": None, "prev": None}}]
     )
-    client = SandboxRequestClient(transport=transport, token_provider=provider)
+
+    client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=_credentials_factory(
+            provider,
+            project_id="project",
+            team_id="team",
+        ),
+    )
     ops = BaseSandboxOpsClient(
         request_client=client,
         filesystem_client=create_filesystem_client(),
@@ -447,17 +485,29 @@ async def test_list_sandboxes_omits_team_id_query_param() -> None:
 
     await ops.list_sandboxes(project_id="project", limit=10)
 
-    assert transport.requests[0]["params"] == {"project": "project", "limit": 10}
+    assert transport.requests[0]["params"] == {
+        "project": "project",
+        "limit": 10,
+        "teamId": "team",
+    }
 
 
-async def test_list_snapshots_omits_team_id_query_param() -> None:
+async def test_list_snapshots_includes_team_id_query_param() -> None:
     async def provider() -> str:
         return "token"
 
     transport = RecordingTransport(
         [{"snapshots": [], "pagination": {"count": 0, "next": None, "prev": None}}]
     )
-    client = SandboxRequestClient(transport=transport, token_provider=provider)
+
+    client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=_credentials_factory(
+            provider,
+            project_id="project",
+            team_id="team",
+        ),
+    )
     ops = BaseSandboxOpsClient(
         request_client=client,
         filesystem_client=create_filesystem_client(),
@@ -465,7 +515,26 @@ async def test_list_snapshots_omits_team_id_query_param() -> None:
 
     await ops.list_snapshots(project_id="project", limit=10)
 
-    assert transport.requests[0]["params"] == {"project": "project", "limit": 10}
+    assert transport.requests[0]["params"] == {
+        "project": "project",
+        "limit": 10,
+        "teamId": "team",
+    }
+
+
+async def test_request_client_uses_oidc_owner_as_team_id(mock_env_clear: None) -> None:
+    payload = base64.urlsafe_b64encode(json.dumps({"owner_id": "team_oidc"}).encode())
+    token = f"header.{payload.decode().rstrip('=')}.signature"
+
+    transport = RecordingTransport([{"ok": True}])
+    client = SandboxRequestClient(
+        transport=transport,
+        credentials_factory=make_public_sandbox_credentials_factory(token=token),
+    )
+
+    await client.request_json("GET", "/one")
+
+    assert transport.requests[0]["params"] == {"teamId": "team_oidc"}
 
 
 @respx.mock
@@ -477,11 +546,12 @@ def test_public_sync_create_uses_explicit_token_for_default_project_id(
         return_value=httpx.Response(200, json={"sandbox": _sandbox_payload(), "routes": []})
     )
 
-    sandbox = Sandbox.create(token="tok")
+    sandbox = Sandbox.create(token="tok", team_id="team_explicit")
     sandbox.client.close()
 
     request = route.calls.last.request
     assert request.headers["authorization"] == "Bearer tok"
+    assert request.url.params["teamId"] == "team_explicit"
     assert json.loads(request.content)["projectId"] == "prj_from_env"
 
 
@@ -499,6 +569,7 @@ async def test_public_async_create_uses_explicit_token_for_default_project_id(
 
     request = route.calls.last.request
     assert request.headers["authorization"] == "Bearer tok"
+    assert request.url.params["teamId"] == "team_from_env"
     assert json.loads(request.content)["projectId"] == "prj_from_env"
 
 
@@ -522,8 +593,8 @@ async def test_public_token_provider_resolves_default_project_id(
     await sandbox.client.aclose()
 
     request = route.calls.last.request
-    assert calls == 2
-    assert request.headers["authorization"] == "Bearer tok-2"
+    assert calls == 1
+    assert request.headers["authorization"] == "Bearer tok-1"
     assert json.loads(request.content)["projectId"] == "prj_from_env"
 
 
@@ -556,6 +627,8 @@ def test_public_sync_lists_use_explicit_token_for_default_project_id(
     assert snapshot_request.headers["authorization"] == "Bearer tok"
     assert sandbox_request.url.params["project"] == "prj_from_env"
     assert snapshot_request.url.params["project"] == "prj_from_env"
+    assert sandbox_request.url.params["teamId"] == "team_from_env"
+    assert snapshot_request.url.params["teamId"] == "team_from_env"
 
 
 @respx.mock
@@ -587,3 +660,5 @@ async def test_public_async_lists_use_explicit_token_for_default_project_id(
     assert snapshot_request.headers["authorization"] == "Bearer tok"
     assert sandbox_request.url.params["project"] == "prj_from_env"
     assert snapshot_request.url.params["project"] == "prj_from_env"
+    assert sandbox_request.url.params["teamId"] == "team_from_env"
+    assert snapshot_request.url.params["teamId"] == "team_from_env"

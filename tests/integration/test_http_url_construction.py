@@ -36,6 +36,39 @@ def _transport_options(base_url: str) -> TransportOptions:
     )
 
 
+class TestAbsoluteUrls:
+    @respx.mock
+    def test_sync_origin_neutral_client_sends_absolute_url(self):
+        route = respx.get("https://sandbox.example.com/v2/sandboxes").mock(
+            return_value=Response(200)
+        )
+        transport = SyncTransport(httpx.Client())
+        try:
+            response = iter_coroutine(
+                transport.send("GET", "https://sandbox.example.com/v2/sandboxes")
+            )
+        finally:
+            transport.close()
+
+        assert response.status_code == 200
+        assert route.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_origin_neutral_client_sends_absolute_url(self):
+        route = respx.get("https://sandbox.example.com/v2/sandboxes").mock(
+            return_value=Response(200)
+        )
+        transport = AsyncTransport(httpx.AsyncClient())
+        try:
+            response = await transport.send("GET", "https://sandbox.example.com/v2/sandboxes")
+        finally:
+            await transport.aclose()
+
+        assert response.status_code == 200
+        assert route.called
+
+
 class TestUrlNormalization:
     """Test that URL normalization produces consistent results regardless of input format."""
 

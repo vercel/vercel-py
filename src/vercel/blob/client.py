@@ -33,7 +33,7 @@ from vercel.blob.types import (
 
 
 class BlobClient:
-    def __init__(self, *, token: str | None = None):
+    def __init__(self, token: str | None = None):
         self._ops_client = SyncBlobOpsClient(token=token)
         self._closed = False
 
@@ -288,7 +288,7 @@ class BlobClient:
 
 
 class AsyncBlobClient:
-    def __init__(self, *, token: str | None = None):
+    def __init__(self, token: str | None = None):
         self._ops_client = AsyncBlobOpsClient(token=token)
         self._closed = False
 
