@@ -1,8 +1,11 @@
+import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import pathlib
+import threading
 import traceback
 from datetime import datetime
 from typing import Any, TypeVar
@@ -11,10 +14,17 @@ import cbor2
 import pydantic
 
 from vercel._internal.polyfills import UTC
+from vercel._internal.retryloop import RetryLoop, exp_backoff
 from vercel.workers import client as vqs_client
 
 from .. import world as w
 from ..ulid import monotonic_factory
+
+logger = logging.getLogger("vercel.workflow")
+
+# Local dev only: how long to keep retrying recovery enqueues while the dev
+# server's queue finishes coming up before giving up.
+RECOVERY_TIMEOUT_SECONDS = float(os.getenv("WORKFLOW_LOCAL_RECOVERY_TIMEOUT", "30"))
 
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
@@ -71,6 +81,7 @@ class LocalWorld(w.World):
     def __init__(self) -> None:
         self.monotonic_ulid = monotonic_factory()
         self.data_dir = pathlib.Path(os.getenv("WORKFLOW_LOCAL_DATA_DIR", ".workflow-data"))
+        self._recovery_started = False
 
     def delete_all_hooks_for_run(self, run_id: str) -> None:
         hooks_dir = self.data_dir / "hooks"
@@ -207,7 +218,76 @@ class LocalWorld(w.World):
             except Exception as error:
                 return w.HTTPResponse.json({"error": str(error)}, status=500)
 
+        # When the workflow worker comes up, recover any run stranded by a dev
+        # server restart (see _resume_pending_runs). Triggered off the workflow
+        # topic only, once per process.
+        if queue_name_prefix == "__wkf_workflow_":
+            self._start_recovery_once()
+
         return http_handler
+
+    def _start_recovery_once(self) -> None:
+        if self._recovery_started or os.getenv("WORKFLOW_LOCAL_DISABLE_RECOVERY"):
+            return
+        self._recovery_started = True
+
+        # No event loop runs at worker import time, so drive the async sweep on
+        # a throwaway loop in a daemon thread; it never blocks worker startup.
+        def _run() -> None:
+            try:
+                asyncio.run(self._resume_pending_runs())
+            except Exception as e:  # never break worker startup
+                logger.warning("Local run recovery failed: %r", e)
+
+        threading.Thread(target=_run, name="wkf-local-recovery", daemon=True).start()
+
+    async def _resume_pending_runs(self) -> None:
+        """Re-enqueue runs left mid-flight by a dev server restart (local dev only).
+
+        ``vercel dev``'s queue is in-memory, so a ``sleep``'s delayed wake-up
+        message is lost if the server restarts mid-run, stranding the run in
+        ``running`` with no one to resume it. Re-invoking the run lets
+        ``workflow_handler`` turn any elapsed wait into a ``wait_completed`` and
+        continue; replay is idempotent, so re-invoking a healthy run is harmless.
+        Production uses ``VercelWorld`` (durable queue), so this never runs there.
+        """
+        runs_dir = self.data_dir / "runs"
+        if not runs_dir.exists():
+            return
+
+        pending: list[tuple[str, str]] = []
+        for run_file in runs_dir.glob("*.json"):
+            try:
+                run = await self.runs_get(run_file.stem)
+            except Exception:
+                continue
+            if run.status in ("pending", "running"):
+                pending.append((run.workflow_name, run.run_id))
+        if not pending:
+            return
+
+        # The dev server's queue may not be reachable the instant the worker
+        # imports. Retry until it accepts the messages (popping each run once
+        # enqueued, so none is sent twice) or the timeout elapses.
+        try:
+            async for iteration in RetryLoop(
+                backoff=exp_backoff(), timeout=RECOVERY_TIMEOUT_SECONDS, ignore=Exception
+            ):
+                async with iteration:
+                    while pending:
+                        workflow_name, run_id = pending[-1]
+                        await self.queue(
+                            f"__wkf_workflow_{workflow_name}",
+                            w.WorkflowInvokePayload(runId=run_id),
+                        )
+                        pending.pop()
+        except Exception as e:
+            logger.warning(
+                "Local run recovery timed out after %ss; %d run(s) still stranded: %r",
+                RECOVERY_TIMEOUT_SECONDS,
+                len(pending),
+                e,
+            )
 
     async def runs_get(self, run_id: str) -> w.WorkflowRun:
         run_path = self.data_dir / "runs" / f"{run_id}.json"
