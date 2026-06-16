@@ -26,6 +26,16 @@ SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 logger = logging.getLogger(__name__)
 
 
+class NondeterminismError(Exception):
+    """Raised when a workflow's replay diverges from its recorded event log.
+
+    Correlation IDs are assigned positionally (the Nth step/sleep/hook of a body
+    run gets the Nth seeded ID), so if the body issues operations in a different
+    order or with different arguments on replay, recorded results would be
+    matched onto the wrong calls. This is raised instead, failing the run.
+    """
+
+
 @dataclasses.dataclass(kw_only=True)
 class BaseSuspension:
     correlation_id: str
@@ -205,7 +215,27 @@ class WorkflowOrchestratorContext:
                     break
 
             match event:
-                case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
+                case w.StepCreatedEvent(
+                    event_data=w.StepCreatedEventData(step_name=name, input=recorded_input)
+                ):
+                    sus = self.suspensions[event.correlation_id]
+                    assert isinstance(sus, Suspension)
+                    # The recorded step at this (positional) correlation ID must be
+                    # the same call the body just issued; a mismatch means the body
+                    # is non-deterministic.
+                    if sus.step.name != name or [sus.input] != recorded_input:
+                        sus.future.set_exception(
+                            NondeterminismError(
+                                f"workflow replay diverged at {event.correlation_id}: "
+                                f"recorded step {name!r}, but the body now calls "
+                                f"{sus.step.name!r} with different arguments. The workflow "
+                                "body is non-deterministic."
+                            )
+                        )
+                        return
+                    sus.has_created_event = True
+
+                case w.HookCreatedEvent() | w.WaitCreatedEvent():
                     self.suspensions[event.correlation_id].has_created_event = True
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
