@@ -7,6 +7,7 @@ loudly rather than silently returning the wrong value.
 """
 
 import asyncio
+from datetime import datetime, timezone
 
 from vercel._internal.workflow import core, runtime, world as w
 
@@ -66,3 +67,27 @@ async def test_matching_step_does_not_raise() -> None:
 
     assert not sus.future.done()
     assert sus.has_created_event
+
+
+async def test_wait_step_swap_raises_nondeterminism() -> None:
+    """Recorded a step at this positional slot, but the body now issues a wait
+    with the same positional ULID -> NondeterminismError (not a silent stall).
+
+    The kind prefixes differ, so the recorded ``step_1`` never matches the
+    body's ``wait_1`` by full correlation ID; the positional ULID does, which is
+    how the swap is caught.
+    """
+    step = core.Step(_greet)
+    events: list[w.Event] = [
+        w.StepCreatedEventData(stepName=step.name, input=[b'json[["a"], {}]']).into_event("step_1")
+    ]
+    ctx = _context(events)
+    wait = runtime.Wait(
+        correlation_id="wait_1", resume_at=datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+    ctx.suspensions["wait_1"] = wait
+
+    ctx.resume()
+
+    assert wait.future.done()
+    assert isinstance(wait.future.exception(), runtime.NondeterminismError)
