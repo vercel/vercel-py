@@ -96,6 +96,36 @@ def _correlation_ulid(correlation_id: str) -> str:
     return correlation_id.split("_", 1)[-1]
 
 
+@dataclasses.dataclass(frozen=True)
+class StepInfo:
+    """Metadata about the step currently executing.
+
+    Mirrors the JS SDK's ``getStepMetadata()`` return value. ``step_id`` is stable
+    across retries and unique per logical step call, which makes it a good
+    idempotency key for non-idempotent side effects (payments, emails, queue
+    sends) performed inside a step body.
+    """
+
+    run_id: str
+    step_id: str
+    step_name: str
+    attempt: int
+
+
+_step_ctx: contextvars.ContextVar[StepInfo] = contextvars.ContextVar("WorkflowStepContext")
+
+
+def get_step_metadata() -> StepInfo:
+    """Return metadata for the step currently executing.
+
+    Must be called from within a step body; raises ``RuntimeError`` otherwise.
+    """
+    try:
+        return _step_ctx.get()
+    except LookupError:
+        raise RuntimeError("get_step_metadata() can only be called inside a step") from None
+
+
 class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
@@ -669,8 +699,26 @@ async def step_handler(
             raise RuntimeError(f"Unsupported step input encoding for step {req.step_id}")
         args, kwargs = json.loads(step_run.input[0][len(b"json") :].decode())
 
+        logger.debug(
+            "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
+            req.workflow_run_id,
+            step.name,
+            req.step_id,
+            current_attempt,
+        )
+        token = _step_ctx.set(
+            StepInfo(
+                run_id=req.workflow_run_id,
+                step_id=req.step_id,
+                step_name=step.name,
+                attempt=current_attempt,
+            )
+        )
         # Execute the step function
-        result = await step.func(*args, **kwargs)
+        try:
+            result = await step.func(*args, **kwargs)
+        finally:
+            _step_ctx.reset(token)
 
         # Serialize the result
         output = b"json" + json.dumps(result).encode()
