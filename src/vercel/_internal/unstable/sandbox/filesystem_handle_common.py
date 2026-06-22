@@ -139,7 +139,11 @@ class _TextReadBuffer:
                 if char == "\n":
                     return index + 1
                 if char == "\r":
-                    return index + (2 if index + 1 < len(text) and text[index + 1] == "\n" else 1)
+                    if index + 1 < len(text):
+                        return index + (2 if text[index + 1] == "\n" else 1)
+                    if self._eof or limit < len(self._buffer):
+                        return index + 1
+                    return None
             return None
         index = text.find(self._newline)
         return None if index < 0 else index + len(self._newline)

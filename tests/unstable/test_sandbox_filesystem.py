@@ -8,8 +8,10 @@ from typing import cast
 import httpx
 import pytest
 import respx
+from hypothesis import given, strategies as st
 
 from vercel import unstable as vercel
+from vercel._internal.unstable.sandbox.filesystem_handle_common import _TextReadBuffer
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
@@ -462,6 +464,22 @@ class _TrackedSyncStream(httpx.SyncByteStream):
 
     def close(self) -> None:
         self.close_called = True
+
+
+@given(
+    prefix=st.text(alphabet=st.characters(exclude_characters="\r\n")),
+    suffix=st.text(alphabet=st.characters(exclude_characters="\r\n")),
+)
+def test_text_read_buffer_preserves_crlf_split_across_chunks(prefix: str, suffix: str) -> None:
+    buffer = _TextReadBuffer("utf-8", "strict", "")
+
+    buffer.feed(f"{prefix}\r".encode())
+    assert buffer.line_end() is None
+
+    buffer.feed(f"\n{suffix}".encode())
+    end = buffer.line_end()
+    assert end is not None
+    assert buffer.take(end) == f"{prefix}\r\n"
 
 
 @respx.mock
