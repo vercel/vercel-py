@@ -84,6 +84,7 @@ class HealthCheckPayload(BaseModel):
 
 
 QueuePayload: TypeAlias = WorkflowInvokePayload | StepInvokePayload | HealthCheckPayload
+QueuePayloadAdaptor: pydantic.TypeAdapter[QueuePayload] = pydantic.TypeAdapter(QueuePayload)
 
 
 class StructuredError(BaseModel):

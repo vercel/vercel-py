@@ -149,7 +149,7 @@ class LocalWorld(w.World):
                     # we may get a duplicate invocation but won't lose the scheduled wakeup
                     await self.queue(
                         queue_name,
-                        w.WorkflowInvokePayload.model_validate(payload),
+                        w.QueuePayloadAdaptor.validate_python(payload),
                         deployment_id=body.get("deploymentId"),
                         delay_seconds=delay_seconds,
                     )
