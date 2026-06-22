@@ -10,8 +10,8 @@ from typing import Any
 import httpx
 
 from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.unstable.sandbox.errors import SandboxUploadSizeMismatchError
 from vercel._internal.unstable.sandbox.filesystem_handle_common import (
+    _ExactSizeValidator,
     _HandleInfo,
     _TextEncoder,
     _TextReadBuffer,
@@ -225,18 +225,131 @@ class _QueueReader:
         return result
 
 
-class SyncSandboxBinaryWriter(_HandleInfo):
+class _SyncSpooledWriterEngine:
+    __slots__ = ("_bind_publish", "_permissions", "_publish", "_spool")
+
+    def __init__(
+        self,
+        bind_publish: Callable[[], Callable[[object, int, int | None], None]],
+        permissions: int | None,
+    ) -> None:
+        self._bind_publish = bind_publish
+        self._permissions = permissions
+        self._publish: Callable[[object, int, int | None], None] | None = None
+        self._spool: Any = None
+
+    def enter(self) -> None:
+        try:
+            self._publish = self._bind_publish()
+            self._spool = tempfile.TemporaryFile("w+b")
+        except BaseException:
+            self.abort()
+            raise
+
+    def write(self, chunk: bytes) -> None:
+        self._spool.write(chunk)
+
+    def flush(self) -> None:
+        self._spool.flush()
+
+    def close(self) -> None:
+        try:
+            self._spool.flush()
+            size = self._spool.tell()
+            self._spool.seek(0)
+            assert self._publish is not None
+            self._publish(self._spool, size, self._permissions)
+        finally:
+            self.abort()
+
+    def abort(self) -> None:
+        spool, self._spool = self._spool, None
+        if spool is not None:
+            spool.close()
+
+
+class _SyncStreamingWriterEngine:
     __slots__ = (
         "_bind_publish",
         "_chunks",
         "_error",
         "_permissions",
-        "_publish",
         "_size",
-        "_spool",
+        "_started",
         "_thread",
-        "_written",
     )
+
+    def __init__(
+        self,
+        bind_publish: Callable[[], Callable[[object, int, int | None], None]],
+        size: int,
+        permissions: int | None,
+    ) -> None:
+        self._bind_publish = bind_publish
+        self._size = size
+        self._permissions = permissions
+        self._chunks: queue.Queue[bytes | object] | None = None
+        self._thread: threading.Thread | None = None
+        self._started = False
+        self._error: BaseException | None = None
+
+    def enter(self) -> None:
+        try:
+            publish = self._bind_publish()
+            self._chunks = queue.Queue(maxsize=1)
+            reader = _QueueReader(self._chunks)
+
+            def worker() -> None:
+                try:
+                    publish(reader, self._size, self._permissions)
+                except BaseException as exc:
+                    self._error = exc
+
+            self._thread = threading.Thread(target=worker, daemon=True)
+            self._thread.start()
+            self._started = True
+        except BaseException:
+            self.abort()
+            raise
+
+    def _put(self, item: bytes | object) -> None:
+        assert self._chunks is not None
+        while True:
+            if self._error is not None:
+                raise self._error
+            try:
+                self._chunks.put(item, timeout=0.05)
+                return
+            except queue.Full:
+                continue
+
+    def write(self, chunk: bytes) -> None:
+        if chunk:
+            self._put(chunk)
+
+    def flush(self) -> None:
+        if self._error is not None:
+            raise self._error
+
+    def close(self) -> None:
+        self._put(_EOF)
+        assert self._thread is not None
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
+
+    def abort(self) -> None:
+        if self._chunks is not None:
+            try:
+                self._put(_ABORT)
+            except BaseException:
+                pass
+            if self._thread is not None and self._started:
+                self._thread.join()
+
+
+class SyncSandboxBinaryWriter(_HandleInfo):
+    __slots__ = ("_engine", "_validator")
 
     def __init__(
         self,
@@ -247,35 +360,19 @@ class SyncSandboxBinaryWriter(_HandleInfo):
         permissions: int | None,
     ) -> None:
         super().__init__(name, "wb")
-        self._bind_publish = bind_publish
-        self._publish: Callable[[object, int, int | None], None] | None = None
-        self._size = size
-        self._permissions = permissions
-        self._spool: Any = None
-        self._chunks: queue.Queue[bytes | object] | None = None
-        self._thread: threading.Thread | None = None
-        self._error: BaseException | None = None
-        self._written = 0
+        self._engine: _SyncSpooledWriterEngine | _SyncStreamingWriterEngine
+        self._validator: _ExactSizeValidator | None
+        if size is None:
+            self._engine = _SyncSpooledWriterEngine(bind_publish, permissions)
+            self._validator = None
+        else:
+            self._engine = _SyncStreamingWriterEngine(bind_publish, size, permissions)
+            self._validator = _ExactSizeValidator(name, size)
 
     def __enter__(self) -> "SyncSandboxBinaryWriter":
         self._enter()
         try:
-            self._publish = self._bind_publish()
-            if self._size is None:
-                self._spool = tempfile.TemporaryFile("w+b")
-            else:
-                self._chunks = queue.Queue(maxsize=1)
-                reader = _QueueReader(self._chunks)
-
-                def worker() -> None:
-                    try:
-                        assert self._publish is not None
-                        self._publish(reader, self._size or 0, self._permissions)
-                    except BaseException as exc:
-                        self._error = exc
-
-                self._thread = threading.Thread(target=worker, daemon=True)
-                self._thread.start()
+            self._engine.enter()
         except BaseException:
             self._mark_closed()
             raise
@@ -292,34 +389,16 @@ class SyncSandboxBinaryWriter(_HandleInfo):
         else:
             self._abort()
 
-    def _put(self, item: bytes | object) -> None:
-        assert self._chunks is not None
-        while True:
-            if self._error is not None:
-                raise self._error
-            try:
-                self._chunks.put(item, timeout=0.05)
-                return
-            except queue.Full:
-                continue
-
     def write(self, data: bytes, /) -> int:
         self._ensure_active()
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError(f"a bytes-like object is required, not {type(data).__name__}")
         chunk = bytes(data)
-        if self._size is not None and self._written + len(chunk) > self._size:
-            raise SandboxUploadSizeMismatchError(
-                self.name,
-                declared=self._size,
-                consumed=self._written + len(chunk),
-                early_end=False,
-            )
-        if self._size is None:
-            self._spool.write(chunk)
-        elif chunk:
-            self._put(chunk)
-        self._written += len(chunk)
+        if self._validator is not None:
+            self._validator.validate_write(len(chunk))
+        self._engine.write(chunk)
+        if self._validator is not None:
+            self._validator.record_write(len(chunk))
         return len(chunk)
 
     def writelines(self, lines: Iterable[bytes], /) -> None:
@@ -328,56 +407,28 @@ class SyncSandboxBinaryWriter(_HandleInfo):
 
     def flush(self) -> None:
         self._ensure_active()
-        if self._spool is not None:
-            self._spool.flush()
-        if self._error is not None:
-            raise self._error
+        self._engine.flush()
 
     def close(self) -> None:
         if self.closed:
             return
         self._ensure_active()
         try:
-            if self._size is None:
-                self._spool.flush()
-                size = self._spool.tell()
-                self._spool.seek(0)
-                assert self._publish is not None
-                self._publish(self._spool, size, self._permissions)
-            else:
-                if self._written != self._size:
-                    error = SandboxUploadSizeMismatchError(
-                        self.name,
-                        declared=self._size,
-                        consumed=self._written,
-                        early_end=True,
-                    )
-                    self._abort()
-                    raise error
-                self._put(_EOF)
-                assert self._thread is not None
-                self._thread.join()
-                if self._error is not None:
-                    raise self._error
+            if self._validator is not None:
+                self._validator.validate_close()
+            self._engine.close()
+        except BaseException:
+            self._engine.abort()
+            raise
         finally:
-            if self._spool is not None:
-                self._spool.close()
             self._mark_closed()
 
     def _abort(self) -> None:
         if self.closed:
             return
         try:
-            if self._chunks is not None:
-                try:
-                    self._put(_ABORT)
-                except BaseException:
-                    pass
-                if self._thread is not None:
-                    self._thread.join()
+            self._engine.abort()
         finally:
-            if self._spool is not None:
-                self._spool.close()
             self._mark_closed()
 
 

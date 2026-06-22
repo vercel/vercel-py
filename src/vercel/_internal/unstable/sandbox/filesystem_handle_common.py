@@ -6,6 +6,7 @@ import os
 from enum import Enum, auto
 from typing import Any, Literal, TypeAlias
 
+from vercel._internal.unstable.sandbox.errors import SandboxUploadSizeMismatchError
 from vercel._internal.unstable.sandbox.runtime_common import (
     RemotePath,
     _coerce_remote_path,
@@ -69,6 +70,37 @@ def _validate_read_size(size: int) -> None:
         raise TypeError("size must be an integer")
     if size < -1:
         raise ValueError("size must be -1 or non-negative")
+
+
+class _ExactSizeValidator:
+    __slots__ = ("_declared", "_name", "_written")
+
+    def __init__(self, name: str, declared: int) -> None:
+        self._name = name
+        self._declared = declared
+        self._written = 0
+
+    def validate_write(self, size: int) -> None:
+        consumed = self._written + size
+        if consumed > self._declared:
+            raise SandboxUploadSizeMismatchError(
+                self._name,
+                declared=self._declared,
+                consumed=consumed,
+                early_end=False,
+            )
+
+    def record_write(self, size: int) -> None:
+        self._written += size
+
+    def validate_close(self) -> None:
+        if self._written != self._declared:
+            raise SandboxUploadSizeMismatchError(
+                self._name,
+                declared=self._declared,
+                consumed=self._written,
+                early_end=True,
+            )
 
 
 class _HandleInfo:

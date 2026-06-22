@@ -7,8 +7,8 @@ from typing import Any
 import anyio
 import httpx
 
-from vercel._internal.unstable.sandbox.errors import SandboxUploadSizeMismatchError
 from vercel._internal.unstable.sandbox.filesystem_handle_common import (
+    _ExactSizeValidator,
     _HandleInfo,
     _TextEncoder,
     _TextReadBuffer,
@@ -225,21 +225,147 @@ class _ChannelReader:
         return result
 
 
-class SandboxBinaryWriter(_HandleInfo):
+class _AsyncSpooledWriterEngine:
+    __slots__ = ("_bind_publish", "_permissions", "_publish", "_spool", "_spool_context")
+
+    def __init__(
+        self,
+        bind_publish: Callable[[], Callable[[object, int, int | None], Awaitable[None]]],
+        permissions: int | None,
+    ) -> None:
+        self._bind_publish = bind_publish
+        self._permissions = permissions
+        self._publish: Callable[[object, int, int | None], Awaitable[None]] | None = None
+        self._spool: Any = None
+        self._spool_context: Any = None
+
+    async def enter(self) -> None:
+        try:
+            self._publish = self._bind_publish()
+            self._spool_context = anyio.TemporaryFile("w+b")
+            self._spool = await self._spool_context.__aenter__()
+        except BaseException:
+            await self.abort()
+            raise
+
+    async def write(self, chunk: bytes) -> None:
+        await self._spool.write(chunk)
+
+    async def flush(self) -> None:
+        await self._spool.flush()
+
+    async def close(self) -> None:
+        try:
+            await self._spool.flush()
+            size = await self._spool.tell()
+            await self._spool.seek(0)
+            assert self._publish is not None
+            await self._publish(self._spool, size, self._permissions)
+        finally:
+            await self.abort()
+
+    async def abort(self) -> None:
+        spool_context, self._spool_context = self._spool_context, None
+        self._spool = None
+        if spool_context is not None:
+            await spool_context.__aexit__(None, None, None)
+
+
+class _AsyncStreamingWriterEngine:
     __slots__ = (
         "_bind_publish",
         "_error",
-        "_guard",
         "_permissions",
-        "_publish",
         "_receive",
         "_send",
         "_size",
-        "_spool",
-        "_spool_context",
         "_task_group",
-        "_written",
     )
+
+    def __init__(
+        self,
+        bind_publish: Callable[[], Callable[[object, int, int | None], Awaitable[None]]],
+        size: int,
+        permissions: int | None,
+    ) -> None:
+        self._bind_publish = bind_publish
+        self._size = size
+        self._permissions = permissions
+        self._send: anyio.abc.ObjectSendStream[bytes | object] | None = None
+        self._receive: anyio.abc.ObjectReceiveStream[bytes | object] | None = None
+        self._task_group: anyio.abc.TaskGroup | None = None
+        self._error: BaseException | None = None
+
+    async def enter(self) -> None:
+        try:
+            publish = self._bind_publish()
+            self._send, self._receive = anyio.create_memory_object_stream(1)
+            reader = _ChannelReader(self._receive)
+            self._task_group = anyio.create_task_group()
+            await self._task_group.__aenter__()
+
+            async def worker() -> None:
+                try:
+                    await publish(reader, self._size, self._permissions)
+                except BaseException as exc:
+                    self._error = exc
+                finally:
+                    assert self._receive is not None
+                    await self._receive.aclose()
+
+            self._task_group.start_soon(worker)
+        except BaseException:
+            await self.abort()
+            raise
+
+    async def write(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        if self._error is not None:
+            raise self._error
+        assert self._send is not None
+        try:
+            await self._send.send(chunk)
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+            if self._error is not None:
+                raise self._error from None
+            raise
+        if self._error is not None:
+            raise self._error
+
+    async def flush(self) -> None:
+        if self._error is not None:
+            raise self._error
+
+    async def close(self) -> None:
+        assert self._send is not None
+        try:
+            await self._send.send(_EOF)
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+            pass
+        await self._finish_tasks()
+        if self._error is not None:
+            raise self._error
+
+    async def _finish_tasks(self) -> None:
+        if self._task_group is not None:
+            task_group, self._task_group = self._task_group, None
+            await task_group.__aexit__(None, None, None)
+        send, self._send = self._send, None
+        receive, self._receive = self._receive, None
+        if send is not None:
+            await send.aclose()
+        if receive is not None:
+            await receive.aclose()
+
+    async def abort(self) -> None:
+        if self._task_group is not None:
+            self._task_group.cancel_scope.cancel()
+        await self._finish_tasks()
+
+
+class SandboxBinaryWriter(_HandleInfo):
+    __slots__ = ("_engine", "_guard", "_validator")
 
     def __init__(
         self,
@@ -250,43 +376,20 @@ class SandboxBinaryWriter(_HandleInfo):
         permissions: int | None,
     ) -> None:
         super().__init__(name, "wb")
-        self._bind_publish = bind_publish
-        self._publish: Callable[[object, int, int | None], Awaitable[None]] | None = None
-        self._size = size
-        self._permissions = permissions
-        self._spool: Any = None
-        self._spool_context: Any = None
-        self._send: anyio.abc.ObjectSendStream[bytes | object] | None = None
-        self._receive: anyio.abc.ObjectReceiveStream[bytes | object] | None = None
-        self._task_group: anyio.abc.TaskGroup | None = None
-        self._error: BaseException | None = None
-        self._written = 0
+        self._engine: _AsyncSpooledWriterEngine | _AsyncStreamingWriterEngine
+        self._validator: _ExactSizeValidator | None
+        if size is None:
+            self._engine = _AsyncSpooledWriterEngine(bind_publish, permissions)
+            self._validator = None
+        else:
+            self._engine = _AsyncStreamingWriterEngine(bind_publish, size, permissions)
+            self._validator = _ExactSizeValidator(name, size)
         self._guard = anyio.ResourceGuard("writing to")
 
     async def __aenter__(self) -> "SandboxBinaryWriter":
         self._enter()
         try:
-            self._publish = self._bind_publish()
-            if self._size is None:
-                self._spool_context = anyio.TemporaryFile("w+b")
-                self._spool = await self._spool_context.__aenter__()
-            else:
-                self._send, self._receive = anyio.create_memory_object_stream(1)
-                reader = _ChannelReader(self._receive)
-                self._task_group = anyio.create_task_group()
-                await self._task_group.__aenter__()
-
-                async def worker() -> None:
-                    try:
-                        assert self._publish is not None
-                        await self._publish(reader, self._size or 0, self._permissions)
-                    except BaseException as exc:
-                        self._error = exc
-                    finally:
-                        assert self._receive is not None
-                        await self._receive.aclose()
-
-                self._task_group.start_soon(worker)
+            await self._engine.enter()
         except BaseException:
             self._mark_closed()
             raise
@@ -310,24 +413,12 @@ class SandboxBinaryWriter(_HandleInfo):
             raise TypeError(f"a bytes-like object is required, not {type(data).__name__}")
         chunk = bytes(data)
         with self._guard:
-            if self._size is not None and self._written + len(chunk) > self._size:
-                raise SandboxUploadSizeMismatchError(
-                    self.name,
-                    declared=self._size,
-                    consumed=self._written + len(chunk),
-                    early_end=False,
-                )
-            if self._size is None:
-                await self._spool.write(chunk)
-            elif chunk:
-                if self._error is not None:
-                    raise self._error
-                assert self._send is not None
-                await self._send.send(chunk)
-                if self._error is not None:
-                    raise self._error
-            self._written += len(chunk)
-            return len(chunk)
+            if self._validator is not None:
+                self._validator.validate_write(len(chunk))
+            await self._engine.write(chunk)
+            if self._validator is not None:
+                self._validator.record_write(len(chunk))
+        return len(chunk)
 
     async def writelines(self, lines: Iterable[bytes], /) -> None:
         for line in lines:
@@ -336,64 +427,28 @@ class SandboxBinaryWriter(_HandleInfo):
     async def flush(self) -> None:
         self._ensure_active()
         with self._guard:
-            if self._spool is not None:
-                await self._spool.flush()
-            if self._error is not None:
-                raise self._error
+            await self._engine.flush()
 
     async def aclose(self) -> None:
         if self.closed:
             return
         self._ensure_active()
         try:
-            if self._size is None:
-                await self._spool.flush()
-                size = await self._spool.tell()
-                await self._spool.seek(0)
-                assert self._publish is not None
-                await self._publish(self._spool, size, self._permissions)
-            else:
-                if self._written != self._size:
-                    error = SandboxUploadSizeMismatchError(
-                        self.name,
-                        declared=self._size,
-                        consumed=self._written,
-                        early_end=True,
-                    )
-                    await self._abort()
-                    raise error
-                assert self._send is not None
-                try:
-                    await self._send.send(_EOF)
-                except (anyio.BrokenResourceError, anyio.ClosedResourceError):
-                    pass
-                await self._finish_tasks()
-                if self._error is not None:
-                    raise self._error
+            if self._validator is not None:
+                self._validator.validate_close()
+            await self._engine.close()
+        except BaseException:
+            await self._engine.abort()
+            raise
         finally:
-            if self._spool is not None:
-                await self._spool_context.__aexit__(None, None, None)
             self._mark_closed()
-
-    async def _finish_tasks(self) -> None:
-        if self._task_group is not None:
-            task_group, self._task_group = self._task_group, None
-            await task_group.__aexit__(None, None, None)
-        if self._send is not None:
-            await self._send.aclose()
-        if self._receive is not None:
-            await self._receive.aclose()
 
     async def _abort(self) -> None:
         if self.closed:
             return
         try:
-            if self._task_group is not None:
-                self._task_group.cancel_scope.cancel()
-                await self._finish_tasks()
+            await self._engine.abort()
         finally:
-            if self._spool is not None:
-                await self._spool_context.__aexit__(None, None, None)
             self._mark_closed()
 
 
