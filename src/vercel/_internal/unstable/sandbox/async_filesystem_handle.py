@@ -353,6 +353,15 @@ class SandboxBinaryWriter(_HandleInfo):
                 assert self._publish is not None
                 await self._publish(self._spool, size, self._permissions)
             else:
+                if self._written != self._size:
+                    error = SandboxUploadSizeMismatchError(
+                        self.name,
+                        declared=self._size,
+                        consumed=self._written,
+                        early_end=True,
+                    )
+                    await self._abort()
+                    raise error
                 assert self._send is not None
                 try:
                     await self._send.send(_EOF)

@@ -345,6 +345,15 @@ class SyncSandboxBinaryWriter(_HandleInfo):
                 assert self._publish is not None
                 self._publish(self._spool, size, self._permissions)
             else:
+                if self._written != self._size:
+                    error = SandboxUploadSizeMismatchError(
+                        self.name,
+                        declared=self._size,
+                        consumed=self._written,
+                        early_end=True,
+                    )
+                    self._abort()
+                    raise error
                 self._put(_EOF)
                 assert self._thread is not None
                 self._thread.join()

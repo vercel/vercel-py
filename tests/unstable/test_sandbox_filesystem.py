@@ -21,6 +21,7 @@ from vercel.unstable.sandbox import (
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
     SandboxServiceOptions,
+    SandboxUploadSizeMismatchError,
     sync as sandbox_sync,
 )
 
@@ -174,6 +175,33 @@ async def test_async_filesystem_native_operations_and_write_composition(
     assert _tar_entries(writes.calls[2].request.content) == {
         "vercel/sandbox/workspace/file.txt": (b"relative", 0o644)
     }
+
+
+@pytest.mark.parametrize("content", [b"", b"abc"])
+@respx.mock
+async def test_async_binary_writer_rejects_incomplete_declared_size(
+    mock_env_clear: None, content: bytes
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
+            async with box.fs.open("data.bin", "wb", size=4) as writer:
+                await writer.write(content)
+
+    error = exc_info.value
+    assert (error.path, error.declared, error.consumed, error.early_end) == (
+        "data.bin",
+        4,
+        len(content),
+        True,
+    )
 
 
 @respx.mock
@@ -407,6 +435,33 @@ def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> 
         for method in ("mkdir", "read_file", "read_text", "write_files"):
             assert not hasattr(box, method)
             assert not hasattr(box.current_session, method)
+
+
+@pytest.mark.parametrize("content", [b"", b"abc"])
+@respx.mock
+def test_sync_binary_writer_rejects_incomplete_declared_size(
+    mock_env_clear: None, content: bytes
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
+            with box.fs.open("data.bin", "wb", size=4) as writer:
+                writer.write(content)
+
+    error = exc_info.value
+    assert (error.path, error.declared, error.consumed, error.early_end) == (
+        "data.bin",
+        4,
+        len(content),
+        True,
+    )
 
 
 @respx.mock
