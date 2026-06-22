@@ -141,6 +141,32 @@ class SandboxPathNotFoundError(SandboxFilesystemError):
         self.cause = cause
 
 
+class SandboxFilesystemTransferError(SandboxFilesystemError):
+    """Common error for Sandbox filesystem streaming transfers."""
+
+
+class SandboxUploadSizeMismatchError(SandboxFilesystemTransferError):
+    """Declared upload size does not match the bytes the source produced."""
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        declared: int,
+        consumed: int,
+        early_end: bool,
+    ) -> None:
+        super().__init__(
+            f"Sandbox upload size mismatch for {path!r}: "
+            f"declared {declared} bytes, consumed {consumed} bytes"
+            f"{' (source ended early)' if early_end else ' (source produced trailing data)'}"
+        )
+        self.path = path
+        self.declared = declared
+        self.consumed = consumed
+        self.early_end = early_end
+
+
 def _extract_api_error_code(data: object | None) -> str | None:
     if not isinstance(data, dict):
         return None
