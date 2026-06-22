@@ -35,6 +35,13 @@ jobs:
         with:
           enable-cache: false
 
+      # The devalue interop tests run the real JS package against the Python
+      # port. They skip when node is absent locally, but are mandatory here.
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
