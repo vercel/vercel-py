@@ -1,6 +1,7 @@
 import io
 import json
 import tarfile
+from collections.abc import AsyncIterator, Iterator
 from pathlib import PurePosixPath
 from typing import cast
 
@@ -20,6 +21,41 @@ from vercel.unstable.sandbox import (
     SandboxServiceOptions,
     sync as sandbox_sync,
 )
+
+
+async def _read_as_chunks(source: bytes, chunk_size: int) -> AsyncIterator[bytes]:
+    offset = 0
+    while offset < len(source):
+        chunk = source[offset : offset + chunk_size]
+        yield chunk
+        offset += chunk_size
+
+
+class _SyncByteReader:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._offset = 0
+
+    def read(self, n: int = -1) -> bytes:
+        if n < 0:
+            chunk = self._data[self._offset :]
+            self._offset = len(self._data)
+        else:
+            chunk = self._data[self._offset : self._offset + n]
+            self._offset += len(chunk)
+        return chunk
+
+
+class _SyncByteWriter:
+    def __init__(self) -> None:
+        self.written: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _sandbox_response(session_id: str = "sbx_1") -> dict[str, object]:
@@ -178,6 +214,18 @@ async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
     second = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_2/fs/mkdir").mock(
         return_value=httpx.Response(204)
     )
+    first_write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+    second_write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_2/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+    first_read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, content=b"original")
+    )
+    second_read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_2/fs/read").mock(
+        return_value=httpx.Response(200, content=b"current")
+    )
 
     async with vercel.session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
@@ -187,9 +235,21 @@ async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
         await box.update(current_snapshot_id="snap_1")
         await retained_box_fs.mkdir("current")
         await retained_session_fs.mkdir("original")
+        async with retained_box_fs.open("current.bin", "wb", size=7) as current_writer:
+            await current_writer.write(b"current")
+        async with retained_session_fs.open("original.bin", "wb", size=8) as original_writer:
+            await original_writer.write(b"original")
+        async with retained_box_fs.open("current.bin", "rb") as current_reader:
+            assert await current_reader.read() == b"current"
+        async with retained_session_fs.open("original.bin", "rb") as original_reader:
+            assert await original_reader.read() == b"original"
 
     assert second.call_count == 1
     assert first.call_count == 1
+    assert second_write.call_count == 1
+    assert first_write.call_count == 1
+    assert second_read.call_count == 1
+    assert first_read.call_count == 1
 
 
 @respx.mock
@@ -371,3 +431,167 @@ def test_sync_filesystem_batch_stages_one_request(mock_env_clear: None) -> None:
         "tmp/data.bin": (b"\x01", 0o600),
         "tmp/message.txt": (b"hello", 0o644),
     }
+
+
+class _TrackedAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes], *, failure: BaseException | None = None) -> None:
+        self._chunks = chunks
+        self._failure = failure
+        self.aclose_called = False
+
+    async def __aiter__(self) -> "AsyncIterator[bytes]":
+        for chunk in self._chunks:
+            yield chunk
+        if self._failure is not None:
+            raise self._failure
+
+    async def aclose(self) -> None:
+        self.aclose_called = True
+
+
+class _TrackedSyncStream(httpx.SyncByteStream):
+    def __init__(self, chunks: list[bytes], *, failure: BaseException | None = None) -> None:
+        self._chunks = chunks
+        self._failure = failure
+        self.close_called = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield from self._chunks
+        if self._failure is not None:
+            raise self._failure
+
+    def close(self) -> None:
+        self.close_called = True
+
+
+@respx.mock
+async def test_read_bytes_response_closed_after_streaming_read(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stream = _TrackedAsyncStream([b"bytes"])
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        result = await box.fs.read_bytes(PurePosixPath("data.bin"))
+        assert result == b"bytes"
+
+    assert stream.aclose_called
+
+
+@respx.mock
+def test_sync_read_bytes_uses_and_closes_unread_stream(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stream = _TrackedSyncStream([b"abc", b"", b"def"])
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        assert box.fs.read_bytes("data.bin") == b"abcdef"
+
+    assert stream.close_called
+
+
+@respx.mock
+def test_sync_read_bytes_closes_response_after_stream_failure(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    failure = RuntimeError("stream failed")
+    stream = _TrackedSyncStream([b"partial"], failure=failure)
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(RuntimeError) as exc_info:
+            box.fs.read_bytes("data.bin")
+        assert exc_info.value is failure
+
+    assert stream.close_called
+
+
+@respx.mock
+async def test_read_bytes_multiple_chunks(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=_TrackedAsyncStream([b"abc", b"def", b"ghi"]))
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        result = await box.fs.read_bytes(PurePosixPath("data.bin"))
+        assert result == b"abcdefghi"
+
+
+@respx.mock
+async def test_read_bytes_empty_file(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(200, stream=_TrackedAsyncStream([]))
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        result = await box.fs.read_bytes(PurePosixPath("empty.txt"))
+        assert result == b""
+
+
+@respx.mock
+async def test_read_bytes_missing_path(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        return_value=httpx.Response(
+            404, json={"error": {"code": "not_found", "message": "missing"}}
+        )
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(SandboxPathNotFoundError) as exc_info:
+            await box.fs.read_bytes(PurePosixPath("missing.txt"))
+        assert exc_info.value.path == "missing.txt"
+        assert exc_info.value.operation == "read_bytes"
+        assert exc_info.value.cause.code == "not_found"
+
+
+@respx.mock
+async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    response_count = 0
+
+    def stream_response(request: httpx.Request) -> httpx.Response:
+        nonlocal response_count
+        response_count += 1
+        return httpx.Response(200, stream=_TrackedAsyncStream([b"content"]))
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+        side_effect=stream_response
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+
+        raw = await box.fs.read_bytes(PurePosixPath("data.bin"))
+        assert raw == b"content"
+
+        text = await box.fs.read_text("message.txt")
+        assert text == "content"
+
+    assert response_count == 2

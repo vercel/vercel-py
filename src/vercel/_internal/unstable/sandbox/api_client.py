@@ -1,12 +1,9 @@
 """Internal Sandbox v2 API client."""
 
-import io
 import json
 import platform
-import posixpath
 import sys
-import tarfile
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Literal, TypeVar, cast
@@ -25,8 +22,8 @@ from pydantic import (
 
 from vercel._internal.http import (
     BaseTransport,
-    BytesBody,
     JSONBody,
+    RawBody,
     ReadResponsePolicy,
     RequestBody,
     extract_structured_error,
@@ -54,7 +51,6 @@ from vercel._internal.unstable.sandbox.models import (
     _Omitted,
     _parse_network_policy,
     _serialize_network_policy,
-    _WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import (
     SandboxCredentials,
@@ -697,49 +693,6 @@ def _drop_none(data: Mapping[str, JSONValue | None]) -> JSONObject:
     return {key: value for key, value in data.items() if value is not None}
 
 
-def _normalize_mode(mode: object) -> int | None:
-    match mode:
-        case None:
-            return None
-        case bool():
-            raise TypeError("mode must be an integer between 0 and 0o777")
-        case int() if 0 <= mode <= 0o777:
-            return mode
-        case int():
-            raise ValueError("mode must be an integer between 0 and 0o777")
-        case _:
-            raise TypeError("mode must be an integer between 0 and 0o777")
-
-
-def _normalize_tar_path(path: str, *, cwd: str) -> str:
-    if not posixpath.isabs(cwd):
-        raise ValueError("cwd must be an absolute path")
-    if posixpath.isabs(path):
-        absolute_path = posixpath.normpath(path)
-    else:
-        absolute_path = posixpath.normpath(posixpath.join(cwd, path))
-    return posixpath.relpath(absolute_path, "/")
-
-
-def _build_write_files_tarball(
-    files: Sequence[_WriteFile],
-    *,
-    cwd: str,
-) -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for file in files:
-            info = tarfile.TarInfo(name=_normalize_tar_path(file.path, cwd=cwd))
-            mode = _normalize_mode(file.mode)
-            if mode is not None:
-                info.mode = mode
-            info.size = len(file.content)
-            tar.addfile(info, io.BytesIO(file.content))
-    # BytesBody currently requires bytes, so finalizing the in-memory archive
-    # makes one additional copy. Streaming uploads are intentionally deferred.
-    return buffer.getvalue()
-
-
 def _validate_response(model: type[ResponseModelT], data: JSONObject) -> ResponseModelT:
     try:
         return model.model_validate(data)
@@ -789,10 +742,12 @@ class SandboxApiClient:
         base_url: str,
         credentials_factory: SandboxCredentialsFactory,
         transport: BaseTransport,
+        file_transfer_timeout: timedelta,
     ) -> None:
         self._credentials_factory = credentials_factory
         self._base_url = base_url
         self._transport = transport
+        self._file_transfer_timeout = file_transfer_timeout
 
     def _url(self, path: str) -> str:
         return self._base_url.rstrip("/") + "/" + path.lstrip("/")
@@ -806,6 +761,7 @@ class SandboxApiClient:
         body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
+        timeout: timedelta | None = None,
     ) -> Response:
         query = cast(
             QueryParamTypes,
@@ -827,6 +783,7 @@ class SandboxApiClient:
             params=query,
             body=body,
             headers=request_headers,
+            timeout=timeout,
             read_response=ReadResponsePolicy.ALWAYS,
         )
 
@@ -845,6 +802,7 @@ class SandboxApiClient:
         body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
+        timeout: timedelta | None = None,
     ) -> Response:
         query = cast(
             QueryParamTypes,
@@ -866,6 +824,7 @@ class SandboxApiClient:
             params=query,
             body=body,
             headers=request_headers,
+            timeout=timeout,
             stream=True,
             read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
         )
@@ -1413,38 +1372,37 @@ class SandboxApiClient:
             body=JSONBody(request.to_api_dict()),
         )
 
-    async def read_bytes(
+    async def open_read_response(
         self,
         *,
         session_id: str,
         path: str,
         cwd: str | None = None,
-    ) -> bytes:
+    ) -> Response:
         credentials = await self._credentials_factory()
         request = _FilesystemPathRequest(path=path, cwd=cwd)
-        response = await self._request(
+        return await self._request_stream(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/read", session_id=session_id),
             credentials=credentials,
             body=JSONBody(request.to_api_dict()),
+            timeout=self._file_transfer_timeout,
         )
-        return response.content
 
     async def write_files(
         self,
         *,
         session_id: str,
-        files: Sequence[_WriteFile],
-        cwd: str,
+        body: Iterator[bytes] | AsyncIterator[bytes],
     ) -> None:
         credentials = await self._credentials_factory()
-        payload = _build_write_files_tarball(files, cwd=cwd)
         await self._request(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/write", session_id=session_id),
             credentials=credentials,
-            body=BytesBody(payload, "application/gzip"),
-            headers={"x-cwd": "/"},
+            body=RawBody(body),
+            headers={"x-cwd": "/", "content-type": "application/gzip"},
+            timeout=self._file_transfer_timeout,
         )
 
     async def kill_command(

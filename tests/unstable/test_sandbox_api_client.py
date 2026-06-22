@@ -50,6 +50,7 @@ async def test_invalid_json_response_raises_response_error(mock_env_clear: None)
         base_url="https://sandbox.test",
         credentials_factory=credentials_factory,
         transport=transport,
+        file_transfer_timeout=timedelta(minutes=5),
     )
 
     with pytest.raises(SandboxResponseError):

@@ -1,6 +1,6 @@
 """Neutral orchestration for unstable Sandbox operations."""
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, cast
@@ -31,7 +31,6 @@ from vercel._internal.unstable.sandbox.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     TagFilter,
-    _WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
 from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
@@ -562,31 +561,39 @@ class SandboxService:
                 ) from error
             raise
 
-    async def read_bytes(self, *, session_id: str, path: str, cwd: str | None = None) -> bytes:
-        self._ensure_open()
-        try:
-            return await self._api_client.read_bytes(session_id=session_id, path=path, cwd=cwd)
-        except SandboxApiError as error:
-            if error.code in _MISSING_PATH_ERROR_CODES:
-                raise SandboxPathNotFoundError(
-                    path, operation="read_bytes", cwd=cwd, cause=error
-                ) from error
-            raise
-
-    async def write_files(
+    async def write_archive(
         self,
         *,
         session_id: str,
-        files: Sequence[_WriteFile],
+        body: Iterator[bytes] | AsyncIterator[bytes],
+        paths: tuple[str, ...],
         cwd: str,
     ) -> None:
         self._ensure_open()
         try:
-            await self._api_client.write_files(session_id=session_id, files=files, cwd=cwd)
+            await self._api_client.write_files(session_id=session_id, body=body)
         except SandboxApiError as error:
-            raise SandboxFilesystemWriteError(
-                paths=tuple(file.path for file in files), cwd=cwd, cause=error
-            ) from error
+            raise SandboxFilesystemWriteError(paths=paths, cwd=cwd, cause=error) from error
+
+    async def open_read_response(
+        self,
+        *,
+        operation: str,
+        session_id: str,
+        path: str,
+        cwd: str | None = None,
+    ) -> httpx.Response:
+        self._ensure_open()
+        try:
+            return await self._api_client.open_read_response(
+                session_id=session_id, path=path, cwd=cwd
+            )
+        except SandboxApiError as error:
+            if error.code in _MISSING_PATH_ERROR_CODES:
+                raise SandboxPathNotFoundError(
+                    path, operation=operation, cwd=cwd, cause=error
+                ) from error
+            raise
 
     async def _filesystem_command(
         self,
@@ -790,6 +797,7 @@ def get_sandbox_service(session: "_BaseSdkSession") -> SandboxService:
                 base_url=options.base_url,
                 credentials_factory=options.credentials_factory,
                 transport=session.get_transport(),
+                file_transfer_timeout=options.file_transfer_timeout,
             ),
             options=options,
             ensure_open=session.check_open,

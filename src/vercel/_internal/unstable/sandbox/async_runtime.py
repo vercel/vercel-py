@@ -7,15 +7,26 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mappi
 from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
-from typing import Any, TextIO
+from typing import Any, Literal, TextIO, overload
+
+import anyio
 
 from vercel._internal.polyfills import Self
 from vercel._internal.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel._internal.unstable.sandbox.async_filesystem_handle import (
+    SandboxBinaryReader,
+    SandboxBinaryWriter,
+    SandboxTextReader,
+    SandboxTextWriter,
+    _async_open_response,
+    _async_publish,
+)
 from vercel._internal.unstable.sandbox.errors import (
     SandboxCleanupError,
     SandboxResponseError,
     SandboxTerminalStateError,
 )
+from vercel._internal.unstable.sandbox.filesystem_handle_common import _validate_open_options
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
@@ -52,9 +63,12 @@ from vercel._internal.unstable.sandbox.runtime_common import (
     SandboxHandleBase,
     SnapshotHandleBase,
     _coerce_remote_path,
+    _normalize_tar_path,
     _ProcessHandleState,
     _SandboxFilesystemBatchBase,
     _signal_number,
+    _UploadFileEntry,
+    _validate_file_mode,
 )
 from vercel._internal.unstable.sandbox.service import SandboxService, _SandboxTerminalState
 from vercel._internal.unstable.sandbox.state import (
@@ -63,6 +77,7 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxState,
     SnapshotState,
 )
+from vercel._internal.unstable.sandbox.streaming_archive import async_archive_body
 from vercel._internal.unstable.sandbox.text_reader import TextReader, _text_readers
 
 
@@ -186,6 +201,17 @@ class Snapshot(SnapshotHandleBase):
         return self
 
 
+class _AsyncBytearrayWriter:
+    __slots__ = ("_data",)
+
+    def __init__(self, data: bytearray) -> None:
+        self._data = data
+
+    async def write(self, data: bytes, /) -> object:
+        self._data.extend(data)
+        return len(data)
+
+
 class SandboxFilesystem:
     """Perform filesystem operations in a sandbox runtime session."""
 
@@ -201,6 +227,104 @@ class SandboxFilesystem:
         self._service = service
         self._session_id = session_id
         self._write_files_cwd = write_files_cwd
+
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["r"] = "r",
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+        size: None = None,
+        permissions: None = None,
+    ) -> SandboxTextReader: ...
+
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["rb"],
+        *,
+        cwd: RemotePath | None = None,
+        encoding: None = None,
+        errors: None = None,
+        newline: None = None,
+        size: None = None,
+        permissions: None = None,
+    ) -> SandboxBinaryReader: ...
+
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["w"],
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+        size: None = None,
+        permissions: int | None = None,
+    ) -> SandboxTextWriter: ...
+
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["wb"],
+        *,
+        cwd: RemotePath | None = None,
+        encoding: None = None,
+        errors: None = None,
+        newline: None = None,
+        size: int | None = None,
+        permissions: int | None = None,
+    ) -> SandboxBinaryWriter: ...
+
+    def open(
+        self,
+        path: RemotePath,
+        mode: str = "r",
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+        size: int | None = None,
+        permissions: int | None = None,
+    ) -> SandboxBinaryReader | SandboxTextReader | SandboxBinaryWriter | SandboxTextWriter:
+        """Create a lazy, single-use sequential file handle."""
+        path, mode, encoding, errors, newline, size, permissions = _validate_open_options(
+            path,
+            mode,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+            size=size,
+            permissions=permissions,
+        )
+        normalized_cwd = None if cwd is None else _coerce_remote_path(cwd)
+        if mode == "rb":
+            return SandboxBinaryReader(
+                path, _async_open_response(self._service, self._session_id, path, normalized_cwd)
+            )
+        if mode == "r":
+            return SandboxTextReader(
+                path,
+                _async_open_response(self._service, self._session_id, path, normalized_cwd),
+                encoding,
+                errors,
+                newline,
+            )
+        publish = _async_publish(
+            self._service, self._session_id, self._write_files_cwd, path, normalized_cwd
+        )
+        if mode == "wb":
+            return SandboxBinaryWriter(path, publish, size=size, permissions=permissions)
+        return SandboxTextWriter(path, publish, encoding, errors, newline, permissions)
 
     async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
         stdout: list[str] = []
@@ -248,11 +372,15 @@ class SandboxFilesystem:
         Raises:
             SandboxPathNotFoundError: If the file does not exist.
         """
-        return await self._service.read_bytes(
-            session_id=self._session_id(),
+        data = bytearray()
+        await self._copy_response(
+            operation="read_bytes",
             path=_coerce_remote_path(path),
             cwd=None if cwd is None else _coerce_remote_path(cwd),
+            target=_AsyncBytearrayWriter(data),
+            chunk_size=64 * 1024,
         )
+        return bytes(data)
 
     async def read_text(
         self,
@@ -335,13 +463,58 @@ class SandboxFilesystem:
             cwd=cwd,
         )
 
+    async def _copy_response(
+        self,
+        *,
+        operation: str,
+        path: str,
+        cwd: str | None,
+        target: _AsyncBytearrayWriter,
+        chunk_size: int,
+    ) -> int:
+        response = await self._service.open_read_response(
+            operation=operation,
+            session_id=self._session_id(),
+            path=path,
+            cwd=cwd,
+        )
+        try:
+            total = 0
+            async for chunk in response.aiter_bytes(chunk_size):
+                if not chunk:
+                    continue
+                await target.write(chunk)
+                total += len(chunk)
+            return total
+        finally:
+            with anyio.CancelScope(shield=True):
+                await response.aclose()
+
     async def _write_files(
         self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None
     ) -> None:
-        await self._service.write_files(
+        for file in files:
+            _validate_file_mode(file.mode)
+        resolved_cwd = self._write_files_cwd(cwd)
+        entries = [
+            _UploadFileEntry(path=f.path, size=len(f.content), source=f.content, mode=f.mode)
+            for f in files
+        ]
+        normalized = [
+            _UploadFileEntry(
+                path=entry.path,
+                size=entry.size,
+                source=entry.source,
+                mode=entry.mode,
+                archive_path=_normalize_tar_path(entry.path, cwd=resolved_cwd),
+            )
+            for entry in entries
+        ]
+        await self._service.write_archive(
             session_id=self._session_id(),
-            files=files,
-            cwd=self._write_files_cwd(cwd),
+            body=async_archive_body(normalized, 64 * 1024),
+            paths=tuple(entry.path for entry in entries),
+            cwd=resolved_cwd,
         )
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SandboxFilesystemBatch":

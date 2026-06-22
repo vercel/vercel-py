@@ -1,11 +1,12 @@
 """Sync runtime handles and entry points for unstable Sandbox operations."""
 
+import io
 import signal as signal_module
 import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import timedelta
 from types import TracebackType
-from typing import Any, TextIO
+from typing import Any, Literal, TextIO, overload
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.polyfills import Self
@@ -15,6 +16,7 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxResponseError,
     SandboxTerminalStateError,
 )
+from vercel._internal.unstable.sandbox.filesystem_handle_common import _validate_open_options
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
@@ -50,9 +52,12 @@ from vercel._internal.unstable.sandbox.runtime_common import (
     SandboxHandleBase,
     SnapshotHandleBase,
     _coerce_remote_path,
+    _normalize_tar_path,
     _ProcessHandleState,
     _SandboxFilesystemBatchBase,
     _signal_number,
+    _UploadFileEntry,
+    _validate_file_mode,
 )
 from vercel._internal.unstable.sandbox.service import SandboxService, _SandboxTerminalState
 from vercel._internal.unstable.sandbox.state import (
@@ -60,6 +65,15 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxRuntimeSessionState,
     SandboxState,
     SnapshotState,
+)
+from vercel._internal.unstable.sandbox.streaming_archive import sync_archive_body
+from vercel._internal.unstable.sandbox.sync_filesystem_handle import (
+    SyncSandboxBinaryReader,
+    SyncSandboxBinaryWriter,
+    SyncSandboxTextReader,
+    SyncSandboxTextWriter,
+    _sync_open_response,
+    _sync_publish,
 )
 from vercel._internal.unstable.sandbox.text_reader import SyncTextReader, _sync_text_readers
 
@@ -206,6 +220,109 @@ class SyncSandboxFilesystem:
         self._session_id = session_id
         self._write_files_cwd = write_files_cwd
 
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["r"] = "r",
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+        size: None = None,
+        permissions: None = None,
+    ) -> SyncSandboxTextReader: ...
+
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["rb"],
+        *,
+        cwd: RemotePath | None = None,
+        encoding: None = None,
+        errors: None = None,
+        newline: None = None,
+        size: None = None,
+        permissions: None = None,
+    ) -> SyncSandboxBinaryReader: ...
+
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["w"],
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+        size: None = None,
+        permissions: int | None = None,
+    ) -> SyncSandboxTextWriter: ...
+
+    @overload
+    def open(
+        self,
+        path: RemotePath,
+        mode: Literal["wb"],
+        *,
+        cwd: RemotePath | None = None,
+        encoding: None = None,
+        errors: None = None,
+        newline: None = None,
+        size: int | None = None,
+        permissions: int | None = None,
+    ) -> SyncSandboxBinaryWriter: ...
+
+    def open(
+        self,
+        path: RemotePath,
+        mode: str = "r",
+        *,
+        cwd: RemotePath | None = None,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+        size: int | None = None,
+        permissions: int | None = None,
+    ) -> (
+        SyncSandboxBinaryReader
+        | SyncSandboxTextReader
+        | SyncSandboxBinaryWriter
+        | SyncSandboxTextWriter
+    ):
+        """Create a lazy, single-use sequential file handle."""
+        path, mode, encoding, errors, newline, size, permissions = _validate_open_options(
+            path,
+            mode,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+            size=size,
+            permissions=permissions,
+        )
+        normalized_cwd = None if cwd is None else _coerce_remote_path(cwd)
+        if mode == "rb":
+            return SyncSandboxBinaryReader(
+                path, _sync_open_response(self._service, self._session_id, path, normalized_cwd)
+            )
+        if mode == "r":
+            return SyncSandboxTextReader(
+                path,
+                _sync_open_response(self._service, self._session_id, path, normalized_cwd),
+                encoding,
+                errors,
+                newline,
+            )
+        publish = _sync_publish(
+            self._service, self._session_id, self._write_files_cwd, path, normalized_cwd
+        )
+        if mode == "wb":
+            return SyncSandboxBinaryWriter(path, publish, size=size, permissions=permissions)
+        return SyncSandboxTextWriter(path, publish, encoding, errors, newline, permissions)
+
     async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
         stdout: list[str] = []
         stderr: list[str] = []
@@ -254,13 +371,15 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxPathNotFoundError: If the file does not exist.
         """
-        return iter_coroutine(
-            self._service.read_bytes(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-            )
+        target = io.BytesIO()
+        self._copy_response(
+            operation="read_bytes",
+            path=_coerce_remote_path(path),
+            cwd=None if cwd is None else _coerce_remote_path(cwd),
+            target=target,
+            chunk_size=64 * 1024,
         )
+        return target.getvalue()
 
     def read_text(
         self,
@@ -343,12 +462,58 @@ class SyncSandboxFilesystem:
             cwd=cwd,
         )
 
-    def _write_files(self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None) -> None:
-        iter_coroutine(
-            self._service.write_files(
+    def _copy_response(
+        self,
+        *,
+        operation: str,
+        path: str,
+        cwd: str | None,
+        target: io.BytesIO,
+        chunk_size: int,
+    ) -> int:
+        response = iter_coroutine(
+            self._service.open_read_response(
+                operation=operation,
                 session_id=self._session_id(),
-                files=files,
-                cwd=self._write_files_cwd(cwd),
+                path=path,
+                cwd=cwd,
+            )
+        )
+        try:
+            total = 0
+            for chunk in response.iter_bytes(chunk_size):
+                if not chunk:
+                    continue
+                target.write(chunk)
+                total += len(chunk)
+            return total
+        finally:
+            response.close()
+
+    def _write_files(self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None) -> None:
+        for file in files:
+            _validate_file_mode(file.mode)
+        resolved_cwd = self._write_files_cwd(cwd)
+        entries = [
+            _UploadFileEntry(path=f.path, size=len(f.content), source=f.content, mode=f.mode)
+            for f in files
+        ]
+        normalized = [
+            _UploadFileEntry(
+                path=entry.path,
+                size=entry.size,
+                source=entry.source,
+                mode=entry.mode,
+                archive_path=_normalize_tar_path(entry.path, cwd=resolved_cwd),
+            )
+            for entry in entries
+        ]
+        iter_coroutine(
+            self._service.write_archive(
+                session_id=self._session_id(),
+                body=sync_archive_body(normalized, 64 * 1024),
+                paths=tuple(entry.path for entry in entries),
+                cwd=resolved_cwd,
             )
         )
 
