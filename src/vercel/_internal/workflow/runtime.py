@@ -524,6 +524,13 @@ async def workflow_handler(
                         await world.events_create(run_id, step_data.into_event(s.correlation_id))
                     except w.EntityConflictError:
                         logger.debug(f"Workflow step {s.correlation_id!r} has already been created")
+                    # We enqueue the invoke whether or not the
+                    # events_create had an EntityConflictError, since
+                    # a previous invoker may have crashed between
+                    # creating the event and enqueueing.
+                    #
+                    # Instead we use an idempotency_key to pervent
+                    # duplicate queueing.
                     await world.queue(
                         f"__wkf_step_{s.step.name}",
                         w.StepInvokePayload(
@@ -533,6 +540,7 @@ async def workflow_handler(
                             stepId=s.correlation_id,
                             requestedAt=datetime.now(UTC),
                         ),
+                        idempotency_key=s.correlation_id,
                     )
 
                 tg.start_soon(create_step)
