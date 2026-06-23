@@ -5,6 +5,7 @@ import functools
 import importlib
 import json
 import logging
+import math
 import random
 import re
 import traceback
@@ -24,6 +25,26 @@ P = ParamSpec("P")
 T = TypeVar("T")
 SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 logger = logging.getLogger("vercel.workflow")
+
+# Wait-continuation dispatch — mirrors @workflow/core's wait-continuation.ts.
+# The delayed re-enqueue that wakes a run when a pending wait elapses is keyed on
+# the wait's correlation id, so repeated suspension passes over the same pending
+# wait dedupe to a single timer. Long waits chain in <=23h hops (suffixed with the
+# hop index so the chain advances while same-hop re-observations still dedupe);
+# near-elapsed waits get a per-second bucket so an early delivery can re-enqueue.
+WAIT_CONTINUATION_MAX_DELAY_SECONDS = 82_800
+NEAR_ELAPSED_WAIT_THRESHOLD_SECONDS = 2
+
+
+def _wait_continuation_dispatch(
+    timeout_seconds: int, wait_correlation_id: str, now: datetime
+) -> tuple[float, str]:
+    if timeout_seconds <= NEAR_ELAPSED_WAIT_THRESHOLD_SECONDS:
+        return timeout_seconds, f"{wait_correlation_id}:{int(now.timestamp())}"
+    hop = math.ceil(timeout_seconds / WAIT_CONTINUATION_MAX_DELAY_SECONDS)
+    delay = min(timeout_seconds, WAIT_CONTINUATION_MAX_DELAY_SECONDS)
+    key = wait_correlation_id if hop == 1 else f"{wait_correlation_id}:hop-{hop}"
+    return delay, key
 
 
 class NondeterminismError(Exception):
@@ -387,7 +408,7 @@ async def workflow_handler(
     queue_name: str,
     message_id: str,
     registry: core.Workflows,
-) -> float | None:
+) -> w.QueueContinuation | None:
     world = w.get_world()
     run_id = w.WorkflowInvokePayload.model_validate(message).run_id
     workflow_run = await world.runs_get(run_id)
@@ -600,14 +621,20 @@ async def workflow_handler(
 
     now = datetime.now(UTC)
     min_timeout_seconds = -1.0
+    soonest_wait_id: str | None = None
     for sus in context.suspensions.values():
         if isinstance(sus, Wait):
             seconds = (sus.resume_at - now).total_seconds()
-            if min_timeout_seconds < 0:
+            if min_timeout_seconds < 0 or seconds < min_timeout_seconds:
                 min_timeout_seconds = seconds
-            else:
-                min_timeout_seconds = min(min_timeout_seconds, seconds)
-    return None if min_timeout_seconds < 0 else min_timeout_seconds
+                soonest_wait_id = sus.correlation_id
+    if soonest_wait_id is None:
+        return None
+    # Key the delayed wake-up on the soonest pending wait so repeated suspension
+    # passes over it collapse to one timer instead of piling up duplicate wake-ups.
+    timeout_seconds = max(1, math.ceil(min_timeout_seconds))
+    delay, key = _wait_continuation_dispatch(timeout_seconds, soonest_wait_id, now)
+    return w.QueueContinuation(delay_seconds=delay, idempotency_key=key)
 
 
 async def step_handler(
@@ -617,7 +644,7 @@ async def step_handler(
     queue_name: str,
     message_id: str,
     registry: core.Workflows,
-) -> float | None:
+) -> w.QueueContinuation | None:
     world = w.get_world()
     req = w.StepInvokePayload.model_validate(message)
 
@@ -629,7 +656,7 @@ async def step_handler(
     now = datetime.now(UTC)
     if step_run.retry_after and step_run.retry_after > now:
         timeout_seconds = max(1, int((step_run.retry_after - now).total_seconds()))
-        return timeout_seconds
+        return w.QueueContinuation(delay_seconds=timeout_seconds)
 
     # Check max retries FIRST before any state changes
     # step.attempt tracks how many times step_started has been called
@@ -792,7 +819,7 @@ async def step_handler(
             )
 
             # Return timeout to keep message visible for retry
-            return 1.0
+            return w.QueueContinuation(delay_seconds=1.0)
 
     # Re-invoke the workflow to continue execution
     await world.queue(

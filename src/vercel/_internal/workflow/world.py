@@ -632,10 +632,23 @@ class EntityConflictError(Exception):
     pass
 
 
+@dataclasses.dataclass(frozen=True)
+class QueueContinuation:
+    """A handler's request to re-enqueue its own message after a delay.
+
+    ``idempotency_key`` lets the re-enqueue dedupe — e.g. a wait/sleep
+    continuation keyed on the pending wait so repeated suspension passes over the
+    same wait collapse into one delayed wake-up.
+    """
+
+    delay_seconds: float
+    idempotency_key: str | None = None
+
+
 class QueueHandler(Protocol):
     async def __call__(
         self, message: Any, *, attempt: int, queue_name: str, message_id: str
-    ) -> float | None: ...
+    ) -> QueueContinuation | None: ...
 
 
 class HTTPHandler(Protocol):
