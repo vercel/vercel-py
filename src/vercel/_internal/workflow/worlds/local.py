@@ -5,6 +5,7 @@ import math
 import os
 import pathlib
 import tempfile
+import threading
 import traceback
 from datetime import datetime
 from typing import Any, TypeVar
@@ -102,6 +103,17 @@ class LocalWorld(w.World):
     def __init__(self) -> None:
         self.monotonic_ulid = monotonic_factory()
         self.data_dir = pathlib.Path(os.getenv("WORKFLOW_LOCAL_DATA_DIR", ".workflow-data"))
+        # Per-run mutex serializing events_create, which does some
+        # read-modify-writes in some cases.
+        #
+        # We certainly *could* do more fine-grained locking but I
+        # don't think it would really help.
+        self._run_locks: dict[str, threading.Lock] = {}
+
+    def _run_lock(self, run_id: str) -> threading.Lock:
+        # dict.setdefault is atomic, so concurrent callers for the same run_id
+        # converge on one lock without a separate guard lock.
+        return self._run_locks.setdefault(run_id, threading.Lock())
 
     def delete_all_hooks_for_run(self, run_id: str) -> None:
         hooks_dir = self.data_dir / "hooks"
@@ -268,6 +280,16 @@ class LocalWorld(w.World):
         raise RuntimeError(f"Hook with token {token!r} not found")
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+        # run_created has no existing entity to race on — its create is guarded by
+        # the atomic write in write_json. Every other event reads-checks-writes an
+        # existing run/step, so serialize those per run. The body is synchronous,
+        # so holding a threading.Lock across it is safe and brief.
+        if run_id is None:
+            return self._events_create_impl(run_id, data)
+        with self._run_lock(run_id):
+            return self._events_create_impl(run_id, data)
+
+    def _events_create_impl(self, run_id: str | None, data: w.Event) -> w.EventResult:
         event_id = f"evnt_{self.monotonic_ulid(None)}"
         now = datetime.now(UTC)
 
