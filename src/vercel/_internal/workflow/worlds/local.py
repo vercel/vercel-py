@@ -142,7 +142,7 @@ class LocalWorld(w.World):
                     # Use delaySeconds approach: send new message with delay, then delete current
                     # Clamp to max delay (23h) - for longer sleeps, the workflow will chain
                     # multiple delayed messages until the full sleep duration has elapsed
-                    delay_seconds = min(result, MAX_DELAY_SECONDS)
+                    delay_seconds = min(result.delay_seconds, MAX_DELAY_SECONDS)
 
                     # Send new message with delay BEFORE acknowledging current message
                     # This ensures crash safety: if process dies after send but before ack,
@@ -152,6 +152,7 @@ class LocalWorld(w.World):
                         w.QueuePayloadAdaptor.validate_python(payload),
                         deployment_id=body.get("deploymentId"),
                         delay_seconds=delay_seconds,
+                        idempotency_key=result.idempotency_key,
                     )
             except Exception:
                 traceback.print_exc()
@@ -198,8 +199,8 @@ class LocalWorld(w.World):
 
                 # Handle timeout response
                 timeout_seconds: float | None = None
-                if result:
-                    timeout_seconds = min(result, LOCAL_QUEUE_MAX_VISIBILITY)
+                if result is not None:
+                    timeout_seconds = min(result.delay_seconds, LOCAL_QUEUE_MAX_VISIBILITY)
                 if timeout_seconds:
                     return w.HTTPResponse.json({"timeoutSeconds": timeout_seconds}, status=503)
 
