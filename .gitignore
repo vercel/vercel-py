@@ -25,7 +25,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstallerhave 
+# PyInstallerhave
 *.manifest
 *.spec
 
@@ -122,3 +122,5 @@ venv.bak/
 **/.env
 **/.env.*
 **/*.env
+
+.claude
