@@ -26,6 +26,16 @@ SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 logger = logging.getLogger(__name__)
 
 
+class NondeterminismError(Exception):
+    """Raised when a workflow's replay diverges from its recorded event log.
+
+    Correlation IDs are assigned positionally (the Nth step/sleep/hook of a body
+    run gets the Nth seeded ID), so if the body issues operations in a different
+    order or with different arguments on replay, recorded results would be
+    matched onto the wrong calls. This is raised instead, failing the run.
+    """
+
+
 @dataclasses.dataclass(kw_only=True)
 class BaseSuspension:
     correlation_id: str
@@ -68,6 +78,22 @@ class Hook(BaseSuspension, Generic[T]):
                 break
         else:
             logger.warning("Hook %r resumed but no handler needs it; ignoring: %r", self.token, res)
+
+
+def _correlation_kind(correlation_id: str) -> str:
+    """The kind prefix of a correlation ID (``step`` / ``wait`` / ``hook``)."""
+    return correlation_id.split("_", 1)[0]
+
+
+def _correlation_ulid(correlation_id: str) -> str:
+    """The positional ULID of a correlation ID, stripped of its kind prefix.
+
+    Correlation IDs are ``<kind>_<ulid>`` where the ULID is assigned positionally
+    from a run-seeded monotonic factory. Two calls at the same body position share
+    a ULID regardless of kind, so this is the slot identity used to spot a
+    step/wait/hook swap during replay.
+    """
+    return correlation_id.split("_", 1)[-1]
 
 
 class WorkflowOrchestratorContext:
@@ -166,6 +192,20 @@ class WorkflowOrchestratorContext:
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
 
+    def _fail_suspension(self, sus: BaseSuspension, exc: Exception) -> None:
+        """Surface ``exc`` on whichever future(s) a suspension is awaiting.
+
+        The error propagates through the body's ``await`` of the step/wait/hook,
+        out of ``run_workflow``, and into the run-failed path.
+        """
+        if isinstance(sus, Hook):
+            while sus.futures:
+                fut = sus.futures.popleft()
+                if not fut.done():
+                    fut.set_exception(exc)
+        elif isinstance(sus, (Suspension, Wait)) and not sus.future.done():
+            sus.future.set_exception(exc)
+
     def resume(self) -> None:
         self.resume_handle = None
 
@@ -192,6 +232,29 @@ class WorkflowOrchestratorContext:
                             # suspension from the task. So we yield here and let the task
                             # suspend and resume again in next iteration.
                             case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
+                                # ...unless the body already registered a different-kind
+                                # call at this positional slot (same ULID, different
+                                # prefix). A same-kind match would have hit the dict
+                                # lookup above, so a ULID collision here is a step/wait/
+                                # hook swap -- the body is non-deterministic. Fail loudly
+                                # instead of yielding forever (the matching ID will never
+                                # appear, so plain `return` would deadlock the run).
+                                pos = _correlation_ulid(event.correlation_id)
+                                for sus in self.suspensions.values():
+                                    if _correlation_ulid(sus.correlation_id) == pos:
+                                        self._fail_suspension(
+                                            sus,
+                                            NondeterminismError(
+                                                f"workflow replay diverged at position "
+                                                f"{pos}: recorded a "
+                                                f"{_correlation_kind(event.correlation_id)!r} "
+                                                f"call, but the body now issues a "
+                                                f"{_correlation_kind(sus.correlation_id)!r} "
+                                                "call. The workflow body is "
+                                                "non-deterministic."
+                                            ),
+                                        )
+                                        return
                                 return
                             # HookReceivedEvent is not created from workflows, it may arrive
                             # at any time out of order. At this momemnt we don't need one,
@@ -205,7 +268,28 @@ class WorkflowOrchestratorContext:
                     break
 
             match event:
-                case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
+                case w.StepCreatedEvent(
+                    event_data=w.StepCreatedEventData(step_name=name, input=recorded_input)
+                ):
+                    sus = self.suspensions[event.correlation_id]
+                    assert isinstance(sus, Suspension)
+                    # The recorded step at this (positional) correlation ID must be
+                    # the same call the body just issued; a mismatch means the body
+                    # is non-deterministic.
+                    if sus.step.name != name or [sus.input] != recorded_input:
+                        self._fail_suspension(
+                            sus,
+                            NondeterminismError(
+                                f"workflow replay diverged at {event.correlation_id}: "
+                                f"recorded step {name!r}, but the body now calls "
+                                f"{sus.step.name!r} with different arguments. The workflow "
+                                "body is non-deterministic."
+                            ),
+                        )
+                        return
+                    sus.has_created_event = True
+
+                case w.HookCreatedEvent() | w.WaitCreatedEvent():
                     self.suspensions[event.correlation_id].has_created_event = True
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
