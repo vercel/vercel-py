@@ -271,12 +271,12 @@ class LocalWorld(w.World):
                 return w.EventResult(event=event, run=current_run)
 
             if data.event_type in run_terminal_events or data.event_type == "run_cancelled":
-                raise RuntimeError(
+                raise w.EntityConflictError(
                     f"Cannot transition run from terminal state {current_run.status}"
                 )
 
             if data.event_type in ["step_created", "hook_created", "wait_created"]:
-                raise RuntimeError(
+                raise w.EntityConflictError(
                     f"Cannot create new entities on run in terminal state {current_run.status}"
                 )
 
@@ -291,13 +291,13 @@ class LocalWorld(w.World):
                 raise RuntimeError(f'Step "{data.correlation_id}" not found')
 
             if is_step_terminal(validated_step.status):
-                raise RuntimeError(
+                raise w.EntityConflictError(
                     f'Cannot modify step in terminal state "{validated_step.status}"'
                 )
 
             if current_run and is_run_terminal(current_run.status):
                 if validated_step.status != "running":
-                    raise RuntimeError(
+                    raise w.EntityConflictError(
                         f"Cannot modify non-running step on run in terminal state "
                         f'"{current_run.status}"'
                     )
