@@ -22,18 +22,19 @@ class _AsyncStream(httpx.AsyncByteStream):
 
 
 @pytest.mark.parametrize(
-    ("read_response", "status_code", "expected_consumed"),
+    ("read_response", "status_code", "expected_consumed", "expected_closed"),
     [
-        (None, 200, False),
-        (ReadResponsePolicy.ALWAYS, 200, True),
-        (ReadResponsePolicy.NON_SUCCESS_ONLY, 200, False),
-        (ReadResponsePolicy.NON_SUCCESS_ONLY, 400, True),
+        (None, 200, False, False),
+        (ReadResponsePolicy.ALWAYS, 200, True, True),
+        (ReadResponsePolicy.NON_SUCCESS_ONLY, 200, False, False),
+        (ReadResponsePolicy.NON_SUCCESS_ONLY, 400, True, True),
     ],
 )
 def test_sync_transport_read_response_policy(
     read_response: ReadResponsePolicy | None,
     status_code: int,
     expected_consumed: bool,
+    expected_closed: bool,
 ) -> None:
     client = httpx.Client(
         transport=httpx.MockTransport(
@@ -51,6 +52,7 @@ def test_sync_transport_read_response_policy(
                 )
             )
         assert response.is_stream_consumed is expected_consumed
+        assert response.is_closed is expected_closed
         if expected_consumed:
             assert response.content == PAYLOAD
     finally:
@@ -58,18 +60,19 @@ def test_sync_transport_read_response_policy(
 
 
 @pytest.mark.parametrize(
-    ("read_response", "status_code", "expected_consumed"),
+    ("read_response", "status_code", "expected_consumed", "expected_closed"),
     [
-        (None, 200, False),
-        (ReadResponsePolicy.ALWAYS, 200, True),
-        (ReadResponsePolicy.NON_SUCCESS_ONLY, 200, False),
-        (ReadResponsePolicy.NON_SUCCESS_ONLY, 400, True),
+        (None, 200, False, False),
+        (ReadResponsePolicy.ALWAYS, 200, True, True),
+        (ReadResponsePolicy.NON_SUCCESS_ONLY, 200, False, False),
+        (ReadResponsePolicy.NON_SUCCESS_ONLY, 400, True, True),
     ],
 )
 async def test_async_transport_read_response_policy(
     read_response: ReadResponsePolicy | None,
     status_code: int,
     expected_consumed: bool,
+    expected_closed: bool,
 ) -> None:
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(
@@ -85,6 +88,7 @@ async def test_async_transport_read_response_policy(
                 "GET", "https://example.com", stream=True, read_response=read_response
             )
         assert response.is_stream_consumed is expected_consumed
+        assert response.is_closed is expected_closed
         if expected_consumed:
             assert response.content == PAYLOAD
     finally:
