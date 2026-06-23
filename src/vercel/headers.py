@@ -44,6 +44,7 @@ class Geo(TypedDict, total=False):
     latitude: str | None
     longitude: str | None
     postalCode: str | None
+    requestId: str | None
 
 
 def _get_header(headers: _HeadersLike, key: str) -> str | None:
@@ -83,4 +84,5 @@ def geolocation(request: _RequestLike) -> Geo:
         "latitude": _get_header(headers, LATITUDE_HEADER_NAME),
         "longitude": _get_header(headers, LONGITUDE_HEADER_NAME),
         "postalCode": _get_header(headers, POSTAL_CODE_HEADER_NAME),
+        "requestId": _get_header(headers, REQUEST_ID_HEADER_NAME),
     }
