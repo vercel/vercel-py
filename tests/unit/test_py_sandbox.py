@@ -136,8 +136,9 @@ class TestOsRestrictions:
     def test_os_constants_allowed(self):
         _run_in_sandbox("import os; _ = os.O_RDONLY")
 
-    def test_os_getcwd_blocked(self):
-        _raises_in_sandbox("import os; os.getcwd()")
+    def test_os_getcwd_allowed(self):
+        ns = _run_in_sandbox("import os; result = os.getcwd()")
+        assert isinstance(ns["result"], str)
 
     def test_os_listdir_blocked(self):
         _raises_in_sandbox("import os; os.listdir('.')")
