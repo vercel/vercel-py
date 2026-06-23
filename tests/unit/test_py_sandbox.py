@@ -874,6 +874,14 @@ class TestPassthroughModules:
         ns = _run_in_sandbox("import math; result = math.sqrt(16)")
         assert ns["result"] == 4.0
 
+    def test_shutil_works(self):
+        ns = _run_in_sandbox("import os; lurr = os.supports_dir_fd")
+        _run_in_sandbox("import shutil")
+
+    def test_pathlib_works(self):
+        ns = _run_in_sandbox("import pathlib; result = isinstance(0, pathlib.Path)")
+        assert not ns['result']
+
     def test_collections_counter(self):
         ns = _run_in_sandbox("from collections import Counter; result = dict(Counter('aabbc'))")
         assert ns["result"] == {"a": 2, "b": 2, "c": 1}
