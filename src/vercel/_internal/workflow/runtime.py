@@ -510,10 +510,14 @@ async def workflow_handler(
             # Workflow suspended, continue outside the try..except block
             pass
         elif isinstance(e, Exception):
+            error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
             try:
                 await world.events_create(
                     run_id,
-                    w.RunFailedEventData(error=str(e)).into_event(),
+                    w.RunFailedEventData(
+                        error={"message": error_message, "stack": traceback.format_exc()},
+                        code=type(e).__name__,
+                    ).into_event(),
                 )
             except w.EntityConflictError:
                 logger.warning(f"Workflow run {run_id} was already completed")
