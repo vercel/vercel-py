@@ -177,6 +177,16 @@ class VercelWorld(w.World):
             )
             if resp.status_code == 409:
                 raise w.EntityConflictError(message)
+            if resp.status_code == 425:
+                # retryAfter (seconds) is carried in the Retry-After header.
+                retry_after_header = resp.headers.get("retry-after")
+                retry_after: int | None = None
+                if retry_after_header is not None:
+                    try:
+                        retry_after = int(retry_after_header)
+                    except ValueError:
+                        retry_after = None
+                raise w.TooEarlyError(message, retry_after=retry_after)
             raise RuntimeError(
                 message,
                 {
