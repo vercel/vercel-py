@@ -1,17 +1,13 @@
 """Bounded-memory streaming tar+gzip encoder for sandbox filesystem transfers."""
 
 import tarfile
-import typing
 import zlib
-from collections.abc import AsyncIterator, Generator, Iterator
+from collections.abc import Generator, Iterator
+from typing import Protocol
 
-from vercel._internal.unstable.sandbox.errors import SandboxUploadSizeMismatchError
-from vercel._internal.unstable.sandbox.runtime_common import (
-    _AsyncReadableBytes,
-    _ReadableBytes,
-    _UploadFileEntry,
-    _validate_file_mode,
-)
+import anyio
+
+from vercel._internal.unstable.sandbox.runtime_common import _validate_file_mode
 
 
 class _TarGzipEncoder:
@@ -115,158 +111,67 @@ class _TarGzipEncoder:
             self._buffer.extend(compressed)
 
 
+class _ArchiveUpload(Protocol):
+    async def write(self, data: bytes) -> None: ...
+
+    async def finish(self) -> None: ...
+
+    async def abort(self) -> None: ...
+
+
+class ArchiveRequestWriter:
+    """Push raw entry data through the archive encoder into one request."""
+
+    def __init__(self, request: _ArchiveUpload, chunk_size: int) -> None:
+        self._request = request
+        self._encoder = _TarGzipEncoder(chunk_size)
+        self._entry_open = False
+        self._closed = False
+
+    async def _drain(self) -> None:
+        for chunk in self._encoder.drain():
+            await self._request.write(chunk)
+
+    async def start_entry(self, path: str, size: int, mode: int | None) -> None:
+        if self._closed:
+            raise anyio.ClosedResourceError
+        self._encoder.add_entry(path, size, mode)
+        self._entry_open = True
+        await self._drain()
+
+    async def write(self, data: bytes) -> None:
+        if self._closed:
+            raise anyio.ClosedResourceError
+        self._encoder.write_entry_data(data)
+        await self._drain()
+
+    async def finish_entry(self) -> None:
+        if self._closed:
+            raise anyio.ClosedResourceError
+        self._encoder.finish_entry()
+        self._entry_open = False
+        await self._drain()
+
+    async def finish(self) -> None:
+        if self._closed:
+            raise anyio.ClosedResourceError
+        if self._entry_open:
+            await self.finish_entry()
+        self._closed = True
+        await self._drain()
+        for chunk in self._encoder.finalize():
+            await self._request.write(chunk)
+        await self._request.finish()
+
+    async def abort(self) -> None:
+        if not self._closed:
+            self._closed = True
+            await self._request.abort()
+
+
 class _CurrentEntry:
     __slots__ = ("size", "written")
 
     def __init__(self, size: int) -> None:
         self.size = size
         self.written = 0
-
-
-class _BytesReader:
-    __slots__ = ("_view", "_offset")
-
-    def __init__(self, data: bytes) -> None:
-        self._view = memoryview(data)
-        self._offset = 0
-
-    def read(self, size: int = -1) -> bytes:
-        remaining = self._view[self._offset :]
-        if size < 0:
-            result = bytes(remaining)
-            self._offset = len(self._view)
-            return result
-        chunk = remaining[:size]
-        result = bytes(chunk)
-        self._offset += len(result)
-        return result
-
-
-def _coerce_to_bytes(chunk: object) -> bytes:
-    if isinstance(chunk, bytes):
-        return chunk
-    raise TypeError(f"Source produced non-bytes chunk of type {type(chunk).__name__}")
-
-
-def _make_reader(source: object) -> _BytesReader:
-    if isinstance(source, bytes):
-        return _BytesReader(source)
-    if isinstance(source, memoryview):
-        return _BytesReader(bytes(source))
-    if isinstance(source, bytearray):
-        return _BytesReader(bytes(source))
-    raise TypeError(f"_UploadFileEntry source is not bytes: {type(source).__name__}")
-
-
-async def _read_async(source: _AsyncReadableBytes, n: int) -> bytes:
-    raw = await source.read(n)
-    return _coerce_to_bytes(raw)
-
-
-def _read_sync(source: _ReadableBytes, n: int) -> bytes:
-    raw = source.read(n)
-    return _coerce_to_bytes(raw)
-
-
-def _is_bytes_source(source: object) -> bool:
-    return isinstance(source, (bytes, memoryview, bytearray))
-
-
-async def async_archive_body(
-    entries: list[_UploadFileEntry], chunk_size: int
-) -> AsyncIterator[bytes]:
-    encoder = _TarGzipEncoder(chunk_size)
-    for entry in entries:
-        encoder.add_entry(entry.archive_path or entry.path, entry.size, entry.mode)
-        for chunk in encoder.drain():
-            yield chunk
-        bytes_source = _is_bytes_source(entry.source)
-        if bytes_source:
-            bytes_reader = _make_reader(entry.source)
-        remaining = entry.size
-        while remaining > 0:
-            n = min(chunk_size, remaining)
-            if bytes_source:
-                data = _coerce_to_bytes(bytes_reader.read(n))
-            else:
-                data = await _read_async(typing.cast(_AsyncReadableBytes, entry.source), n)
-            if not data:
-                raise SandboxUploadSizeMismatchError(
-                    entry.path,
-                    declared=entry.size,
-                    consumed=entry.size - remaining,
-                    early_end=True,
-                )
-            consumed = entry.size - remaining + len(data)
-            if len(data) > remaining:
-                raise SandboxUploadSizeMismatchError(
-                    entry.path, declared=entry.size, consumed=consumed, early_end=False
-                )
-            encoder.write_entry_data(data)
-            remaining -= len(data)
-            for chunk in encoder.drain():
-                yield chunk
-        if bytes_source:
-            trailing = bytes_reader.read(1)
-        else:
-            trailing = await _read_async(typing.cast(_AsyncReadableBytes, entry.source), 1)
-        if trailing:
-            raise SandboxUploadSizeMismatchError(
-                entry.path,
-                declared=entry.size,
-                consumed=entry.size + len(trailing),
-                early_end=False,
-            )
-        encoder.finish_entry()
-        for chunk in encoder.drain():
-            yield chunk
-
-    for chunk in encoder.finalize():
-        yield chunk
-
-
-def sync_archive_body(entries: list[_UploadFileEntry], chunk_size: int) -> Iterator[bytes]:
-    encoder = _TarGzipEncoder(chunk_size)
-    for entry in entries:
-        encoder.add_entry(entry.archive_path or entry.path, entry.size, entry.mode)
-        yield from encoder.drain()
-        bytes_source = _is_bytes_source(entry.source)
-        if bytes_source:
-            bytes_reader = _make_reader(entry.source)
-        remaining = entry.size
-        while remaining > 0:
-            n = min(chunk_size, remaining)
-            if bytes_source:
-                data = _coerce_to_bytes(bytes_reader.read(n))
-            else:
-                data = _read_sync(typing.cast(_ReadableBytes, entry.source), n)
-            if not data:
-                raise SandboxUploadSizeMismatchError(
-                    entry.path,
-                    declared=entry.size,
-                    consumed=entry.size - remaining,
-                    early_end=True,
-                )
-            consumed = entry.size - remaining + len(data)
-            if len(data) > remaining:
-                raise SandboxUploadSizeMismatchError(
-                    entry.path, declared=entry.size, consumed=consumed, early_end=False
-                )
-            encoder.write_entry_data(data)
-            remaining -= len(data)
-            yield from encoder.drain()
-        if bytes_source:
-            trailing = bytes_reader.read(1)
-        else:
-            trailing = _read_sync(typing.cast(_ReadableBytes, entry.source), 1)
-        if trailing:
-            raise SandboxUploadSizeMismatchError(
-                entry.path,
-                declared=entry.size,
-                consumed=entry.size + len(trailing),
-                early_end=False,
-            )
-        encoder.finish_entry()
-        yield from encoder.drain()
-
-    yield from encoder.finalize()

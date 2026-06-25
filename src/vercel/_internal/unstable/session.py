@@ -15,6 +15,11 @@ from vercel._internal.unstable.errors import VercelSessionClosedError, VercelSes
 from vercel._internal.unstable.options import ServiceOptions, merge_service_options
 
 if TYPE_CHECKING:
+    from vercel._internal.byte_stream import (
+        AsyncByteStreamRuntime,
+        StagingFileRuntime,
+        SyncByteStreamRuntime,
+    )
     from vercel._internal.http import AsyncTransport, BaseTransport, SyncTransport
 
 ServiceOptionsT = TypeVar("ServiceOptionsT", bound=ServiceOptions)
@@ -81,6 +86,9 @@ class _BaseSdkSession:
     def get_transport(self) -> "BaseTransport":
         raise NotImplementedError()
 
+    def get_staging_file_runtime(self) -> "StagingFileRuntime":
+        raise NotImplementedError()
+
     async def sleep(self, seconds: float) -> None:
         raise NotImplementedError()
 
@@ -104,6 +112,7 @@ class SdkSession(_BaseSdkSession):
             httpx_client_factory=httpx_client_factory,
         )
         self._transport: AsyncTransport | None = None
+        self._staging_file_runtime: AsyncByteStreamRuntime | None = None
 
     @classmethod
     def default(cls) -> Self:
@@ -169,6 +178,14 @@ class SdkSession(_BaseSdkSession):
         self._transport = AsyncTransport(client)
         return self._transport
 
+    def get_staging_file_runtime(self) -> "AsyncByteStreamRuntime":
+        from vercel._internal.byte_stream import AsyncByteStreamRuntime
+
+        self.check_open()
+        if self._staging_file_runtime is None:
+            self._staging_file_runtime = AsyncByteStreamRuntime()
+        return self._staging_file_runtime
+
     async def sleep(self, seconds: float) -> None:
         await anyio.sleep(seconds)
 
@@ -198,6 +215,7 @@ class SyncSdkSession(_BaseSdkSession):
             httpx_client_factory=httpx_client_factory,
         )
         self._transport: SyncTransport | None = None
+        self._staging_file_runtime: SyncByteStreamRuntime | None = None
 
     @classmethod
     def default(cls) -> Self:
@@ -270,6 +288,14 @@ class SyncSdkSession(_BaseSdkSession):
             client = candidate
         self._transport = SyncTransport(client)
         return self._transport
+
+    def get_staging_file_runtime(self) -> "SyncByteStreamRuntime":
+        from vercel._internal.byte_stream import SyncByteStreamRuntime
+
+        self.check_open()
+        if self._staging_file_runtime is None:
+            self._staging_file_runtime = SyncByteStreamRuntime()
+        return self._staging_file_runtime
 
     async def sleep(self, seconds: float) -> None:
         time.sleep(seconds)

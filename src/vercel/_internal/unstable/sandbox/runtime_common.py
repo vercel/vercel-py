@@ -8,8 +8,9 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum, auto
 from pathlib import PurePosixPath
-from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
+from typing import Generic, Literal, TypeAlias, TypeVar
 
+from vercel._internal.byte_stream import ReadableByteStream
 from vercel._internal.unstable.sandbox.errors import SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
     JSONObject,
@@ -29,26 +30,19 @@ from vercel._internal.unstable.sandbox.state import (
 
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
 RemotePath: TypeAlias = str | PurePosixPath
-
-
-class _ReadableBytes(Protocol):
-    def read(self, size: int = -1, /) -> bytes: ...
-
-
-class _AsyncReadableBytes(Protocol):
-    async def read(self, size: int = -1, /) -> bytes: ...
-
-
-FileSource: TypeAlias = bytes | _ReadableBytes | _AsyncReadableBytes
+_SourceT = TypeVar("_SourceT")
 
 
 @dataclass(frozen=True, slots=True)
-class _UploadFileEntry:
+class _UploadFileEntry(Generic[_SourceT]):
     path: str
     size: int
-    source: FileSource
+    source: _SourceT
     mode: int | None = None
     archive_path: str | None = None
+
+
+_StreamUploadFileEntry: TypeAlias = _UploadFileEntry[ReadableByteStream]
 
 
 class _FilesystemBatchState(Enum):

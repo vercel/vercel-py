@@ -177,6 +177,29 @@ async def test_async_filesystem_native_operations_and_write_composition(
     }
 
 
+@respx.mock
+async def test_async_unknown_size_writer_publishes_temporary_spool(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        async with box.fs.open("spooled.bin", "wb") as writer:
+            await writer.write(b"spooled")
+            await writer.write(b" data")
+            assert write.call_count == 0
+
+    assert _tar_entries(write.calls[0].request.content) == {
+        "vercel/sandbox/spooled.bin": (b"spooled data", 0o644)
+    }
+
+
 @pytest.mark.parametrize("content", [b"", b"abc"])
 @respx.mock
 async def test_async_binary_writer_rejects_incomplete_declared_size(
@@ -437,6 +460,27 @@ def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> 
             assert not hasattr(box.current_session, method)
 
 
+@respx.mock
+def test_sync_unknown_size_writer_publishes_temporary_spool(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    write = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        with box.fs.open("spooled.bin", "wb") as writer:
+            writer.write(b"spooled")
+            writer.write(b" data")
+            assert write.call_count == 0
+
+    assert _tar_entries(write.calls[0].request.content) == {
+        "vercel/sandbox/spooled.bin": (b"spooled data", 0o644)
+    }
+
+
 @pytest.mark.parametrize("content", [b"", b"abc"])
 @respx.mock
 def test_sync_binary_writer_rejects_incomplete_declared_size(
@@ -522,8 +566,12 @@ class _TrackedSyncStream(httpx.SyncByteStream):
 
 
 @given(
-    prefix=st.text(alphabet=st.characters(exclude_characters="\r\n")),
-    suffix=st.text(alphabet=st.characters(exclude_characters="\r\n")),
+    prefix=st.text(
+        alphabet=st.characters(min_codepoint=0, max_codepoint=0xD7FF, exclude_characters="\r\n")
+    ),
+    suffix=st.text(
+        alphabet=st.characters(min_codepoint=0, max_codepoint=0xD7FF, exclude_characters="\r\n")
+    ),
 )
 def test_text_read_buffer_preserves_crlf_split_across_chunks(prefix: str, suffix: str) -> None:
     buffer = _TextReadBuffer("utf-8", "strict", "")

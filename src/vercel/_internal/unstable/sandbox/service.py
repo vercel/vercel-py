@@ -1,12 +1,15 @@
 """Neutral orchestration for unstable Sandbox operations."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, cast
 
-import httpx
-
+from vercel._internal.byte_stream import (
+    StagingFileRuntime,
+)
+from vercel._internal.http import StreamingResponse
 from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
 from vercel._internal.unstable.sandbox.errors import (
     SandboxApiError,
@@ -14,11 +17,14 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
     SandboxResponseError,
+    SandboxUploadSizeMismatchError,
 )
+from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
     DirectoryEntry,
     NetworkPolicy,
+    ProcessLog,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -34,6 +40,9 @@ from vercel._internal.unstable.sandbox.models import (
 )
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
 from vercel._internal.unstable.sandbox.process_output import ProcessOutputRouter
+from vercel._internal.unstable.sandbox.runtime_common import (
+    _StreamUploadFileEntry,
+)
 from vercel._internal.unstable.sandbox.state import (
     CompletedProcessState,
     ProcessState,
@@ -45,6 +54,7 @@ from vercel._internal.unstable.sandbox.state import (
     SnapshotsPageState,
     SnapshotState,
 )
+from vercel._internal.unstable.sandbox.streaming_archive import ArchiveRequestWriter
 
 if TYPE_CHECKING:
     from vercel._internal.unstable.session import _BaseSdkSession
@@ -189,11 +199,13 @@ class SandboxService:
         options: SandboxServiceOptions,
         ensure_open: Callable[[], None],
         sleep: AsyncSleep,
+        staging_file_runtime: StagingFileRuntime,
     ) -> None:
         self._api_client = api_client
         self._options = options
         self._ensure_open = ensure_open
         self._sleep = sleep
+        self._staging_file_runtime = staging_file_runtime
 
     @property
     def api_client(self) -> SandboxApiClient:
@@ -202,6 +214,10 @@ class SandboxService:
     @property
     def options(self) -> SandboxServiceOptions:
         return self._options
+
+    @property
+    def staging_file_runtime(self) -> StagingFileRuntime:
+        return self._staging_file_runtime
 
     async def _wait_for_ready_sandbox(
         self, sandbox: SandboxState, *, project_id: str | None = None
@@ -561,17 +577,66 @@ class SandboxService:
                 ) from error
             raise
 
-    async def write_archive(
+    async def write_stream_archive(
         self,
         *,
         session_id: str,
-        body: Iterator[bytes] | AsyncIterator[bytes],
+        entries: Sequence[_StreamUploadFileEntry],
         paths: tuple[str, ...],
         cwd: str,
     ) -> None:
         self._ensure_open()
+        await self._write_stream_archive(
+            session_id=session_id,
+            entries=entries,
+            paths=paths,
+            cwd=cwd,
+        )
+
+    async def _write_stream_archive(
+        self,
+        *,
+        session_id: str,
+        entries: Sequence[_StreamUploadFileEntry],
+        paths: tuple[str, ...],
+        cwd: str,
+    ) -> None:
+        if not entries:
+            return
+        async with self.open_archive_upload(
+            session_id=session_id,
+            paths=paths,
+            cwd=cwd,
+        ) as upload:
+            for entry in entries:
+                await upload.add_source(entry)
+
+    @asynccontextmanager
+    async def open_archive_upload(
+        self,
+        *,
+        session_id: str,
+        paths: tuple[str, ...],
+        cwd: str,
+    ) -> AsyncGenerator["SandboxArchiveUpload", None]:
+        self._ensure_open()
         try:
-            await self._api_client.write_files(session_id=session_id, body=body)
+            async with self._api_client.write_files_request(session_id=session_id) as request:
+                writer = ArchiveRequestWriter(request, 64 * 1024)
+                upload = SandboxArchiveUpload(
+                    writer=writer,
+                    paths=paths,
+                    cwd=cwd,
+                )
+                try:
+                    yield upload
+                except BaseException:
+                    if not upload.finished:
+                        await upload.abort()
+                    raise
+                else:
+                    if not upload.finished:
+                        await upload.finish()
         except SandboxApiError as error:
             raise SandboxFilesystemWriteError(paths=paths, cwd=cwd, cause=error) from error
 
@@ -582,7 +647,7 @@ class SandboxService:
         session_id: str,
         path: str,
         cwd: str | None = None,
-    ) -> httpx.Response:
+    ) -> StreamingResponse:
         self._ensure_open()
         try:
             return await self._api_client.open_read_response(
@@ -594,6 +659,28 @@ class SandboxService:
                     path, operation=operation, cwd=cwd, cause=error
                 ) from error
             raise
+
+    async def read_bytes(
+        self,
+        *,
+        operation: str,
+        session_id: str,
+        path: str,
+        cwd: str | None,
+    ) -> bytes:
+        response = await self.open_read_response(
+            operation=operation,
+            session_id=session_id,
+            path=path,
+            cwd=cwd,
+        )
+        data = bytearray()
+        try:
+            async for chunk in response:
+                data.extend(chunk)
+        finally:
+            await response.aclose()
+        return bytes(data)
 
     async def _filesystem_command(
         self,
@@ -782,11 +869,110 @@ class SandboxService:
             session_id=session_id, command_id=process_id, signal=signal
         )
 
-    async def process_logs_response(self, *, session_id: str, process_id: str) -> httpx.Response:
+    async def process_logs_response(self, *, session_id: str, process_id: str) -> StreamingResponse:
         self._ensure_open()
         return await self._api_client.command_logs_response(
             session_id=session_id, command_id=process_id
         )
+
+    async def process_logs(
+        self, *, session_id: str, process_id: str
+    ) -> AsyncGenerator[ProcessLog, None]:
+        response = await self.process_logs_response(session_id=session_id, process_id=process_id)
+        try:
+            async for line in response.aiter_lines():
+                if line:
+                    event = _parse_command_log_record(line)
+                    if event is not None:
+                        yield event
+        finally:
+            await response.aclose()
+
+
+class SandboxArchiveUpload:
+    """Service-owned lifecycle for one multi-entry archive upload."""
+
+    _CHUNK_SIZE = 64 * 1024
+
+    def __init__(
+        self,
+        *,
+        writer: ArchiveRequestWriter,
+        paths: tuple[str, ...],
+        cwd: str,
+    ) -> None:
+        self._writer = writer
+        self._paths = paths
+        self._cwd = cwd
+        self._finished = False
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
+
+    async def start_entry(self, archive_path: str, size: int, mode: int | None) -> None:
+        await self._writer.start_entry(archive_path, size, mode)
+
+    async def finish_entry(self) -> None:
+        await self._writer.finish_entry()
+
+    async def add_source(self, entry: _StreamUploadFileEntry) -> None:
+        source = entry.source
+        await self.start_entry(entry.archive_path or entry.path, entry.size, entry.mode)
+        remaining = entry.size
+        while remaining > 0:
+            chunk = await source.read(min(self._CHUNK_SIZE, remaining))
+            if not isinstance(chunk, bytes):
+                raise TypeError(f"Source produced non-bytes chunk of type {type(chunk).__name__}")
+            if not chunk:
+                raise SandboxUploadSizeMismatchError(
+                    entry.path,
+                    declared=entry.size,
+                    consumed=entry.size - remaining,
+                    early_end=True,
+                )
+            consumed = entry.size - remaining + len(chunk)
+            if len(chunk) > remaining:
+                raise SandboxUploadSizeMismatchError(
+                    entry.path,
+                    declared=entry.size,
+                    consumed=consumed,
+                    early_end=False,
+                )
+            await self.write(chunk)
+            remaining -= len(chunk)
+
+        trailing = await source.read(1)
+        if not isinstance(trailing, bytes):
+            raise TypeError(f"Source produced non-bytes chunk of type {type(trailing).__name__}")
+        if trailing:
+            raise SandboxUploadSizeMismatchError(
+                entry.path,
+                declared=entry.size,
+                consumed=entry.size + len(trailing),
+                early_end=False,
+            )
+        await self.finish_entry()
+
+    async def write(self, data: bytes) -> None:
+        await self._writer.write(data)
+
+    async def flush(self) -> None:
+        await self._writer.write(b"")
+
+    async def finish(self) -> None:
+        try:
+            await self._writer.finish()
+        except SandboxApiError as error:
+            raise SandboxFilesystemWriteError(
+                paths=self._paths, cwd=self._cwd, cause=error
+            ) from error
+        finally:
+            self._finished = True
+
+    async def abort(self) -> None:
+        self._finished = True
+        await self._writer.abort()
 
 
 def get_sandbox_service(session: "_BaseSdkSession") -> SandboxService:
@@ -802,6 +988,7 @@ def get_sandbox_service(session: "_BaseSdkSession") -> SandboxService:
             options=options,
             ensure_open=session.check_open,
             sleep=session.sleep,
+            staging_file_runtime=session.get_staging_file_runtime(),
         )
 
     return session.get_or_create_service(SandboxService, factory)

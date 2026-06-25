@@ -6,12 +6,53 @@ import anyio
 import httpx
 import pytest
 
+from vercel._internal.http import StreamingResponse
 from vercel._internal.unstable.sandbox.errors import SandboxStreamError
 from vercel._internal.unstable.sandbox.text_reader import _sync_text_readers, _text_readers
 
 
-def _logs_response(*records: object) -> httpx.Response:
-    return httpx.Response(200, text="\n".join(json.dumps(record) for record in records) + "\n")
+class _TestStreamingResponse(StreamingResponse):
+    def __init__(self, response: httpx.Response) -> None:
+        self.response = response
+        self._sync_iterator: Iterator[bytes] | None = None
+        self._async_iterator: AsyncIterator[bytes] | None = None
+        if isinstance(response.stream, httpx.AsyncByteStream):
+            self._async_iterator = response.aiter_bytes()
+        else:
+            self._sync_iterator = response.iter_bytes()
+
+    async def __anext__(self) -> bytes:
+        if self._async_iterator is not None:
+            return await anext(self._async_iterator)
+        assert self._sync_iterator is not None
+        try:
+            return next(self._sync_iterator)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def aiter_lines(self) -> AsyncIterator[str]:
+        if isinstance(self.response.stream, httpx.AsyncByteStream):
+            async for line in self.response.aiter_lines():
+                yield line
+        else:
+            for line in self.response.iter_lines():
+                yield line
+
+    async def aclose(self) -> None:
+        if isinstance(self.response.stream, httpx.AsyncByteStream):
+            await self.response.aclose()
+        else:
+            self.response.close()
+
+
+def _streaming(response: httpx.Response) -> StreamingResponse:
+    return _TestStreamingResponse(response)
+
+
+def _logs_response(*records: object) -> StreamingResponse:
+    return _streaming(
+        httpx.Response(200, text="\n".join(json.dumps(record) for record in records) + "\n")
+    )
 
 
 def _logs_body(*records: object) -> bytes:
@@ -45,7 +86,7 @@ class _TrackingSyncStream(httpx.SyncByteStream):
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_text_reader_lines_shared_cursor_eof_and_close(anyio_backend: str) -> None:
-    async def open_response() -> httpx.Response:
+    async def open_response() -> StreamingResponse:
         return _logs_response(
             {"stream": "stdout", "data": "first\nsecond"},
             {"stream": "stderr", "data": "ignored\n"},
@@ -82,8 +123,8 @@ async def test_async_text_reader_rejects_concurrent_reads(anyio_backend: str) ->
             await release.wait()
             yield b'{"stream":"stdout","data":"done\\n"}\n'
 
-    async def open_response() -> httpx.Response:
-        return httpx.Response(200, stream=PendingStream())
+    async def open_response() -> StreamingResponse:
+        return _streaming(httpx.Response(200, stream=PendingStream()))
 
     reader, _ = _text_readers(open_response)
     assert reader is not None
@@ -98,7 +139,7 @@ async def test_async_text_reader_rejects_concurrent_reads(anyio_backend: str) ->
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_text_reader_propagates_in_band_errors(anyio_backend: str) -> None:
-    async def open_response() -> httpx.Response:
+    async def open_response() -> StreamingResponse:
         return _logs_response(
             {"stream": "stdout", "data": "before\n"},
             {"stream": "error", "data": {"code": "stopped", "message": "process stopped"}},
@@ -124,8 +165,8 @@ async def test_async_text_reader_breaks_peer_after_transport_failure(
             raise httpx.ReadError("connection failed")
             yield b""  # pragma: no cover
 
-    async def open_response() -> httpx.Response:
-        return httpx.Response(200, stream=FailedStream())
+    async def open_response() -> StreamingResponse:
+        return _streaming(httpx.Response(200, stream=FailedStream()))
 
     reader, peer = _text_readers(open_response)
     assert reader is not None and peer is not None
@@ -143,8 +184,8 @@ async def test_async_text_reader_breaks_peer_after_cancellation(anyio_backend: s
             await anyio.sleep_forever()
             yield b""  # pragma: no cover
 
-    async def open_response() -> httpx.Response:
-        return httpx.Response(200, stream=PendingStream())
+    async def open_response() -> StreamingResponse:
+        return _streaming(httpx.Response(200, stream=PendingStream()))
 
     reader, peer = _text_readers(open_response)
     assert reader is not None and peer is not None
@@ -203,8 +244,8 @@ async def test_async_text_reader_merges_stderr_in_arrival_order(anyio_backend: s
         )
     )
 
-    async def open_response() -> httpx.Response:
-        return httpx.Response(200, stream=stream)
+    async def open_response() -> StreamingResponse:
+        return _streaming(httpx.Response(200, stream=stream))
 
     reader, peer = _text_readers(open_response, stderr=subprocess.STDOUT)
     assert peer is None
@@ -219,7 +260,7 @@ async def test_async_text_reader_merges_stderr_in_arrival_order(anyio_backend: s
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_text_reader_drops_devnull_stream(anyio_backend: str) -> None:
-    async def open_response() -> httpx.Response:
+    async def open_response() -> StreamingResponse:
         return _logs_response(
             {"stream": "stdout", "data": "dropped\n"},
             {"stream": "stderr", "data": "kept\n"},
@@ -239,7 +280,7 @@ async def test_async_text_readers_with_no_streams_never_open_response(
 ) -> None:
     opened = 0
 
-    async def open_response() -> httpx.Response:
+    async def open_response() -> StreamingResponse:
         nonlocal opened
         opened += 1
         return _logs_response()
@@ -252,7 +293,7 @@ async def test_async_text_readers_with_no_streams_never_open_response(
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_merged_reader_propagates_in_band_errors(anyio_backend: str) -> None:
-    async def open_response() -> httpx.Response:
+    async def open_response() -> StreamingResponse:
         return _logs_response(
             {"stream": "stderr", "data": "before\n"},
             {"stream": "error", "data": {"code": "stopped", "message": "process stopped"}},
@@ -277,7 +318,7 @@ def test_sync_text_reader_merges_stderr_in_arrival_order() -> None:
     )
 
     reader, peer = _sync_text_readers(
-        lambda: httpx.Response(200, stream=stream), stderr=subprocess.STDOUT
+        lambda: _streaming(httpx.Response(200, stream=stream)), stderr=subprocess.STDOUT
     )
     assert peer is None
     assert reader is not None
@@ -305,7 +346,7 @@ def test_sync_text_reader_drops_devnull_stream() -> None:
 def test_sync_text_readers_with_no_streams_never_open_response(stderr: int) -> None:
     opened = 0
 
-    def open_response() -> httpx.Response:
+    def open_response() -> StreamingResponse:
         nonlocal opened
         opened += 1
         return _logs_response()

@@ -9,8 +9,7 @@ from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
 
-import anyio
-
+from vercel._internal.byte_stream import AsyncByteStreamRuntime
 from vercel._internal.polyfills import Self
 from vercel._internal.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel._internal.unstable.sandbox.async_filesystem_handle import (
@@ -18,8 +17,6 @@ from vercel._internal.unstable.sandbox.async_filesystem_handle import (
     SandboxBinaryWriter,
     SandboxTextReader,
     SandboxTextWriter,
-    _async_open_response,
-    _async_publish,
 )
 from vercel._internal.unstable.sandbox.errors import (
     SandboxCleanupError,
@@ -27,7 +24,13 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxTerminalStateError,
 )
 from vercel._internal.unstable.sandbox.filesystem_handle_common import _validate_open_options
-from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
+from vercel._internal.unstable.sandbox.filesystem_handle_core import (
+    BinaryReaderCore,
+    BinaryWriterCore,
+    FilesystemHandleBinding,
+    TextReaderCore,
+    TextWriterCore,
+)
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
     CompletedProcess,
@@ -77,7 +80,6 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxState,
     SnapshotState,
 )
-from vercel._internal.unstable.sandbox.streaming_archive import async_archive_body
 from vercel._internal.unstable.sandbox.text_reader import TextReader, _text_readers
 
 
@@ -201,17 +203,6 @@ class Snapshot(SnapshotHandleBase):
         return self
 
 
-class _AsyncBytearrayWriter:
-    __slots__ = ("_data",)
-
-    def __init__(self, data: bytearray) -> None:
-        self._data = data
-
-    async def write(self, data: bytes, /) -> object:
-        self._data.extend(data)
-        return len(data)
-
-
 class SandboxFilesystem:
     """Perform filesystem operations in a sandbox runtime session."""
 
@@ -307,30 +298,29 @@ class SandboxFilesystem:
             permissions=permissions,
         )
         normalized_cwd = None if cwd is None else _coerce_remote_path(cwd)
-        if mode == "rb":
-            return SandboxBinaryReader(
-                path, _async_open_response(self._service, self._session_id, path, normalized_cwd)
-            )
-        if mode == "r":
-            return SandboxTextReader(
-                path,
-                _async_open_response(self._service, self._session_id, path, normalized_cwd),
-                encoding,
-                errors,
-                newline,
-            )
-        publish = _async_publish(
-            self._service, self._session_id, self._write_files_cwd, path, normalized_cwd
+        binding = FilesystemHandleBinding(
+            service=self._service,
+            runtime=self._service.staging_file_runtime,
+            session_id=self._session_id,
+            write_files_cwd=self._write_files_cwd,
+            path=path,
+            cwd=normalized_cwd,
         )
+        if mode == "rb":
+            return SandboxBinaryReader(BinaryReaderCore(binding))
+        if mode == "r":
+            return SandboxTextReader(TextReaderCore(binding, encoding, errors, newline))
         if mode == "wb":
-            return SandboxBinaryWriter(path, publish, size=size, permissions=permissions)
-        return SandboxTextWriter(path, publish, encoding, errors, newline, permissions)
+            return SandboxBinaryWriter(
+                BinaryWriterCore(binding.write_target_source(size=size, permissions=permissions))
+            )
+        return SandboxTextWriter(TextWriterCore(binding, encoding, errors, newline, permissions))
 
     async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
         stdout: list[str] = []
         stderr: list[str] = []
-        async for event in _process_logs(
-            self._service, session_id=command.session_id, process_id=command.id
+        async for event in self._service.process_logs(
+            session_id=command.session_id, process_id=command.id
         ):
             if event.stream == "stdout":
                 stdout.append(event.data)
@@ -372,15 +362,12 @@ class SandboxFilesystem:
         Raises:
             SandboxPathNotFoundError: If the file does not exist.
         """
-        data = bytearray()
-        await self._copy_response(
+        return await self._service.read_bytes(
             operation="read_bytes",
+            session_id=self._session_id(),
             path=_coerce_remote_path(path),
             cwd=None if cwd is None else _coerce_remote_path(cwd),
-            target=_AsyncBytearrayWriter(data),
-            chunk_size=64 * 1024,
         )
-        return bytes(data)
 
     async def read_text(
         self,
@@ -463,33 +450,6 @@ class SandboxFilesystem:
             cwd=cwd,
         )
 
-    async def _copy_response(
-        self,
-        *,
-        operation: str,
-        path: str,
-        cwd: str | None,
-        target: _AsyncBytearrayWriter,
-        chunk_size: int,
-    ) -> int:
-        response = await self._service.open_read_response(
-            operation=operation,
-            session_id=self._session_id(),
-            path=path,
-            cwd=cwd,
-        )
-        try:
-            total = 0
-            async for chunk in response.aiter_bytes(chunk_size):
-                if not chunk:
-                    continue
-                await target.write(chunk)
-                total += len(chunk)
-            return total
-        finally:
-            with anyio.CancelScope(shield=True):
-                await response.aclose()
-
     async def _write_files(
         self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None
     ) -> None:
@@ -497,22 +457,18 @@ class SandboxFilesystem:
             _validate_file_mode(file.mode)
         resolved_cwd = self._write_files_cwd(cwd)
         entries = [
-            _UploadFileEntry(path=f.path, size=len(f.content), source=f.content, mode=f.mode)
+            _UploadFileEntry(
+                path=f.path,
+                size=len(f.content),
+                source=AsyncByteStreamRuntime.reader(f.content),
+                mode=f.mode,
+                archive_path=_normalize_tar_path(f.path, cwd=resolved_cwd),
+            )
             for f in files
         ]
-        normalized = [
-            _UploadFileEntry(
-                path=entry.path,
-                size=entry.size,
-                source=entry.source,
-                mode=entry.mode,
-                archive_path=_normalize_tar_path(entry.path, cwd=resolved_cwd),
-            )
-            for entry in entries
-        ]
-        await self._service.write_archive(
+        await self._service.write_stream_archive(
             session_id=self._session_id(),
-            body=async_archive_body(normalized, 64 * 1024),
+            entries=entries,
             paths=tuple(entry.path for entry in entries),
             cwd=resolved_cwd,
         )
@@ -1486,15 +1442,4 @@ async def get_snapshot(service: SandboxService, *, snapshot_id: str) -> Snapshot
 def _process_logs(
     service: SandboxService, *, session_id: str, process_id: str
 ) -> AsyncIterator[ProcessLog]:
-    async def iterate() -> AsyncIterator[ProcessLog]:
-        response = await service.process_logs_response(session_id=session_id, process_id=process_id)
-        try:
-            async for line in response.aiter_lines():
-                if line:
-                    event = _parse_command_log_record(line)
-                    if event is not None:
-                        yield event
-        finally:
-            await response.aclose()
-
-    return iterate()
+    return service.process_logs(session_id=session_id, process_id=process_id)

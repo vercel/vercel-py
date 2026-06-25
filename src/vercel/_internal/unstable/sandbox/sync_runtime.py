@@ -1,6 +1,5 @@
 """Sync runtime handles and entry points for unstable Sandbox operations."""
 
-import io
 import signal as signal_module
 import subprocess
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -8,6 +7,7 @@ from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
 
+from vercel._internal.byte_stream import SyncByteStreamRuntime
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.polyfills import Self
 from vercel._internal.time import parse_duration_seconds, parse_required_duration_seconds
@@ -17,7 +17,13 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxTerminalStateError,
 )
 from vercel._internal.unstable.sandbox.filesystem_handle_common import _validate_open_options
-from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
+from vercel._internal.unstable.sandbox.filesystem_handle_core import (
+    BinaryReaderCore,
+    BinaryWriterCore,
+    FilesystemHandleBinding,
+    TextReaderCore,
+    TextWriterCore,
+)
 from vercel._internal.unstable.sandbox.models import (
     _OMITTED,
     CompletedProcess,
@@ -66,14 +72,11 @@ from vercel._internal.unstable.sandbox.state import (
     SandboxState,
     SnapshotState,
 )
-from vercel._internal.unstable.sandbox.streaming_archive import sync_archive_body
 from vercel._internal.unstable.sandbox.sync_filesystem_handle import (
     SyncSandboxBinaryReader,
     SyncSandboxBinaryWriter,
     SyncSandboxTextReader,
     SyncSandboxTextWriter,
-    _sync_open_response,
-    _sync_publish,
 )
 from vercel._internal.unstable.sandbox.text_reader import SyncTextReader, _sync_text_readers
 
@@ -111,9 +114,7 @@ class SyncProcess(_ProcessHandleState):
         super().__init__(payload)
         self._service = service
         self.stdout, self.stderr = _sync_text_readers(
-            lambda: iter_coroutine(
-                service.process_logs_response(session_id=self._session_id, process_id=self.id)
-            ),
+            lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
         )
@@ -304,30 +305,31 @@ class SyncSandboxFilesystem:
             permissions=permissions,
         )
         normalized_cwd = None if cwd is None else _coerce_remote_path(cwd)
-        if mode == "rb":
-            return SyncSandboxBinaryReader(
-                path, _sync_open_response(self._service, self._session_id, path, normalized_cwd)
-            )
-        if mode == "r":
-            return SyncSandboxTextReader(
-                path,
-                _sync_open_response(self._service, self._session_id, path, normalized_cwd),
-                encoding,
-                errors,
-                newline,
-            )
-        publish = _sync_publish(
-            self._service, self._session_id, self._write_files_cwd, path, normalized_cwd
+        binding = FilesystemHandleBinding(
+            service=self._service,
+            runtime=self._service.staging_file_runtime,
+            session_id=self._session_id,
+            write_files_cwd=self._write_files_cwd,
+            path=path,
+            cwd=normalized_cwd,
         )
+        if mode == "rb":
+            return SyncSandboxBinaryReader(BinaryReaderCore(binding))
+        if mode == "r":
+            return SyncSandboxTextReader(TextReaderCore(binding, encoding, errors, newline))
         if mode == "wb":
-            return SyncSandboxBinaryWriter(path, publish, size=size, permissions=permissions)
-        return SyncSandboxTextWriter(path, publish, encoding, errors, newline, permissions)
+            return SyncSandboxBinaryWriter(
+                BinaryWriterCore(binding.write_target_source(size=size, permissions=permissions))
+            )
+        return SyncSandboxTextWriter(
+            TextWriterCore(binding, encoding, errors, newline, permissions)
+        )
 
     async def _collect_output(self, command: ProcessState) -> tuple[str, str]:
         stdout: list[str] = []
         stderr: list[str] = []
-        for event in _process_logs(
-            self._service, session_id=command.session_id, process_id=command.id
+        async for event in self._service.process_logs(
+            session_id=command.session_id, process_id=command.id
         ):
             if event.stream == "stdout":
                 stdout.append(event.data)
@@ -371,15 +373,14 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxPathNotFoundError: If the file does not exist.
         """
-        target = io.BytesIO()
-        self._copy_response(
-            operation="read_bytes",
-            path=_coerce_remote_path(path),
-            cwd=None if cwd is None else _coerce_remote_path(cwd),
-            target=target,
-            chunk_size=64 * 1024,
+        return iter_coroutine(
+            self._service.read_bytes(
+                operation="read_bytes",
+                session_id=self._session_id(),
+                path=_coerce_remote_path(path),
+                cwd=None if cwd is None else _coerce_remote_path(cwd),
+            )
         )
-        return target.getvalue()
 
     def read_text(
         self,
@@ -462,56 +463,24 @@ class SyncSandboxFilesystem:
             cwd=cwd,
         )
 
-    def _copy_response(
-        self,
-        *,
-        operation: str,
-        path: str,
-        cwd: str | None,
-        target: io.BytesIO,
-        chunk_size: int,
-    ) -> int:
-        response = iter_coroutine(
-            self._service.open_read_response(
-                operation=operation,
-                session_id=self._session_id(),
-                path=path,
-                cwd=cwd,
-            )
-        )
-        try:
-            total = 0
-            for chunk in response.iter_bytes(chunk_size):
-                if not chunk:
-                    continue
-                target.write(chunk)
-                total += len(chunk)
-            return total
-        finally:
-            response.close()
-
     def _write_files(self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None) -> None:
         for file in files:
             _validate_file_mode(file.mode)
         resolved_cwd = self._write_files_cwd(cwd)
         entries = [
-            _UploadFileEntry(path=f.path, size=len(f.content), source=f.content, mode=f.mode)
+            _UploadFileEntry(
+                path=f.path,
+                size=len(f.content),
+                source=SyncByteStreamRuntime.reader(f.content),
+                mode=f.mode,
+                archive_path=_normalize_tar_path(f.path, cwd=resolved_cwd),
+            )
             for f in files
         ]
-        normalized = [
-            _UploadFileEntry(
-                path=entry.path,
-                size=entry.size,
-                source=entry.source,
-                mode=entry.mode,
-                archive_path=_normalize_tar_path(entry.path, cwd=resolved_cwd),
-            )
-            for entry in entries
-        ]
         iter_coroutine(
-            self._service.write_archive(
+            self._service.write_stream_archive(
                 session_id=self._session_id(),
-                body=sync_archive_body(normalized, 64 * 1024),
+                entries=entries,
                 paths=tuple(entry.path for entry in entries),
                 cwd=resolved_cwd,
             )
@@ -1378,14 +1347,16 @@ def get_snapshot(service: SandboxService, *, snapshot_id: str) -> SyncSnapshot:
 def _process_logs(
     service: SandboxService, *, session_id: str, process_id: str
 ) -> Iterator[ProcessLog]:
-    response = iter_coroutine(
-        service.process_logs_response(session_id=session_id, process_id=process_id)
-    )
+    stream = service.process_logs(session_id=session_id, process_id=process_id)
+
+    async def next_log() -> ProcessLog:
+        return await anext(stream)
+
     try:
-        for line in response.iter_lines():
-            if line:
-                event = _parse_command_log_record(line)
-                if event is not None:
-                    yield event
+        while True:
+            try:
+                yield iter_coroutine(next_log())
+            except StopAsyncIteration:
+                return
     finally:
-        response.close()
+        iter_coroutine(stream.aclose())
