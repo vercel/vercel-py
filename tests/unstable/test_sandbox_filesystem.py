@@ -8,10 +8,9 @@ from typing import cast
 import httpx
 import pytest
 import respx
-from hypothesis import given, strategies as st
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 from vercel import unstable as vercel
-from vercel._internal.unstable.sandbox.filesystem_handle_common import _TextReadBuffer
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
 from vercel.unstable import sandbox
 from vercel.unstable.sandbox import (
@@ -122,7 +121,37 @@ def _tar_entries(content: bytes) -> dict[str, tuple[bytes, int]]:
             extracted = archive.extractfile(member)
             assert extracted is not None
             entries[member.name] = (extracted.read(), member.mode)
-        return entries
+    return entries
+
+
+@pytest.mark.parametrize(
+    ("mode", "options", "error_type"),
+    [
+        ("invalid", {}, ValueError),
+        ("rb", {"encoding": "utf-8"}, ValueError),
+        ("r", {"size": 1}, ValueError),
+        ("rb", {"permissions": 0o600}, ValueError),
+        ("wb", {"size": -1}, ValueError),
+        ("wb", {"size": True}, TypeError),
+        ("wb", {"permissions": 0o1000}, ValueError),
+        ("wb", {"permissions": True}, TypeError),
+    ],
+)
+@respx.mock
+async def test_filesystem_open_rejects_invalid_options(
+    mock_env_clear: None,
+    mode: str,
+    options: dict[str, object],
+    error_type: type[Exception],
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(error_type):
+            box.fs.open("data.bin", mode, **options)  # type: ignore[call-overload]
 
 
 @respx.mock
@@ -572,17 +601,43 @@ class _TrackedSyncStream(httpx.SyncByteStream):
     suffix=st.text(
         alphabet=st.characters(min_codepoint=0, max_codepoint=0xD7FF, exclude_characters="\r\n")
     ),
+    chunk_size=st.integers(min_value=1, max_value=8),
 )
-def test_text_read_buffer_preserves_crlf_split_across_chunks(prefix: str, suffix: str) -> None:
-    buffer = _TextReadBuffer("utf-8", "strict", "")
+@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+async def test_text_reader_preserves_crlf_split_across_chunks(
+    mock_env_clear: None,
+    prefix: str,
+    suffix: str,
+    chunk_size: int,
+) -> None:
+    prefix_bytes = prefix.encode()
+    suffix_bytes = suffix.encode()
+    chunks = [
+        *(
+            prefix_bytes[offset : offset + chunk_size]
+            for offset in range(0, len(prefix_bytes), chunk_size)
+        ),
+        b"\r",
+        b"\n",
+        *(
+            suffix_bytes[offset : offset + chunk_size]
+            for offset in range(0, len(suffix_bytes), chunk_size)
+        ),
+    ]
 
-    buffer.feed(f"{prefix}\r".encode())
-    assert buffer.line_end() is None
+    with respx.mock:
+        respx.post("https://sandbox.test/v2/sandboxes").mock(
+            return_value=httpx.Response(200, json=_sandbox_response())
+        )
+        respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
+            return_value=httpx.Response(200, stream=_TrackedAsyncStream(chunks))
+        )
 
-    buffer.feed(f"\n{suffix}".encode())
-    end = buffer.line_end()
-    assert end is not None
-    assert buffer.take(end) == f"{prefix}\r\n"
+        async with vercel.session(service_options=_session_options()):
+            box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+            async with box.fs.open("data.txt", "r", newline="") as reader:
+                assert await reader.readline() == f"{prefix}\r\n"
+                assert await reader.read() == suffix
 
 
 @respx.mock

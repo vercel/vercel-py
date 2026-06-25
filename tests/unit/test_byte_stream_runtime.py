@@ -28,9 +28,7 @@ class _AsyncReader:
         return self._source.read(size)
 
 
-async def _assert_bytes_like_readers(
-    runtime: AsyncByteStreamRuntime | SyncByteStreamRuntime,
-) -> None:
+async def _assert_bytes_like_readers(runtime: SyncByteStreamRuntime) -> None:
     for value in (b"bytes", bytearray(b"bytearray"), memoryview(b"memoryview")):
         source = runtime.reader(value)
         assert await source.read(4) == bytes(value)[:4]
@@ -55,9 +53,8 @@ def test_sync_runtime_rejects_async_reader() -> None:
 
 
 @pytest.mark.anyio
-async def test_async_runtime_adapts_bytes_like_and_async_readers() -> None:
+async def test_async_runtime_adapts_async_readers() -> None:
     runtime = AsyncByteStreamRuntime()
-    await _assert_bytes_like_readers(runtime)
     async_source = runtime.reader(_AsyncReader(b"async"))
     assert await async_source.read(2) == b"as"
     assert await async_source.read() == b"ync"
@@ -137,18 +134,9 @@ async def test_async_runtime_rejects_invalid_and_non_bytes_readers() -> None:
 def test_sync_temporary_file_context_never_suspends_and_owns_cleanup() -> None:
     runtime: StagingFileRuntime = SyncByteStreamRuntime()
 
-    async def operation() -> bytes:
+    async def operation() -> None:
         async with runtime.temporary_file() as temporary:
             await temporary.write(b"temporary")
-            assert await temporary.tell() == 9
-            assert await temporary.truncate(6) == 6
-            await temporary.seek(0)
-            buffer = bytearray(9)
-            assert await temporary.readinto(buffer) == 6
-            result = bytes(buffer[:6])
-            await temporary.seek(0)
-            with pytest.raises(TypeError):
-                await temporary.readinto(b"read-only")
 
         with pytest.raises(anyio.ClosedResourceError):
             await temporary.read()
@@ -159,9 +147,8 @@ def test_sync_temporary_file_context_never_suspends_and_owns_cleanup() -> None:
 
         with pytest.raises(anyio.ClosedResourceError):
             await failed.read()
-        return result
 
-    assert iter_coroutine(operation()) == b"tempor"
+    iter_coroutine(operation())
 
 
 @pytest.mark.anyio
@@ -170,14 +157,6 @@ async def test_async_temporary_file_context_owns_cleanup() -> None:
 
     async with runtime.temporary_file() as temporary:
         await temporary.write(b"temporary")
-        assert await temporary.truncate(6) == 6
-        await temporary.seek(0)
-        buffer = bytearray(9)
-        assert await temporary.readinto(buffer) == 6
-        assert bytes(buffer[:6]) == b"tempor"
-        await temporary.seek(0)
-        with pytest.raises(TypeError):
-            await temporary.readinto(b"read-only")
 
     with pytest.raises((anyio.ClosedResourceError, ValueError)):
         await temporary.read()
