@@ -17,7 +17,6 @@ from vercel._internal.sandbox.constants import (
 from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.errors import SandboxNotFoundError
 from vercel._internal.sandbox.models import (
-    ApiNetworkPolicy,
     CommandResponse,
     GitSource,
     NetworkPolicy,
@@ -33,6 +32,7 @@ from vercel._internal.sandbox.models import (
     WriteFile,
     parse_resources,
     parse_source,
+    serialize_network_policy,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
 from vercel._internal.sandbox.time import (
@@ -280,7 +280,7 @@ class AsyncSandbox:
     async def update_network_policy(self, network_policy: NetworkPolicy) -> NetworkPolicy:
         response = await self.client.update_network_policy(
             sandbox_id=self.sandbox.id,
-            network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
+            network_policy=serialize_network_policy(network_policy),
         )
         self.sandbox = response.sandbox
         updated_network_policy = self.sandbox.network_policy
@@ -767,7 +767,7 @@ class Sandbox:
         response = iter_coroutine(
             self.client.update_network_policy(
                 sandbox_id=self.sandbox.id,
-                network_policy=ApiNetworkPolicy.from_network_policy(network_policy),
+                network_policy=serialize_network_policy(network_policy),
             )
         )
         self.sandbox = response.sandbox
