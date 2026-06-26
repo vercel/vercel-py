@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.http.transport import BaseTransport, RequestBody
 

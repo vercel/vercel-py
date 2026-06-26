@@ -5,7 +5,7 @@ Tests both sync and async variants to ensure API parity.
 
 import io
 
-import httpx
+import httpx2 as httpx
 import pytest
 import respx
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-import httpx
+import httpx2 as httpx
 
 from vercel.headers import get_headers
 

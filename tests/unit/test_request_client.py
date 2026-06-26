@@ -4,7 +4,7 @@ import os
 from typing import Any
 from unittest.mock import patch
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.http.request_client import (
@@ -401,7 +401,7 @@ class TestSendWithRetryCallables:
 class TestSyncTransportEndToEnd:
     def test_with_real_sync_transport(self) -> None:
         """Test that RequestClient works with SyncTransport + iter_coroutine."""
-        import httpx
+        import httpx2 as httpx
 
         # Create a real httpx.Client with a mock transport
         mock_transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True}))

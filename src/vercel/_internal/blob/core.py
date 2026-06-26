@@ -8,7 +8,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.blob import (
     PutHeaders,

@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.telemetry.credentials import extract_credentials
 

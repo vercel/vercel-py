@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from typing import Any, TypeVar
 
 import cbor2
-import httpx
+import httpx2 as httpx
 import pydantic
 
 from vercel._internal.polyfills import UTC

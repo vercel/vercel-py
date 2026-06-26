@@ -10,7 +10,7 @@ dev = [
     "pytest-asyncio<2",
     "pytest-xdist<4",
     "hypothesis>=6.0.0,<7",
-    "respx>=0.21.0,<1",
+    "respx==0.23.1",
     "uvloop<1",
     "mypy>=1.20.2,<2",
     "build<2",
@@ -38,7 +38,7 @@ markers = [
 [tool.mypy]
 ignore_missing_imports = true
 explicit_package_bases = true
-mypy_path = ["src", "src/vercel-oidc", "src/vercel-headers"]
+mypy_path = ["src", "src/vercel-oidc", "src/vercel-headers", "tests/stubs"]
 
 [tool.ruff]
 line-length = 100

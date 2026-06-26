@@ -6,8 +6,76 @@ import time
 import uuid
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
+import httpcore2
+import httpx2
 import pytest
+import respx
+import respx.mocks
+import respx.models
+import respx.router
+from respx.mocks import HTTPCoreMocker
+
+
+class HTTPCore2Mocker(HTTPCoreMocker):
+    name = "httpcore2"
+    targets = [
+        "httpcore2._sync.connection.HTTPConnection",
+        "httpcore2._sync.connection_pool.ConnectionPool",
+        "httpcore2._sync.http_proxy.HTTPProxy",
+        "httpcore2._async.connection.AsyncHTTPConnection",
+        "httpcore2._async.connection_pool.AsyncConnectionPool",
+        "httpcore2._async.http_proxy.AsyncHTTPProxy",
+    ]
+
+    @classmethod
+    def to_httpx_request(cls, **kwargs: Any) -> httpx2.Request:
+        request = kwargs["request"]
+        method = (
+            request.method.decode("ascii")
+            if isinstance(request.method, bytes)
+            else request.method
+        )
+        scheme = (
+            request.url.scheme.decode("ascii")
+            if isinstance(request.url.scheme, bytes)
+            else request.url.scheme
+        )
+        host = (
+            request.url.host.decode("ascii")
+            if isinstance(request.url.host, bytes)
+            else request.url.host
+        )
+        return httpx2.Request(
+            method,
+            httpx2.URL(
+                scheme=scheme,
+                host=host,
+                port=request.url.port,
+                raw_path=request.url.target,
+            ),
+            headers=request.headers,
+            stream=request.stream,
+            extensions=request.extensions,
+        )
+
+    @classmethod
+    def from_sync_httpx_response(
+        cls, httpx_response: httpx2.Response, target: object, **kwargs: Any
+    ) -> httpcore2.Response:
+        return httpcore2.Response(
+            status=httpx_response.status_code,
+            headers=httpx_response.headers.raw,
+            content=httpx_response.stream,
+            extensions=httpx_response.extensions,
+        )
+
+
+respx.models.httpx = httpx2
+respx.mocks.httpx = httpx2
+respx.router.httpx = httpx2
+respx.mocks.DEFAULT_MOCKER = HTTPCore2Mocker.name
 
 
 @pytest.fixture

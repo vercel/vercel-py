@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Sequence
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.http.config import DEFAULT_TIMEOUT
 from vercel._internal.http.request_client import (

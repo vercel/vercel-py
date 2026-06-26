@@ -11,7 +11,7 @@ without leading slash - the result will be the same.
 
 import pytest
 import respx
-from httpx import Response
+from httpx2 import Response
 
 from vercel._internal.http import (
     AsyncTransport,
@@ -59,7 +59,9 @@ class TestUrlNormalization:
     @respx.mock
     def test_sync_normalization_consistency(self, base_url: str, path: str, expected_url: str):
         """Test that SyncTransport normalizes URLs consistently."""
-        route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
+        route = respx.get(expected_url).mock(
+            return_value=Response(200, json={"ok": True})
+        )
 
         client = create_base_client(timeout=30.0, base_url=base_url)
         transport = SyncTransport(client)
@@ -93,7 +95,9 @@ class TestUrlNormalization:
         self, base_url: str, path: str, expected_url: str
     ):
         """Test that AsyncTransport normalizes URLs consistently."""
-        route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
+        route = respx.get(expected_url).mock(
+            return_value=Response(200, json={"ok": True})
+        )
 
         client = create_base_async_client(timeout=30.0, base_url=base_url)
         transport = AsyncTransport(client)
@@ -136,7 +140,9 @@ class TestEdgeCases:
     @respx.mock
     def test_edge_cases(self, base_url: str, path: str, expected_url: str):
         """Test edge cases for URL construction."""
-        route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
+        route = respx.get(expected_url).mock(
+            return_value=Response(200, json={"ok": True})
+        )
 
         client = create_base_client(timeout=30.0, base_url=base_url)
         transport = SyncTransport(client)

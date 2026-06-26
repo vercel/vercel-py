@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import httpx
+import httpx2 as httpx
 
 from .constants import PTY_BINARY_DOWNLOAD_TIMEOUT
 from .time import to_seconds_float

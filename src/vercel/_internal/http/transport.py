@@ -6,7 +6,7 @@ import abc
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
 
 def _normalize_path(path: str) -> str:

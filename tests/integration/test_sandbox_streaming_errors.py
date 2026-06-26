@@ -1,6 +1,6 @@
 """Test that non-2xx streaming responses raise sandbox-specific errors."""
 
-import httpx
+import httpx2 as httpx
 import pytest
 import respx
 

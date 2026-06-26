@@ -21,7 +21,7 @@ from datetime import timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Any, TypeAlias, cast
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.fs import (
     FileHandle,

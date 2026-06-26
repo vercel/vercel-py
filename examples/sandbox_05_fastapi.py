@@ -3,7 +3,7 @@ import contextlib
 import os
 import webbrowser
 
-import httpx
+import httpx2 as httpx
 from dotenv import load_dotenv
 
 from vercel.sandbox import AsyncSandbox as Sandbox

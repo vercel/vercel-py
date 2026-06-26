@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.telemetry.tracker import track
 

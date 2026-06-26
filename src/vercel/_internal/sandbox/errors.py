@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import httpx
+import httpx2 as httpx
 
 
 def _normalize_retry_after(value: str | int | None) -> int | str | None:
