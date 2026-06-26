@@ -48,10 +48,30 @@ jobs:
             exit 1
           fi
 
+      - name: Check if version already published
+        id: pypi
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+        run: |
+          VERSION=$(python scripts/get-version.py "$PACKAGE_NAME")
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${PACKAGE_NAME}/${VERSION}/json")
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "$PACKAGE_NAME $VERSION already exists on PyPI, skipping publish"
+            echo "should-publish=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HTTP_STATUS" = "404" ]; then
+            echo "$PACKAGE_NAME $VERSION not found on PyPI, proceeding with publish"
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unexpected PyPI response for $PACKAGE_NAME $VERSION: $HTTP_STATUS"
+            exit 1
+          fi
+
       - name: Build package
+        if: steps.pypi.outputs.should-publish == 'true'
         env:
           PACKAGE_NAME: ${{ steps.package.outputs.name }}
         run: uv build --package "$PACKAGE_NAME" --no-sources
 
       - name: Publish package
+        if: steps.pypi.outputs.should-publish == 'true'
         run: uv publish

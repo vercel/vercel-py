@@ -11,12 +11,21 @@ from workspace_packages import version_files
 def read_version(path: Path) -> str:
     module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in module.body:
-        if not isinstance(node, ast.Assign):
+        value: ast.expr | None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets
+        ):
+            value = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "__version__"
+        ):
+            value = node.value
+        else:
             continue
-        if not any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets):
-            continue
-        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            return node.value.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
     raise RuntimeError(f"could not find __version__ in {path}")
 
 
