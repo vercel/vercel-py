@@ -458,6 +458,7 @@ class CreateSandboxRequest(_CreateModel):
     timeout: int | timedelta | None = None
     resources: Resources | None = None
     runtime: StrictStr | None = None
+    image: StrictStr | None = None
     network_policy: (
         ApiNetworkPolicy | NetworkPolicyCustom | Literal["allow-all", "deny-all"] | None
     ) = Field(
@@ -466,6 +467,30 @@ class CreateSandboxRequest(_CreateModel):
     )
     interactive: bool | None = Field(default=None, serialization_alias="__interactive")
     env: dict[str, str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_boot_selectors(self) -> CreateSandboxRequest:
+        if self.runtime is not None and self.image is not None:
+            raise SandboxValidationError(
+                [
+                    SandboxValidationIssue(
+                        path="runtime",
+                        message="runtime and image are mutually exclusive",
+                    )
+                ]
+            )
+        if isinstance(self.source, SnapshotSource) and (
+            self.runtime is not None or self.image is not None
+        ):
+            raise SandboxValidationError(
+                [
+                    SandboxValidationIssue(
+                        path="source",
+                        message="snapshot source cannot be combined with runtime or image",
+                    )
+                ]
+            )
+        return self
 
     @field_validator("network_policy", mode="before")
     @classmethod

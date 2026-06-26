@@ -105,6 +105,27 @@ class TestSandboxCreate:
         sandbox.client.close()
 
     @respx.mock
+    def test_create_sandbox_sync_with_image(self, mock_env_clear, mock_sandbox_create_response):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": mock_sandbox_create_response, "routes": []},
+            )
+        )
+
+        sandbox = Sandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            image="acme/worker:latest",
+        )
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["image"] == "acme/worker:latest"
+        assert "runtime" not in body
+        sandbox.client.close()
+
+    @respx.mock
     @pytest.mark.asyncio
     async def test_create_sandbox_async(self, mock_env_clear, mock_sandbox_create_response):
         """Test asynchronous sandbox creation."""
@@ -137,6 +158,30 @@ class TestSandboxCreate:
         assert sandbox.status == "running"
 
         # Cleanup
+        await sandbox.client.aclose()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_sandbox_async_with_image(
+        self, mock_env_clear, mock_sandbox_create_response
+    ):
+        route = respx.post(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(
+            return_value=httpx.Response(
+                200,
+                json={"sandbox": mock_sandbox_create_response, "routes": []},
+            )
+        )
+
+        sandbox = await AsyncSandbox.create(
+            token="test_token",
+            team_id="team_test123",
+            project_id="prj_test123",
+            image="acme/worker:latest",
+        )
+
+        body = json.loads(route.calls[0].request.content)
+        assert body["image"] == "acme/worker:latest"
+        assert "runtime" not in body
         await sandbox.client.aclose()
 
     @respx.mock

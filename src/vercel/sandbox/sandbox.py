@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from os import PathLike
-from typing import Any
+from typing import Any, overload
 
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox.constants import (
@@ -132,6 +132,60 @@ class AsyncSandbox:
         return self.sandbox.interactive_port
 
     @staticmethod
+    @overload
+    async def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: str,
+        image: None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> AsyncSandbox: ...
+
+    @staticmethod
+    @overload
+    async def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: str,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> AsyncSandbox: ...
+
+    @staticmethod
+    @overload
+    async def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> AsyncSandbox: ...
+
+    @staticmethod
     async def create(
         *,
         source: Source | None = None,
@@ -139,6 +193,7 @@ class AsyncSandbox:
         timeout: int | timedelta | None = None,
         resources: Resources | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
@@ -153,7 +208,13 @@ class AsyncSandbox:
             ports: List of ports to expose.
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
-            runtime: Runtime to use.
+            runtime: Runtime to use. Mutually exclusive with ``image`` and unavailable
+                when ``source`` is a snapshot.
+            image: Vercel Container Registry (VCR) image to start the sandbox from,
+                scoped to the sandbox's project. Accepts a repository name, an optional
+                tag or digest, or a fully-qualified VCR URL. A bare repository name
+                resolves to the ``latest`` tag. Mutually exclusive with ``runtime`` and
+                unavailable when ``source`` is a snapshot.
             token: API token (uses OIDC if not provided).
             project_id: Project ID (uses OIDC if not provided).
             team_id: Team ID (uses OIDC if not provided).
@@ -166,6 +227,10 @@ class AsyncSandbox:
 
         Returns:
             Created AsyncSandbox instance.
+
+        Raises:
+            SandboxValidationError: If both runtime and image are supplied, or either is
+                supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
@@ -177,6 +242,7 @@ class AsyncSandbox:
             timeout=timeout,
             resources=parsed_resources,
             runtime=runtime,
+            image=image,
             interactive=interactive,
             env=env,
             network_policy=network_policy,
@@ -614,6 +680,60 @@ class Sandbox:
         return self.sandbox.network_policy
 
     @staticmethod
+    @overload
+    def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: str,
+        image: None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox: ...
+
+    @staticmethod
+    @overload
+    def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: str,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox: ...
+
+    @staticmethod
+    @overload
+    def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: None = None,
+        token: str | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox: ...
+
+    @staticmethod
     def create(
         *,
         source: Source | None = None,
@@ -621,6 +741,7 @@ class Sandbox:
         timeout: int | timedelta | None = None,
         resources: Resources | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         token: str | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
@@ -635,7 +756,13 @@ class Sandbox:
             ports: List of ports to expose.
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
-            runtime: Runtime to use.
+            runtime: Runtime to use. Mutually exclusive with ``image`` and unavailable
+                when ``source`` is a snapshot.
+            image: Vercel Container Registry (VCR) image to start the sandbox from,
+                scoped to the sandbox's project. Accepts a repository name, an optional
+                tag or digest, or a fully-qualified VCR URL. A bare repository name
+                resolves to the ``latest`` tag. Mutually exclusive with ``runtime`` and
+                unavailable when ``source`` is a snapshot.
             token: API token (uses OIDC if not provided).
             project_id: Project ID (uses OIDC if not provided).
             team_id: Team ID (uses OIDC if not provided).
@@ -649,6 +776,10 @@ class Sandbox:
 
         Returns:
             Created Sandbox instance.
+
+        Raises:
+            SandboxValidationError: If both runtime and image are supplied, or either is
+                supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
@@ -661,6 +792,7 @@ class Sandbox:
                 timeout=timeout,
                 resources=parsed_resources,
                 runtime=runtime,
+                image=image,
                 interactive=interactive,
                 env=env,
                 network_policy=network_policy,
