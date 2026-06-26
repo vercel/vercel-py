@@ -1,82 +1,57 @@
 name: Publish PyPI
+
 on:
   push:
-    branches:
-      - main   # publish on push to main
+    tags:
+      - "*-v*"
 
 permissions: {}
 
 jobs:
-  check-version:
+  publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      should-publish: ${{ steps.version-check.outputs.should-publish }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.14"
-      - name: Check if version already published
-        id: version-check
-        run: |
-          VERSION=$(python scripts/get-version.py)
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/vercel/$VERSION/json")
-          if [ "$HTTP_STATUS" = "200" ]; then
-            echo "Version $VERSION already exists on PyPI, skipping publish"
-            echo "should-publish=false" >> $GITHUB_OUTPUT
-          else
-            echo "Version $VERSION not found on PyPI, proceeding with publish"
-            echo "should-publish=true" >> $GITHUB_OUTPUT
-          fi
-
-  publish:
-    needs: check-version
-    if: needs.check-version.outputs.should-publish == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
       id-token: write
     environment:
       name: pypi
-      url: https://pypi.org/p/vercel
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.14"
+
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: false
-      - run: uv venv --python 3.14
-      - name: Create tag from version
+
+      - name: Select package
+        id: package
+        run: |
+          while IFS= read -r package; do
+            if [ "${GITHUB_REF_NAME}" = "$package-v$(python scripts/get-version.py "$package")" ]; then
+              echo "name=$package" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done < <(python scripts/package-names.py)
+
+          echo "No workspace package matches tag ${GITHUB_REF_NAME}"
+          exit 1
+
+      - name: Verify tag matches package version
         env:
-          GH_TOKEN: ${{ github.token }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
         run: |
-          VERSION=$(python scripts/get-version.py)
-          TAG="v$VERSION"
-          REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          # Check the remote directly because the checkout is shallow and does not fetch tags.
-          if git ls-remote --exit-code --tags "$REMOTE_URL" "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping tag creation"
-          else
-            echo "Creating tag $TAG"
-            git config --local user.email "action@github.com"
-            git config --local user.name "GitHub Action"
-            git tag "$TAG"
-            git push "$REMOTE_URL" "$TAG"
+          VERSION=$(python scripts/get-version.py "$PACKAGE_NAME")
+          EXPECTED="$PACKAGE_NAME-v$VERSION"
+          if [ "${GITHUB_REF_NAME}" != "$EXPECTED" ]; then
+            echo "Expected tag $EXPECTED, got ${GITHUB_REF_NAME}"
+            exit 1
           fi
-      - name: Verify tag matches version
-        run: |
-          VERSION=$(python scripts/get-version.py)
-          TAG="v$VERSION"
-          echo "Verifying tag $TAG matches version $VERSION"
-      - name: Build
-        run: uv build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+
+      - name: Build package
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+        run: uv build --package "$PACKAGE_NAME" --no-sources
+
+      - name: Publish package
+        run: uv publish

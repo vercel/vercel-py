@@ -1,5 +1,31 @@
 #!/usr/bin/env python3
-import tomllib
+from __future__ import annotations
 
-with open("pyproject.toml", "rb") as f:
-    print(tomllib.load(f)["project"]["version"])
+import ast
+import sys
+from pathlib import Path
+
+from workspace_packages import version_files
+
+
+def read_version(path: Path) -> str:
+    module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets):
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return node.value.value
+    raise RuntimeError(f"could not find __version__ in {path}")
+
+
+package = sys.argv[1] if len(sys.argv) > 1 else "vercel"
+versions = version_files()
+try:
+    version_file = versions[package]
+except KeyError as exc:
+    packages = ", ".join(versions)
+    raise SystemExit(f"unknown package {package!r}; expected one of: {packages}") from exc
+
+print(read_version(version_file))

@@ -5,7 +5,8 @@ from collections.abc import Mapping
 
 import httpx
 
-from ..cache.context import get_headers
+from vercel.headers import get_headers
+
 from .types import VercelTokenResponse
 from .utils import (
     find_project_info,
@@ -28,7 +29,7 @@ class VercelOidcTokenError(Exception):
 
 
 def get_vercel_oidc_token_from_context() -> str:
-    # Prefer request header (set via vercel.headers.set_headers middleware),
+    # Prefer request header registered in the OIDC context,
     # fall back to environment variable like the TypeScript SDK.
     headers = get_headers()
     if headers:
