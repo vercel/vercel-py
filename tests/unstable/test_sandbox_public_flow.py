@@ -438,6 +438,60 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
 
 
 @respx.mock
+async def test_public_create_sandbox_serializes_image_without_runtime(
+    mock_env_clear: None,
+) -> None:
+    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        await sandbox.create_sandbox(
+            name="preview",
+            image="acme/worker:latest",
+            source=SnapshotSource(snapshot_id="snap_123"),
+        )
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["image"] == "acme/worker:latest"
+    assert body["source"] == {"type": "snapshot", "snapshotId": "snap_123"}
+    assert "runtime" not in body
+
+
+@respx.mock
+def test_sync_create_sandbox_serializes_image_without_runtime(mock_env_clear: None) -> None:
+    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    with vercel.session(service_options=_session_options()):
+        sandbox_sync.create_sandbox(name="preview", image="acme/worker:latest")
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["image"] == "acme/worker:latest"
+    assert "runtime" not in body
+
+
+@respx.mock
+async def test_public_create_sandbox_rejects_runtime_and_image(
+    mock_env_clear: None,
+) -> None:
+    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        with pytest.raises(ValidationError, match="runtime and image"):
+            await sandbox.create_sandbox(
+                name="preview",
+                runtime="python3.13",
+                image="acme/worker:latest",
+            )
+
+    assert not route.called
+
+
+@respx.mock
 async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
     create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(

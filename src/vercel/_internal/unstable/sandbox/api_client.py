@@ -19,6 +19,7 @@ from pydantic import (
     ValidationError,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 from vercel._internal.http import (
@@ -131,6 +132,7 @@ class _CreateSandboxRequest(_ApiRequestModel):
     project_id: str = Field(serialization_alias="projectId")
     name: str | None = None
     runtime: str | None = None
+    image: str | None = None
     source: SandboxSource | None = None
     ports: list[int] | None = None
     timeout: timedelta | None = None
@@ -161,6 +163,12 @@ class _CreateSandboxRequest(_ApiRequestModel):
     @field_serializer("network_policy")
     def _serialize_network_policy(self, value: NetworkPolicy | None) -> JSONObject | None:
         return None if value is None else _serialize_network_policy(value)
+
+    @model_validator(mode="after")
+    def _validate_boot_selectors(self) -> "_CreateSandboxRequest":
+        if self.runtime is not None and self.image is not None:
+            raise ValueError("runtime and image are mutually exclusive")
+        return self
 
     @field_validator("network_policy", mode="before")
     @classmethod
@@ -879,6 +887,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         name: str | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
@@ -895,6 +904,7 @@ class SandboxApiClient:
             project_id=project_id or credentials.project_id,
             name=name,
             runtime=runtime,
+            image=image,
             source=source,
             ports=ports,
             timeout=execution_time_limit,
