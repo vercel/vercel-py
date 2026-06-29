@@ -596,7 +596,10 @@ class LocalWorld(w.World):
             )
             if not token_claimed:
                 existing_claim = json.loads(constraint_path.read_text())
-                if existing_claim["hookId"] == data.correlation_id:
+                if (
+                    existing_claim["runId"] == effective_run_id
+                    and existing_claim["hookId"] == data.correlation_id
+                ):
                     # Same hook re-claiming its own token (replay re-issue or
                     # crash recovery). Idempotent, not a cross-workflow conflict.
                     raise w.EntityConflictError(
