@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from os import PathLike
-from typing import Any
+from typing import Any, overload
 
 from vercel._internal.auth import TokenProvider
 from vercel._internal.iter_coroutine import iter_coroutine
@@ -129,6 +129,60 @@ class AsyncSandbox:
         return self.sandbox.interactive_port
 
     @staticmethod
+    @overload
+    async def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: str,
+        image: None = None,
+        token: str | TokenProvider | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> AsyncSandbox: ...
+
+    @staticmethod
+    @overload
+    async def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: str,
+        token: str | TokenProvider | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> AsyncSandbox: ...
+
+    @staticmethod
+    @overload
+    async def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: None = None,
+        token: str | TokenProvider | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> AsyncSandbox: ...
+
+    @staticmethod
     async def create(
         *,
         source: Source | None = None,
@@ -136,6 +190,7 @@ class AsyncSandbox:
         timeout: int | timedelta | None = None,
         resources: Resources | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
@@ -150,11 +205,17 @@ class AsyncSandbox:
             ports: List of ports to expose.
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
-            runtime: Runtime to use.
+            runtime: Runtime to use. Mutually exclusive with ``image`` and unavailable
+                when ``source`` is a snapshot.
+            image: Vercel Container Registry (VCR) image to start the sandbox from,
+                scoped to the sandbox's project. Accepts a repository name, an optional
+                tag or digest, or a fully-qualified VCR URL. A bare repository name
+                resolves to the ``latest`` tag. Mutually exclusive with ``runtime``.
             token: API token string or provider called for each API request
                 made by this sandbox handle.
             project_id: Project ID used as create scope. Uses configured
                 credentials when omitted.
+            team_id: Team ID used as create scope. Uses configured credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
             env: Default environment variables for the sandbox. These are inherited
@@ -164,6 +225,10 @@ class AsyncSandbox:
 
         Returns:
             Created AsyncSandbox instance.
+
+        Raises:
+            SandboxValidationError: If both runtime and image are supplied, or runtime
+                is supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         client = AsyncSandboxOpsClient(
@@ -180,6 +245,7 @@ class AsyncSandbox:
             timeout=timeout,
             resources=parsed_resources,
             runtime=runtime,
+            image=image,
             interactive=interactive,
             env=env,
             network_policy=network_policy,
@@ -637,6 +703,60 @@ class Sandbox:
         return self.sandbox.network_policy
 
     @staticmethod
+    @overload
+    def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: str,
+        image: None = None,
+        token: str | TokenProvider | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox: ...
+
+    @staticmethod
+    @overload
+    def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: str,
+        token: str | TokenProvider | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox: ...
+
+    @staticmethod
+    @overload
+    def create(
+        *,
+        source: Source | None = None,
+        ports: list[int] | None = None,
+        timeout: int | timedelta | None = None,
+        resources: Resources | None = None,
+        runtime: None = None,
+        image: None = None,
+        token: str | TokenProvider | None = None,
+        project_id: str | None = None,
+        team_id: str | None = None,
+        interactive: bool = False,
+        env: dict[str, str] | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox: ...
+
+    @staticmethod
     def create(
         *,
         source: Source | None = None,
@@ -644,6 +764,7 @@ class Sandbox:
         timeout: int | timedelta | None = None,
         resources: Resources | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
@@ -658,11 +779,17 @@ class Sandbox:
             ports: List of ports to expose.
             timeout: Sandbox timeout in milliseconds or as a ``timedelta``.
             resources: Resource configuration.
-            runtime: Runtime to use.
+            runtime: Runtime to use. Mutually exclusive with ``image`` and unavailable
+                when ``source`` is a snapshot.
+            image: Vercel Container Registry (VCR) image to start the sandbox from,
+                scoped to the sandbox's project. Accepts a repository name, an optional
+                tag or digest, or a fully-qualified VCR URL. A bare repository name
+                resolves to the ``latest`` tag. Mutually exclusive with ``runtime``.
             token: API token string or provider called for each API request
                 made by this sandbox handle.
             project_id: Project ID used as create scope. Uses configured
                 credentials when omitted.
+            team_id: Team ID used as create scope. Uses configured credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
                 Note: For interactive shell sessions, use AsyncSandbox instead.
@@ -673,6 +800,10 @@ class Sandbox:
 
         Returns:
             Created Sandbox instance.
+
+        Raises:
+            SandboxValidationError: If both runtime and image are supplied, or runtime
+                is supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         client = SyncSandboxOpsClient(
@@ -690,6 +821,7 @@ class Sandbox:
                 timeout=timeout,
                 resources=parsed_resources,
                 runtime=runtime,
+                image=image,
                 interactive=interactive,
                 env=env,
                 network_policy=network_policy,

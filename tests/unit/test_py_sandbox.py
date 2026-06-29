@@ -136,8 +136,9 @@ class TestOsRestrictions:
     def test_os_constants_allowed(self):
         _run_in_sandbox("import os; _ = os.O_RDONLY")
 
-    def test_os_getcwd_blocked(self):
-        _raises_in_sandbox("import os; os.getcwd()")
+    def test_os_getcwd_allowed(self):
+        ns = _run_in_sandbox("import os; result = os.getcwd()")
+        assert isinstance(ns["result"], str)
 
     def test_os_listdir_blocked(self):
         _raises_in_sandbox("import os; os.listdir('.')")
@@ -873,6 +874,14 @@ class TestPassthroughModules:
     def test_math_works(self):
         ns = _run_in_sandbox("import math; result = math.sqrt(16)")
         assert ns["result"] == 4.0
+
+    def test_shutil_works(self):
+        _run_in_sandbox("import os; lurr = os.supports_dir_fd")
+        _run_in_sandbox("import shutil")
+
+    def test_pathlib_works(self):
+        ns = _run_in_sandbox("import pathlib; result = isinstance(0, pathlib.Path)")
+        assert not ns["result"]
 
     def test_collections_counter(self):
         ns = _run_in_sandbox("from collections import Counter; result = dict(Counter('aabbc'))")

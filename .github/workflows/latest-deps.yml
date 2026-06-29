@@ -1,16 +1,15 @@
-name: CI
+name: Latest Dependencies
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
 
 permissions: {}
 
 jobs:
   lint-test-and-build:
-    name: test (py${{ matrix.python-version }})
+    name: latest deps (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     environment: ci
     permissions:
@@ -36,7 +35,7 @@ jobs:
           enable-cache: false
 
       - name: Sync dependencies
-        run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
+        run: uv sync --all-packages --upgrade --python ${{ matrix.python-version }}
 
       - name: Run tests, including lint and typecheck
         run: ./scripts/test.sh

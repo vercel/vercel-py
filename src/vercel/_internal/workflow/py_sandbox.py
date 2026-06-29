@@ -26,6 +26,8 @@ class SandboxRestrictionError(RuntimeError):
     """Raised when workflow code calls a non-deterministic function."""
 
 
+# TODO: We should have a more proper proxy that blocks __call__ and
+# returns proxied members but otherwise looks the same.
 def _restricted(name: str) -> Callable[..., NoReturn]:
     def _raise(*_args: Any, **_kwargs: Any) -> NoReturn:
         raise SandboxRestrictionError(
@@ -288,7 +290,12 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
         "fsdecode",
         "fsencode",
         "fspath",
+        # These are deterministic enough if the functions that change
+        # them are blocked...
+        "getenv",
+        "getcwd",
         "_get_exports_list",
+        "PathLike",
         environ=os.environ.copy(),
         allow_if=str.isupper,
         drops=["fork", "register_at_fork"],
@@ -488,6 +495,8 @@ class _ProxyModule(types.ModuleType):
             and name not in policy.allowed
             and not (name.startswith("__") and name.endswith("__"))
             and not (policy.allow_if is not None and policy.allow_if(name))
+            # Only restrict callables (which will include classes).
+            and callable(policy.resolve_attr(name, real))
         ):
             # Return a restricted callable instead of raising immediately.
             # This allows module init code like ``from os import urandom``

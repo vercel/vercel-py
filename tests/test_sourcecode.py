@@ -7,7 +7,19 @@ import unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_DIRS = ["src", "tests", "examples"]
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+
+from workspace_packages import workspace_packages  # noqa: E402
+
+PACKAGE_PATHS = workspace_packages()
+SOURCE_DIRS = [str(path.relative_to(PROJECT_ROOT)) for path in PACKAGE_PATHS.values()]
+SOURCE_DIRS.extend(["tests", "examples"])
+TYPECHECK_DIRS = [
+    "src/vercel",
+    "src/vercel-oidc/vercel/oidc",
+    "src/vercel-headers/vercel/headers",
+    "tests",
+]
 
 
 class TestLint(unittest.TestCase):
@@ -77,8 +89,7 @@ class TestTypecheck(unittest.TestCase):
                     "mypy",
                     "--config-file",
                     str(config_path),
-                    "src",
-                    "tests",
+                    *TYPECHECK_DIRS,
                 ],
                 check=True,
                 capture_output=True,

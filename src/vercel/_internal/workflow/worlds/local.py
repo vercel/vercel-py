@@ -1,8 +1,11 @@
+import contextlib
 import hashlib
 import json
 import math
 import os
 import pathlib
+import tempfile
+import threading
 import traceback
 from datetime import datetime
 from typing import Any, TypeVar
@@ -46,21 +49,50 @@ def read_json(path: pathlib.Path, schema: type[T] | pydantic.TypeAdapter[T]) -> 
         return None
 
 
+def atomic_write(path: str | os.PathLike[str], data: bytes, *, overwrite: bool = True) -> None:
+    """Atomically write ``data`` to ``path``.
+
+    Writes to a temp file in the same directory, then puts it in place
+    with a single atomic syscall. If ``overwrite`` is True, an existing
+    file is replaced; otherwise the write fails with ``FileExistsError``
+    if ``path`` already exists.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        if overwrite:
+            os.replace(tmp, path)
+        else:
+            os.link(tmp, path)
+            os.unlink(tmp)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def write_json(path: pathlib.Path, data: w.BaseModel | dict, *, overwrite: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Do an early check to avoid serializing stuff when we don't need to.
+    # The exists check is not needed for correctness, though -- the real
+    # check is in atomic_write, and so there is not a TOCTOU race.
     if path.exists() and not overwrite:
         raise w.EntityConflictError(f"File already exists: {path}")
+
     if isinstance(data, w.BaseModel):
         data = data.model_dump()
-    with path.open("wb") as f:
-        cbor2.dump(data, f)
+    try:
+        atomic_write(path, cbor2.dumps(data), overwrite=overwrite)
+    except FileExistsError:
+        raise w.EntityConflictError(f"File already exists: {path}") from None
 
 
 def write_exclusive(path: pathlib.Path, data: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with path.open("x") as f:
-            f.write(data)
+        atomic_write(path, data.encode(), overwrite=False)
     except FileExistsError:
         return False
     else:
@@ -71,6 +103,17 @@ class LocalWorld(w.World):
     def __init__(self) -> None:
         self.monotonic_ulid = monotonic_factory()
         self.data_dir = pathlib.Path(os.getenv("WORKFLOW_LOCAL_DATA_DIR", ".workflow-data"))
+        # Per-run mutex serializing events_create, which does some
+        # read-modify-writes in some cases.
+        #
+        # We certainly *could* do more fine-grained locking but I
+        # don't think it would really help.
+        self._run_locks: dict[str, threading.Lock] = {}
+
+    def _run_lock(self, run_id: str) -> threading.Lock:
+        # dict.setdefault is atomic, so concurrent callers for the same run_id
+        # converge on one lock without a separate guard lock.
+        return self._run_locks.setdefault(run_id, threading.Lock())
 
     def delete_all_hooks_for_run(self, run_id: str) -> None:
         hooks_dir = self.data_dir / "hooks"
@@ -142,16 +185,17 @@ class LocalWorld(w.World):
                     # Use delaySeconds approach: send new message with delay, then delete current
                     # Clamp to max delay (23h) - for longer sleeps, the workflow will chain
                     # multiple delayed messages until the full sleep duration has elapsed
-                    delay_seconds = min(result, MAX_DELAY_SECONDS)
+                    delay_seconds = min(result.delay_seconds, MAX_DELAY_SECONDS)
 
                     # Send new message with delay BEFORE acknowledging current message
                     # This ensures crash safety: if process dies after send but before ack,
                     # we may get a duplicate invocation but won't lose the scheduled wakeup
                     await self.queue(
                         queue_name,
-                        w.WorkflowInvokePayload.model_validate(payload),
+                        w.QueuePayloadAdaptor.validate_python(payload),
                         deployment_id=body.get("deploymentId"),
                         delay_seconds=delay_seconds,
+                        idempotency_key=result.idempotency_key,
                     )
             except Exception:
                 traceback.print_exc()
@@ -198,8 +242,8 @@ class LocalWorld(w.World):
 
                 # Handle timeout response
                 timeout_seconds: float | None = None
-                if result:
-                    timeout_seconds = min(result, LOCAL_QUEUE_MAX_VISIBILITY)
+                if result is not None:
+                    timeout_seconds = min(result.delay_seconds, LOCAL_QUEUE_MAX_VISIBILITY)
                 if timeout_seconds:
                     return w.HTTPResponse.json({"timeoutSeconds": timeout_seconds}, status=503)
 
@@ -236,6 +280,16 @@ class LocalWorld(w.World):
         raise RuntimeError(f"Hook with token {token!r} not found")
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+        # run_created has no existing entity to race on — its create is guarded by
+        # the atomic write in write_json. Every other event reads-checks-writes an
+        # existing run/step, so serialize those per run. The body is synchronous,
+        # so holding a threading.Lock across it is safe and brief.
+        if run_id is None:
+            return self._events_create_impl(run_id, data)
+        with self._run_lock(run_id):
+            return self._events_create_impl(run_id, data)
+
+    def _events_create_impl(self, run_id: str | None, data: w.Event) -> w.EventResult:
         event_id = f"evnt_{self.monotonic_ulid(None)}"
         now = datetime.now(UTC)
 
@@ -270,12 +324,12 @@ class LocalWorld(w.World):
                 return w.EventResult(event=event, run=current_run)
 
             if data.event_type in run_terminal_events or data.event_type == "run_cancelled":
-                raise RuntimeError(
+                raise w.EntityConflictError(
                     f"Cannot transition run from terminal state {current_run.status}"
                 )
 
             if data.event_type in ["step_created", "hook_created", "wait_created"]:
-                raise RuntimeError(
+                raise w.EntityConflictError(
                     f"Cannot create new entities on run in terminal state {current_run.status}"
                 )
 
@@ -290,13 +344,13 @@ class LocalWorld(w.World):
                 raise RuntimeError(f'Step "{data.correlation_id}" not found')
 
             if is_step_terminal(validated_step.status):
-                raise RuntimeError(
+                raise w.EntityConflictError(
                     f'Cannot modify step in terminal state "{validated_step.status}"'
                 )
 
             if current_run and is_run_terminal(current_run.status):
                 if validated_step.status != "running":
-                    raise RuntimeError(
+                    raise w.EntityConflictError(
                         f"Cannot modify non-running step on run in terminal state "
                         f'"{current_run.status}"'
                     )

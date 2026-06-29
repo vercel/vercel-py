@@ -1,9 +1,11 @@
 """Shared fixtures for all tests."""
 
+import importlib.util
 import os
 import time
 import uuid
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 
@@ -36,7 +38,7 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
     for var in env_vars_to_clear:
         monkeypatch.delenv(var, raising=False)
 
-    from vercel.cache.context import set_headers
+    from vercel.headers import set_headers
 
     set_headers(None)
     yield
@@ -107,3 +109,15 @@ requires_sandbox_credentials = pytest.mark.skipif(
     not has_sandbox_credentials(),
     reason="Requires VERCEL_TOKEN, VERCEL_TEAM_ID, and VERCEL_PROJECT_ID for sandbox",
 )
+
+
+# Workflow tests import the workflow worlds, which depend on vercel-workers
+# (installed only on Python >= 3.12; see pyproject). Skip collecting them when the
+# package is unavailable, so collection doesn't error on older interpreters.
+_HAS_VERCEL_WORKERS = importlib.util.find_spec("vercel.workers") is not None
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    if not _HAS_VERCEL_WORKERS and collection_path.name.startswith("test_workflow_"):
+        return True
+    return None

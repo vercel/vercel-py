@@ -84,6 +84,7 @@ class HealthCheckPayload(BaseModel):
 
 
 QueuePayload: TypeAlias = WorkflowInvokePayload | StepInvokePayload | HealthCheckPayload
+QueuePayloadAdaptor: pydantic.TypeAdapter[QueuePayload] = pydantic.TypeAdapter(QueuePayload)
 
 
 class StructuredError(BaseModel):
@@ -441,6 +442,7 @@ class Hook(BaseModel):
     created_at: datetime = pydantic.Field(alias="createdAt")
     spec_version: int | None = pydantic.Field(default=None, alias="specVersion")
     is_webhook: bool | None = pydantic.Field(default=None, alias="isWebhook")
+    is_system: bool | None = pydantic.Field(default=None, alias="isSystem")
 
 
 class HookCreatedEventData(BaseModel):
@@ -594,6 +596,8 @@ class EventResult(BaseModel):
     step: WorkflowStep | None = None
     hook: Any | None = None
     wait: Any | None = None
+    cursor: str | None = None
+    has_more: bool | None = pydantic.Field(default=None, alias="hasMore")
 
 
 class HTTPRequest(metaclass=abc.ABCMeta):
@@ -628,10 +632,23 @@ class EntityConflictError(Exception):
     pass
 
 
+@dataclasses.dataclass(frozen=True)
+class QueueContinuation:
+    """A handler's request to re-enqueue its own message after a delay.
+
+    ``idempotency_key`` lets the re-enqueue dedupe — e.g. a wait/sleep
+    continuation keyed on the pending wait so repeated suspension passes over the
+    same wait collapse into one delayed wake-up.
+    """
+
+    delay_seconds: float
+    idempotency_key: str | None = None
+
+
 class QueueHandler(Protocol):
     async def __call__(
         self, message: Any, *, attempt: int, queue_name: str, message_id: str
-    ) -> float | None: ...
+    ) -> QueueContinuation | None: ...
 
 
 class HTTPHandler(Protocol):
