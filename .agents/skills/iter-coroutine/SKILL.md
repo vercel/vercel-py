@@ -1,3 +1,8 @@
+---
+name: iter-coroutine
+description: Use when refactoring vercel-py sync and async modules to share transport-agnostic business logic with the iter_coroutine pattern, including base/runtime splits and shared HTTP request clients.
+---
+
 # Iter-Coroutine + Base/Runtime Migration
 
 Refactor sync+async modules to eliminate duplication using the iter-coroutine

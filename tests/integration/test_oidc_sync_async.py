@@ -14,7 +14,7 @@ class TestOidcTokenFromContext:
 
     def test_get_token_from_header_context(self, mock_env_clear):
         """Test getting OIDC token from request headers."""
-        from vercel.cache.context import set_headers
+        from vercel.headers import set_headers
         from vercel.oidc import get_vercel_oidc_token_sync
 
         # Set headers via context
@@ -47,7 +47,7 @@ class TestOidcTokenFromContext:
 
     def test_header_takes_precedence_over_env(self, mock_env_clear, monkeypatch):
         """Test that header takes precedence over environment variable."""
-        from vercel.cache.context import set_headers
+        from vercel.headers import set_headers
         from vercel.oidc import get_vercel_oidc_token_sync
 
         monkeypatch.setenv("VERCEL_OIDC_TOKEN", "env_token")
@@ -56,6 +56,57 @@ class TestOidcTokenFromContext:
         try:
             token = get_vercel_oidc_token_sync()
             assert token == "header_token"
+        finally:
+            set_headers(None)
+
+    def test_oidc_standalone_header_context(self, mock_env_clear, monkeypatch):
+        """Test the OIDC compatibility header setter."""
+        from vercel.oidc import get_vercel_oidc_token_sync, set_headers
+
+        monkeypatch.setenv("VERCEL_OIDC_TOKEN", "env_token")
+        set_headers({"x-vercel-oidc-token": "standalone_header_token"})
+
+        try:
+            token = get_vercel_oidc_token_sync()
+            assert token == "standalone_header_token"
+        finally:
+            set_headers(None)
+
+    def test_cache_set_headers_updates_oidc_context(self, mock_env_clear):
+        """Test OIDC token lookup sees cache context headers."""
+        from vercel.cache.context import set_headers
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        set_headers({"x-vercel-oidc-token": "cache_header_token"})
+
+        try:
+            token = get_vercel_oidc_token_sync()
+            assert token == "cache_header_token"
+        finally:
+            set_headers(None)
+
+    def test_cache_set_context_updates_oidc_context(self, mock_env_clear):
+        """Test OIDC token lookup sees headers from set_context."""
+        from vercel.cache.context import set_context
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        set_context(headers={"x-vercel-oidc-token": "set_context_header_token"})
+
+        try:
+            token = get_vercel_oidc_token_sync()
+            assert token == "set_context_header_token"
+        finally:
+            set_context(headers=None)
+
+    def test_cache_context_snapshot_uses_shared_headers(self, mock_env_clear):
+        """Test cache context snapshots reflect shared header state."""
+        from vercel.cache.context import get_context
+        from vercel.headers import set_headers
+
+        set_headers({"x-vercel-oidc-token": "snapshot_header_token"})
+
+        try:
+            assert get_context().headers == {"x-vercel-oidc-token": "snapshot_header_token"}
         finally:
             set_headers(None)
 
@@ -186,7 +237,7 @@ class TestGetCredentials:
 
     def test_get_credentials_from_oidc_header_context(self, mock_env_clear):
         """Test getting credentials from OIDC token in request header context."""
-        from vercel.cache.context import set_headers
+        from vercel.headers import set_headers
         from vercel.oidc import get_credentials
 
         payload = {

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-oidc"
+dynamic = ["version"]
+description = "OIDC helpers for Vercel Python applications"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "httpx>=0.27.0,<1",
+    "vercel-headers>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-headers = { workspace = true }
+
+[tool.hatch.version]
+path = "vercel/oidc/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/oidc/**/*.py",
+    "/README.md",
+    "/vercel/oidc/py.typed",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = ["/vercel/oidc"]
+exclude = [
+    "/**/__pycache__",
+]

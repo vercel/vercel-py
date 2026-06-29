@@ -1,30 +1,7 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "vercel"
-version = "0.5.9"
-description = "Python SDK for Vercel"
-readme = "README.md"
-requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE", "LICENSE.*"]
-dependencies = [
-    "httpx>=0.27.0,<1",
-    "pydantic>=2.7.0,<3",
-    "anyio>=4.0.0,<5",
-    "typing-extensions>=4.0.0,<5 ; python_version < '3.11'",
-    "python-dotenv>=1.0.0,<2",
-    "websockets>=12.0,<17",
-    "cbor2>=6.0,<7",
-    "vercel-workers>=0.0.16,<1 ; python_version >= '3.12'",
-]
-
-[project.scripts]
-vercel = "vercel.__main__:main"
-vercel-sandbox = "vercel.sandbox.__main__:main"
-sandbox = "vercel.sandbox.__main__:main"
+requires = []
+build-backend = "no_root_build"
+backend-path = ["scripts"]
 
 [dependency-groups]
 dev = [
@@ -39,23 +16,16 @@ dev = [
     "build<2",
     "twine<7",
     "zizmor>=1.24.1,<2",
+    "hatchling>=1.27.0,<2",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
-package = true
+package = false
 exclude-newer = "2 days"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["vercel*"]
-namespaces = true
-
-[tool.setuptools]
-include-package-data = false
-
-[tool.setuptools.package-data]
-vercel = ["py.typed"]
+[tool.uv.workspace]
+members = ["src/vercel-headers", "src/vercel-oidc", "src/vercel"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -68,7 +38,7 @@ markers = [
 [tool.mypy]
 ignore_missing_imports = true
 explicit_package_bases = true
-mypy_path = ["src"]
+mypy_path = ["src", "src/vercel-oidc", "src/vercel-headers"]
 
 [tool.ruff]
 line-length = 100

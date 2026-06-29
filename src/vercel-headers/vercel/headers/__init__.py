@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import urllib.parse
+from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import Protocol, TypedDict
-
-from .cache.context import get_headers, set_headers
 
 __all__ = [
     "ip_address",
@@ -13,6 +13,8 @@ __all__ = [
     "get_headers",
 ]
 
+
+_cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar("vercel_headers", default=None)
 
 # Header constants (same as TS names)
 CITY_HEADER_NAME = "x-vercel-ip-city"
@@ -25,6 +27,14 @@ POSTAL_CODE_HEADER_NAME = "x-vercel-ip-postal-code"
 REQUEST_ID_HEADER_NAME = "x-vercel-id"
 
 EMOJI_FLAG_UNICODE_STARTING_POSITION = 127397
+
+
+def set_headers(headers: Mapping[str, str] | None) -> None:
+    _cv_headers.set(headers)
+
+
+def get_headers() -> Mapping[str, str] | None:
+    return _cv_headers.get()
 
 
 class _HeadersLike(Protocol):

@@ -5,6 +5,7 @@ from collections.abc import Generator
 import pytest
 
 from vercel.cache import context as ctx
+from vercel.headers import set_headers as set_shared_headers
 
 
 @pytest.fixture
@@ -13,13 +14,13 @@ def isolated_context() -> Generator[None, None, None]:
     ctx._cv_cache.set(None)
     ctx._cv_async_cache.set(None)
     ctx._cv_purge.set(None)
-    ctx._cv_headers.set(None)
+    set_shared_headers(None)
     yield
     ctx._cv_wait_until.set(None)
     ctx._cv_cache.set(None)
     ctx._cv_async_cache.set(None)
     ctx._cv_purge.set(None)
-    ctx._cv_headers.set(None)
+    set_shared_headers(None)
 
 
 class FakeCacheObject: ...
@@ -80,3 +81,20 @@ class TestSetContextClearsWithNone:
         snapshot = ctx.get_context()
         assert snapshot.cache is None
         assert snapshot.async_cache is new_async
+
+
+class TestSharedHeaderContext:
+    def test_cache_set_headers_updates_shared_headers(self, isolated_context: None) -> None:
+        from vercel.headers import get_headers
+
+        ctx.set_headers({"x-test": "from-cache"})
+
+        assert get_headers() == {"x-test": "from-cache"}
+
+    def test_shared_set_headers_updates_cache_context(self, isolated_context: None) -> None:
+        from vercel.headers import set_headers
+
+        set_headers({"x-test": "from-shared"})
+
+        assert ctx.get_headers() == {"x-test": "from-shared"}
+        assert ctx.get_context().headers == {"x-test": "from-shared"}

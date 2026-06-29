@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from vercel.headers import get_headers as _get_headers, set_headers as _set_headers
+
 from .types import PurgeAPI
 
 _cv_wait_until: ContextVar[Callable[[Awaitable[object]], None] | None] = ContextVar(
@@ -12,7 +14,6 @@ _cv_wait_until: ContextVar[Callable[[Awaitable[object]], None] | None] = Context
 _cv_cache: ContextVar[object | None] = ContextVar("vercel_cache", default=None)
 _cv_async_cache: ContextVar[object | None] = ContextVar("vercel_async_cache", default=None)
 _cv_purge: ContextVar[PurgeAPI | None] = ContextVar("vercel_purge", default=None)
-_cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar("vercel_headers", default=None)
 
 
 class _Unset: ...
@@ -36,7 +37,7 @@ def get_context() -> _ContextSnapshot:
         cache=_cv_cache.get(),
         async_cache=_cv_async_cache.get(),
         purge=_cv_purge.get(),
-        headers=_cv_headers.get(),
+        headers=_get_headers(),
     )
 
 
@@ -57,12 +58,12 @@ def set_context(
     if not isinstance(purge, _Unset):
         _cv_purge.set(purge)
     if not isinstance(headers, _Unset):
-        _cv_headers.set(headers)
+        _set_headers(headers)
 
 
 def set_headers(headers: Mapping[str, str] | None) -> None:
-    _cv_headers.set(headers)
+    _set_headers(headers)
 
 
 def get_headers() -> Mapping[str, str] | None:
-    return _cv_headers.get()
+    return _get_headers()

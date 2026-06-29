@@ -108,10 +108,12 @@ __pypackages__/
 # Virtual environments
 .env
 .venv
+.venv.*
 env/
 venv/
 **/.env
 **/.venv
+**/.venv.*
 **/env/
 **/venv/
 ENV/
