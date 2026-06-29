@@ -17,6 +17,7 @@ dev = [
     "twine<7",
     "zizmor>=1.24.1,<2",
     "hatchling>=1.27.0,<2",
+    "trio>=0.33.0,<1",
 ]
 
 [tool.uv]
@@ -39,6 +40,23 @@ markers = [
 ignore_missing_imports = true
 explicit_package_bases = true
 mypy_path = ["src", "src/vercel-oidc", "src/vercel-headers"]
+
+[[tool.mypy.overrides]]
+module = [
+    "vercel._internal.unstable",
+    "vercel._internal.unstable.*",
+    "vercel.unstable",
+    "vercel.unstable.*",
+]
+check_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+no_implicit_reexport = true
+strict_equality = true
+warn_return_any = true
 
 [tool.ruff]
 line-length = 100

@@ -30,6 +30,17 @@ def parse_duration(value: object, unit: timedelta) -> timedelta | None:
             raise TypeError("duration must be an int, float, timedelta, or None")
 
 
+def parse_duration_seconds(value: object) -> timedelta | None:
+    return parse_duration(value, SECOND)
+
+
+def parse_required_duration_seconds(value: object) -> timedelta:
+    duration = parse_duration_seconds(value)
+    if duration is None:
+        raise TypeError("duration is required")
+    return duration
+
+
 def to_ms_int(td: timedelta) -> int:
     return td // MILLISECOND
 
