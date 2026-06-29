@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import functools
 import json
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
@@ -37,7 +38,7 @@ class Step(Generic[P, T]):
         self.func = func
         self.name = f"step//{func.__module__}.{func.__qualname__}"
         self.max_retries = max_retries
-        self.__wrapped__ = func
+        functools.update_wrapper(self, func)
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         from . import runtime

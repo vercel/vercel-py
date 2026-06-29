@@ -42,7 +42,7 @@ def test_step_sets_wrapped() -> None:
 
     step = wf.step(max_retries=2)(body)
 
-    assert step.__wrapped__ is body
+    assert step.__name__ == "body"  # type: ignore
 
 
 def test_both_decorator_forms_register_step() -> None:
