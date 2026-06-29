@@ -5,17 +5,82 @@ import pytest
 
 import vercel.sandbox.sandbox as sandbox_module
 from vercel._internal.sandbox.models import (
+    CreateSandboxRequest,
     GitSource,
     Resources,
     Sandbox,
     SandboxAndRoutesResponse,
     SandboxStatus,
+    SnapshotSource,
     parse_resources,
     parse_source,
 )
 from vercel.oidc.types import Credentials
 from vercel.sandbox import SandboxValidationError
 from vercel.sandbox.sandbox import Sandbox as SyncSandbox
+
+
+def test_create_request_serializes_image_without_runtime() -> None:
+    request = CreateSandboxRequest(
+        project_id="project_123",
+        image="acme/worker:latest",
+    )
+
+    assert request.model_dump(by_alias=True, exclude_none=True) == {
+        "projectId": "project_123",
+        "image": "acme/worker:latest",
+    }
+
+
+def test_create_request_serializes_snapshot_source_with_image() -> None:
+    request = CreateSandboxRequest(
+        project_id="project_123",
+        source=SnapshotSource(snapshot_id="snap_123"),
+        image="acme/worker:latest",
+    )
+
+    assert request.model_dump(by_alias=True, exclude_none=True) == {
+        "projectId": "project_123",
+        "source": {"type": "snapshot", "snapshotId": "snap_123"},
+        "image": "acme/worker:latest",
+    }
+
+
+@pytest.mark.parametrize(
+    ("runtime", "image", "source", "path", "message"),
+    [
+        (
+            "node24",
+            "acme/worker",
+            None,
+            "runtime",
+            "runtime and image are mutually exclusive",
+        ),
+        (
+            "node24",
+            None,
+            SnapshotSource(snapshot_id="snap_123"),
+            "source",
+            "snapshot source cannot be combined with runtime",
+        ),
+    ],
+)
+def test_create_request_rejects_invalid_boot_selector_combinations(
+    runtime: str | None,
+    image: str | None,
+    source: SnapshotSource | None,
+    path: str,
+    message: str,
+) -> None:
+    with pytest.raises(SandboxValidationError) as exc_info:
+        CreateSandboxRequest(
+            project_id="project_123",
+            runtime=runtime,
+            image=image,
+            source=source,
+        )
+
+    assert [(issue.path, issue.message) for issue in exc_info.value.issues] == [(path, message)]
 
 
 def test_parse_source_accumulates_issues() -> None:
@@ -173,6 +238,7 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
             "timeout": None,
             "resources": Resources(vcpus=2, memory=4096),
             "runtime": None,
+            "image": None,
             "interactive": False,
             "env": None,
             "network_policy": None,
@@ -200,7 +266,22 @@ def test_sandbox_create_does_not_warn_for_typed_models(
         sandbox = SyncSandbox.create(
             source=GitSource(type="git", url="https://github.com/vercel/vercel-py"),
             resources=Resources(vcpus=2, memory=4096),
+            image="acme/worker:latest",
         )
 
     assert sandbox.sandbox_id == "sbx_123"
     assert len(record) == 0
+    assert client.calls == [
+        {
+            "project_id": "project_123",
+            "source": GitSource(type="git", url="https://github.com/vercel/vercel-py"),
+            "ports": None,
+            "timeout": None,
+            "resources": Resources(vcpus=2, memory=4096),
+            "runtime": None,
+            "image": "acme/worker:latest",
+            "interactive": False,
+            "env": None,
+            "network_policy": None,
+        }
+    ]
