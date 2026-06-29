@@ -4,7 +4,7 @@ import dataclasses
 import datetime
 import json
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
-from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
 
 import pydantic
 
@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 P = ParamSpec("P")
 T = TypeVar("T")
 
+DEFAULT_MAX_RETRIES = 3
+
 
 class Workflow(Generic[P, T]):
     def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
@@ -29,11 +31,13 @@ class Workflow(Generic[P, T]):
 
 
 class Step(Generic[P, T]):
-    max_retries: int = 3
-
-    def __init__(self, func: Callable[P, Coroutine[Any, Any, T]]):
+    def __init__(
+        self, func: Callable[P, Coroutine[Any, Any, T]], *, max_retries: int = DEFAULT_MAX_RETRIES
+    ):
         self.func = func
         self.name = f"step//{func.__module__}.{func.__qualname__}"
+        self.max_retries = max_retries
+        self.__wrapped__ = func
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         from . import runtime
@@ -154,11 +158,29 @@ class Workflows:
     def _get_workflow(self, workflow_id: str) -> Workflow[Any, Any]:
         return self._workflows[workflow_id]
 
-    def step(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
-        rv = Step(func)
-        assert rv.name not in self._steps, f"Duplicate step name: {rv.name}"
-        self._steps[rv.name] = rv
-        return rv
+    @overload
+    def step(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]: ...
+
+    @overload
+    def step(
+        self, *, max_retries: int = ...
+    ) -> Callable[[Callable[P, Coroutine[Any, Any, T]]], Step[P, T]]: ...
+
+    def step(
+        self,
+        func: Callable[P, Coroutine[Any, Any, T]] | None = None,
+        *,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+    ) -> Step[P, T] | Callable[[Callable[P, Coroutine[Any, Any, T]]], Step[P, T]]:
+        def register(f: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
+            rv = Step(f, max_retries=max_retries)
+            assert rv.name not in self._steps, f"Duplicate step name: {rv.name}"
+            self._steps[rv.name] = rv
+            return rv
+
+        if func is None:
+            return register
+        return register(func)
 
     def _get_step(self, step_name: str) -> Step[Any, Any]:
         return self._steps[step_name]
