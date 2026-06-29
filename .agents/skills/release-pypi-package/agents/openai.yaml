@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release PyPI Package"
+  short_description: "Publish workspace packages to PyPI with signed release tags."
+  default_prompt: "Publish a PyPI package release from this repo."
