@@ -32,6 +32,20 @@ def test_create_request_serializes_image_without_runtime() -> None:
     }
 
 
+def test_create_request_serializes_snapshot_source_with_image() -> None:
+    request = CreateSandboxRequest(
+        project_id="project_123",
+        source=SnapshotSource(snapshot_id="snap_123"),
+        image="acme/worker:latest",
+    )
+
+    assert request.model_dump(by_alias=True, exclude_none=True) == {
+        "projectId": "project_123",
+        "source": {"type": "snapshot", "snapshotId": "snap_123"},
+        "image": "acme/worker:latest",
+    }
+
+
 @pytest.mark.parametrize(
     ("runtime", "image", "source", "path", "message"),
     [
@@ -47,14 +61,7 @@ def test_create_request_serializes_image_without_runtime() -> None:
             None,
             SnapshotSource(snapshot_id="snap_123"),
             "source",
-            "snapshot source cannot be combined with runtime or image",
-        ),
-        (
-            None,
-            "acme/worker",
-            SnapshotSource(snapshot_id="snap_123"),
-            "source",
-            "snapshot source cannot be combined with runtime or image",
+            "snapshot source cannot be combined with runtime",
         ),
     ],
 )

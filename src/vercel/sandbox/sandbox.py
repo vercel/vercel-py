@@ -213,8 +213,7 @@ class AsyncSandbox:
             image: Vercel Container Registry (VCR) image to start the sandbox from,
                 scoped to the sandbox's project. Accepts a repository name, an optional
                 tag or digest, or a fully-qualified VCR URL. A bare repository name
-                resolves to the ``latest`` tag. Mutually exclusive with ``runtime`` and
-                unavailable when ``source`` is a snapshot.
+                resolves to the ``latest`` tag. Mutually exclusive with ``runtime``.
             token: API token (uses OIDC if not provided).
             project_id: Project ID (uses OIDC if not provided).
             team_id: Team ID (uses OIDC if not provided).
@@ -229,8 +228,8 @@ class AsyncSandbox:
             Created AsyncSandbox instance.
 
         Raises:
-            SandboxValidationError: If both runtime and image are supplied, or either is
-                supplied with snapshot source.
+            SandboxValidationError: If both runtime and image are supplied, or runtime
+                is supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
@@ -761,8 +760,7 @@ class Sandbox:
             image: Vercel Container Registry (VCR) image to start the sandbox from,
                 scoped to the sandbox's project. Accepts a repository name, an optional
                 tag or digest, or a fully-qualified VCR URL. A bare repository name
-                resolves to the ``latest`` tag. Mutually exclusive with ``runtime`` and
-                unavailable when ``source`` is a snapshot.
+                resolves to the ``latest`` tag. Mutually exclusive with ``runtime``.
             token: API token (uses OIDC if not provided).
             project_id: Project ID (uses OIDC if not provided).
             team_id: Team ID (uses OIDC if not provided).
@@ -778,8 +776,8 @@ class Sandbox:
             Created Sandbox instance.
 
         Raises:
-            SandboxValidationError: If both runtime and image are supplied, or either is
-                supplied with snapshot source.
+            SandboxValidationError: If both runtime and image are supplied, or runtime
+                is supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
         creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)

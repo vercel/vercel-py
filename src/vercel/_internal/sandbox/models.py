@@ -479,14 +479,12 @@ class CreateSandboxRequest(_CreateModel):
                     )
                 ]
             )
-        if isinstance(self.source, SnapshotSource) and (
-            self.runtime is not None or self.image is not None
-        ):
+        if isinstance(self.source, SnapshotSource) and self.runtime is not None:
             raise SandboxValidationError(
                 [
                     SandboxValidationIssue(
                         path="source",
-                        message="snapshot source cannot be combined with runtime or image",
+                        message="snapshot source cannot be combined with runtime",
                     )
                 ]
             )
