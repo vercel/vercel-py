@@ -2,6 +2,7 @@
 """Demonstrate streaming file upload and download on a Sandbox session."""
 
 from datetime import timedelta
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
@@ -21,7 +22,10 @@ async def main() -> None:
     with TemporaryDirectory() as directory:
         source_path = anyio.Path(directory) / "source.bin"
         target_path = anyio.Path(directory) / "target.bin"
+        sync_source_path = Path(directory) / "sync-source.bin"
+        sync_target_path = Path(directory) / "sync-target.bin"
         await source_path.write_bytes(b"\x01" * DATA_SIZE)
+        sync_source_path.write_bytes(b"\x02" * DATA_SIZE)
 
         async with sandbox.create_sandbox(
             name=name,
@@ -46,6 +50,25 @@ async def main() -> None:
             print(f"Downloaded {copied} bytes")
 
             assert await target_path.read_bytes() == b"\x01" * DATA_SIZE
+
+            with sync_source_path.open("rb") as source:
+                async with box.fs.open(
+                    "workspace/sync-reference.bin",
+                    "wb",
+                    permissions=0o600,
+                ) as target:
+                    while chunk := source.read(CHUNK_SIZE):
+                        await target.write(chunk)
+
+            sync_copied = 0
+            async with box.fs.open("workspace/sync-reference.bin", "rb") as source:
+                with sync_target_path.open("wb") as target:
+                    while chunk := await source.read(CHUNK_SIZE):
+                        target.write(chunk)
+                        sync_copied += len(chunk)
+            print(f"Downloaded {sync_copied} bytes with sync local files")
+
+            assert sync_target_path.read_bytes() == b"\x02" * DATA_SIZE
 
     print("Streaming transfer complete")
 
