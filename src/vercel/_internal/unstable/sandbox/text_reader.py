@@ -1,21 +1,25 @@
-"""Text reader contracts and private process log stream implementations."""
+"""Process log readers backed by one async-shaped streaming core."""
 
+import inspect
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from types import TracebackType
+from typing import Protocol, TypeAlias
 
 import anyio
-import httpx
 
+from vercel._internal.http import StreamingResponse
+from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.unstable.sandbox.log_stream import _parse_command_log_record
 from vercel._internal.unstable.sandbox.models import ProcessLogStream
 
+_OpenResponse: TypeAlias = Callable[[], StreamingResponse | Awaitable[StreamingResponse]]
+
 
 class _TextBuffer:
-    __slots__ = ("_chunks", "_head", "_size", "eof")
-
     def __init__(self) -> None:
         self._chunks: deque[str] = deque()
         self._head = 0
@@ -35,34 +39,22 @@ class _TextBuffer:
         self._head = 0
         self._size = 0
 
-    def _prefix(self, size: int) -> str:
-        remaining = size
-        parts: list[str] = []
-        for index, chunk in enumerate(self._chunks):
-            start = self._head if index == 0 else 0
-            part = chunk[start : start + remaining]
-            parts.append(part)
-            remaining -= len(part)
-            if remaining == 0:
-                break
-        return "".join(parts)
-
     def take(self, size: int) -> str:
         size = self._size if size < 0 else min(size, self._size)
-        value = self._prefix(size)
         remaining = size
+        parts: list[str] = []
         while remaining:
             chunk = self._chunks[0]
             available = len(chunk) - self._head
-            if remaining < available:
-                self._head += remaining
-                remaining = 0
-            else:
-                remaining -= available
+            count = min(remaining, available)
+            parts.append(chunk[self._head : self._head + count])
+            self._head += count
+            remaining -= count
+            if self._head == len(chunk):
                 self._chunks.popleft()
                 self._head = 0
         self._size -= size
-        return value
+        return "".join(parts)
 
     def take_line(self) -> str | None:
         seen = 0
@@ -78,58 +70,30 @@ class _TextBuffer:
 
 
 class TextReader(anyio.abc.ObjectReceiveStream[str], ABC):
-    """Read one remote process output stream asynchronously.
-
-    A reader consumes its stream once. Use ``read`` for buffered reads,
-    ``readline`` or async iteration for line-oriented reads, and ``aclose`` to
-    release the underlying response early.
-    """
-
     @property
     @abstractmethod
-    def closed(self) -> bool:
-        """Return whether this reader has been closed."""
-        ...
+    def closed(self) -> bool: ...
 
     @abstractmethod
-    async def read(self, size: int = -1) -> str:
-        """Read up to ``size`` characters, or the remaining stream."""
-        ...
+    async def read(self, size: int = -1) -> str: ...
 
     @abstractmethod
-    async def readline(self) -> str:
-        """Read through the next newline or return the remaining text at EOF."""
-        ...
+    async def readline(self) -> str: ...
 
 
 class SyncTextReader(ABC):
-    """Read one remote process output stream synchronously.
-
-    A reader consumes its stream once. Use ``read`` for buffered reads,
-    ``readline`` or iteration for line-oriented reads, and ``close`` to release
-    the underlying response early.
-    """
-
     @property
     @abstractmethod
-    def closed(self) -> bool:
-        """Return whether this reader has been closed."""
-        ...
+    def closed(self) -> bool: ...
 
     @abstractmethod
-    def read(self, size: int = -1) -> str:
-        """Read up to ``size`` characters, or the remaining stream."""
-        ...
+    def read(self, size: int = -1) -> str: ...
 
     @abstractmethod
-    def readline(self) -> str:
-        """Read through the next newline or return the remaining text at EOF."""
-        ...
+    def readline(self) -> str: ...
 
     @abstractmethod
-    def close(self) -> None:
-        """Close the reader and discard unread output from this stream."""
-        ...
+    def close(self) -> None: ...
 
     def __iter__(self) -> Iterator[str]:
         while line := self.readline():
@@ -149,40 +113,78 @@ class SyncTextReader(ABC):
         self.close()
 
 
-def _distinct_buffers(
-    routes: Mapping[ProcessLogStream, "_TextBuffer | None"],
-) -> "list[_TextBuffer]":
+def _distinct_buffers(routes: Mapping[ProcessLogStream, _TextBuffer | None]) -> list[_TextBuffer]:
     return list({id(buffer): buffer for buffer in routes.values() if buffer is not None}.values())
 
 
-class _AsyncTextTransport:
-    __slots__ = ("_broken", "_lines", "_live", "_lock", "_open_response", "_response", "_routes")
+class _PumpLock(Protocol):
+    async def acquire(self) -> None: ...
 
+    def release(self) -> None: ...
+
+
+class _SyncPumpLock:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    async def acquire(self) -> None:
+        self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
+
+
+class _AsyncPumpLock:
+    def __init__(self) -> None:
+        self._lock = anyio.Lock()
+
+    async def acquire(self) -> None:
+        await self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
+
+
+def _normalize_open_response(
+    open_response: _OpenResponse,
+) -> Callable[[], Awaitable[StreamingResponse]]:
+    async def open_stream() -> StreamingResponse:
+        result = open_response()
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, StreamingResponse):
+            return result
+        raise TypeError("open_response must return an HTTP streaming response")
+
+    return open_stream
+
+
+class _TextTransportCore:
     def __init__(
         self,
-        open_response: Callable[[], Awaitable[httpx.Response]],
+        open_response: Callable[[], Awaitable[StreamingResponse]],
         routes: Mapping[ProcessLogStream, _TextBuffer | None],
+        lock: _PumpLock,
     ) -> None:
         self._open_response = open_response
-        self._response: httpx.Response | None = None
+        self._response: StreamingResponse | None = None
         self._lines: AsyncIterator[str] | None = None
         self._routes = dict(routes)
         self._live = len(_distinct_buffers(routes))
         self._broken = False
-        self._lock = anyio.Lock()
+        self._lock = lock
 
     async def _cleanup(self) -> None:
         response, self._response = self._response, None
         self._lines = None
         if response is not None:
-            with anyio.CancelScope(shield=True):
-                await response.aclose()
+            await response.aclose()
 
     async def pump(self) -> None:
-        # Fail fast without acquiring a lock
         if self._broken:
             raise anyio.BrokenResourceError
-        async with self._lock:
+        await self._lock.acquire()
+        try:
             if self._broken:
                 raise anyio.BrokenResourceError
             try:
@@ -212,56 +214,76 @@ class _AsyncTextTransport:
                     buffer.eof = True
                 await self._cleanup()
                 raise
+        finally:
+            self._lock.release()
 
     async def close(self, buffer: _TextBuffer) -> None:
-        buffer.clear()
-        buffer.eof = True
-        for stream, target in self._routes.items():
-            if target is buffer:
-                self._routes[stream] = None
-        self._live -= 1
-        if self._live == 0:
-            await self._cleanup()
+        await self._lock.acquire()
+        try:
+            buffer.clear()
+            buffer.eof = True
+            for stream, target in self._routes.items():
+                if target is buffer:
+                    self._routes[stream] = None
+            self._live -= 1
+            if self._live == 0:
+                await self._cleanup()
+        finally:
+            self._lock.release()
 
 
-class _TextReader(TextReader):
-    __slots__ = ("_buffer", "_closed", "_guard", "_transport")
+class _ReaderCore:
+    def __init__(self, transport: _TextTransportCore, buffer: _TextBuffer) -> None:
+        self.transport = transport
+        self.buffer = buffer
+        self.closed = False
 
-    def __init__(self, transport: _AsyncTextTransport, buffer: _TextBuffer) -> None:
-        self._transport = transport
-        self._buffer = buffer
-        self._closed = False
-        self._guard = anyio.ResourceGuard("reading from")
-
-    @property
-    def closed(self) -> bool:
-        return self._closed
-
-    def _ensure_open(self) -> None:
-        if self._closed:
+    def ensure_open(self) -> None:
+        if self.closed:
             raise anyio.ClosedResourceError
-        if self._transport._broken:
+        if self.transport._broken:
             raise anyio.BrokenResourceError
 
     async def read(self, size: int = -1) -> str:
-        self._ensure_open()
+        self.ensure_open()
         if size < -1:
             raise ValueError("size must be -1 or non-negative")
         if size == 0:
             return ""
-        with self._guard:
-            while not self._buffer.eof and (size < 0 or len(self._buffer) < size):
-                await self._transport.pump()
-            return self._buffer.take(size)
+        while not self.buffer.eof and (size < 0 or len(self.buffer) < size):
+            await self.transport.pump()
+        return self.buffer.take(size)
 
     async def readline(self) -> str:
-        self._ensure_open()
+        self.ensure_open()
+        while True:
+            line = self.buffer.take_line()
+            if line is not None:
+                return line
+            await self.transport.pump()
+
+    async def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            await self.transport.close(self.buffer)
+
+
+class _TextReader(TextReader):
+    def __init__(self, core: _ReaderCore) -> None:
+        self._core = core
+        self._guard = anyio.ResourceGuard("reading from")
+
+    @property
+    def closed(self) -> bool:
+        return self._core.closed
+
+    async def read(self, size: int = -1) -> str:
         with self._guard:
-            while True:
-                line = self._buffer.take_line()
-                if line is not None:
-                    return line
-                await self._transport.pump()
+            return await self._core.read(size)
+
+    async def readline(self) -> str:
+        with self._guard:
+            return await self._core.readline()
 
     async def receive(self) -> str:
         line = await self.readline()
@@ -270,125 +292,29 @@ class _TextReader(TextReader):
         return line
 
     async def aclose(self) -> None:
-        if not self._closed:
-            self._closed = True
-            await self._transport.close(self._buffer)
-
-
-class _SyncTextTransport:
-    __slots__ = ("_broken", "_lines", "_live", "_open_response", "_response", "_routes")
-
-    def __init__(
-        self,
-        open_response: Callable[[], httpx.Response],
-        routes: Mapping[ProcessLogStream, _TextBuffer | None],
-    ) -> None:
-        self._open_response = open_response
-        self._response: httpx.Response | None = None
-        self._lines: Iterator[str] | None = None
-        self._routes = dict(routes)
-        self._live = len(_distinct_buffers(routes))
-        self._broken = False
-
-    def _cleanup(self) -> None:
-        response, self._response = self._response, None
-        self._lines = None
-        if response is not None:
-            response.close()
-
-    def pump(self) -> None:
-        if self._broken:
-            raise anyio.BrokenResourceError
-        try:
-            if self._response is None:
-                self._response = self._open_response()
-                self._lines = self._response.iter_lines()
-            assert self._lines is not None
-            while True:
-                try:
-                    line = next(self._lines)
-                except StopIteration:
-                    for buffer in _distinct_buffers(self._routes):
-                        buffer.eof = True
-                    self._cleanup()
-                    return
-                if not line:
-                    continue
-                event = _parse_command_log_record(line)
-                if event is not None:
-                    target = self._routes[event.stream]
-                    if target is not None:
-                        target.append(event.data)
-                    return
-        except BaseException:
-            self._broken = True
-            for buffer in _distinct_buffers(self._routes):
-                buffer.eof = True
-            self._cleanup()
-            raise
-
-    def close(self, buffer: _TextBuffer) -> None:
-        buffer.clear()
-        buffer.eof = True
-        for stream, target in self._routes.items():
-            if target is buffer:
-                self._routes[stream] = None
-        self._live -= 1
-        if self._live == 0:
-            self._cleanup()
+        with anyio.CancelScope(shield=True):
+            await self._core.close()
 
 
 class _SyncTextReader(SyncTextReader):
-    __slots__ = ("_buffer", "_closed", "_guard", "_transport")
-
-    def __init__(self, transport: _SyncTextTransport, buffer: _TextBuffer) -> None:
-        self._transport = transport
-        self._buffer = buffer
-        self._closed = False
-        self._guard = anyio.ResourceGuard("reading from")
+    def __init__(self, core: _ReaderCore) -> None:
+        self._core = core
 
     @property
     def closed(self) -> bool:
-        return self._closed
-
-    def _ensure_open(self) -> None:
-        if self._closed:
-            raise anyio.ClosedResourceError
-        if self._transport._broken:
-            raise anyio.BrokenResourceError
+        return self._core.closed
 
     def read(self, size: int = -1) -> str:
-        self._ensure_open()
-        if size < -1:
-            raise ValueError("size must be -1 or non-negative")
-        if size == 0:
-            return ""
-        with self._guard:
-            while not self._buffer.eof and (size < 0 or len(self._buffer) < size):
-                self._transport.pump()
-            return self._buffer.take(size)
+        return iter_coroutine(self._core.read(size))
 
     def readline(self) -> str:
-        self._ensure_open()
-        with self._guard:
-            while True:
-                line = self._buffer.take_line()
-                if line is not None:
-                    return line
-                self._transport.pump()
+        return iter_coroutine(self._core.readline())
 
     def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            self._transport.close(self._buffer)
+        iter_coroutine(self._core.close())
 
 
 def _reader_buffers(stdout: int, stderr: int) -> tuple[_TextBuffer | None, _TextBuffer | None]:
-    """Resolve validated Popen-style destinations to per-stream buffers.
-
-    ``subprocess.STDOUT`` makes stderr share stdout's buffer (or its absence),
-    and ``subprocess.DEVNULL`` drops a stream entirely.
-    """
     stdout_buffer = _TextBuffer() if stdout == subprocess.PIPE else None
     if stderr == subprocess.STDOUT:
         stderr_buffer = stdout_buffer
@@ -399,43 +325,53 @@ def _reader_buffers(stdout: int, stderr: int) -> tuple[_TextBuffer | None, _Text
     return stdout_buffer, stderr_buffer
 
 
+def _cores(
+    open_response: Callable[[], Awaitable[StreamingResponse]],
+    stdout: int,
+    stderr: int,
+    lock: _PumpLock,
+) -> tuple[_ReaderCore | None, _ReaderCore | None]:
+    stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
+    if stdout_buffer is None and stderr_buffer is None:
+        return None, None
+    transport = _TextTransportCore(
+        open_response,
+        {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
+        lock,
+    )
+    return (
+        None if stdout_buffer is None else _ReaderCore(transport, stdout_buffer),
+        None
+        if stderr_buffer is None or stderr_buffer is stdout_buffer
+        else _ReaderCore(transport, stderr_buffer),
+    )
+
+
 def _text_readers(
-    open_response: Callable[[], Awaitable[httpx.Response]],
+    open_response: _OpenResponse,
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
 ) -> tuple[TextReader | None, TextReader | None]:
-    stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
-    if stdout_buffer is None and stderr_buffer is None:
-        return None, None
-    transport = _AsyncTextTransport(
-        open_response,
-        {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
+    stdout_core, stderr_core = _cores(
+        _normalize_open_response(open_response), stdout, stderr, _AsyncPumpLock()
     )
     return (
-        None if stdout_buffer is None else _TextReader(transport, stdout_buffer),
-        None
-        if stderr_buffer is None or stderr_buffer is stdout_buffer
-        else _TextReader(transport, stderr_buffer),
+        None if stdout_core is None else _TextReader(stdout_core),
+        None if stderr_core is None else _TextReader(stderr_core),
     )
 
 
 def _sync_text_readers(
-    open_response: Callable[[], httpx.Response],
+    open_response: _OpenResponse,
     *,
     stdout: int = subprocess.PIPE,
     stderr: int = subprocess.PIPE,
 ) -> tuple[SyncTextReader | None, SyncTextReader | None]:
-    stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
-    if stdout_buffer is None and stderr_buffer is None:
-        return None, None
-    transport = _SyncTextTransport(
-        open_response,
-        {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
+    stdout_core, stderr_core = _cores(
+        _normalize_open_response(open_response), stdout, stderr, _SyncPumpLock()
     )
     return (
-        None if stdout_buffer is None else _SyncTextReader(transport, stdout_buffer),
-        None
-        if stderr_buffer is None or stderr_buffer is stdout_buffer
-        else _SyncTextReader(transport, stderr_buffer),
+        None if stdout_core is None else _SyncTextReader(stdout_core),
+        None if stderr_core is None else _SyncTextReader(stderr_core),
     )

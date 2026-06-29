@@ -4,9 +4,15 @@ import httpx
 import pytest
 from httpx._types import HeaderTypes, QueryParamTypes
 
-from vercel._internal.http import BaseTransport, ReadResponsePolicy, RequestBody
-from vercel._internal.unstable.sandbox.api_client import SandboxApiClient
-from vercel._internal.unstable.sandbox.errors import SandboxResponseError
+from vercel._internal.http import (
+    BaseTransport,
+    ReadResponsePolicy,
+    RequestBody,
+    StreamingRequest,
+    StreamingResponse,
+)
+from vercel._internal.unstable.sandbox.api_client import SandboxApiClient, _WriteFilesUpload
+from vercel._internal.unstable.sandbox.errors import SandboxApiError, SandboxResponseError
 from vercel._internal.unstable.sandbox.options import SandboxCredentials
 from vercel._internal.url import format_url_path
 
@@ -37,7 +43,37 @@ class InvalidJsonTransport(BaseTransport):
         )
 
 
-async def test_invalid_json_response_raises_response_error(mock_env_clear: None) -> None:
+class _CompletedResponse(StreamingResponse):
+    def __init__(self, response: httpx.Response) -> None:
+        self.response = response
+        self.closed = False
+
+    async def __anext__(self) -> bytes:
+        raise StopAsyncIteration
+
+    async def aiter_lines(self):  # type: ignore[no-untyped-def]
+        if False:
+            yield ""
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _CompletedRequest(StreamingRequest):
+    def __init__(self, response: _CompletedResponse) -> None:
+        self.response = response
+
+    async def write(self, data: bytes) -> None:
+        raise NotImplementedError
+
+    async def finish(self) -> StreamingResponse:
+        return self.response
+
+    async def abort(self) -> None:
+        raise NotImplementedError
+
+
+def _sandbox_client(transport: BaseTransport) -> SandboxApiClient:
     async def credentials_factory() -> SandboxCredentials:
         return SandboxCredentials(
             token="token",
@@ -45,16 +81,40 @@ async def test_invalid_json_response_raises_response_error(mock_env_clear: None)
             project_id="prj_123",
         )
 
-    transport = InvalidJsonTransport()
-    client = SandboxApiClient(
+    return SandboxApiClient(
         base_url="https://sandbox.test",
         credentials_factory=credentials_factory,
         transport=transport,
+        file_transfer_timeout=timedelta(minutes=5),
     )
+
+
+async def test_invalid_json_response_raises_response_error(mock_env_clear: None) -> None:
+    transport = InvalidJsonTransport()
+    client = _sandbox_client(transport)
 
     with pytest.raises(SandboxResponseError):
         await client.get_sandbox(name="preview")
     assert transport.paths == ["https://sandbox.test/v2/sandboxes/preview"]
+
+
+@pytest.mark.parametrize("status", [204, 400])
+async def test_write_files_upload_finish_closes_stream(status: int) -> None:
+    raw_response = httpx.Response(
+        status,
+        json={"error": {"message": "upload failed"}},
+        request=httpx.Request("POST", "https://sandbox.test/upload"),
+    )
+    stream = _CompletedResponse(raw_response)
+    upload = _WriteFilesUpload(_CompletedRequest(stream))
+
+    if status < 400:
+        await upload.finish()
+    else:
+        with pytest.raises(SandboxApiError):
+            await upload.finish()
+
+    assert stream.closed
 
 
 def test_format_url_path_quotes_placeholder_values() -> None:

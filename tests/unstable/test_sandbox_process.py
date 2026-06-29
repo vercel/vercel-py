@@ -102,24 +102,25 @@ class _FailingTextIO(io.StringIO):
 
 
 class _TrackingAsyncStream(httpx.AsyncByteStream):
-    def __init__(self, content: bytes) -> None:
-        self.content = content
+    def __init__(self, content: bytes | list[bytes]) -> None:
+        self.chunks = content if isinstance(content, list) else [content]
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        yield self.content
+        for chunk in self.chunks:
+            yield chunk
 
     async def aclose(self) -> None:
         self.closed = True
 
 
 class _TrackingSyncStream(httpx.SyncByteStream):
-    def __init__(self, content: bytes) -> None:
-        self.content = content
+    def __init__(self, content: bytes | list[bytes]) -> None:
+        self.chunks = content if isinstance(content, list) else [content]
         self.closed = False
 
     def __iter__(self) -> Iterator[bytes]:
-        yield self.content
+        yield from self.chunks
 
     def close(self) -> None:
         self.closed = True
@@ -132,6 +133,11 @@ def _completed_body() -> bytes:
         _process_response(0),
     ]
     return "".join(json.dumps(record) + "\n" for record in records).encode()
+
+
+def _chunked_ndjson(*records: object) -> list[bytes]:
+    content = "\r\n\r\n".join(json.dumps(record, ensure_ascii=False) for record in records).encode()
+    return [content[offset : offset + 1] for offset in range(len(content))]
 
 
 def _session_options() -> list[SandboxServiceOptions]:
@@ -551,6 +557,118 @@ def test_sync_run_process_routes_and_captures(
         assert captured.stderr is None
 
     assert run.call_count == 2
+
+
+@respx.mock
+async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stream = _TrackingAsyncStream(
+        _chunked_ndjson(
+            _process_response(),
+            {"stream": "stdout", "data": "café\n"},
+            {"stream": "stderr", "data": "雪\n"},
+            _process_response(0),
+        )
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        result = await box.run_process("python", capture_output=True)
+
+    assert result.stdout == "café\n"
+    assert result.stderr == "雪\n"
+    assert stream.closed
+
+
+@respx.mock
+def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stream = _TrackingSyncStream(
+        _chunked_ndjson(
+            _process_response(),
+            {"stream": "stdout", "data": "café\n"},
+            {"stream": "stderr", "data": "雪\n"},
+            _process_response(0),
+        )
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        result = box.run_process("python", capture_output=True)
+
+    assert result.stdout == "café\n"
+    assert result.stderr == "雪\n"
+    assert stream.closed
+
+
+@respx.mock
+async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    stream = _TrackingAsyncStream(
+        _chunked_ndjson(
+            {"stream": "stdout", "data": "café\n"},
+            {"stream": "stderr", "data": "雪\n"},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    async with vercel.session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        process = await box.create_process("python")
+        output = await process.communicate()
+
+    assert output == ("café\n", "雪\n")
+    assert stream.closed
+
+
+@respx.mock
+def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    stream = _TrackingSyncStream(
+        _chunked_ndjson(
+            {"stream": "stdout", "data": "café\n"},
+            {"stream": "stderr", "data": "雪\n"},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    with vercel.session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        process = box.create_process("python")
+        output = process.communicate()
+
+    assert output == ("café\n", "雪\n")
+    assert stream.closed
 
 
 @pytest.mark.parametrize(

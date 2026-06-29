@@ -9,11 +9,13 @@ from ._unstable_scenarios import (
     NetworkPolicyObservation,
     PersistentObservation,
     ProcessFilesystemObservation,
+    StreamingTransferObservation,
     SyncDriver,
     WorkspaceObservation,
     network_policy_flow,
     persistent_snapshot_flow,
     process_filesystem_flow,
+    streaming_transfer_flow,
     workspace_command_flow,
 )
 from .conftest import requires_sandbox_credentials
@@ -95,6 +97,22 @@ async def test_process_filesystem_flow_has_sync_async_semantic_parity() -> None:
 
     _assert_process_filesystem(async_result)
     _assert_process_filesystem(sync_result)
+
+
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_streaming_transfer_flow() -> None:
+    expected = StreamingTransferObservation(
+        digest_matches=True,
+        empty_matches=True,
+        explicit_mode="0o600",
+        missing_download_failed=True,
+    )
+    async_result = await streaming_transfer_flow(AsyncDriver(), _name("transfer", "async"))
+    sync_result = await streaming_transfer_flow(SyncDriver(), _name("transfer", "sync"))
+    assert async_result == expected
+    assert sync_result == expected
 
 
 @requires_sandbox_credentials

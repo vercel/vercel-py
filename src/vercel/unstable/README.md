@@ -417,12 +417,29 @@ entries = await sandbox_.fs.listdir("workspace")
 handle on every operation. It follows a replacement current session only after
 new sandbox state has been applied to that handle. `SandboxRuntimeSession.fs`
 remains bound to that specific historical session identity. The async
-`SandboxFilesystem` and sync `SyncSandboxFilesystem` expose `mkdir`,
+`SandboxFilesystem` and sync `SyncSandboxFilesystem` expose `open`, `mkdir`,
 `read_bytes`, `read_text`, `write_bytes`, `write_text`, `batch`, `exists`,
-`is_file`, `is_dir`, `listdir`, `remove`, and `rename`. A batch stages files
-synchronously inside its context and submits one tarball on clean exit.
+`is_file`, `is_dir`, `listdir`, `remove`, and `rename`.
+A batch stages files synchronously inside its context and submits one tarball on clean exit.
 `listdir()` returns sorted `DirectoryEntry(path=..., kind=...)` values, where
 `kind` is `file`, `directory`, `symlink`, or `other`.
+
+`open()` returns a lazy, single-use sequential handle for `"r"`, `"rb"`, `"w"`,
+or `"wb"`. Reads stream the response in bounded chunks. Unsized binary and text
+writes spool locally and publish on successful close; `"wb"` accepts an exact
+`size` to stream directly. `read_bytes()`, `read_text()`, `write_bytes()`, and
+`write_text()` remain whole-file conveniences.
+
+```python
+async with await anyio.open_file("input.csv", "rb") as source, box.fs.open(
+    "workspace/input.csv", "wb"
+) as target:
+    while chunk := await source.read(64 * 1024):
+        await target.write(chunk)
+
+async with box.fs.open("workspace/result.json", "rb") as source:
+    result = await source.read()
+```
 
 `create_process(...)` accepts the `subprocess.Popen` output sentinels.
 `stdout` accepts `subprocess.PIPE` (default) or `subprocess.DEVNULL`; `stderr`

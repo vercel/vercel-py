@@ -1,12 +1,15 @@
 """Shared live scenarios for the experimental Sandbox public API."""
 
 import asyncio
+import hashlib
 import subprocess
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from vercel import unstable as vercel
@@ -68,6 +71,14 @@ class ProcessFilesystemObservation:
     binary: bytes
     missing_read_failed: bool
     invalid_write_failed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class StreamingTransferObservation:
+    digest_matches: bool
+    empty_matches: bool
+    explicit_mode: str
+    missing_download_failed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +152,14 @@ class _ScenarioDriver:
         raise NotImplementedError
 
     async def write_bytes(self, box: Any, path: str, data: bytes) -> None:
+        raise NotImplementedError
+
+    async def write_path(
+        self, box: Any, remote: str, local: Path, *, mode: int | None = None
+    ) -> None:
+        raise NotImplementedError
+
+    async def read_path(self, box: Any, remote: str, local: Path) -> int:
         raise NotImplementedError
 
     async def exists(self, box: Any, path: str) -> bool:
@@ -280,13 +299,39 @@ class AsyncDriver(_ScenarioDriver):
         return await box.fs.read_text(path)
 
     async def write_text(self, box: Any, path: str, text: str) -> None:
-        await box.fs.write_text(path, text)
+        async with box.fs.open(path, "w") as target:
+            await target.write(text)
 
     async def read_bytes(self, box: Any, path: str) -> bytes:
         return await box.fs.read_bytes(path)
 
     async def write_bytes(self, box: Any, path: str, data: bytes) -> None:
         await box.fs.write_bytes(path, data)
+
+    async def write_path(
+        self, box: Any, remote: str, local: Path, *, mode: int | None = None
+    ) -> None:
+        import anyio
+
+        async with (
+            await anyio.open_file(local, "rb") as source,
+            box.fs.open(remote, "wb", permissions=mode) as target,
+        ):
+            while chunk := await source.read(64 * 1024):
+                await target.write(chunk)
+
+    async def read_path(self, box: Any, remote: str, local: Path) -> int:
+        import anyio
+
+        copied = 0
+        async with (
+            box.fs.open(remote, "rb") as source,
+            await anyio.open_file(local, "wb") as target,
+        ):
+            while chunk := await source.read(64 * 1024):
+                await target.write(chunk)
+                copied += len(chunk)
+        return copied
 
     async def exists(self, box: Any, path: str) -> bool:
         return await box.fs.exists(path)
@@ -454,13 +499,32 @@ class SyncDriver(_ScenarioDriver):
         return box.fs.read_text(path)
 
     async def write_text(self, box: Any, path: str, text: str) -> None:
-        box.fs.write_text(path, text)
+        with box.fs.open(path, "w") as target:
+            target.write(text)
 
     async def read_bytes(self, box: Any, path: str) -> bytes:
         return box.fs.read_bytes(path)
 
     async def write_bytes(self, box: Any, path: str, data: bytes) -> None:
         box.fs.write_bytes(path, data)
+
+    async def write_path(
+        self, box: Any, remote: str, local: Path, *, mode: int | None = None
+    ) -> None:
+        with (
+            local.open("rb") as source,
+            box.fs.open(remote, "wb", permissions=mode) as target,
+        ):
+            while chunk := source.read(64 * 1024):
+                target.write(chunk)
+
+    async def read_path(self, box: Any, remote: str, local: Path) -> int:
+        copied = 0
+        with box.fs.open(remote, "rb") as source, local.open("wb") as target:
+            while chunk := source.read(64 * 1024):
+                target.write(chunk)
+                copied += len(chunk)
+        return copied
 
     async def exists(self, box: Any, path: str) -> bool:
         return box.fs.exists(path)
@@ -640,6 +704,65 @@ async def process_filesystem_flow(
         missing_read_failed=missing_read_failed,
         invalid_write_failed=invalid_write_failed,
     )
+
+
+async def streaming_transfer_flow(
+    driver: _ScenarioDriver, name: str
+) -> StreamingTransferObservation:
+    payload = bytes(range(256)) * 1025
+    expected_digest = hashlib.sha256(payload).digest()
+    remote_paths = ("large.bin", "empty.bin")
+
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / "source.bin"
+        empty_source = Path(directory) / "empty.bin"
+        target = Path(directory) / "target.bin"
+        empty_target = Path(directory) / "empty-target.bin"
+        missing_target = Path(directory) / "missing.bin"
+        source.write_bytes(payload)
+        empty_source.write_bytes(b"")
+
+        async with driver.session():
+            async with driver.ephemeral_sandbox(name) as box:
+                try:
+                    await driver.write_path(box, remote_paths[0], source, mode=0o600)
+                    await driver.write_path(box, remote_paths[1], empty_source)
+                    copied = await driver.read_path(box, remote_paths[0], target)
+                    empty_copied = await driver.read_path(box, remote_paths[1], empty_target)
+
+                    command = await driver.create_process(
+                        box,
+                        "python",
+                        [
+                            "-c",
+                            "import os; print(oct(os.stat('large.bin').st_mode & 0o777))",
+                        ],
+                    )
+                    stdout, _ = await driver.read_process_streams(command)
+                    await driver.wait(command)
+
+                    try:
+                        await driver.read_path(box, "missing.bin", missing_target)
+                    except SandboxPathNotFoundError:
+                        missing_download_failed = True
+                    else:
+                        missing_download_failed = False
+                finally:
+                    for remote_path in remote_paths:
+                        try:
+                            await driver.remove(box, remote_path)
+                        except SandboxPathNotFoundError:
+                            pass
+
+        return StreamingTransferObservation(
+            digest_matches=(
+                copied == len(payload)
+                and hashlib.sha256(target.read_bytes()).digest() == expected_digest
+            ),
+            empty_matches=empty_copied == 0 and empty_target.read_bytes() == b"",
+            explicit_mode=stdout.strip(),
+            missing_download_failed=missing_download_failed,
+        )
 
 
 async def network_policy_flow(driver: _ScenarioDriver, name: str) -> NetworkPolicyObservation:

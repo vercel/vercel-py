@@ -1,17 +1,15 @@
 """Internal Sandbox v2 API client."""
 
-import io
 import json
 import platform
-import posixpath
 import sys
-import tarfile
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from importlib.metadata import version as _pkg_version
 from typing import Literal, TypeVar, cast
 
-from httpx import AsyncByteStream, Response
+from httpx import Response
 from httpx._types import QueryParamTypes
 from pydantic import (
     AliasChoices,
@@ -25,10 +23,11 @@ from pydantic import (
 
 from vercel._internal.http import (
     BaseTransport,
-    BytesBody,
     JSONBody,
     ReadResponsePolicy,
     RequestBody,
+    StreamingRequest,
+    StreamingResponse,
     extract_structured_error,
 )
 from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
@@ -54,7 +53,6 @@ from vercel._internal.unstable.sandbox.models import (
     _Omitted,
     _parse_network_policy,
     _serialize_network_policy,
-    _WriteFile,
 )
 from vercel._internal.unstable.sandbox.options import (
     SandboxCredentials,
@@ -87,6 +85,27 @@ USER_AGENT = (
     f"(Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
+
+
+class _WriteFilesUpload:
+    """Own one sandbox filesystem upload through server acceptance."""
+
+    def __init__(self, request: StreamingRequest) -> None:
+        self._request = request
+
+    async def write(self, data: bytes) -> None:
+        await self._request.write(data)
+
+    async def finish(self) -> None:
+        stream = await self._request.finish()
+        await stream.read()
+        response = stream.response
+        if not response.is_success:
+            message, data = extract_structured_error(response)
+            raise SandboxApiError(response, message, data=data)
+
+    async def abort(self) -> None:
+        await self._request.abort()
 
 
 class _ApiModel(BaseModel):
@@ -697,49 +716,6 @@ def _drop_none(data: Mapping[str, JSONValue | None]) -> JSONObject:
     return {key: value for key, value in data.items() if value is not None}
 
 
-def _normalize_mode(mode: object) -> int | None:
-    match mode:
-        case None:
-            return None
-        case bool():
-            raise TypeError("mode must be an integer between 0 and 0o777")
-        case int() if 0 <= mode <= 0o777:
-            return mode
-        case int():
-            raise ValueError("mode must be an integer between 0 and 0o777")
-        case _:
-            raise TypeError("mode must be an integer between 0 and 0o777")
-
-
-def _normalize_tar_path(path: str, *, cwd: str) -> str:
-    if not posixpath.isabs(cwd):
-        raise ValueError("cwd must be an absolute path")
-    if posixpath.isabs(path):
-        absolute_path = posixpath.normpath(path)
-    else:
-        absolute_path = posixpath.normpath(posixpath.join(cwd, path))
-    return posixpath.relpath(absolute_path, "/")
-
-
-def _build_write_files_tarball(
-    files: Sequence[_WriteFile],
-    *,
-    cwd: str,
-) -> bytes:
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for file in files:
-            info = tarfile.TarInfo(name=_normalize_tar_path(file.path, cwd=cwd))
-            mode = _normalize_mode(file.mode)
-            if mode is not None:
-                info.mode = mode
-            info.size = len(file.content)
-            tar.addfile(info, io.BytesIO(file.content))
-    # BytesBody currently requires bytes, so finalizing the in-memory archive
-    # makes one additional copy. Streaming uploads are intentionally deferred.
-    return buffer.getvalue()
-
-
 def _validate_response(model: type[ResponseModelT], data: JSONObject) -> ResponseModelT:
     try:
         return model.model_validate(data)
@@ -766,22 +742,6 @@ def _parse_run_process_record(line: str) -> JSONObject:
     return cast(JSONObject, record)
 
 
-async def _response_lines(response: Response) -> AsyncIterator[str]:
-    if isinstance(response.stream, AsyncByteStream):
-        async for line in response.aiter_lines():
-            yield line
-    else:
-        for line in response.iter_lines():
-            yield line
-
-
-async def _close_stream_response(response: Response) -> None:
-    if isinstance(response.stream, AsyncByteStream):
-        await response.aclose()
-    else:
-        response.close()
-
-
 class SandboxApiClient:
     def __init__(
         self,
@@ -789,10 +749,12 @@ class SandboxApiClient:
         base_url: str,
         credentials_factory: SandboxCredentialsFactory,
         transport: BaseTransport,
+        file_transfer_timeout: timedelta,
     ) -> None:
         self._credentials_factory = credentials_factory
         self._base_url = base_url
         self._transport = transport
+        self._file_transfer_timeout = file_transfer_timeout
 
     def _url(self, path: str) -> str:
         return self._base_url.rstrip("/") + "/" + path.lstrip("/")
@@ -806,6 +768,7 @@ class SandboxApiClient:
         body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
+        timeout: timedelta | None = None,
     ) -> Response:
         query = cast(
             QueryParamTypes,
@@ -827,6 +790,7 @@ class SandboxApiClient:
             params=query,
             body=body,
             headers=request_headers,
+            timeout=timeout,
             read_response=ReadResponsePolicy.ALWAYS,
         )
 
@@ -845,7 +809,8 @@ class SandboxApiClient:
         body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
-    ) -> Response:
+        timeout: timedelta | None = None,
+    ) -> StreamingResponse:
         query = cast(
             QueryParamTypes,
             _drop_none(
@@ -859,22 +824,25 @@ class SandboxApiClient:
             "user-agent": USER_AGENT,
             **dict(headers or {}),
         }
-        response = await self._transport.send(
+        response = await self._transport.open_response_stream(
             method,
             self._url(path),
             token=credentials.token,
             params=query,
             body=body,
             headers=request_headers,
-            stream=True,
+            timeout=timeout,
             read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
         )
 
-        if response.is_success:
+        if response.response.is_success:
             return response
 
-        message, data = extract_structured_error(response)
-        raise SandboxApiError(response, message, data=data)
+        try:
+            message, data = extract_structured_error(response.response)
+            raise SandboxApiError(response.response, message, data=data)
+        finally:
+            await response.aclose()
 
     async def _request_json(
         self,
@@ -1310,7 +1278,7 @@ class SandboxApiClient:
         initial: ProcessState | None = None
         final: ProcessState | None = None
         try:
-            async for line in _response_lines(response):
+            async for line in response.aiter_lines():
                 if not line:
                     continue
                 record = _parse_run_process_record(line)
@@ -1347,7 +1315,7 @@ class SandboxApiClient:
                     data=record,
                 )
         finally:
-            await _close_stream_response(response)
+            await response.aclose()
 
         if initial is None:
             raise SandboxResponseError("Sandbox process response is missing initial metadata")
@@ -1413,39 +1381,52 @@ class SandboxApiClient:
             body=JSONBody(request.to_api_dict()),
         )
 
-    async def read_bytes(
+    async def open_read_response(
         self,
         *,
         session_id: str,
         path: str,
         cwd: str | None = None,
-    ) -> bytes:
+    ) -> StreamingResponse:
         credentials = await self._credentials_factory()
         request = _FilesystemPathRequest(path=path, cwd=cwd)
-        response = await self._request(
+        return await self._request_stream(
             "POST",
             format_url_path("v2/sandboxes/sessions/{session_id}/fs/read", session_id=session_id),
             credentials=credentials,
             body=JSONBody(request.to_api_dict()),
+            timeout=self._file_transfer_timeout,
         )
-        return response.content
 
-    async def write_files(
+    @asynccontextmanager
+    async def write_files_request(
         self,
         *,
         session_id: str,
-        files: Sequence[_WriteFile],
-        cwd: str,
-    ) -> None:
+    ) -> AsyncIterator[_WriteFilesUpload]:
         credentials = await self._credentials_factory()
-        payload = _build_write_files_tarball(files, cwd=cwd)
-        await self._request(
-            "POST",
-            format_url_path("v2/sandboxes/sessions/{session_id}/fs/write", session_id=session_id),
-            credentials=credentials,
-            body=BytesBody(payload, "application/gzip"),
-            headers={"x-cwd": "/"},
+        query = cast(
+            QueryParamTypes,
+            _drop_none({"teamId": credentials.team_id}),
         )
+        async with self._transport.request_stream(
+            "POST",
+            self._url(
+                format_url_path(
+                    "v2/sandboxes/sessions/{session_id}/fs/write", session_id=session_id
+                )
+            ),
+            token=credentials.token,
+            params=query,
+            headers={
+                "user-agent": USER_AGENT,
+                "x-cwd": "/",
+                "content-type": "application/gzip",
+            },
+            timeout=self._file_transfer_timeout,
+            read_response=ReadResponsePolicy.NON_SUCCESS_ONLY,
+        ) as request:
+            yield _WriteFilesUpload(request)
 
     async def kill_command(
         self,
@@ -1472,7 +1453,7 @@ class SandboxApiClient:
         *,
         session_id: str,
         command_id: str,
-    ) -> Response:
+    ) -> StreamingResponse:
         credentials = await self._credentials_factory()
         return await self._request_stream(
             "GET",

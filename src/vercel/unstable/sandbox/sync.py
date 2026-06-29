@@ -9,12 +9,14 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxError,
     SandboxFilesystemCommandError,
     SandboxFilesystemError,
+    SandboxFilesystemTransferError,
     SandboxFilesystemWriteError,
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
     SandboxResponseError,
     SandboxStreamError,
     SandboxTerminalStateError,
+    SandboxUploadSizeMismatchError,
 )
 from vercel._internal.unstable.sandbox.models import (
     CompletedProcess,
@@ -47,6 +49,12 @@ from vercel._internal.unstable.sandbox.models import (
 from vercel._internal.unstable.sandbox.options import SandboxServiceOptions
 from vercel._internal.unstable.sandbox.service import SandboxService, get_sandbox_service
 from vercel._internal.unstable.sandbox.state import SnapshotRetentionState
+from vercel._internal.unstable.sandbox.sync_filesystem_handle import (
+    SyncSandboxBinaryReader,
+    SyncSandboxBinaryWriter,
+    SyncSandboxTextReader,
+    SyncSandboxTextWriter,
+)
 from vercel._internal.unstable.sandbox.sync_runtime import (
     SyncProcess,
     SyncSandbox,
@@ -310,9 +318,11 @@ __all__ = [
     "SandboxError",
     "SandboxFilesystemCommandError",
     "SandboxFilesystemError",
+    "SandboxFilesystemTransferError",
     "SandboxFilesystemWriteError",
     "SandboxInvalidHandleError",
     "SandboxPathNotFoundError",
+    "SandboxUploadSizeMismatchError",
     "NetworkPolicy",
     "NetworkPolicyKeyValueMatcher",
     "NetworkPolicyMatcher",
@@ -339,10 +349,14 @@ __all__ = [
     "SnapshotRetentionState",
     "SnapshotSource",
     "SyncSandbox",
+    "SyncSandboxBinaryReader",
+    "SyncSandboxBinaryWriter",
     "SyncProcess",
     "SyncSandboxFilesystem",
     "SyncSandboxFilesystemBatch",
     "SyncSandboxRuntimeSession",
+    "SyncSandboxTextReader",
+    "SyncSandboxTextWriter",
     "SyncSnapshot",
     "TagFilter",
     "TarballSource",

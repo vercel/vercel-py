@@ -2,6 +2,12 @@
 
 from collections.abc import AsyncIterator, Mapping
 
+from vercel._internal.unstable.sandbox.async_filesystem_handle import (
+    SandboxBinaryReader,
+    SandboxBinaryWriter,
+    SandboxTextReader,
+    SandboxTextWriter,
+)
 from vercel._internal.unstable.sandbox.async_runtime import (
     CreateSandboxOperation,
     Process,
@@ -26,12 +32,14 @@ from vercel._internal.unstable.sandbox.errors import (
     SandboxError,
     SandboxFilesystemCommandError,
     SandboxFilesystemError,
+    SandboxFilesystemTransferError,
     SandboxFilesystemWriteError,
     SandboxInvalidHandleError,
     SandboxPathNotFoundError,
     SandboxResponseError,
     SandboxStreamError,
     SandboxTerminalStateError,
+    SandboxUploadSizeMismatchError,
 )
 from vercel._internal.unstable.sandbox.models import (
     CompletedProcess,
@@ -306,6 +314,10 @@ async def get_snapshot(*, snapshot_id: str) -> Snapshot:
 
 
 __all__ = [
+    "SandboxBinaryReader",
+    "SandboxBinaryWriter",
+    "SandboxTextReader",
+    "SandboxTextWriter",
     "Sandbox",
     "SandboxApiError",
     "SandboxCleanupError",
@@ -318,9 +330,11 @@ __all__ = [
     "SandboxFilesystemBatch",
     "SandboxFilesystemCommandError",
     "SandboxFilesystemError",
+    "SandboxFilesystemTransferError",
     "SandboxFilesystemWriteError",
     "SandboxInvalidHandleError",
     "SandboxPathNotFoundError",
+    "SandboxUploadSizeMismatchError",
     "NetworkPolicy",
     "NetworkPolicyKeyValueMatcher",
     "NetworkPolicyMatcher",

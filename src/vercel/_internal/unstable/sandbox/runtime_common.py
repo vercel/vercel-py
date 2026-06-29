@@ -4,12 +4,13 @@ import copy
 import posixpath
 import signal as signal_module
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum, auto
 from pathlib import PurePosixPath
 from typing import Generic, Literal, TypeAlias, TypeVar
 
+from vercel._internal.byte_stream import ReadableByteStream
 from vercel._internal.unstable.sandbox.errors import SandboxResponseError
 from vercel._internal.unstable.sandbox.models import (
     JSONObject,
@@ -29,6 +30,19 @@ from vercel._internal.unstable.sandbox.state import (
 
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
 RemotePath: TypeAlias = str | PurePosixPath
+_SourceT = TypeVar("_SourceT")
+
+
+@dataclass(frozen=True, slots=True)
+class _UploadFileEntry(Generic[_SourceT]):
+    path: str
+    size: int
+    source: _SourceT
+    mode: int | None = None
+    archive_path: str | None = None
+
+
+_StreamUploadFileEntry: TypeAlias = _UploadFileEntry[ReadableByteStream]
 
 
 class _FilesystemBatchState(Enum):
@@ -47,6 +61,7 @@ class _SandboxFilesystemBatchBase:
     def _stage(self, file: _WriteFile) -> None:
         if self._state is not _FilesystemBatchState.ACTIVE:
             raise RuntimeError("filesystem batch staging is only allowed inside its context")
+        _validate_file_mode(file.mode)
         self._files.append(file)
 
     def write_bytes(self, path: RemotePath, data: bytes, *, mode: int | None = None) -> None:
@@ -116,6 +131,43 @@ def _resolve_write_files_cwd(cwd: RemotePath | None, *, default: str) -> str:
     if posixpath.isabs(normalized_cwd):
         return posixpath.normpath(normalized_cwd)
     return posixpath.normpath(posixpath.join(default, normalized_cwd))
+
+
+def _normalize_tar_path(path: str, *, cwd: str) -> str:
+    if not posixpath.isabs(cwd):
+        raise ValueError("cwd must be an absolute path")
+    absolute_path = (
+        posixpath.normpath(path)
+        if posixpath.isabs(path)
+        else posixpath.normpath(posixpath.join(cwd, path))
+    )
+    return posixpath.relpath(absolute_path, "/")
+
+
+def _validate_transfer_size(size: object) -> int:
+    if isinstance(size, bool) or not isinstance(size, int):
+        raise TypeError("size must be an integer >= 0")
+    if size < 0:
+        raise ValueError("size must be >= 0")
+    return size
+
+
+def _validate_chunk_size(chunk_size: object) -> int:
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int):
+        raise TypeError("chunk_size must be a positive integer")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    return chunk_size
+
+
+def _validate_file_mode(mode: object) -> int | None:
+    if mode is None:
+        return None
+    if isinstance(mode, bool) or not isinstance(mode, int):
+        raise TypeError("file mode must be an integer or None")
+    if not 0 <= mode <= 0o777:
+        raise ValueError("file mode must be between 0 and 0o777")
+    return mode
 
 
 def _signal_number(value: int | str | signal_module.Signals | None) -> int:
