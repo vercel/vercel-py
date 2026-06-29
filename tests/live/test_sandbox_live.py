@@ -1,7 +1,7 @@
 """Live API tests for Vercel Sandbox.
 
-These tests make real API calls and require VERCEL_TOKEN, VERCEL_TEAM_ID, and
-VERCEL_PROJECT_ID environment variables.
+These tests make real API calls and require VERCEL_TOKEN or VERCEL_OIDC_TOKEN,
+VERCEL_TEAM_ID, and VERCEL_PROJECT_ID environment variables.
 Run with: pytest tests/live/test_sandbox_live.py -v
 """
 
@@ -23,10 +23,7 @@ class TestSandboxLive:
         from vercel.sandbox import Sandbox
 
         # Create sandbox
-        sandbox = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        sandbox = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
         try:
@@ -59,10 +56,7 @@ class TestSandboxLive:
         from vercel.sandbox import AsyncSandbox
 
         # Create sandbox using async context manager
-        async with await AsyncSandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        ) as sandbox:
+        async with await AsyncSandbox.create(token=vercel_token) as sandbox:
             cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
             # Verify creation
@@ -83,10 +77,7 @@ class TestSandboxLive:
         """Test sandbox file write and read operations."""
         from vercel.sandbox import Sandbox, WriteFile
 
-        sandbox = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        sandbox = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
         try:
@@ -121,10 +112,7 @@ class TestSandboxLive:
         """Test running command with environment variables."""
         from vercel.sandbox import Sandbox
 
-        sandbox = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        sandbox = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
         try:
@@ -150,10 +138,7 @@ class TestSandboxLive:
         """Test running a detached command."""
         from vercel.sandbox import Sandbox
 
-        sandbox = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        sandbox = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
         try:
@@ -178,10 +163,7 @@ class TestSandboxLive:
         """Test sandbox context manager cleanup."""
         from vercel.sandbox import Sandbox
 
-        with Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        ) as sandbox:
+        with Sandbox.create(token=vercel_token) as sandbox:
             cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
             # Run a command inside context
@@ -195,10 +177,7 @@ class TestSandboxLive:
         from vercel.sandbox import Sandbox
 
         # Create a sandbox
-        original = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        original = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", original.sandbox_id)
 
         try:
@@ -209,7 +188,6 @@ class TestSandboxLive:
             fetched = Sandbox.get(
                 sandbox_id=original.sandbox_id,
                 token=vercel_token,
-                team_id=vercel_team_id,
             )
 
             assert fetched.sandbox_id == original.sandbox_id
@@ -230,10 +208,7 @@ class TestSandboxLive:
         """Test listing sandboxes returns a newly created sandbox."""
         from vercel.sandbox import Sandbox
 
-        sandbox = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        sandbox = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
         try:
@@ -244,7 +219,6 @@ class TestSandboxLive:
             for _ in range(10):
                 sandboxes = Sandbox.list(
                     token=vercel_token,
-                    team_id=vercel_team_id,
                     project_id=vercel_project_id,
                     limit=20,
                     since=since,
@@ -267,10 +241,7 @@ class TestSandboxLive:
         """Test creating a directory in the sandbox."""
         from vercel.sandbox import Sandbox
 
-        sandbox = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        sandbox = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
         try:
@@ -293,10 +264,7 @@ class TestSandboxLive:
         """Test stop(blocking=True) waits until a real sandbox is stopped."""
         from vercel.sandbox import Sandbox
 
-        sandbox = Sandbox.create(
-            token=vercel_token,
-            team_id=vercel_team_id,
-        )
+        sandbox = Sandbox.create(token=vercel_token)
         cleanup_registry.register("sandbox", sandbox.sandbox_id)
 
         try:
@@ -309,7 +277,6 @@ class TestSandboxLive:
             refreshed = Sandbox.get(
                 sandbox_id=sandbox.sandbox_id,
                 token=vercel_token,
-                team_id=vercel_team_id,
             )
             try:
                 assert refreshed.status == "stopped"

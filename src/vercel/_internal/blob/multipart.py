@@ -369,15 +369,21 @@ class MultipartClient:
     ) -> None:
         self._request_client = request_client
 
-    async def _request_api(self, **kwargs: Any) -> Any:
-        return await self._request_client.request_api(**kwargs)
+    async def _request_api(self, *, token: str | None = None, **kwargs: Any) -> Any:
+        return await self._request_client.request_api(token=token, **kwargs)
+
+    async def resolve_token(self, token: str | None = None) -> str:
+        return await self._request_client.resolve_token(token)
 
     async def create_multipart_upload(
         self,
         path: str,
         headers: PutHeaders | dict[str, str],
+        *,
+        token: str | None = None,
     ) -> dict[str, str]:
         response = await self._request_api(
+            token=token,
             pathname="/mpu",
             method="POST",
             headers=_build_headers(headers, action="create"),
@@ -395,8 +401,10 @@ class MultipartClient:
         part_number: int,
         body: Any,
         on_upload_progress: AsyncProgressCallback | None = None,
+        token: str | None = None,
     ) -> dict[str, Any]:
         response = await self._request_api(
+            token=token,
             pathname="/mpu",
             method="POST",
             headers=_build_headers(
@@ -420,8 +428,10 @@ class MultipartClient:
         path: str,
         headers: PutHeaders | dict[str, str],
         parts: list[dict[str, Any]],
+        token: str | None = None,
     ) -> dict[str, Any]:
         response = await self._request_api(
+            token=token,
             pathname="/mpu",
             method="POST",
             headers=_build_headers(
@@ -438,14 +448,14 @@ class MultipartClient:
 
 
 class SyncMultipartClient(MultipartClient):
-    def __init__(self, token: str | None = None) -> None:
+    def __init__(self) -> None:
         from vercel._internal.blob.core import create_sync_request_client
 
-        super().__init__(create_sync_request_client(token=token))
+        super().__init__(create_sync_request_client())
 
 
 class AsyncMultipartClient(MultipartClient):
-    def __init__(self, token: str | None = None) -> None:
+    def __init__(self) -> None:
         from vercel._internal.blob.core import create_async_request_client
 
-        super().__init__(create_async_request_client(token=token))
+        super().__init__(create_async_request_client())

@@ -1,4 +1,4 @@
-"""Tests for sandbox time helpers."""
+"""Tests for time helpers."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from hypothesis import given, strategies as st
 
 from vercel._internal.sandbox.models import CreateSandboxRequest
-from vercel._internal.sandbox.time import (
+from vercel._internal.time import (
     MILLISECOND,
     SECOND,
     coerce_duration,

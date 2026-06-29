@@ -6,6 +6,12 @@ Vercel projects.
 For project request bodies and product behavior, see the official
 [Vercel projects docs](https://vercel.com/docs).
 
+## Credentials
+
+Grouped project clients use `VERCEL_TOKEN` by default. Pass
+`access_token=get_credentials().token` or another explicit token to `Vercel` /
+`AsyncVercel` when you want to authenticate with OIDC-derived credentials.
+
 ## Async Client
 
 ```python

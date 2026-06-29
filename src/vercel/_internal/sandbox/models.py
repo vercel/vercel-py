@@ -22,7 +22,7 @@ from pydantic_core import InitErrorDetails
 
 from vercel._internal.polyfills import StrEnum
 from vercel._internal.sandbox.errors import SandboxError
-from vercel._internal.sandbox.time import MILLISECOND, parse_duration, to_ms_int
+from vercel._internal.time import MILLISECOND, parse_duration, to_ms_int
 
 # Source types for Sandbox.create()
 _REDACTED_HEADER_VALUE = "<redacted>"

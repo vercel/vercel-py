@@ -35,12 +35,17 @@ class AsyncCommand:
         return self.cmd.started_at
 
     async def logs(self) -> AsyncGenerator[LogLine, None]:
-        async for log in self.client.get_logs(sandbox_id=self.sandbox_id, cmd_id=self.cmd.id):
+        async for log in self.client.get_logs(
+            sandbox_id=self.sandbox_id,
+            cmd_id=self.cmd.id,
+        ):
             yield log
 
     async def wait(self) -> AsyncCommandFinished:
         resp = await self.client.get_command(
-            sandbox_id=self.sandbox_id, cmd_id=self.cmd.id, wait=True
+            sandbox_id=self.sandbox_id,
+            cmd_id=self.cmd.id,
+            wait=True,
         )
         assert isinstance(resp, CommandFinishedResponse)
         return AsyncCommandFinished(
@@ -66,7 +71,9 @@ class AsyncCommand:
     async def kill(self, signal: int = 15) -> None:
         try:
             await self.client.kill_command(
-                sandbox_id=self.sandbox_id, command_id=self.cmd.id, signal=signal
+                sandbox_id=self.sandbox_id,
+                command_id=self.cmd.id,
+                signal=signal,
             )
         except SandboxNotFoundError:
             # Command may already have exited; ignore 404s
@@ -103,11 +110,18 @@ class Command:
         return self.cmd.started_at
 
     def logs(self) -> Generator[LogLine, None, None]:
-        yield from self.client.get_logs(sandbox_id=self.sandbox_id, cmd_id=self.cmd.id)
+        yield from self.client.get_logs(
+            sandbox_id=self.sandbox_id,
+            cmd_id=self.cmd.id,
+        )
 
     def wait(self) -> CommandFinished:
         resp = iter_coroutine(
-            self.client.get_command(sandbox_id=self.sandbox_id, cmd_id=self.cmd.id, wait=True)
+            self.client.get_command(
+                sandbox_id=self.sandbox_id,
+                cmd_id=self.cmd.id,
+                wait=True,
+            )
         )
         assert isinstance(resp, CommandFinishedResponse)
         return CommandFinished(
@@ -134,7 +148,9 @@ class Command:
         try:
             iter_coroutine(
                 self.client.kill_command(
-                    sandbox_id=self.sandbox_id, command_id=self.cmd.id, signal=signal
+                    sandbox_id=self.sandbox_id,
+                    command_id=self.cmd.id,
+                    signal=signal,
                 )
             )
         except SandboxNotFoundError:

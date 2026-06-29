@@ -15,7 +15,6 @@ from vercel._internal.sandbox.models import (
     parse_resources,
     parse_source,
 )
-from vercel.oidc.types import Credentials
 from vercel.sandbox import SandboxValidationError
 from vercel.sandbox.sandbox import Sandbox as SyncSandbox
 
@@ -174,9 +173,7 @@ def test_parse_resources_drops_unknown_keys() -> None:
 
 
 class _RecordingSyncSandboxOpsClient:
-    def __init__(self, *, team_id: str, token: str) -> None:
-        self.team_id = team_id
-        self.token = token
+    def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
     async def create_sandbox(self, **kwargs: object) -> SandboxAndRoutesResponse:
@@ -205,16 +202,8 @@ class _RecordingSyncSandboxOpsClient:
 def test_sandbox_create_warns_for_mapping_source_and_resources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _RecordingSyncSandboxOpsClient(team_id="team_123", token="token_123")
-    monkeypatch.setattr(
-        sandbox_module,
-        "get_credentials",
-        lambda **_: Credentials(
-            token="token_123",
-            project_id="project_123",
-            team_id="team_123",
-        ),
-    )
+    client = _RecordingSyncSandboxOpsClient()
+
     monkeypatch.setattr(sandbox_module, "SyncSandboxOpsClient", lambda **_: client)
 
     with pytest.warns(DeprecationWarning) as record:
@@ -232,7 +221,7 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
     ]
     assert client.calls == [
         {
-            "project_id": "project_123",
+            "project_id": None,
             "source": GitSource(type="git", url="https://github.com/vercel/vercel-py"),
             "ports": None,
             "timeout": None,
@@ -242,23 +231,30 @@ def test_sandbox_create_warns_for_mapping_source_and_resources(
             "interactive": False,
             "env": None,
             "network_policy": None,
-        }
+        },
     ]
+
+
+def test_sandbox_create_warns_with_source_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _RecordingSyncSandboxOpsClient()
+
+    monkeypatch.setattr(sandbox_module, "SyncSandboxOpsClient", lambda **_: client)
+
+    with pytest.warns(
+        DeprecationWarning,
+        match="pass a typed Source model instead",
+    ):
+        with pytest.raises(SandboxValidationError, match="source.type: is required"):
+            SyncSandbox.create(source=cast(Any, {}))
 
 
 def test_sandbox_create_does_not_warn_for_typed_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _RecordingSyncSandboxOpsClient(team_id="team_123", token="token_123")
-    monkeypatch.setattr(
-        sandbox_module,
-        "get_credentials",
-        lambda **_: Credentials(
-            token="token_123",
-            project_id="project_123",
-            team_id="team_123",
-        ),
-    )
+    client = _RecordingSyncSandboxOpsClient()
+
     monkeypatch.setattr(sandbox_module, "SyncSandboxOpsClient", lambda **_: client)
 
     with warnings.catch_warnings(record=True) as record:
@@ -273,7 +269,7 @@ def test_sandbox_create_does_not_warn_for_typed_models(
     assert len(record) == 0
     assert client.calls == [
         {
-            "project_id": "project_123",
+            "project_id": None,
             "source": GitSource(type="git", url="https://github.com/vercel/vercel-py"),
             "ports": None,
             "timeout": None,
@@ -283,5 +279,5 @@ def test_sandbox_create_does_not_warn_for_typed_models(
             "interactive": False,
             "env": None,
             "network_policy": None,
-        }
+        },
     ]

@@ -1,5 +1,7 @@
 """Tests for RawBody support in HTTP transports."""
 
+from datetime import timedelta
+
 import pytest
 import respx
 from httpx import Response
@@ -8,6 +10,7 @@ from vercel._internal.http import (
     AsyncTransport,
     RawBody,
     SyncTransport,
+    TransportOptions,
     create_base_async_client,
     create_base_client,
 )
@@ -31,7 +34,14 @@ class TestRawBodySupport:
 
         route = respx.post(f"{base_url}/upload").mock(side_effect=handler)
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(
+            TransportOptions(
+                timeout=timedelta(seconds=30),
+                base_url=base_url,
+                max_connections=100,
+                enable_http2=False,
+            )
+        )
         transport = SyncTransport(client)
         try:
             body = RawBody(iter([b"chunk-1", b"chunk-2"]))
@@ -63,7 +73,14 @@ class TestRawBodySupport:
 
         route = respx.post(f"{base_url}/upload").mock(side_effect=handler)
 
-        client = create_base_async_client(timeout=30.0, base_url=base_url)
+        client = create_base_async_client(
+            TransportOptions(
+                timeout=timedelta(seconds=30),
+                base_url=base_url,
+                max_connections=100,
+                enable_http2=False,
+            )
+        )
         transport = AsyncTransport(client)
         try:
             response = await transport.send("POST", "upload", body=RawBody(chunks()), stream=stream)

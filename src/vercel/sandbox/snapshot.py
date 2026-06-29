@@ -5,15 +5,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from vercel._internal.auth import TokenProvider
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.sandbox import AsyncSandboxOpsClient, SyncSandboxOpsClient
 from vercel._internal.sandbox.constants import MIN_SNAPSHOT_EXPIRATION
+from vercel._internal.sandbox.core import (
+    make_public_sandbox_credentials_factory,
+)
 from vercel._internal.sandbox.models import Snapshot as SnapshotModel
 from vercel._internal.sandbox.pagination import SnapshotListParams
 from vercel._internal.sandbox.snapshot import SnapshotExpiration as _SnapshotExpiration
-from vercel._internal.sandbox.time import to_ms_int
-
-from ..oidc import Credentials, get_credentials
+from vercel._internal.time import to_ms_int
 
 MIN_SNAPSHOT_EXPIRATION_MS = to_ms_int(MIN_SNAPSHOT_EXPIRATION)
 SnapshotExpiration = _SnapshotExpiration
@@ -60,14 +62,21 @@ class AsyncSnapshot:
     async def get(
         *,
         snapshot_id: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> AsyncSnapshot:
         """Retrieve an existing snapshot by ID."""
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp = await client.get_snapshot(snapshot_id=snapshot_id)
+        client = AsyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
+        resp = await client.get_snapshot(
+            snapshot_id=snapshot_id,
+        )
         return AsyncSnapshot(client=client, snapshot=resp.snapshot)
 
     @staticmethod
@@ -77,7 +86,7 @@ class AsyncSnapshot:
         _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> AsyncIterator[SnapshotModel]:
@@ -87,18 +96,22 @@ class AsyncSnapshot:
         size used during internal pagination. It exists for internal debugging
         and examples and is not part of the supported public contract.
         """
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        params = SnapshotListParams(
-            project_id=creds.project_id,
-            limit=limit,
-            internal_page_size=_internal_page_size,
-            since=since,
-            until=until,
-        )
 
         async def iter_snapshots() -> AsyncIterator[SnapshotModel]:
-            current_params = params
-            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            async with AsyncSandboxOpsClient(
+                credentials_factory=make_public_sandbox_credentials_factory(
+                    token=token,
+                    project_id=project_id,
+                    team_id=team_id,
+                ),
+            ) as client:
+                current_params = SnapshotListParams(
+                    project_id=project_id,
+                    limit=limit,
+                    internal_page_size=_internal_page_size,
+                    since=since,
+                    until=until,
+                )
                 while True:
                     response = await client.list_snapshots(
                         project_id=current_params.project_id,
@@ -170,14 +183,23 @@ class Snapshot:
     def get(
         *,
         snapshot_id: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> Snapshot:
         """Retrieve an existing snapshot by ID."""
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp = iter_coroutine(client.get_snapshot(snapshot_id=snapshot_id))
+        client = SyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
+        resp = iter_coroutine(
+            client.get_snapshot(
+                snapshot_id=snapshot_id,
+            )
+        )
         return Snapshot(client=client, snapshot=resp.snapshot)
 
     @staticmethod
@@ -187,7 +209,7 @@ class Snapshot:
         _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> Iterator[SnapshotModel]:
@@ -197,18 +219,22 @@ class Snapshot:
         size used during internal pagination. It exists for internal debugging
         and examples and is not part of the supported public contract.
         """
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        params = SnapshotListParams(
-            project_id=creds.project_id,
-            limit=limit,
-            internal_page_size=_internal_page_size,
-            since=since,
-            until=until,
-        )
 
         def iter_snapshots() -> Iterator[SnapshotModel]:
-            current_params = params
-            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            with SyncSandboxOpsClient(
+                credentials_factory=make_public_sandbox_credentials_factory(
+                    token=token,
+                    project_id=project_id,
+                    team_id=team_id,
+                ),
+            ) as client:
+                current_params = SnapshotListParams(
+                    project_id=project_id,
+                    limit=limit,
+                    internal_page_size=_internal_page_size,
+                    since=since,
+                    until=until,
+                )
                 while True:
                     response = iter_coroutine(
                         client.list_snapshots(

@@ -100,26 +100,26 @@ class TestBlobLive:
         from vercel.blob import BlobClient
         from vercel.blob.errors import BlobNotFoundError
 
-        client = BlobClient(token=blob_token)
+        client = BlobClient()
 
         # Put using client
-        result = client.put(unique_blob_path, b"Client test content")
+        result = client.put(unique_blob_path, b"Client test content", token=blob_token)
         cleanup_registry.register("blob", result.url)
 
         # Head using client
-        meta = client.head(result.url)
+        meta = client.head(result.url, token=blob_token)
         assert meta.size > 0
 
         # List using client
-        listing = client.list_objects(limit=5)
+        listing = client.list_objects(limit=5, token=blob_token)
         assert listing.blobs is not None
 
         # Delete using client
-        client.delete(result.url)
+        client.delete(result.url, token=blob_token)
 
         # Verify deletion
         with pytest.raises(BlobNotFoundError):
-            client.head(result.url)
+            client.head(result.url, token=blob_token)
 
     @pytest.mark.asyncio
     async def test_async_blob_client_class(self, blob_token, unique_blob_path, cleanup_registry):
@@ -127,22 +127,22 @@ class TestBlobLive:
         from vercel.blob import AsyncBlobClient
         from vercel.blob.errors import BlobNotFoundError
 
-        client = AsyncBlobClient(token=blob_token)
+        client = AsyncBlobClient()
 
         # Put using client
-        result = await client.put(unique_blob_path, b"Async client test content")
+        result = await client.put(unique_blob_path, b"Async client test content", token=blob_token)
         cleanup_registry.register("blob", result.url)
 
         # Head using client
-        meta = await client.head(result.url)
+        meta = await client.head(result.url, token=blob_token)
         assert meta.size > 0
 
         # Delete using client
-        await client.delete(result.url)
+        await client.delete(result.url, token=blob_token)
 
         # Verify deletion
         with pytest.raises(BlobNotFoundError):
-            await client.head(result.url)
+            await client.head(result.url, token=blob_token)
 
     def test_copy_operation(self, blob_token, unique_blob_path, cleanup_registry):
         """Test server-side copy operation."""

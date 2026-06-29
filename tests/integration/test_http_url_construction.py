@@ -9,6 +9,9 @@ Users can pass base_url with or without trailing slash, and paths with or
 without leading slash - the result will be the same.
 """
 
+from datetime import timedelta
+
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -17,10 +20,53 @@ from vercel._internal.http import (
     AsyncTransport,
     JSONBody,
     SyncTransport,
+    TransportOptions,
     create_base_async_client,
     create_base_client,
 )
 from vercel._internal.iter_coroutine import iter_coroutine
+
+
+def _transport_options(base_url: str) -> TransportOptions:
+    return TransportOptions(
+        timeout=timedelta(seconds=30),
+        base_url=base_url,
+        max_connections=100,
+        enable_http2=False,
+    )
+
+
+class TestAbsoluteUrls:
+    @respx.mock
+    def test_sync_origin_neutral_client_sends_absolute_url(self):
+        route = respx.get("https://sandbox.example.com/v2/sandboxes").mock(
+            return_value=Response(200)
+        )
+        transport = SyncTransport(httpx.Client())
+        try:
+            response = iter_coroutine(
+                transport.send("GET", "https://sandbox.example.com/v2/sandboxes")
+            )
+        finally:
+            transport.close()
+
+        assert response.status_code == 200
+        assert route.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_origin_neutral_client_sends_absolute_url(self):
+        route = respx.get("https://sandbox.example.com/v2/sandboxes").mock(
+            return_value=Response(200)
+        )
+        transport = AsyncTransport(httpx.AsyncClient())
+        try:
+            response = await transport.send("GET", "https://sandbox.example.com/v2/sandboxes")
+        finally:
+            await transport.aclose()
+
+        assert response.status_code == 200
+        assert route.called
 
 
 class TestUrlNormalization:
@@ -61,7 +107,7 @@ class TestUrlNormalization:
         """Test that SyncTransport normalizes URLs consistently."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -95,7 +141,7 @@ class TestUrlNormalization:
         """Test that AsyncTransport normalizes URLs consistently."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_async_client(timeout=30.0, base_url=base_url)
+        client = create_base_async_client(_transport_options(base_url))
         transport = AsyncTransport(client)
 
         try:
@@ -138,7 +184,7 @@ class TestEdgeCases:
         """Test edge cases for URL construction."""
         route = respx.get(expected_url).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -166,7 +212,7 @@ class TestCacheUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"data": "cached"}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -185,7 +231,7 @@ class TestCacheUrlPatterns:
 
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -203,7 +249,7 @@ class TestCacheUrlPatterns:
 
         route = respx.post(expected).mock(return_value=Response(200, json={"ok": True}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -229,7 +275,7 @@ class TestApiUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"projects": []}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -249,7 +295,7 @@ class TestApiUrlPatterns:
 
         route = respx.get(expected).mock(return_value=Response(200, json={"id": project_id}))
 
-        client = create_base_client(timeout=30.0, base_url=base_url)
+        client = create_base_client(_transport_options(base_url))
         transport = SyncTransport(client)
 
         try:
@@ -258,3 +304,79 @@ class TestApiUrlPatterns:
             assert route.called
         finally:
             transport.close()
+
+
+class TestFollowRedirects:
+    @respx.mock
+    def test_sync_false_overrides_client_default(self):
+        base_url = "https://redirect.example.com"
+        respx.get(f"{base_url}/start").mock(
+            return_value=Response(307, headers={"location": f"{base_url}/done"})
+        )
+        target = respx.get(f"{base_url}/done").mock(return_value=Response(200))
+
+        transport = SyncTransport(httpx.Client(base_url=base_url, follow_redirects=True))
+        try:
+            response = iter_coroutine(transport.send("GET", "/start", follow_redirects=False))
+        finally:
+            transport.close()
+
+        assert response.status_code == 307
+        assert not target.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_false_overrides_client_default(self):
+        base_url = "https://redirect.example.com"
+        respx.get(f"{base_url}/start").mock(
+            return_value=Response(307, headers={"location": f"{base_url}/done"})
+        )
+        target = respx.get(f"{base_url}/done").mock(return_value=Response(200))
+
+        transport = AsyncTransport(httpx.AsyncClient(base_url=base_url, follow_redirects=True))
+        try:
+            response = await transport.send("GET", "/start", follow_redirects=False)
+        finally:
+            await transport.aclose()
+
+        assert response.status_code == 307
+        assert not target.called
+
+
+class TestBearerInjection:
+    @respx.mock
+    def test_sync_transport_injects_bearer_token(self):
+        base_url = "https://auth.example.com"
+
+        def handler(request):
+            assert request.headers["authorization"] == "Bearer transport-token"
+            return Response(200, json={"ok": True})
+
+        route = respx.get(f"{base_url}/auth").mock(side_effect=handler)
+        transport = SyncTransport(httpx.Client(base_url=base_url))
+        try:
+            response = iter_coroutine(transport.send("GET", "/auth", token="transport-token"))
+        finally:
+            transport.close()
+
+        assert response.status_code == 200
+        assert route.called
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_async_transport_injects_bearer_token(self):
+        base_url = "https://auth.example.com"
+
+        def handler(request):
+            assert request.headers["authorization"] == "Bearer transport-token"
+            return Response(200, json={"ok": True})
+
+        route = respx.get(f"{base_url}/auth").mock(side_effect=handler)
+        transport = AsyncTransport(httpx.AsyncClient(base_url=base_url))
+        try:
+            response = await transport.send("GET", "/auth", token="transport-token")
+        finally:
+            await transport.aclose()
+
+        assert response.status_code == 200
+        assert route.called

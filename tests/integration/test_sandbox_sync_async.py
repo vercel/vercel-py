@@ -91,11 +91,7 @@ class TestSandboxCreate:
             )
         )
 
-        sandbox = Sandbox.create(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
+        sandbox = Sandbox.create(token="test_token", project_id="prj_test123")
 
         assert route.called
         assert sandbox.sandbox_id == "sbx_test123456"
@@ -148,11 +144,7 @@ class TestSandboxCreate:
             )
         )
 
-        sandbox = await AsyncSandbox.create(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
+        sandbox = await AsyncSandbox.create(token="test_token", project_id="prj_test123")
 
         assert route.called
         assert sandbox.sandbox_id == "sbx_test123456"
@@ -202,14 +194,12 @@ class TestSandboxCreate:
 
         sync_sandbox = Sandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             source={"type": "git", "url": "https://github.com/vercel/vercel-py"},
             resources={"vcpus": 2, "memory": 4096},
         )
         async_sandbox = await AsyncSandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             source=GitSource(url="https://github.com/vercel/vercel-py"),
             resources=Resources(vcpus=2, memory=4096),
@@ -244,7 +234,6 @@ class TestSandboxCreate:
 
         sandbox = Sandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             source={"type": "snapshot", "snapshotId": "snap_123"},
         )
@@ -292,7 +281,6 @@ class TestSandboxCreate:
         with pytest.raises(SandboxValidationError) as exc_info:
             Sandbox.create(
                 token="test_token",
-                team_id="team_test123",
                 project_id="prj_test123",
                 source={"type": "git", "depth": 0, "username": "scott"},
                 resources={"vcpus": 3, "memory": 4096},
@@ -313,7 +301,6 @@ class TestSandboxCreate:
         with pytest.raises(SandboxValidationError) as exc_info:
             Sandbox.create(
                 token="test_token",
-                team_id="team_test123",
                 project_id="prj_test123",
                 resources={"vcpus": 3, "memory": 4096},
             )
@@ -340,7 +327,6 @@ class TestSandboxCreate:
 
         sandbox = Sandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             ports=[3000, 8080],
             timeout=600000,
@@ -376,7 +362,6 @@ class TestSandboxCreate:
 
         sandbox = Sandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             timeout=timedelta(minutes=10),
         )
@@ -404,7 +389,6 @@ class TestSandboxCreate:
 
         sandbox = Sandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             env={"NODE_ENV": "production"},
         )
@@ -437,7 +421,6 @@ class TestSandboxCreate:
 
         sandbox = await AsyncSandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             env={"NODE_ENV": "production"},
         )
@@ -469,7 +452,6 @@ class TestSandboxCreate:
 
         sandbox = await AsyncSandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             timeout=timedelta(minutes=10),
         )
@@ -540,7 +522,6 @@ class TestSandboxCreateNetworkPolicy:
 
         sandbox = Sandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             ports=[3000, 8080],
             timeout=600000,
@@ -617,7 +598,6 @@ class TestSandboxCreateNetworkPolicy:
 
         sandbox = await AsyncSandbox.create(
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
             ports=[3000, 8080],
             timeout=600000,
@@ -650,11 +630,7 @@ class TestSandboxCreateNetworkPolicy:
             )
         )
 
-        sandbox = Sandbox.create(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
+        sandbox = Sandbox.create(token="test_token", project_id="prj_test123")
 
         assert route.called
         body = json.loads(route.calls.last.request.content)
@@ -676,11 +652,7 @@ class TestSandboxCreateNetworkPolicy:
             )
         )
 
-        sandbox = await AsyncSandbox.create(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        )
+        sandbox = await AsyncSandbox.create(token="test_token", project_id="prj_test123")
 
         assert route.called
         body = json.loads(route.calls.last.request.content)
@@ -711,7 +683,6 @@ class TestSandboxGet:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -741,7 +712,6 @@ class TestSandboxGet:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -815,7 +785,6 @@ class TestSandboxList:
         sandboxes = list(
             Sandbox.list(
                 token="test_token",
-                team_id="team_test123",
                 project_id=project,
                 limit=limit,
                 since=since,
@@ -825,7 +794,6 @@ class TestSandboxList:
 
         assert requests == [
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": str(limit),
                 "since": expected_since,
@@ -900,7 +868,6 @@ class TestSandboxList:
         items = await _collect_async_items(
             AsyncSandbox.list(
                 token="test_token",
-                team_id="team_test123",
                 project_id=project,
                 limit=limit,
                 since=since,
@@ -915,14 +882,12 @@ class TestSandboxList:
         ]
         assert requests == [
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": str(limit),
                 "since": str(since),
                 "until": str(until),
             },
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": "1",
                 "since": str(since),
@@ -1003,7 +968,6 @@ class TestSandboxList:
         items = await _collect_async_items(
             AsyncSandbox.list(
                 token="test_token",
-                team_id="team_test123",
                 project_id=project,
                 limit=limit,
                 since=since,
@@ -1018,20 +982,17 @@ class TestSandboxList:
         ]
         assert requests == [
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": "1",
                 "since": str(since),
             },
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": "1",
                 "since": str(since),
                 "until": next_until_1,
             },
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": "1",
                 "since": str(since),
@@ -1089,19 +1050,13 @@ class TestSandboxList:
 
         route = respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
-        sandboxes = list(
-            Sandbox.list(
-                token="test_token",
-                team_id="team_test123",
-                project_id="prj_test123",
-            )
-        )
+        sandboxes = list(Sandbox.list(token="test_token", project_id="prj_test123"))
 
         assert route.called
         assert [sandbox.id for sandbox in sandboxes] == ["sbx_page_1", "sbx_page_2", "sbx_page_3"]
         assert requests == [
-            {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319399999"},
+            {"project": "prj_test123"},
+            {"project": "prj_test123", "until": "1705319399999"},
         ]
 
     @respx.mock
@@ -1157,18 +1112,14 @@ class TestSandboxList:
 
         item_ids = [
             sandbox.id
-            async for sandbox in AsyncSandbox.list(
-                token="test_token",
-                team_id="team_test123",
-                project_id="prj_test123",
-            )
+            async for sandbox in AsyncSandbox.list(token="test_token", project_id="prj_test123")
         ]
 
         assert route.called
         assert item_ids == ["sbx_async_1", "sbx_async_2", "sbx_async_3"]
         assert requests == [
-            {"teamId": "team_test123", "project": "prj_test123"},
-            {"teamId": "team_test123", "project": "prj_test123", "until": "1705319399999"},
+            {"project": "prj_test123"},
+            {"project": "prj_test123", "until": "1705319399999"},
         ]
 
     @respx.mock
@@ -1199,16 +1150,10 @@ class TestSandboxList:
 
         respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
-        sandboxes = list(
-            Sandbox.list(
-                token="test_token",
-                team_id="team_test123",
-                project_id="prj_test123",
-            )
-        )
+        sandboxes = list(Sandbox.list(token="test_token", project_id="prj_test123"))
 
         assert [sandbox.id for sandbox in sandboxes] == ["sbx_single_page"]
-        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
+        assert requests == [{"project": "prj_test123"}]
 
     @respx.mock
     @pytest.mark.asyncio
@@ -1240,15 +1185,11 @@ class TestSandboxList:
         respx.get(f"{SANDBOX_API_BASE}/v1/sandboxes").mock(side_effect=handler)
 
         items = await _collect_async_items(
-            AsyncSandbox.list(
-                token="test_token",
-                team_id="team_test123",
-                project_id="prj_test123",
-            )
+            AsyncSandbox.list(token="test_token", project_id="prj_test123")
         )
 
         assert [sandbox.id for sandbox in items] == ["sbx_async_terminal"]
-        assert requests == [{"teamId": "team_test123", "project": "prj_test123"}]
+        assert requests == [{"project": "prj_test123"}]
 
 
 class TestSnapshotList:
@@ -1316,7 +1257,6 @@ class TestSnapshotList:
         snapshots = list(
             Snapshot.list(
                 token="test_token",
-                team_id="team_test123",
                 project_id=project,
                 limit=limit,
                 since=since,
@@ -1325,7 +1265,6 @@ class TestSnapshotList:
         )
         assert requests == [
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": str(limit),
                 "since": expected_since,
@@ -1408,7 +1347,6 @@ class TestSnapshotList:
         snapshots = await _collect_async_items(
             AsyncSnapshot.list(
                 token="test_token",
-                team_id="team_test123",
                 project_id=project,
                 limit=limit,
                 since=since,
@@ -1437,14 +1375,12 @@ class TestSnapshotList:
         ]
         assert requests == [
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": str(limit),
                 "since": str(since),
                 "until": str(until),
             },
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": "1",
                 "since": str(since),
@@ -1507,7 +1443,6 @@ class TestSnapshotList:
         snapshots = list(
             Snapshot.list(
                 token="test_token",
-                team_id="team_test123",
                 project_id=project,
                 limit=limit,
                 since=since,
@@ -1518,13 +1453,11 @@ class TestSnapshotList:
         assert [snapshot.id for snapshot in snapshots] == ["snap_list_1", "snap_list_2"]
         assert requests == [
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": "1",
                 "since": str(since),
             },
             {
-                "teamId": "team_test123",
                 "project": project,
                 "limit": "1",
                 "since": str(since),
@@ -1553,7 +1486,6 @@ class TestSnapshotList:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -1584,7 +1516,6 @@ class TestSnapshotList:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -1692,7 +1623,6 @@ class TestSandboxUpdateNetworkPolicy:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -1729,7 +1659,6 @@ class TestSandboxUpdateNetworkPolicy:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -1826,7 +1755,6 @@ class TestSandboxUpdateNetworkPolicy:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -1864,7 +1792,6 @@ class TestSandboxUpdateNetworkPolicy:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -1939,7 +1866,6 @@ class TestSandboxRunCommand:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2013,7 +1939,6 @@ class TestSandboxRunCommand:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2059,7 +1984,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2107,7 +2031,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2147,7 +2070,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2183,7 +2105,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2235,7 +2156,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2272,7 +2192,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2309,7 +2228,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2341,7 +2259,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2376,7 +2293,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2414,7 +2330,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2452,7 +2367,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2509,7 +2423,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2559,7 +2472,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2596,7 +2508,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2638,7 +2549,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2676,7 +2586,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2713,7 +2622,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2746,7 +2654,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2782,7 +2689,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2821,7 +2727,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2861,7 +2766,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2921,7 +2825,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -2997,7 +2900,6 @@ class TestSandboxFileOperations:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3034,7 +2936,6 @@ class TestSandboxFileOperations:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3092,7 +2993,6 @@ class TestSandboxStop:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3149,7 +3049,6 @@ class TestSandboxStop:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3194,7 +3093,6 @@ class TestSandboxStop:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3231,7 +3129,6 @@ class TestSandboxStop:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3271,7 +3168,6 @@ class TestSandboxStop:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3310,7 +3206,6 @@ class TestSandboxStop:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3356,7 +3251,6 @@ class TestSandboxStop:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3394,7 +3288,6 @@ class TestSandboxStop:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3435,7 +3328,6 @@ class TestSandboxStop:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3477,7 +3369,6 @@ class TestSandboxStop:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3522,11 +3413,7 @@ class TestSandboxContextManager:
             return_value=httpx.Response(200, json={"sandbox": stopped_response})
         )
 
-        with Sandbox.create(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        ) as sandbox:
+        with Sandbox.create(token="test_token", project_id="prj_test123") as sandbox:
             assert sandbox.status == "running"
 
         # Stop should have been called
@@ -3558,11 +3445,8 @@ class TestSandboxContextManager:
             return_value=httpx.Response(200, json={"sandbox": stopped_response})
         )
 
-        async with await AsyncSandbox.create(
-            token="test_token",
-            team_id="team_test123",
-            project_id="prj_test123",
-        ) as sandbox:
+        sandbox = await AsyncSandbox.create(token="test_token", project_id="prj_test123")
+        async with sandbox:
             assert sandbox.status == "running"
 
         # Stop should have been called
@@ -3608,7 +3492,6 @@ class TestSandboxSnapshot:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3658,7 +3541,6 @@ class TestSandboxSnapshot:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3706,7 +3588,6 @@ class TestSandboxSnapshot:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3754,7 +3635,6 @@ class TestSandboxSnapshot:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3801,7 +3681,6 @@ class TestSandboxSnapshot:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3851,7 +3730,6 @@ class TestSandboxSnapshot:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3900,7 +3778,6 @@ class TestSandboxSnapshot:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3951,7 +3828,6 @@ class TestSandboxSnapshot:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -3998,7 +3874,6 @@ class TestSandboxExtendTimeout:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4040,7 +3915,6 @@ class TestSandboxExtendTimeout:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4081,7 +3955,6 @@ class TestSandboxExtendTimeout:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4130,7 +4003,6 @@ class TestSandboxDomain:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4185,7 +4057,6 @@ class TestSandboxRefresh:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4230,7 +4101,6 @@ class TestSandboxRefresh:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4289,7 +4159,6 @@ class TestSandboxWaitForStatus:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4319,7 +4188,6 @@ class TestSandboxWaitForStatus:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4361,7 +4229,6 @@ class TestSandboxWaitForStatus:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4399,7 +4266,6 @@ class TestSandboxWaitForStatus:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4430,7 +4296,6 @@ class TestSandboxWaitForStatus:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4461,7 +4326,6 @@ class TestSandboxWaitForStatus:
         sandbox = Sandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4499,7 +4363,6 @@ class TestSandboxWaitForStatus:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4530,7 +4393,6 @@ class TestSandboxWaitForStatus:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4560,7 +4422,6 @@ class TestSandboxWaitForStatus:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4600,7 +4461,6 @@ class TestSandboxWaitForStatus:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 
@@ -4636,7 +4496,6 @@ class TestSandboxWaitForStatus:
         sandbox = await AsyncSandbox.get(
             sandbox_id=sandbox_id,
             token="test_token",
-            team_id="team_test123",
             project_id="prj_test123",
         )
 

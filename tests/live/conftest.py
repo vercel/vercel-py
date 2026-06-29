@@ -1,8 +1,8 @@
 """Fixtures for live API tests.
 
 These tests require real API credentials set via environment variables:
-- VERCEL_TOKEN: Vercel API token
-- VERCEL_TEAM_ID: Vercel team ID
+- VERCEL_TOKEN or VERCEL_OIDC_TOKEN: Vercel API/OIDC token
+- VERCEL_TEAM_ID and VERCEL_PROJECT_ID when using VERCEL_TOKEN
 - BLOB_READ_WRITE_TOKEN: Blob storage read/write token
 """
 
@@ -16,7 +16,10 @@ import pytest
 
 def has_vercel_credentials() -> bool:
     """Check if Vercel API credentials are available."""
-    return bool(os.getenv("VERCEL_TOKEN") and os.getenv("VERCEL_TEAM_ID"))
+    return bool(
+        (os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN"))
+        and os.getenv("VERCEL_TEAM_ID")
+    )
 
 
 def has_blob_credentials() -> bool:
@@ -26,6 +29,8 @@ def has_blob_credentials() -> bool:
 
 def has_sandbox_credentials() -> bool:
     """Check if Sandbox credentials are available."""
+    if os.getenv("VERCEL_OIDC_TOKEN"):
+        return True
     return bool(
         os.getenv("VERCEL_TOKEN") and os.getenv("VERCEL_TEAM_ID") and os.getenv("VERCEL_PROJECT_ID")
     )
@@ -34,7 +39,7 @@ def has_sandbox_credentials() -> bool:
 # Skip markers for live tests
 requires_vercel_credentials = pytest.mark.skipif(
     not has_vercel_credentials(),
-    reason="Requires VERCEL_TOKEN and VERCEL_TEAM_ID environment variables",
+    reason="Requires VERCEL_TOKEN or VERCEL_OIDC_TOKEN, plus VERCEL_TEAM_ID",
 )
 
 requires_blob_credentials = pytest.mark.skipif(
@@ -44,35 +49,38 @@ requires_blob_credentials = pytest.mark.skipif(
 
 requires_sandbox_credentials = pytest.mark.skipif(
     not has_sandbox_credentials(),
-    reason="Requires VERCEL_TOKEN, VERCEL_TEAM_ID, and VERCEL_PROJECT_ID for sandbox",
+    reason=(
+        "Requires VERCEL_OIDC_TOKEN, or VERCEL_TOKEN plus VERCEL_TEAM_ID "
+        "and VERCEL_PROJECT_ID for sandbox"
+    ),
 )
 
 
 @pytest.fixture
 def vercel_token() -> str:
-    """Get Vercel API token from environment."""
-    token = os.getenv("VERCEL_TOKEN")
+    """Get Vercel API or OIDC token from environment."""
+    token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
     if not token:
-        pytest.skip("VERCEL_TOKEN environment variable not set")
+        pytest.skip("VERCEL_TOKEN or VERCEL_OIDC_TOKEN environment variable not set")
     return token
 
 
 @pytest.fixture
 def vercel_team_id() -> str:
-    """Get Vercel team ID from environment."""
+    """Get Vercel team ID from environment when provided."""
     team_id = os.getenv("VERCEL_TEAM_ID")
-    if not team_id:
+    if not team_id and os.getenv("VERCEL_TOKEN"):
         pytest.skip("VERCEL_TEAM_ID environment variable not set")
-    return team_id
+    return team_id or ""
 
 
 @pytest.fixture
 def vercel_project_id() -> str:
-    """Get Vercel project ID from environment."""
+    """Get Vercel project ID from environment when provided."""
     project_id = os.getenv("VERCEL_PROJECT_ID")
-    if not project_id:
+    if not project_id and os.getenv("VERCEL_TOKEN"):
         pytest.skip("VERCEL_PROJECT_ID environment variable not set")
-    return project_id
+    return project_id or ""
 
 
 @pytest.fixture
@@ -162,7 +170,7 @@ def cleanup_registry() -> Generator[CleanupRegistry, None, None]:
         try:
             from vercel.projects import delete_project
 
-            vercel_token = os.getenv("VERCEL_TOKEN")
+            vercel_token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
             team_id = os.getenv("VERCEL_TEAM_ID")
             if vercel_token and team_id:
                 for project_id in project_ids:
@@ -179,15 +187,13 @@ def cleanup_registry() -> Generator[CleanupRegistry, None, None]:
         try:
             from vercel.sandbox import Sandbox
 
-            vercel_token = os.getenv("VERCEL_TOKEN")
-            team_id = os.getenv("VERCEL_TEAM_ID")
-            if vercel_token and team_id:
+            vercel_token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
+            if vercel_token:
                 for sandbox_id in sandbox_ids:
                     try:
                         sandbox = Sandbox.get(
                             sandbox_id=sandbox_id,
                             token=vercel_token,
-                            team_id=team_id,
                         )
                         sandbox.stop()
                     except Exception:

@@ -14,9 +14,10 @@ from anyio.abc import ByteReceiveStream, ByteSendStream
 from anyio.streams.stapled import StapledByteStream
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
+from vercel._internal.time import SECOND, coerce_duration
+
 from .constants import DEFAULT_PTY_CONNECTION_TIMEOUT
 from .pty_binary import SERVER_BIN_NAME, get_binary_bytes_async
-from .time import SECOND, coerce_duration
 
 if TYPE_CHECKING:
     from vercel.sandbox.command import AsyncCommand

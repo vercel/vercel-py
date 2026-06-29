@@ -2,66 +2,61 @@ from __future__ import annotations
 
 import builtins
 import time
-import warnings
 from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from os import PathLike
 from typing import Any, overload
 
+from vercel._internal.auth import TokenProvider
 from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.sandbox import (
+    AsyncSandboxOpsClient,
+    SandboxNotFoundError,
+    SyncSandboxOpsClient,
+)
 from vercel._internal.sandbox.constants import (
     DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
     DEFAULT_SANDBOX_WAIT_TIMEOUT,
 )
-from vercel._internal.sandbox.core import AsyncSandboxOpsClient, SyncSandboxOpsClient
-from vercel._internal.sandbox.errors import SandboxNotFoundError
+from vercel._internal.sandbox.core import (
+    make_public_sandbox_credentials_factory,
+)
 from vercel._internal.sandbox.models import (
     ApiNetworkPolicy,
     CommandResponse,
     GitSource,
     NetworkPolicy,
     Resources,
-    ResourcesInput,
     Sandbox as SandboxModel,
     SandboxAndRoutesResponse,
     SandboxStatus,
     SnapshotSource,
     Source,
-    SourceInput,
     TarballSource,
     WriteFile,
     parse_resources,
     parse_source,
 )
 from vercel._internal.sandbox.pagination import SandboxListParams
-from vercel._internal.sandbox.time import (
+from vercel._internal.sandbox.snapshot import SnapshotExpiration
+from vercel._internal.time import (
     MILLISECOND,
     SECOND,
     coerce_duration,
     to_seconds_float,
 )
 
-from ..oidc import Credentials, get_credentials
-from .command import (
-    AsyncCommand,
-    AsyncCommandFinished,
-    Command,
-    CommandFinished,
-)
-from .pty.session import AsyncPTYSession
+from .command import AsyncCommand, AsyncCommandFinished, Command, CommandFinished
+from .pty import AsyncPTYSession
 from .pty.shell import start_interactive_shell
-from .snapshot import (
-    AsyncSnapshot,
-    Snapshot as SnapshotClass,
-    SnapshotExpiration,
-)
+from .snapshot import AsyncSnapshot, Snapshot as SnapshotClass
 
 
 def _parse_create_inputs(
     *,
-    source: SourceInput | None,
-    resources: ResourcesInput | None,
+    source: Source | Mapping[str, Any] | None = None,
+    resources: Resources | Mapping[str, Any] | None = None,
 ) -> tuple[Source | None, Resources | None]:
     _warn_deprecated_create_mapping("source", source)
     _warn_deprecated_create_mapping("resources", resources)
@@ -71,28 +66,30 @@ def _parse_create_inputs(
 def _warn_deprecated_create_mapping(name: str, value: object | None) -> None:
     deprecated_models = (GitSource, TarballSource, SnapshotSource, Resources)
     if isinstance(value, Mapping) and not isinstance(value, deprecated_models):
-        replacement = _deprecated_create_mapping_replacement(name, value)
+        import warnings
+
         warnings.warn(
             f"Passing a raw mapping for Sandbox.create(..., {name}=...) is deprecated; "
-            f"pass a typed {replacement} model instead.",
+            f"pass a typed {_deprecated_create_mapping_replacement(name, value)} model instead.",
             DeprecationWarning,
-            stacklevel=4,
+            stacklevel=3,
         )
 
 
 def _deprecated_create_mapping_replacement(name: str, value: Mapping[str, Any]) -> str:
     if name == "resources":
         return "Resources"
-    if name == "source":
-        source_type = value.get("type")
-        if source_type == "git":
-            return "GitSource"
-        if source_type == "tarball":
-            return "TarballSource"
-        if source_type == "snapshot":
-            return "SnapshotSource"
-        return "Source"
-    return name
+    if "type" in value:
+        match value["type"]:
+            case "git":
+                return "GitSource"
+            case "tarball":
+                return "TarballSource"
+            case "snapshot":
+                return "SnapshotSource"
+            case _:
+                return "Source"
+    return "Source"
 
 
 @dataclass
@@ -141,7 +138,7 @@ class AsyncSandbox:
         resources: Resources | None = None,
         runtime: str,
         image: None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -159,7 +156,7 @@ class AsyncSandbox:
         resources: Resources | None = None,
         runtime: None = None,
         image: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -177,7 +174,7 @@ class AsyncSandbox:
         resources: Resources | None = None,
         runtime: None = None,
         image: None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -194,7 +191,7 @@ class AsyncSandbox:
         resources: Resources | None = None,
         runtime: str | None = None,
         image: str | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -214,9 +211,11 @@ class AsyncSandbox:
                 scoped to the sandbox's project. Accepts a repository name, an optional
                 tag or digest, or a fully-qualified VCR URL. A bare repository name
                 resolves to the ``latest`` tag. Mutually exclusive with ``runtime``.
-            token: API token (uses OIDC if not provided).
-            project_id: Project ID (uses OIDC if not provided).
-            team_id: Team ID (uses OIDC if not provided).
+            token: API token string or provider called for each API request
+                made by this sandbox handle.
+            project_id: Project ID used as create scope. Uses configured
+                credentials when omitted.
+            team_id: Team ID used as create scope. Uses configured credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
             env: Default environment variables for the sandbox. These are inherited
@@ -232,10 +231,15 @@ class AsyncSandbox:
                 is supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = AsyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
         resp: SandboxAndRoutesResponse = await client.create_sandbox(
-            project_id=creds.project_id,
+            project_id=project_id,
             source=parsed_source,
             ports=ports,
             timeout=timeout,
@@ -256,13 +260,20 @@ class AsyncSandbox:
     async def get(
         *,
         sandbox_id: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> AsyncSandbox:
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp: SandboxAndRoutesResponse = await client.get_sandbox(sandbox_id=sandbox_id)
+        client = AsyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
+        resp: SandboxAndRoutesResponse = await client.get_sandbox(
+            sandbox_id=sandbox_id,
+        )
         return AsyncSandbox(
             client=client,
             sandbox=resp.sandbox,
@@ -276,7 +287,7 @@ class AsyncSandbox:
         _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> AsyncIterator[SandboxModel]:
@@ -292,26 +303,30 @@ class AsyncSandbox:
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
-            token: API token. Uses configured credentials when omitted.
-            project_id: Project ID used for credential resolution and as the
-                sandbox list scope. Uses configured credentials when omitted.
-            team_id: Team ID scope for the sandbox API.
+            token: API token string or provider called for each list page
+                request.
+            project_id: Project ID used as the list endpoint scope. Uses
+                configured credentials when omitted.
 
         Returns:
             An async iterable of typed sandbox results.
         """
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        params = SandboxListParams(
-            project_id=creds.project_id,
-            limit=limit,
-            internal_page_size=_internal_page_size,
-            since=since,
-            until=until,
-        )
 
         async def iter_sandboxes() -> AsyncIterator[SandboxModel]:
-            current_params = params
-            async with AsyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            async with AsyncSandboxOpsClient(
+                credentials_factory=make_public_sandbox_credentials_factory(
+                    token=token,
+                    project_id=project_id,
+                    team_id=team_id,
+                ),
+            ) as client:
+                current_params = SandboxListParams(
+                    project_id=project_id,
+                    limit=limit,
+                    internal_page_size=_internal_page_size,
+                    since=since,
+                    until=until,
+                )
                 while True:
                     response = await client.list_sandboxes(
                         project_id=current_params.project_id,
@@ -397,9 +412,16 @@ class AsyncSandbox:
         raise ValueError(f"No route for port {port}")
 
     async def get_command(self, cmd_id: str) -> AsyncCommand:
-        resp = await self.client.get_command(sandbox_id=self.sandbox.id, cmd_id=cmd_id)
+        resp = await self.client.get_command(
+            sandbox_id=self.sandbox.id,
+            cmd_id=cmd_id,
+        )
         assert isinstance(resp, CommandResponse)
-        return AsyncCommand(client=self.client, sandbox_id=self.sandbox.id, cmd=resp.command)
+        return AsyncCommand(
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=resp.command,
+        )
 
     async def run_command(
         self,
@@ -419,7 +441,9 @@ class AsyncSandbox:
             sudo=sudo,
         )
         command = AsyncCommand(
-            client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
         )
         # Wait for completion
         return await command.wait()
@@ -442,7 +466,9 @@ class AsyncSandbox:
             sudo=sudo,
         )
         return AsyncCommand(
-            client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
         )
 
     async def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
@@ -663,8 +689,6 @@ class Sandbox:
     def interactive_port(self) -> int | None:
         """Port for interactive PTY connections.
 
-        Returns None if the sandbox was not created with interactive=True.
-
         Note: For interactive shell sessions, use AsyncSandbox instead.
         """
         return self.sandbox.interactive_port
@@ -688,7 +712,7 @@ class Sandbox:
         resources: Resources | None = None,
         runtime: str,
         image: None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -706,7 +730,7 @@ class Sandbox:
         resources: Resources | None = None,
         runtime: None = None,
         image: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -724,7 +748,7 @@ class Sandbox:
         resources: Resources | None = None,
         runtime: None = None,
         image: None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -741,7 +765,7 @@ class Sandbox:
         resources: Resources | None = None,
         runtime: str | None = None,
         image: str | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
         interactive: bool = False,
@@ -761,9 +785,11 @@ class Sandbox:
                 scoped to the sandbox's project. Accepts a repository name, an optional
                 tag or digest, or a fully-qualified VCR URL. A bare repository name
                 resolves to the ``latest`` tag. Mutually exclusive with ``runtime``.
-            token: API token (uses OIDC if not provided).
-            project_id: Project ID (uses OIDC if not provided).
-            team_id: Team ID (uses OIDC if not provided).
+            token: API token string or provider called for each API request
+                made by this sandbox handle.
+            project_id: Project ID used as create scope. Uses configured
+                credentials when omitted.
+            team_id: Team ID used as create scope. Uses configured credentials when omitted.
             interactive: Enable interactive shell support. When True, the sandbox
                 will have an interactive port for PTY connections.
                 Note: For interactive shell sessions, use AsyncSandbox instead.
@@ -780,11 +806,16 @@ class Sandbox:
                 is supplied with snapshot source.
         """
         parsed_source, parsed_resources = _parse_create_inputs(source=source, resources=resources)
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
+        client = SyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
         resp: SandboxAndRoutesResponse = iter_coroutine(
             client.create_sandbox(
-                project_id=creds.project_id,
+                project_id=project_id,
                 source=parsed_source,
                 ports=ports,
                 timeout=timeout,
@@ -806,13 +837,22 @@ class Sandbox:
     def get(
         *,
         sandbox_id: str,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> Sandbox:
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        client = SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token)
-        resp: SandboxAndRoutesResponse = iter_coroutine(client.get_sandbox(sandbox_id=sandbox_id))
+        client = SyncSandboxOpsClient(
+            credentials_factory=make_public_sandbox_credentials_factory(
+                token=token,
+                project_id=project_id,
+                team_id=team_id,
+            ),
+        )
+        resp: SandboxAndRoutesResponse = iter_coroutine(
+            client.get_sandbox(
+                sandbox_id=sandbox_id,
+            )
+        )
         return Sandbox(
             client=client,
             sandbox=resp.sandbox,
@@ -826,7 +866,7 @@ class Sandbox:
         _internal_page_size: int | None = None,
         since: datetime | int | None = None,
         until: datetime | int | None = None,
-        token: str | None = None,
+        token: str | TokenProvider | None = None,
         project_id: str | None = None,
         team_id: str | None = None,
     ) -> Iterator[SandboxModel]:
@@ -842,26 +882,30 @@ class Sandbox:
                 integer milliseconds since the Unix epoch.
             until: Upper timestamp bound as a timezone-aware ``datetime`` or
                 integer milliseconds since the Unix epoch.
-            token: API token. Uses configured credentials when omitted.
-            project_id: Project ID used for credential resolution and as the
-                sandbox list scope. Uses configured credentials when omitted.
-            team_id: Team ID scope for the sandbox API.
+            token: API token string or provider called for each list page
+                request.
+            project_id: Project ID used as the list endpoint scope. Uses
+                configured credentials when omitted.
 
         Returns:
             An iterable of typed sandbox results.
         """
-        creds: Credentials = get_credentials(token=token, project_id=project_id, team_id=team_id)
-        params = SandboxListParams(
-            project_id=creds.project_id,
-            limit=limit,
-            internal_page_size=_internal_page_size,
-            since=since,
-            until=until,
-        )
 
         def iter_sandboxes() -> Iterator[SandboxModel]:
-            current_params = params
-            with SyncSandboxOpsClient(team_id=creds.team_id, token=creds.token) as client:
+            with SyncSandboxOpsClient(
+                credentials_factory=make_public_sandbox_credentials_factory(
+                    token=token,
+                    project_id=project_id,
+                    team_id=team_id,
+                ),
+            ) as client:
+                current_params = SandboxListParams(
+                    project_id=project_id,
+                    limit=limit,
+                    internal_page_size=_internal_page_size,
+                    since=since,
+                    until=until,
+                )
                 while True:
                     response = iter_coroutine(
                         client.list_sandboxes(
@@ -947,9 +991,18 @@ class Sandbox:
         raise ValueError(f"No route for port {port}")
 
     def get_command(self, cmd_id: str) -> Command:
-        resp = iter_coroutine(self.client.get_command(sandbox_id=self.sandbox.id, cmd_id=cmd_id))
+        resp = iter_coroutine(
+            self.client.get_command(
+                sandbox_id=self.sandbox.id,
+                cmd_id=cmd_id,
+            )
+        )
         assert isinstance(resp, CommandResponse)
-        return Command(client=self.client, sandbox_id=self.sandbox.id, cmd=resp.command)
+        return Command(
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=resp.command,
+        )
 
     def run_command(
         self,
@@ -971,7 +1024,9 @@ class Sandbox:
             )
         )
         command = Command(
-            client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
         )
         return command.wait()
 
@@ -994,7 +1049,11 @@ class Sandbox:
                 sudo=sudo,
             )
         )
-        return Command(client=self.client, sandbox_id=self.sandbox.id, cmd=command_response.command)
+        return Command(
+            client=self.client,
+            sandbox_id=self.sandbox.id,
+            cmd=command_response.command,
+        )
 
     def mk_dir(self, path: str, *, cwd: str | None = None) -> None:
         iter_coroutine(self.client.mk_dir(sandbox_id=self.sandbox.id, path=path, cwd=cwd))

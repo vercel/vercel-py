@@ -29,11 +29,16 @@ def on_download_progress(bytes_read: int, total: int | None) -> None:
 
 
 async def head_with_retry(
-    client: AsyncBlobClient, url_or_path: str, *, attempts: int = 5, delay: float = 0.5
+    client: AsyncBlobClient,
+    url_or_path: str,
+    *,
+    token: str,
+    attempts: int = 5,
+    delay: float = 0.5,
 ) -> HeadBlobResult:
     for attempt in range(1, attempts + 1):
         try:
-            return await client.head(url_or_path)
+            return await client.head(url_or_path, token=token)
         except BlobNotFoundError:
             if attempt == attempts:
                 raise
@@ -46,12 +51,12 @@ async def main() -> None:
     assert token, "Set BLOB_READ_WRITE_TOKEN"
 
     # Instantiate clients
-    client = AsyncBlobClient(token)
-    client_sync = BlobClient(token)
+    client = AsyncBlobClient()
+    client_sync = BlobClient()
     folder_prefix = f"examples/assets/{secrets.token_urlsafe(8)}"
 
     # 1) Create a folder entry (async client)
-    folder = await client.create_folder(folder_prefix, overwrite=True)
+    folder = await client.create_folder(folder_prefix, overwrite=True, token=token)
     print("folder:", folder.pathname)
 
     # 2) Upload a text file via put() (async client)
@@ -63,18 +68,19 @@ async def main() -> None:
         content_type="text/plain",
         add_random_suffix=True,
         on_upload_progress=on_progress,
+        token=token,
     )
     print("uploaded (put):", uploaded.pathname)
 
     # 3) List and head (async client)
-    listing = await client.list_objects(prefix=f"{folder_prefix}/", limit=5)
+    listing = await client.list_objects(prefix=f"{folder_prefix}/", limit=5, token=token)
     print("hasMore:", listing.has_more)
     for b in listing.blobs:
-        meta = await head_with_retry(client, b.url)
+        meta = await head_with_retry(client, b.url, token=token)
         print(" -", b.pathname, b.size, meta.content_type)
 
     # 3b) Get object via get() (async client)
-    result = await client.get(uploaded.url, access="public")
+    result = await client.get(uploaded.url, access="public", token=token)
     print("get():", len(bytes(result)), "bytes, etag:", result.etag)
 
     # 4) Copy (async client)
@@ -83,6 +89,7 @@ async def main() -> None:
         f"{folder_prefix}/hello-copy.txt",
         access="public",
         overwrite=True,
+        token=token,
     )
     print("copied:", copied.pathname)
 
@@ -98,6 +105,7 @@ async def main() -> None:
         content_type="text/plain",
         add_random_suffix=True,
         on_upload_progress=on_progress,
+        token=token,
     )
     print("uploaded (upload_file):", uploaded_file.pathname)
     try:
@@ -113,6 +121,7 @@ async def main() -> None:
         overwrite=True,
         create_parents=True,
         progress=on_download_progress,
+        token=token,
     )
     print("downloaded to:", saved_path)
     try:
@@ -121,8 +130,8 @@ async def main() -> None:
         pass
 
     # 7) Demonstrate synchronous BlobClient: head + download + cleanup
-    uploaded_meta = await head_with_retry(client, uploaded.url)
-    meta_sync = client_sync.head(uploaded_meta.url)
+    uploaded_meta = await head_with_retry(client, uploaded.url, token=token)
+    meta_sync = client_sync.head(uploaded_meta.url, token=token)
     print("sync head content_type:", meta_sync.content_type)
 
     sync_download_path = os.path.join(tempfile.gettempdir(), "downloaded-hello-sync.txt")
@@ -132,6 +141,7 @@ async def main() -> None:
         overwrite=True,
         create_parents=True,
         progress=on_download_progress,
+        token=token,
     )
     print("sync downloaded to:", saved_sync_path)
     try:
@@ -140,7 +150,7 @@ async def main() -> None:
         pass
 
     # Cleanup using sync client
-    client_sync.delete([uploaded.url, copied.url, uploaded_file.url, folder.url])
+    client_sync.delete([uploaded.url, copied.url, uploaded_file.url, folder.url], token=token)
     print("deleted folder and uploaded objects (sync client)")
 
 

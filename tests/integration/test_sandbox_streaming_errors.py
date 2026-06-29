@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from vercel.oidc.types import Credentials
 from vercel.sandbox import (
     APIError,
     SandboxAuthError,
@@ -17,6 +18,8 @@ from vercel.sandbox import (
 SANDBOX_API_BASE = "https://api.vercel.com"
 SANDBOX_ID = "sbx_test123"
 CMD_ID = "cmd_test456"
+
+TEST_CREDENTIALS = Credentials(token="tok", project_id="project_test", team_id="team_test")
 
 
 def _sync_client(**kwargs):
@@ -80,10 +83,16 @@ class TestStreamingErrorsSync:
             )
         )
 
-        client = _sync_client(host=SANDBOX_API_BASE, team_id="team_test", token="tok")
+        client = _sync_client(host=SANDBOX_API_BASE)
         try:
             with pytest.raises(error_type) as exc_info:
-                list(client.get_logs(sandbox_id=SANDBOX_ID, cmd_id=CMD_ID))
+                list(
+                    client.get_logs(
+                        sandbox_id=SANDBOX_ID,
+                        cmd_id=CMD_ID,
+                        token=TEST_CREDENTIALS.token,
+                    )
+                )
         finally:
             client.close()
 
@@ -125,10 +134,14 @@ class TestStreamingErrorsAsync:
             )
         )
 
-        client = _async_client(host=SANDBOX_API_BASE, team_id="team_test", token="tok")
+        client = _async_client(host=SANDBOX_API_BASE)
         try:
             with pytest.raises(error_type) as exc_info:
-                async for _ in client.get_logs(sandbox_id=SANDBOX_ID, cmd_id=CMD_ID):
+                async for _ in client.get_logs(
+                    sandbox_id=SANDBOX_ID,
+                    cmd_id=CMD_ID,
+                    token=TEST_CREDENTIALS.token,
+                ):
                     pass
         finally:
             await client.aclose()
