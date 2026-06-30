@@ -511,6 +511,7 @@ async def workflow_handler(
             pass
         elif isinstance(e, Exception):
             error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
+            logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
             try:
                 await world.events_create(
                     run_id,
@@ -774,6 +775,7 @@ async def step_handler(
 
         # step.attempt was incremented by step_started
         current_attempt = step_run.attempt
+        error_text = "".join(traceback.format_exception_only(type(e), e)).strip()
 
         # Check if max retries reached
         if current_attempt >= step.max_retries + 1:
@@ -781,9 +783,9 @@ async def step_handler(
             retry_count = step_run.attempt - 1
             error_message = (
                 f"Step '{step.name}' failed after {step.max_retries} "
-                f"{'retry' if step.max_retries == 1 else 'retries'}: {str(e)}"
+                f"{'retry' if step.max_retries == 1 else 'retries'}: {error_text}"
             )
-            logger.error(
+            logger.exception(
                 "[Workflows] '%s' - Encountered Error "
                 "while executing step '%s' (attempt %d, "
                 "%d %s): %s\n\n  Max retries reached\n  Bubbling error to parent workflow",
@@ -819,7 +821,9 @@ async def step_handler(
             error_stack = traceback.format_exc()
             await world.events_create(
                 req.workflow_run_id,
-                w.StepRetryingEventData(error=str(e), stack=error_stack).into_event(req.step_id),
+                w.StepRetryingEventData(error=error_text, stack=error_stack).into_event(
+                    req.step_id
+                ),
             )
 
             # Return timeout to keep message visible for retry
