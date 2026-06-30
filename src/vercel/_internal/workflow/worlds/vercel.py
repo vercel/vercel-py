@@ -44,6 +44,11 @@ def _cbor_filter_undefined(value: Mapping[Any, Any], shareable: bool = False) ->
     return {k: None if v is cbor2.undefined else v for k, v in value.items()}
 
 
+# Events whose result the runtime reads back resolved (run/step entity fields);
+# everything else is fetched lazily.
+_EVENTS_NEEDING_RESOLVE = frozenset({"run_created", "run_started", "step_started"})
+
+
 # Lazy wire schema for EventResult — mirrors the JS SDK's EventResultLazyWireSchema.
 # Uses BaseWorkflowRun (no discriminated union) with loose error typing so that
 # unresolved RemoteRefs in error/input/output fields don't cause validation failures.
@@ -175,27 +180,27 @@ class VercelWorld(w.World):
                 result.get("message")
                 or f"{method} {endpoint} -> HTTP {resp.status_code}: {resp.reason_phrase}"
             )
+            url = f"{self._base_url}{endpoint}"
+            code = result.get("code")
             if resp.status_code == 409:
                 raise w.EntityConflictError(message)
+            if resp.status_code == 410:
+                raise w.RunExpiredError(message, status=resp.status_code, code=code, url=url)
+            # retryAfter (seconds) is carried in the Retry-After header.
+            retry_after_header = resp.headers.get("retry-after")
+            retry_after: int | None = None
+            if retry_after_header is not None:
+                try:
+                    retry_after = int(retry_after_header)
+                except ValueError:
+                    retry_after = None
             if resp.status_code == 425:
-                # retryAfter (seconds) is carried in the Retry-After header.
-                retry_after_header = resp.headers.get("retry-after")
-                retry_after: int | None = None
-                if retry_after_header is not None:
-                    try:
-                        retry_after = int(retry_after_header)
-                    except ValueError:
-                        retry_after = None
                 raise w.TooEarlyError(message, retry_after=retry_after)
-            raise RuntimeError(
-                message,
-                {
-                    "url": f"{self._base_url}{endpoint}",
-                    "status": resp.status_code,
-                    "code": result.get("code"),
-                    "extras": result,
-                },
-            )
+            if resp.status_code == 429:
+                raise w.ThrottleError(
+                    message, status=resp.status_code, code=code, url=url, retry_after=retry_after
+                )
+            raise w.WorkflowWorldError(message, status=resp.status_code, code=code, url=url)
 
     async def get_deployment_id(self) -> str:
         deployment_id = os.getenv("VERCEL_DEPLOYMENT_ID")
@@ -357,29 +362,39 @@ class VercelWorld(w.World):
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         run_id_path = "null" if run_id is None else run_id
-        remote_ref_behavior = (
-            "resolve"
-            if data.event_type in {"run_created", "run_started", "step_started"}
-            else "lazy"
-        )
-        if remote_ref_behavior == "resolve":
-            return await self._cbor_request(
-                "POST",
-                f"/v3/runs/{run_id_path}/events",
-                data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
-                schema=w.EventResult,
-            )
-        else:
-            # Lazy responses may contain unresolved RemoteRefs that fail
-            # the strict EventResult schema. Use the loose _LazyEventResult
-            # schema that tolerates unresolved refs, matching the JS SDK's
-            # EventResultLazyWireSchema.
-            return await self._cbor_request(
-                "POST",
-                f"/v3/runs/{run_id_path}/events",
-                data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
-                schema=_LazyEventResult,
-            )
+        remote_ref_behavior = "resolve" if data.event_type in _EVENTS_NEEDING_RESOLVE else "lazy"
+        try:
+            if remote_ref_behavior == "resolve":
+                return await self._cbor_request(
+                    "POST",
+                    f"/v3/runs/{run_id_path}/events",
+                    data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+                    schema=w.EventResult,
+                )
+            else:
+                # Lazy responses may contain unresolved RemoteRefs that fail
+                # the strict EventResult schema. Use the loose _LazyEventResult
+                # schema that tolerates unresolved refs, matching the JS SDK's
+                # EventResultLazyWireSchema.
+                return await self._cbor_request(
+                    "POST",
+                    f"/v3/runs/{run_id_path}/events",
+                    data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+                    schema=_LazyEventResult,
+                )
+        except w.WorkflowWorldError as err:
+            # The backend 404s hook_disposed / hook_received when the hook is
+            # already disposed or never existed. Translate to a typed
+            # HookNotFoundError so the runtime can treat a duplicate dispose as a
+            # benign skip.
+            correlation_id = getattr(data, "correlation_id", None)
+            if (
+                err.status == 404
+                and data.event_type in w.HOOK_EVENTS_REQUIRING_EXISTENCE
+                and correlation_id
+            ):
+                raise w.HookNotFoundError(correlation_id) from err
+            raise
 
     async def events_list(
         self,
