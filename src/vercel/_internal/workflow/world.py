@@ -632,6 +632,19 @@ class EntityConflictError(Exception):
     pass
 
 
+class TooEarlyError(Exception):
+    """Raised when a step is started before its ``retryAfter`` timestamp.
+
+    Mirrors the server's HTTP 425 response. ``retry_after`` is the number of
+    seconds remaining before the step may be started, used to size the
+    re-delivery delay.
+    """
+
+    def __init__(self, message: str, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclasses.dataclass(frozen=True)
 class QueueContinuation:
     """A handler's request to re-enqueue its own message after a delay.

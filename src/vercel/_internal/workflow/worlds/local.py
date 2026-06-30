@@ -510,9 +510,10 @@ class LocalWorld(w.World):
         elif data.event_type == "step_started":
             if validated_step:
                 if validated_step.retry_after and validated_step.retry_after > now:
-                    raise RuntimeError(
+                    raise w.TooEarlyError(
                         f'Cannot start step "{data.correlation_id}": '
-                        f"retryAfter timestamp has not been reached yet"
+                        f"retryAfter timestamp has not been reached yet",
+                        retry_after=math.ceil((validated_step.retry_after - now).total_seconds()),
                     )
 
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"

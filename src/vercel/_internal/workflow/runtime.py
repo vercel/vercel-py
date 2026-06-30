@@ -642,6 +642,11 @@ async def workflow_handler(
     return w.QueueContinuation(delay_seconds=delay, idempotency_key=key)
 
 
+def _step_name_from_queue(queue_name: str) -> str:
+    """The step name encoded in a step queue topic."""
+    return queue_name.removeprefix("__wkf_step_")
+
+
 async def step_handler(
     message: Any,
     *,
@@ -653,19 +658,49 @@ async def step_handler(
     world = w.get_world()
     req = w.StepInvokePayload.model_validate(message)
 
-    # Get the step entity
-    step_run = await world.steps_get(req.workflow_run_id, req.step_id)
-    step = registry._get_step(step_run.step_name)
+    step = registry._get_step(_step_name_from_queue(queue_name))
 
-    # Check if retry_after timestamp hasn't been reached yet
-    now = datetime.now(UTC)
-    if step_run.retry_after and step_run.retry_after > now:
-        timeout_seconds = max(1, int((step_run.retry_after - now).total_seconds()))
+    # step_started validates state (terminal -> EntityConflictError, retryAfter
+    # not reached -> TooEarlyError), increments the attempt, and returns the
+    # updated step entity, so no step pre-read is needed.
+    try:
+        start_result = await world.events_create(
+            req.workflow_run_id,
+            w.StepStartedEvent(correlationId=req.step_id),
+        )
+    except w.TooEarlyError as e:
+        # retryAfter not reached yet — keep the message visible and retry later.
+        timeout_seconds = max(1, e.retry_after or 1)
+        logger.debug(
+            "[Workflows] '%s' - step '%s' retryAfter not reached, deferring %ds",
+            req.workflow_run_id,
+            step.name,
+            timeout_seconds,
+        )
         return w.QueueContinuation(delay_seconds=timeout_seconds)
+    except w.EntityConflictError:
+        # Step already in a terminal state — a duplicate delivery, or a concurrent
+        # worker finished it. Re-enqueue the workflow so it observes the outcome,
+        # then ack. This is also the crash-recovery path for a step that finished
+        # but whose handler died before re-invoking the workflow.
+        logger.debug("Tried starting step %r, but it has already finished", req.step_id)
+        await world.queue(
+            f"__wkf_workflow_{req.workflow_name}",
+            w.WorkflowInvokePayload(
+                runId=req.workflow_run_id,
+                requestedAt=datetime.now(UTC),
+            ),
+        )
+        return None
 
-    # Check max retries FIRST before any state changes
-    # step.attempt tracks how many times step_started has been called
-    # Use > here (not >=) because this guards against re-invocation AFTER all attempts are used
+    # Use the step entity from the event response
+    if not start_result.step:
+        raise RuntimeError(f"step_started event for '{req.step_id}' did not return step entity")
+    step_run = start_result.step
+    current_attempt = step_run.attempt
+
+    # Check max retries AFTER step_started (the attempt was just incremented).
+    # Use > here (not >=) because this guards re-invocation AFTER all attempts are used.
     if step_run.attempt > step.max_retries + 1:
         retry_count = step_run.attempt - 1
         error_message = (
@@ -693,42 +728,6 @@ async def step_handler(
         return None
 
     try:
-        # Check step status
-        if step_run.status not in ["pending", "running"]:
-            logger.warning(
-                "[Workflows] '%s' - Step invoked erroneously, "
-                "expected status 'pending' or 'running', got '%s' instead, "
-                "skipping execution",
-                req.workflow_run_id,
-                step_run.status,
-            )
-
-            # Re-enqueue workflow if step is in terminal state
-            is_terminal_step = step_run.status in ["completed", "failed", "cancelled"]
-            if is_terminal_step:
-                await world.queue(
-                    f"__wkf_workflow_{req.workflow_name}",
-                    w.WorkflowInvokePayload(runId=req.workflow_run_id),
-                )
-            return None
-
-        # Start the step via event (increments attempt counter)
-        try:
-            start_result = await world.events_create(
-                req.workflow_run_id,
-                w.StepStartedEvent(correlationId=req.step_id),
-            )
-        except w.EntityConflictError:
-            logger.debug(f"Workflow step {req.step_id!r} was already started")
-            return None
-
-        # Use the step entity from the event response
-        if not start_result.step:
-            raise RuntimeError(f"step_started event for '{req.step_id}' did not return step entity")
-        step_run = start_result.step
-
-        current_attempt = step_run.attempt
-
         if not step_run.started_at:
             raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
 
