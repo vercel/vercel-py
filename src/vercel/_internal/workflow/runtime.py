@@ -605,7 +605,7 @@ async def workflow_handler(
                             run_id,
                             w.HookDisposedEvent(correlationId=h.correlation_id),
                         )
-                    except w.EntityConflictError:
+                    except (w.EntityConflictError, w.HookNotFoundError):
                         logger.debug(
                             f"Workflow hook {h.correlation_id!r} has already been disposed"
                         )

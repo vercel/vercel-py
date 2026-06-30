@@ -575,6 +575,12 @@ Event: TypeAlias = Annotated[
 EventAdaptor: pydantic.TypeAdapter[Event] = pydantic.TypeAdapter(Event)
 
 
+# Hook events that require the target hook to still exist: the backend 404s them
+# (and the local world rejects them) once the hook is disposed or never existed,
+# surfacing as HookNotFoundError.
+HOOK_EVENTS_REQUIRING_EXISTENCE = frozenset({"hook_disposed", "hook_received"})
+
+
 class PaginationOptions(BaseModel):
     limit: int | None = pydantic.Field(default=None, exclude_if=lambda e: not e)
     cursor: str | None = pydantic.Field(default=None, exclude_if=lambda e: not e)
@@ -628,8 +634,65 @@ class HTTPError(Exception):
         super().__init__(f"HTTP Error {response.status}")
 
 
+class WorkflowWorldError(Exception):
+    """A non-success response from the workflow backend that isn't mapped to a
+    more specific error. Carries the HTTP status so callers can branch on it
+    (e.g. a 404 on a hook event becomes a HookNotFoundError)."""
+
+    def __init__(
+        self, message: str, *, status: int, code: str | None = None, url: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.url = url
+
+
+class RunExpiredError(WorkflowWorldError):
+    """HTTP 410 — the workflow run has expired and can no longer be advanced."""
+
+
+class ThrottleError(WorkflowWorldError):
+    """HTTP 429 — the backend is throttling requests. ``retry_after`` is the
+    number of seconds to wait before retrying, when the server provides it."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        code: str | None = None,
+        url: str | None = None,
+        retry_after: int | None = None,
+    ) -> None:
+        super().__init__(message, status=status, code=code, url=url)
+        self.retry_after = retry_after
+
+
 class EntityConflictError(Exception):
     pass
+
+
+class HookNotFoundError(Exception):
+    """Raised when a hook lookup or hook event targets a hook that does not exist.
+
+    A by-token lookup (``hooks_get_by_token``) that matches no active hook supplies
+    ``token``; the server's HTTP 404 on ``hook_disposed`` / ``hook_received`` for an
+    already-disposed (or never-created) hook supplies ``hook_id``. The runtime
+    treats the event-path case the same as ``EntityConflictError`` — a benign
+    duplicate to skip.
+    """
+
+    def __init__(self, *, token: str | None = None, hook_id: str | None = None) -> None:
+        self.token = token
+        self.hook_id = hook_id
+        if hook_id is not None:
+            message = f'Hook "{hook_id}" not found'
+        elif token is not None:
+            message = f'Hook not found for token "{token}"'
+        else:
+            message = "Hook not found"
+        super().__init__(message)
 
 
 class TooEarlyError(Exception):
