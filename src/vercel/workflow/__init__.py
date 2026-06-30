@@ -1,6 +1,15 @@
 from vercel._internal.workflow.core import BaseHook, HookEvent, Workflows, sleep
 from vercel._internal.workflow.runtime import Run, StepInfo, get_step_metadata, start
 
+from .errors import (
+    EntityConflictError,
+    HookNotFoundError,
+    RunExpiredError,
+    ThrottleError,
+    TooEarlyError,
+    WorkflowWorldError,
+)
+
 __all__ = [
     "Workflows",
     "sleep",
@@ -10,4 +19,10 @@ __all__ = [
     "HookEvent",
     "get_step_metadata",
     "StepInfo",
+    "EntityConflictError",
+    "HookNotFoundError",
+    "RunExpiredError",
+    "ThrottleError",
+    "TooEarlyError",
+    "WorkflowWorldError",
 ]
