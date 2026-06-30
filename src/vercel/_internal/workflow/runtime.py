@@ -682,7 +682,7 @@ async def step_handler(
         # worker finished it. Re-enqueue the workflow so it observes the outcome,
         # then ack. This is also the crash-recovery path for a step that finished
         # but whose handler died before re-invoking the workflow.
-        logger.debug(f"Tried starting step {req.step_id!r}, but it has already finished")
+        logger.debug(f"Tried starting step %r, but it has already finished", req.step_id)
         await world.queue(
             f"__wkf_workflow_{req.workflow_name}",
             w.WorkflowInvokePayload(
