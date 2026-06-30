@@ -902,19 +902,95 @@ class TestModuleIsolation:
             "if hasattr(__builtins__, '__dict__') else True"
         )
 
-    def test_sys_modules_restored(self):
-        """sys.modules should be fully restored after sandbox exits."""
-        before = set(sys.modules.keys())
-        _run_in_sandbox("import asyncio")
-        after = set(sys.modules.keys())
-        assert before == after
+    def test_sandbox_imports_do_not_leak_to_host(self):
+        """Imports inside a sandbox land in the run's private table, never the
+        host's real module table — the restricted proxy must not replace the
+        host's real module."""
+        import datetime as real_datetime
 
-    def test_sys_meta_path_restored(self):
-        """sys.meta_path should be restored after sandbox exits."""
-        before = list(sys.meta_path)
-        _run_in_sandbox("pass")
-        after = list(sys.meta_path)
-        assert before == after
+        _run_in_sandbox("import datetime; _ = datetime.timedelta")
+        # Seen from outside any sandbox, the host module is the real one.
+        assert sys.modules["datetime"] is real_datetime
+
+    def test_finder_installed_once_and_inert_outside_sandbox(self):
+        """The finder is installed permanently (not per-run) and is a no-op
+        outside a sandbox, so ordinary imports are unaffected."""
+        import importlib
+
+        from vercel._internal.workflow import py_sandbox
+
+        _run_in_sandbox("pass")  # ensure installed
+        finders = [f for f in sys.meta_path if isinstance(f, py_sandbox._SandboxFinder)]
+        assert len(finders) == 1
+        # Outside the sandbox the finder returns None, so a normal import works.
+        assert importlib.import_module("string") is sys.modules["string"]
+
+    @pytest.mark.parametrize("end_barrier", [True, False])
+    @pytest.mark.parametrize("start_barrier", [True, False])
+    def test_concurrent_thread_sandboxes_have_independent_module_tables(
+        self, tmp_path, start_barrier: bool, end_barrier: bool
+    ):
+        """Regression: two workflow runs on different threads must each get a
+        private module table, so a module that mutates a shared singleton on
+        import (e.g. a workflow registry) re-imports cleanly per run instead of
+        colliding (the "Duplicate step name" failure).
+
+        Reproduces the cross-thread sys.modules race that the global
+        clear()/restore design could not survive. Run across the four
+        combinations of barriers at sandbox entry and exit, so isolation holds
+        whether or not the two sandboxes overlap in time."""
+        import importlib
+        import textwrap
+        import threading
+
+        pkgdir = tmp_path / "regpkg"
+        pkgdir.mkdir()
+        (pkgdir / "__init__.py").write_text("registry = {}\n")
+        (pkgdir / "mod.py").write_text(
+            textwrap.dedent("""
+                from regpkg import registry
+                name = "step//regpkg.mod.work"
+                assert name not in registry, "Duplicate step name: " + name
+                registry[name] = 1
+                """)
+        )
+        d = str(tmp_path)
+        sys.path.insert(0, d)
+
+        barrier = threading.Barrier(2)
+        results: dict[str, dict[str, int]] = {}
+        errors: list[str] = []
+
+        def run(seed: str) -> None:
+            try:
+                with workflow_sandbox(random_seed=seed):
+                    if start_barrier:
+                        barrier.wait()
+                    importlib.import_module("regpkg.mod")
+                    pkg = importlib.import_module("regpkg")
+                    results[seed] = pkg.registry
+                    if end_barrier:
+                        barrier.wait()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+                # Release a partner waiting on a barrier this thread won't reach.
+                barrier.abort()
+
+        try:
+            t1 = threading.Thread(target=run, args=("a",))
+            t2 = threading.Thread(target=run, args=("b",))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        finally:
+            sys.path.remove(d)
+
+        assert not errors, errors
+        # Each run imported into its own table -> its own registry instance,
+        # each holding exactly the single registration (no duplicate).
+        assert results["a"] is not results["b"]
+        assert results["a"] == results["b"] == {"step//regpkg.mod.work": 1}
 
 
 # ═══════════════════════════════════════════════════════════════

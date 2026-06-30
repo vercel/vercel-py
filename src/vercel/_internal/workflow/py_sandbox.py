@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import builtins
 import contextvars
 import dataclasses
 import datetime as _dt
+import importlib
 import os
 import random
 import sys
+import threading
 import types
 import weakref
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from importlib.abc import Loader, MetaPathFinder
 from importlib.machinery import ModuleSpec
@@ -20,6 +23,19 @@ from typing import Any, NoReturn
 # This allows concurrent coroutines that are NOT running a workflow to
 # use the real module even while the sandbox has replaced sys.modules.
 _in_sandbox: contextvars.ContextVar[bool] = contextvars.ContextVar("_in_sandbox", default=False)
+
+# The real, process-wide sys.modules dict, captured before we install the
+# dispatching proxy below.  Any context that is not running a workflow reads
+# and writes this dict directly, so non-workflow code is unaffected.
+_real_sys_modules: dict[str, types.ModuleType] = sys.modules
+
+# Per-execution module table.  A workflow run sets this to its own private dict
+# (see workflow_sandbox) so concurrent runs — whether on different asyncio
+# tasks or different threads — never share or clobber each other's modules.
+# ``None`` means "use the real table".
+_sandbox_sys_modules: contextvars.ContextVar[dict[str, types.ModuleType] | None] = (
+    contextvars.ContextVar("_sandbox_sys_modules", default=None)
+)
 
 
 class SandboxRestrictionError(RuntimeError):
@@ -533,8 +549,8 @@ class _SandboxFinder(MetaPathFinder):
 
     1. If ``X`` **has restrictions** — return a ``_ProxyModule`` that
        intercepts the restricted attributes.
-    2. If ``X`` **is in the host snapshot and matches the passthrough
-       set** — return the host module as-is (shared).
+    2. If ``X`` **is already imported in the host and matches the
+       passthrough set** — return the host module as-is (shared).
     3. Otherwise — return ``None`` for a fresh re-import.
     """
 
@@ -563,6 +579,9 @@ class _SandboxFinder(MetaPathFinder):
         path: Sequence[str] | None,
         target: types.ModuleType | None = None,
     ) -> ModuleSpec | None:
+        # If we aren't actually in a sandbox, defer to the normal finders.
+        if not _in_sandbox.get(False):
+            return None
         if fullname in self._blocked:
             # Return a stub module instead of raising — other modules may
             # ``import subprocess`` at module level but never call it.
@@ -653,18 +672,76 @@ class _PreloadedLoader(Loader):
         pass
 
 
-@contextmanager
-def _sandbox_linecache() -> Iterator[None]:
-    """Patch linecache so ``traceback.format_exc()`` works in the sandbox.
+class _DispatchingSysModules(MutableMapping[str, types.ModuleType]):
+    """Installed once as ``sys.modules``.
 
-    Python 3.14 moved linecache's ``os``/``tokenize`` imports into
-    function bodies (lazy imports for startup perf).  Inside the
-    sandbox those ``import`` statements resolve through
-    ``sys.modules`` and pick up the restricted proxies.
+    Every read/write dispatches to the current context's module table: a
+    workflow run's private dict while a sandbox is active in this context
+    (asyncio task or thread), or the real process table otherwise.  The real
+    dict object is never cleared, so concurrent workflows on different tasks or
+    threads can neither corrupt each other nor the host — which the previous
+    ``sys.modules.clear()`` approach could not guarantee.
+    """
 
-    We replace ``updatecache`` with a minimal version that uses a
-    captured host ``open``, and ``checkcache`` with a no-op (files
-    don't change during a workflow run).
+    __slots__ = ()
+
+    @property
+    def _current(self) -> dict[str, types.ModuleType]:
+        table = _sandbox_sys_modules.get()
+        return _real_sys_modules if table is None else table
+
+    def __getitem__(self, key: str) -> types.ModuleType:
+        return self._current[key]
+
+    def __setitem__(self, key: str, value: types.ModuleType) -> None:
+        self._current[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._current[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._current)
+
+    def __len__(self) -> int:
+        return len(self._current)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._current
+
+    def __repr__(self) -> str:
+        where = "sandbox table" if _sandbox_sys_modules.get() is not None else "host"
+        return f"<dispatching sys.modules -> {where} ({len(self._current)} modules)>"
+
+    # dict-only methods the import system / inspect call on sys.modules but
+    # which MutableMapping does not provide.
+    def copy(self) -> dict[str, types.ModuleType]:
+        return self._current.copy()
+
+    def __or__(self, other: Any) -> dict[str, types.ModuleType]:
+        return self._current | other
+
+    def __ror__(self, other: Any) -> dict[str, types.ModuleType]:
+        return other | self._current
+
+    def __ior__(self, other: Any) -> _DispatchingSysModules:
+        self._current.update(other)
+        return self
+
+    @classmethod
+    def fromkeys(cls, *args: Any, **kwargs: Any) -> dict[str, types.ModuleType]:
+        return dict.fromkeys(*args, **kwargs)
+
+
+def _install_linecache_patch() -> None:
+    """Make ``traceback.format_exc()`` work inside the sandbox, permanently.
+
+    Python 3.14 moved linecache's ``os``/``tokenize`` imports into function
+    bodies (lazy imports for startup perf).  Inside the sandbox those ``import``
+    statements resolve through ``sys.modules`` and pick up restricted proxies.
+    We replace ``updatecache`` with a version that uses a captured host
+    ``open`` and ``checkcache`` with a no-op — but only while a sandbox is
+    active in this context, so non-workflow code is unaffected and the patch is
+    race-free (installed once, gated on ``_in_sandbox``).
     """
     import linecache
 
@@ -674,6 +751,8 @@ def _sandbox_linecache() -> Iterator[None]:
     orig_checkcache = linecache.checkcache
 
     def updatecache(filename: str, module_globals: Any = None) -> list[str]:
+        if not _in_sandbox.get(False):
+            return orig_updatecache(filename, module_globals)
         if filename in cache:
             del cache[filename]
         try:
@@ -686,100 +765,114 @@ def _sandbox_linecache() -> Iterator[None]:
         return lines
 
     def checkcache(filename: str | None = None) -> None:
-        pass
+        if not _in_sandbox.get(False):
+            orig_checkcache(filename)
+        # Inside the sandbox: no-op — files don't change during a run.
 
     linecache.updatecache = updatecache
     linecache.checkcache = checkcache
-    try:
-        yield
-    finally:
-        linecache.updatecache = orig_updatecache
-        linecache.checkcache = orig_checkcache
 
 
-_sandbox_refcount: int = 0
+def _install_import_hook() -> None:
+    """Route ``import`` statements through a pure Python importer while sandboxed.
 
+    builtins.__import__ directly uses the interpreter-level modules
+    dict, which is not overridden when sys.modules is changed.
 
-@contextmanager
-def _sandbox_modules() -> Iterator[None]:
-    """Ref-counted sys.modules patch.
-
-    The first caller patches sys.modules with proxy modules and installs
-    the sandbox finder.  Subsequent concurrent callers are no-ops.
-    The last caller to exit restores everything.
-
-    Thread safety: only called from synchronous code inside async
-    coroutines on the main event loop thread, so no lock is needed.
+    importlib has its own pure-Python reimplementation of __import__
+    that *does* use sys.modules, so we redirect to that when in a
+    sandbox.
     """
-    global _sandbox_refcount
+    real_import = builtins.__import__
 
-    _sandbox_refcount += 1
-    if _sandbox_refcount > 1:
-        try:
-            yield
-        finally:
-            _sandbox_refcount -= 1
+    def _sandbox_import(
+        name: str,
+        globals: Mapping[str, object] | None = None,
+        locals: Mapping[str, object] | None = None,
+        fromlist: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> types.ModuleType:
+        if not _in_sandbox.get(False):
+            return real_import(name, globals, locals, fromlist or (), level)
+        return importlib.__import__(name, globals, locals, fromlist or (), level)
+
+    builtins.__import__ = _sandbox_import
+
+
+_install_lock = threading.Lock()
+_installed = False
+
+
+def _ensure_installed() -> None:
+    """Install the dispatching ``sys.modules`` and the sandbox finder once.
+
+    Both are permanent and inert outside a sandbox context, so there is no
+    per-run mutation of any shared global to race on.
+    """
+    global _installed
+    if _installed:
         return
+    with _install_lock:
+        if _installed:
+            return
+        finder = _SandboxFinder(
+            host_modules=_real_sys_modules,
+            passthrough=_PASSTHROUGHS,
+            restrictions={k: v for k, v in _RESTRICTIONS.items() if k != "builtins"},
+            blocked=_BLOCKED,
+        )
+        sys.meta_path.insert(0, finder)
+        _install_linecache_patch()
+        _install_import_hook()
+        sys.modules = _DispatchingSysModules()  # type: ignore[assignment]
+        _installed = True
 
-    # First sandbox in — snapshot and patch.
-    orig_modules = dict(sys.modules)
 
+def _new_sandbox_table() -> dict[str, types.ModuleType]:
+    """A fresh per-run module table seeded with the bootstrap essentials.
+
+    Everything else is served on demand by ``_SandboxFinder`` (passthrough
+    from the host, a restricted proxy, or a fresh re-import into this table).
+    """
+    table: dict[str, types.ModuleType] = {"sys": sys}
+    # Snapshot atomically (list() over the view is a single C op) so a
+    # concurrent import in another thread can't trip "dict changed size".
+    for key, mod in list(_real_sys_modules.items()):
+        if key == "importlib" or key.startswith("importlib."):
+            table[key] = mod
     builtins_policy = _RESTRICTIONS.get("builtins")
     if builtins_policy is not None:
-        proxy_builtins: types.ModuleType = _ProxyModule(
-            sys.modules["builtins"],
-            builtins_policy,
-            copy_dict=True,
+        table["builtins"] = _ProxyModule(
+            _real_sys_modules["builtins"], builtins_policy, copy_dict=True
         )
     else:
-        proxy_builtins = sys.modules["builtins"]
-
-    module_restrictions = {k: v for k, v in _RESTRICTIONS.items() if k != "builtins"}
-    finder = _SandboxFinder(
-        host_modules=orig_modules,
-        passthrough=_PASSTHROUGHS,
-        restrictions=module_restrictions,
-        blocked=_BLOCKED,
-    )
-
-    with _sandbox_linecache():
-        sys.modules.clear()
-        sys.modules["sys"] = sys
-        for key in orig_modules:
-            if key == "importlib" or key.startswith("importlib."):
-                sys.modules[key] = orig_modules[key]
-        sys.modules["builtins"] = proxy_builtins
-        sys.meta_path.insert(0, finder)
-        try:
-            yield
-        finally:
-            _sandbox_refcount -= 1
-            if sys.meta_path is not None:
-                sys.meta_path.remove(finder)
-            sys.modules.clear()
-            sys.modules.update(orig_modules)
+        table["builtins"] = _real_sys_modules["builtins"]
+    return table
 
 
+# TODO: we probably want to support some form of sandbox caching
 @contextmanager
 def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
-    """Activate the workflow sandbox.
+    """Activate the workflow sandbox for the current context.
 
-    Sets ``_in_sandbox`` so proxy modules are active only in this async
-    context, and provides a per-context seeded ``Random``.  Also
-    ensures ``sys.modules`` is patched to enforce import restrictions
-    before user code runs. See also _sandbox_modules().
+    Gives this context its own private ``sys.modules`` table, marks it as
+    in-sandbox so proxy modules enforce restrictions, and provides a seeded
+    ``Random``.  All three are ContextVars, so concurrent runs are isolated
+    without touching any shared global.
     """
     if not isinstance(random_seed, str):
         raise TypeError("random_seed must be a str")
 
-    with _sandbox_modules():
-        sandbox_token = _in_sandbox.set(True)
-        random_token = _sandbox_random.set(random.Random(random_seed))
-        try:
-            yield
-        finally:
-            _sandbox_random.reset(random_token)
-            _in_sandbox.reset(sandbox_token)
+    _ensure_installed()
+    table_token = _sandbox_sys_modules.set(_new_sandbox_table())
+    sandbox_token = _in_sandbox.set(True)
+    random_token = _sandbox_random.set(random.Random(random_seed))
+    try:
+        yield
+    finally:
+        _sandbox_random.reset(random_token)
+        _in_sandbox.reset(sandbox_token)
+        _sandbox_sys_modules.reset(table_token)
 
 
 def in_sandbox() -> bool:
