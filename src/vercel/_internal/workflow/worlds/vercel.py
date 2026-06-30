@@ -362,7 +362,7 @@ class VercelWorld(w.World):
             )
         except w.WorkflowWorldError as err:
             if err.status == 404:
-                raise w.HookNotFoundError(token) from err
+                raise w.HookNotFoundError(token=token) from err
             raise
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
@@ -398,7 +398,7 @@ class VercelWorld(w.World):
                 and data.event_type in w.HOOK_EVENTS_REQUIRING_EXISTENCE
                 and correlation_id
             ):
-                raise w.HookNotFoundError(correlation_id) from err
+                raise w.HookNotFoundError(hook_id=correlation_id) from err
             raise
 
     async def events_list(

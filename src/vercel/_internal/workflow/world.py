@@ -674,16 +674,25 @@ class EntityConflictError(Exception):
 
 
 class HookNotFoundError(Exception):
-    """Raised when a hook event targets a hook that no longer exists.
+    """Raised when a hook lookup or hook event targets a hook that does not exist.
 
-    Mirrors the server's HTTP 404 on ``hook_disposed`` / ``hook_received`` for an
-    already-disposed (or never-created) hook. The runtime treats this the same as
-    ``EntityConflictError`` — a benign duplicate to skip.
+    A by-token lookup (``hooks_get_by_token``) that matches no active hook supplies
+    ``token``; the server's HTTP 404 on ``hook_disposed`` / ``hook_received`` for an
+    already-disposed (or never-created) hook supplies ``hook_id``. The runtime
+    treats the event-path case the same as ``EntityConflictError`` — a benign
+    duplicate to skip.
     """
 
-    def __init__(self, correlation_id: str) -> None:
-        self.correlation_id = correlation_id
-        super().__init__(f'Hook "{correlation_id}" not found')
+    def __init__(self, *, token: str | None = None, hook_id: str | None = None) -> None:
+        self.token = token
+        self.hook_id = hook_id
+        if hook_id is not None:
+            message = f'Hook "{hook_id}" not found'
+        elif token is not None:
+            message = f'Hook not found for token "{token}"'
+        else:
+            message = "Hook not found"
+        super().__init__(message)
 
 
 class TooEarlyError(Exception):

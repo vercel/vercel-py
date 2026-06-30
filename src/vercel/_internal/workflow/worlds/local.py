@@ -277,7 +277,7 @@ class LocalWorld(w.World):
                 hook = read_json(hook_path, w.Hook)
                 if hook is not None and hook.token == token:
                     return hook
-        raise w.HookNotFoundError(token)
+        raise w.HookNotFoundError(token=token)
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         # run_created has no existing entity to race on — its create is guarded by
@@ -360,7 +360,7 @@ class LocalWorld(w.World):
             existing_hook = read_json(hook_path, w.Hook)
             if existing_hook is None:
                 # Already disposed (or never created). Mirrors the backend's 404.
-                raise w.HookNotFoundError(data.correlation_id)
+                raise w.HookNotFoundError(hook_id=data.correlation_id)
 
         event = w.EventAdaptor.validate_python(
             data.model_dump()
