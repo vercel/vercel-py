@@ -277,7 +277,7 @@ class LocalWorld(w.World):
                 hook = read_json(hook_path, w.Hook)
                 if hook is not None and hook.token == token:
                     return hook
-        raise RuntimeError(f"Hook with token {token!r} not found")
+        raise w.HookNotFoundError(token)
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         # run_created has no existing entity to race on — its create is guarded by

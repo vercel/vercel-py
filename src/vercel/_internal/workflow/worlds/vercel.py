@@ -354,11 +354,16 @@ class VercelWorld(w.World):
         )
 
     async def hooks_get_by_token(self, token: str) -> w.Hook:
-        return await self._cbor_request(
-            "GET",
-            f"/v2/hooks/by-token?token={token}",
-            schema=w.Hook,
-        )
+        try:
+            return await self._cbor_request(
+                "GET",
+                f"/v2/hooks/by-token?token={token}",
+                schema=w.Hook,
+            )
+        except w.WorkflowWorldError as err:
+            if err.status == 404:
+                raise w.HookNotFoundError(token) from err
+            raise
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         run_id_path = "null" if run_id is None else run_id
