@@ -69,6 +69,7 @@ mypy_path = [
     "src/vercel-oidc",
     "src/vercel-internal-telemetry",
     "integrations/vercel-celery",
+    "integrations/vercel-dramatiq",
     "tests/stubs",
 ]
 
