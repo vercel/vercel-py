@@ -1,0 +1,12 @@
+{
+    "functions": {
+        "api/celery_worker.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "celery"
+                }
+            ]
+        }
+    }
+}

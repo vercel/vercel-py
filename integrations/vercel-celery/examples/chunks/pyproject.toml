@@ -1,0 +1,13 @@
+[project]
+name = "vercel-celery-example-chunks"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "celery>=5.3,<6",
+    "vercel-cache @ git+https://github.com/vercel/vercel-py.git@main#subdirectory=src/vercel-cache",
+    "vercel-celery @ git+https://github.com/vercel/vercel-py.git@main#subdirectory=integrations/vercel-celery",
+    "vercel-queue @ git+https://github.com/vercel/vercel-py.git@main#subdirectory=src/vercel-queue",
+]
+
+[tool.uv]
+package = false
