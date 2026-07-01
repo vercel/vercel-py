@@ -1,0 +1,12 @@
+{
+    "functions": {
+        "api/archive_file.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "files"
+                }
+            ]
+        }
+    }
+}

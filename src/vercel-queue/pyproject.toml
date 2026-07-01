@@ -1,0 +1,193 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-queue"
+dynamic = ["version"]
+description = "Vercel Queue client for Python"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "anyio>=4.0.0",
+    "httpx[http2]>=0.27.0",
+    "python-multipart>=0.0.20",
+    "typing_extensions>=4.0.0",
+    "vercel-oidc>=0.6.0",
+]
+
+[project.optional-dependencies]
+devserver = ["uvicorn"]
+typed = ["pydantic>=2.7.0"]
+trio = ["anyio[trio]>=4.0.0"]
+
+[tool.uv.sources]
+vercel-oidc = { workspace = true }
+
+[tool.hatch.version]
+path = "vercel/queue/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/queue/**/*.py",
+    "/vercel/queue/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/queue",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.ruff]
+extend = "../../pyproject.toml"
+preview = true
+
+[tool.ruff.lint]
+extend-select = [
+  "A",     # flake8-builtins
+  "ANN",   # flake8-annotations
+  "ASYNC", # flake8-async
+  "BLE",   # flake8-blind-except
+  "C4",    # flake8-comprehensions
+  "D",     # pydocstyle
+  "DTZ",   # flake8-datetimez
+  "ERA",   # flake8-eradicate
+  "FA",    # flake8-future-annotations
+  "FBT",   # flake8-boolean-trap
+  "FLY",   # flynt
+  "FIX",   # flake8-fixme
+  "FURB",  # refurb
+  "G",     # flake8-logging-format
+  "ICN",   # flake8-import-conventions
+  "INP",   # flake8-no-pep420 (on PyPI)
+  "LOG",   # flake8-logging
+  "N",     # pep8-naming
+  "PERF",  # perflint
+  "PGH",   # pygrep-hooks
+  "PIE",   # flake8-pie
+  "PLC",   # pylint-convention
+  "PLE",   # pylint-error
+  "PLR",   # pylint-refactor
+  "PLW",   # pylint-warning
+  "PT",    # flake8-pytest-style
+  "PTH",   # flake8-use-pathlib
+  "PYI",   # flake8-pyi
+  "Q",     # flake8-quotes
+  "RET",   # flake8-return
+  "RSE",   # flake8-raise
+  "RUF",   # ruff specific
+  "S",     # flake8-bandit
+  "SIM",   # flake8-simplify
+  "SLF",   # flake8-self
+  "SLOT",  # flake8-slots
+  "T10",   # flake8-debugger
+  "T20",   # flake8-print
+  "TC",    # flake8-type-checking
+  "TRY",   # tryceratops
+  "YTT",   # flake8-2020
+
+  "banned-api", # prefer-anyio-primitives
+  "explicit-string-concatenation",
+  "implicit-string-concatenation-in-collection-literal",
+  "import-outside-top-level",
+  "import-private-name",
+  "manual-list-comprehension",
+  "single-line-implicit-string-concatenation",
+  "sorted-min-max",
+  "trailing-comma-on-bare-tuple",
+  "type-name-incorrect-variance",
+]
+extend-ignore = [
+  "any-type",
+  "f-string-missing-placeholders",
+  "incorrect-blank-line-before-class",
+  "multi-line-summary-second-line",
+  "no-self-use",
+  "raise-vanilla-args",
+  "suppressible-exception",
+  "try-except-in-loop",
+  "typing-only-first-party-import",
+  "typing-only-standard-library-import",
+  "typing-only-third-party-import",
+  "unused-async",
+]
+
+[tool.ruff.lint.isort]
+section-order = [
+  "future",
+  "typing",
+  "standard-library",
+  "third-party",
+  "first-party",
+  "local-folder",
+]
+
+[tool.ruff.lint.isort.sections]
+typing = ["typing", "typing_extensions"]
+
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/**/*.py" = [
+    "D",       # docstrings not required in benchmarks
+]
+"examples/**/*.py" = [
+    "banned-api",  # examples show concrete asyncio/trio entry points
+    "D",       # examples should stay compact
+    "INP001",  # examples are deployable app directories, not Python packages
+    "T201",    # examples print their observable result
+]
+"tests/**/*.py" = [
+    "D",       # docstrings not required in tests
+    "assert",  # pytests are all about asserts
+    "hardcoded-password-default",   # tests set tokens
+    "hardcoded-password-func-arg",  # tests set tokens
+    "hardcoded-password-string",    # tests assert tokens
+    "import-private-name",
+    "magic-value-comparison",
+    "private-member-access",
+    "too-many-statements",
+]
+
+[tool.ruff.lint.pylint]
+allow-magic-value-types = ["int", "str"]
+max-args = 10
+max-returns = 10
+max-statements-in-try = 10
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"asyncio.Condition".msg = "prefer-anyio-primitives: use anyio.Condition instead."
+"asyncio.Event".msg = "prefer-anyio-primitives: use anyio.Event instead."
+"asyncio.Lock".msg = "prefer-anyio-primitives: use anyio.Lock instead."
+"asyncio.Queue".msg = "prefer-anyio-primitives: use anyio memory streams instead."
+"asyncio.Semaphore".msg = "prefer-anyio-primitives: use anyio.Semaphore instead."
+"asyncio.TaskGroup".msg = "prefer-anyio-primitives: use anyio.create_task_group instead."
+"asyncio.create_task".msg = "prefer-anyio-primitives: use an AnyIO task group instead."
+"asyncio.gather".msg = "prefer-anyio-primitives: use an AnyIO task group instead."
+"asyncio.get_event_loop".msg = "prefer-anyio-primitives: avoid asyncio loop APIs."
+"asyncio.get_running_loop".msg = "prefer-anyio-primitives: avoid asyncio loop APIs."
+"asyncio.new_event_loop".msg = "prefer-anyio-primitives: avoid asyncio loop APIs."
+"asyncio.run".msg = "prefer-anyio-primitives: use anyio.run instead."
+"asyncio.sleep".msg = "prefer-anyio-primitives: use anyio.sleep instead."
+"asyncio.timeout".msg = "prefer-anyio-primitives: use anyio fail_after or move_on_after instead."
+"asyncio.to_thread".msg = "prefer-anyio-primitives: use anyio.to_thread.run_sync instead."
+"asyncio.wait_for".msg = "prefer-anyio-primitives: use anyio fail_after or move_on_after instead."
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "strict"
+testpaths = ["tests"]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1

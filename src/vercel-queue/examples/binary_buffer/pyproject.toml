@@ -1,0 +1,16 @@
+[project]
+name = "vercel-queue-example-binary-buffer"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "vercel-queue>=0.6.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+vercel-queue = { git = "https://github.com/vercel/vercel-py.git", branch = "elprans/vercel-queues", subdirectory = "src/vercel-queue" }
+
+[tool.vercel]
+entrypoint = "api.handle_image:app"

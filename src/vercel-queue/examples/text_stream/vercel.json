@@ -1,0 +1,12 @@
+{
+    "functions": {
+        "api/index_logs.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "logs"
+                }
+            ]
+        }
+    }
+}

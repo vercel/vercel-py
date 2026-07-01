@@ -1,0 +1,12 @@
+{
+    "functions": {
+        "api/record_invoice.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "invoices"
+                }
+            ]
+        }
+    }
+}
