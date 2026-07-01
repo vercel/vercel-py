@@ -8,6 +8,7 @@ loudly rather than silently returning the wrong value.
 
 import asyncio
 from datetime import datetime, timezone
+from typing import Any
 
 from vercel._internal.workflow import core, runtime, world as w
 
@@ -91,3 +92,123 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
 
     assert wait.future.done()
     assert isinstance(wait.future.exception(), runtime.NondeterminismError)
+
+
+# --- concurrent delivery: the resume_wrapper gate + resume single-step -----------
+#
+# When a body issues several calls from concurrent coroutines, recorded
+# completions must be delivered ONE AT A TIME, each only once the body has fully
+# reacted to the previous one. Otherwise a woken coroutine interleaves with a
+# still-running one and the two issue their next calls in a different order than
+# at record time -> the positional correlation IDs no longer line up ->
+# NondeterminismError. Two pieces cooperate:
+#   * resume_wrapper() is the heartbeat: it re-arms itself every tick and only
+#     runs resume() when the loop's ready queue was otherwise empty (quiescent).
+#   * resume() applies at most one recorded event (single-step), or parks.
+
+_ARGS = b'json[["a"], {}]'
+
+
+def _created(step: "core.Step[Any, Any]", cid: str) -> w.Event:
+    return w.StepCreatedEventData(stepName=step.name, input=[_ARGS]).into_event(cid)
+
+
+def _completed(cid: str, result_json: bytes) -> w.Event:
+    return w.StepCompletedEventData(result=[b"json" + result_json]).into_event(cid)
+
+
+async def test_single_step_delivers_one_completion_per_pass() -> None:
+    """Two concurrently-issued steps both have results in the log, but a single
+    resume() pass resolves only the first; the rest is left for the next pass."""
+    step = core.Step(_greet)
+    events: list[w.Event] = [
+        _created(step, "step_1"),
+        _created(step, "step_2"),
+        _completed("step_1", b'"one"'),
+        _completed("step_2", b'"two"'),
+    ]
+    ctx = _context(events)
+    sus1 = _suspension("step_1", _ARGS)
+    sus2 = _suspension("step_2", _ARGS)
+    ctx.suspensions["step_1"] = sus1
+    ctx.suspensions["step_2"] = sus2
+
+    ctx.resume()
+
+    # exactly one completion delivered; its suspension consumed...
+    assert sus1.future.done() and sus1.future.result() == "one"
+    assert "step_1" not in ctx.suspensions
+    # ...the second still pending, and the run not parked (the heartbeat will
+    # deliver it on a later pass).
+    assert not sus2.future.done()
+    assert "step_2" in ctx.suspensions
+    assert not ctx._suspended
+
+
+async def test_resume_wrapper_defers_while_loop_has_pending_work() -> None:
+    """A completion is available, but the loop still has a pending callback (the
+    body mid-reaction). The wrapper must NOT run resume() -- it re-arms and waits
+    for the next tick."""
+    step = core.Step(_greet)
+    events: list[w.Event] = [
+        _created(step, "step_1"),
+        _completed("step_1", b'"one"'),
+    ]
+    ctx = _context(events)
+    sus1 = _suspension("step_1", _ARGS)
+    ctx.suspensions["step_1"] = sus1
+
+    loop = asyncio.get_running_loop()
+    pending = loop.call_soon(lambda: None)
+    try:
+        ctx.resume_wrapper()
+
+        assert not sus1.future.done()  # resume() not run -> nothing delivered
+        assert ctx.replay_index == 0  # event log untouched
+        assert ctx.resume_handle is not None  # re-armed for the next tick
+    finally:
+        pending.cancel()
+        if ctx.resume_handle is not None:
+            ctx.resume_handle.cancel()
+
+
+async def test_resume_wrapper_runs_resume_when_quiescent() -> None:
+    """With the ready queue empty, the wrapper runs resume() (delivering one
+    completion) and re-arms itself."""
+    step = core.Step(_greet)
+    events: list[w.Event] = [
+        _created(step, "step_1"),
+        _completed("step_1", b'"one"'),
+    ]
+    ctx = _context(events)
+    sus1 = _suspension("step_1", _ARGS)
+    ctx.suspensions["step_1"] = sus1
+
+    ctx.resume_wrapper()
+
+    assert sus1.future.done() and sus1.future.result() == "one"
+    assert ctx.resume_handle is not None  # heartbeat re-armed
+
+    ctx.resume_handle.cancel()
+
+
+async def test_resume_parks_and_cancels_heartbeat_when_nothing_to_deliver() -> None:
+    """Suspension registered and its create replayed, no completion yet -> the
+    run suspends (cancels its future) and stops the heartbeat rather than
+    spinning."""
+    step = core.Step(_greet)
+    events: list[w.Event] = [_created(step, "step_1")]
+    ctx = _context(events)
+    sus1 = _suspension("step_1", _ARGS)
+    ctx.suspensions["step_1"] = sus1
+    # the heartbeat would have armed itself before calling resume().
+    loop = asyncio.get_running_loop()
+    ctx.resume_handle = loop.call_soon(ctx.resume_wrapper)
+
+    ctx.resume()
+
+    assert sus1.has_created_event
+    assert not sus1.future.done()
+    assert ctx._suspended
+    assert ctx._fut is not None and ctx._fut.cancelled()
+    assert ctx.resume_handle.cancelled()  # heartbeat stopped

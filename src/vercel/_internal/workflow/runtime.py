@@ -192,6 +192,7 @@ class WorkflowOrchestratorContext:
             token = self._ctx.set(self)
             try:
                 self._fut = asyncio.ensure_future(obj.func(*args, **kwargs))
+                self.resume_wrapper()  # arm the resume callback
             finally:
                 self._ctx.reset(token)
             return await self._fut
@@ -200,8 +201,6 @@ class WorkflowOrchestratorContext:
         input_data = b"json" + json.dumps((args, kwargs), sort_keys=True).encode()
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
-        if self.resume_handle is None and not self._suspended:
-            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         return await sus.future
 
     async def run_wait(self, param: int | float | datetime | str) -> None:
@@ -210,8 +209,6 @@ class WorkflowOrchestratorContext:
             resume_at=(parse_duration_to_date(param)),
         )
         self.suspensions[wait.correlation_id] = wait
-        if self.resume_handle is None and not self._suspended:
-            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         await wait.future
 
     def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
@@ -230,8 +227,6 @@ class WorkflowOrchestratorContext:
         self.suspensions[hook.correlation_id] = hook
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
-        if self.resume_handle is None and not self._suspended:
-            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         return await fut
 
     def dispose_hook(self, *, correlation_id: str) -> None:
@@ -257,12 +252,57 @@ class WorkflowOrchestratorContext:
         elif isinstance(sus, (Suspension, Wait)) and not sus.future.done():
             sus.future.set_exception(exc)
 
+    def resume_wrapper(self) -> None:
+        """Make sure that resume() runs on an empty event loop ready queue."""
+
+        loop = asyncio.get_running_loop()
+        is_ready = bool(loop._ready)  # type: ignore[attr-defined]
+        self.resume_handle = loop.call_soon(self.resume_wrapper)
+        # We only want to resume() when all of the workflow tasks have
+        # suspended, so if anything else is running or ready to run,
+        # we defer. Our resume_handle callback will be at the back of
+        # the _ready queue, so everything else will go first.
+        #
+        # NOTE: Since we check loop._ready, the workflow must be run
+        # in its own dedicated event loop.
+        if is_ready:
+            return
+
+        self.resume()
+
     def resume(self) -> None:
-        self.resume_handle = None
+        """Run over the the event log and try to apply an event.
+
+        The idea is that resume() will be run whenever everything else in the
+        async event loop has paused.
+
+        The core invariant of how resume() interacts with the workflow
+        is that the execution needs to appear identical to the events
+        arriving one at a time (because when they originally arrive
+        they are one at a time, and it needs to be indistinguishable
+        from that.)
+
+        Resolves at most one suspension before breaking.
+
+        If the event log is exhausted, cancel the future and suspend
+        the workflow.
+        """
 
         if self._fut is None:
             return
 
+        # NOTE: resume() does single-step delivery, so we resolve at most
+        # one suspension per invocation of resume().
+        # As an optimization for processing StepCreatedEvent and similar,
+        # we still structure this as a loop, though.
+        # The cases that do *not* invoke a suspension will continue,
+        # and the main bottom of the loop will break.
+        #
+        # This makes sure that resume() gets interleaved directly one
+        # to one with event deliveries, instead of sometimes having
+        # multiple deliveries bunched up before a resume(), which can
+        # lead to mismatches between a recording trace and a replaying
+        # one.
         while (
             self.replay_index < len(self.events) or self.ooo_hook_received_events
         ) and self.suspensions:
@@ -339,9 +379,11 @@ class WorkflowOrchestratorContext:
                         )
                         return
                     sus.has_created_event = True
+                    continue
 
                 case w.HookCreatedEvent() | w.WaitCreatedEvent():
                     self.suspensions[event.correlation_id].has_created_event = True
+                    continue
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
@@ -396,9 +438,18 @@ class WorkflowOrchestratorContext:
                     self.hooks[event.correlation_id].has_dispose_event = True
                     self.dispose_hook(correlation_id=event.correlation_id)
 
-        if self.suspensions:
+            # One wake per pass: yield to the body so it drains to its next
+            # suspension before we deliver the next recorded event.
+            break
+
+        # If we did not break out of the loop, that means that the
+        # event log exhausted without doing any work.
+        # Suspend.
+        else:
             self._suspended = True
             self._fut.cancel(SUSPENDED_MESSAGE)
+            if self.resume_handle:
+                self.resume_handle.cancel()
 
 
 async def workflow_handler(
