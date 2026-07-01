@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import (
     Annotated,
@@ -21,6 +22,7 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Self
 
+import httpx
 import pydantic
 
 from vercel._internal.polyfills import Self
@@ -639,11 +641,12 @@ class EventResult(BaseModel):
 
 
 class HTTPRequest(metaclass=abc.ABCMeta):
+    @property
     @abc.abstractmethod
-    def get_header(self, name: str) -> str | None: ...
+    def headers(self) -> httpx.Headers: ...
 
     @abc.abstractmethod
-    async def get_body(self) -> bytes: ...
+    def aiter_bytes(self, chunk_size: int | None = None) -> AsyncIterator[bytes]: ...
 
 
 @dataclasses.dataclass
