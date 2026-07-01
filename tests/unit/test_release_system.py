@@ -1392,6 +1392,57 @@ def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
     )
 
 
+def test_django_tasks_bundle_keeps_django_peer_dependency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.0")
+    cache_version = tmp_path / "vercel-cache/version.py"
+    queue_version = tmp_path / "vercel-queue/version.py"
+    cache_version.parent.mkdir()
+    queue_version.parent.mkdir()
+    cache_version.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    queue_version.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    monkeypatch.setattr(
+        workspace,
+        "packages",
+        lambda: {
+            "vercel-cache": workspace.Package(
+                "vercel-cache", tmp_path / "vercel-cache", cache_version, ()
+            ),
+            "vercel-queue": workspace.Package(
+                "vercel-queue", tmp_path / "vercel-queue", queue_version, ()
+            ),
+        },
+    )
+    data = {
+        "project": {
+            "dependencies": [
+                "Django>=6.0; python_version >= '3.12'",
+                "vercel-cache",
+                "vercel-queue>=0.6.0",
+            ]
+        }
+    }
+
+    assert (
+        bundle_release._derive_vendor_requirements(  # noqa: SLF001
+            "vercel-django-tasks",
+            data,
+        )
+        == ()
+    )
+    assert bundle_release._external_dependencies(  # noqa: SLF001
+        "vercel-django-tasks",
+        data,
+        (),
+    ) == (
+        "Django>=6.0; python_version >= '3.12'",
+        "vercel-cache-bundle>=0.7.0",
+        "vercel-queue-bundle>=0.7.0",
+        "vercel-internal-shared-vendored-deps>=0.7.0",
+    )
+
+
 def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
