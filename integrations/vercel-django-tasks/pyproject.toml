@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-django-tasks"
+dynamic = ["version"]
+description = "Django task backend backed by Vercel Queue Service"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "Django>=6.0; python_version >= '3.12'",
+    "vercel-cache",
+    "vercel-queue>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-cache = { workspace = true }
+vercel-queue = { workspace = true }
+
+[tool.hatch.version]
+path = "vercel/integrations/django/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/integrations/django/**/*.py",
+    "/vercel/integrations/django/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/integrations/django",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.ruff]
+extend = "../ruff.toml"
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.rules]
+unresolved-attribute = "ignore"
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.poe.tasks.test]
+shell = """
+if python -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+    $PYTEST
+else
+    echo "Skipping vercel-django-tasks tests: Django 6 requires Python 3.12+"
+fi
+"""
+
+[tool.poe.tasks.typecheck-mypy]
+cmd = "$MYPY --python-version 3.12"
