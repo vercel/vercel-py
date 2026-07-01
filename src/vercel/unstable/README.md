@@ -322,6 +322,55 @@ async with vercel.session(
         ...
 ```
 
+## Blob File API And Migration Boundaries
+
+`vercel.unstable.blob` is a pathname-only file API. Object pathnames are the
+inputs to `open()`, `stat()`, `scandir()`, `remove()`, and `rmtree()`; URLs are
+outputs, not alternate identifiers accepted by core operations. This differs
+intentionally from the stable Blob CRUD clients and convenience functions.
+
+Listing and marker behavior is object-store behavior rather than a directory
+filesystem:
+
+- `scandir()` defaults to `ScandirMode.FOLDED`. Folded prefix entries are
+  synthesized from object pathnames and need not identify stored objects.
+- `ScandirMode.EXPANDED` performs a flat traversal of all descendants below
+  the prefix.
+- `mkdir()` creates an exact, zero-byte object whose pathname ends in `/`.
+  Existing descendants do not conflict with creating that marker.
+- Removing a marker does not remove its descendants. There is no initial
+  `rmdir()` operation.
+- `rmtree()` is one-pass, non-atomic list-and-batch-delete orchestration. It
+  may partially complete, and objects created concurrently behind the listing
+  cursor may survive.
+
+Binary readers are seekable through ETag-pinned range requests. Writes are
+complete-object publications on successful close, never remote in-place
+mutations. Append and update modes download the complete existing object to an
+SDK-owned temporary file, apply local mutations, and conditionally replace the
+object on close. They therefore need local space for the complete object and
+can fail to publish if another writer replaces it first.
+
+`BlobStatResult.url`, `BlobStatResult.download_url`, and the corresponding
+object-entry properties are unsigned locations. Only `presign()` grants
+delegated, expiring access without a bearer token. Entry GET and HEAD URLs are
+scoped to the pathname, not pinned to the entry's ETag, so a replacement before
+use may change the bytes served. Signed-token issuance and concrete presigned
+request authentication remain backend rollout-gated; callers must be prepared
+for `presign()` to fail where `enable-blob-presigned-url-auth` is unavailable.
+
+One Blob service session targets one store. Default credentials are either a
+Blob read/write token, whose embedded store ID selects that store, or a
+request-aware OIDC token paired with `BLOB_STORE_ID`. Credential factories are
+mode-specific: async sessions use `credentials_factory`, sync sessions use
+`sync_credentials_factory`, and an options object intended for both custom
+runtimes must provide both factories. The default environment-backed options
+provide both forms.
+
+The unstable surface intentionally omits old client objects, CRUD names,
+convenience helpers, and public multipart primitives. Continue using the
+stable `vercel.blob` package when those APIs are required.
+
 ## Sandbox Lifecycle
 
 `sandbox.create_sandbox(...)` always waits until the sandbox reaches a ready

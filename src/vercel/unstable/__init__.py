@@ -8,7 +8,7 @@ from vercel._internal.unstable.errors import (
 )
 from vercel._internal.unstable.session import session
 
-from . import sandbox
+from . import blob, sandbox
 
 __all__ = [
     "VercelError",
@@ -16,5 +16,6 @@ __all__ = [
     "VercelSessionClosedError",
     "VercelSessionError",
     "sandbox",
+    "blob",
     "session",
 ]
