@@ -6,12 +6,29 @@
 
 # Scripts
 
-- `./scripts/test.sh` — Run all tests including lint and typecheck (excludes example tests). Accepts extra pytest args.
-  Example: `./scripts/test.sh -q tests/unit/test_filesystem.py`
+- `./scripts/test.sh` — Run tests (excludes example tests).
 - `./scripts/test-examples.sh` — Run example tests in parallel. Accepts extra pytest args.
-- `./scripts/lint.sh` — Run lint tests only (ruff check + format). Accepts extra pytest args.
-- `./scripts/typecheck.sh` — Run typecheck tests only (mypy + module imports). Accepts extra pytest args.
+- `./scripts/lint.sh` — Run lint checks (ruff check + format).
+- `./scripts/typecheck.sh` — Run type checks (mypy + ty).
 - `./scripts/fix.sh` — Auto-fix lint issues and reformat code with ruff.
+
+The workspace `test`, `lint`, and `typecheck` scripts accept zero or more
+scopes before `--` and tool args after `--`.
+
+Example: `./scripts/test.sh tests/unit/test_time.py -- -k coerce_duration`
+Or by package name: `./scripts/test.sh vercel-oidc`.
+
+The workspace task system is documented in `scripts/poe/README.md`. Workspace
+packages should include `scripts/poe/poe.toml` and inherit the shared `lint`,
+`typecheck`, and `test` tasks unless they have package-specific behavior.
+
+Example package `pyproject.toml` Poe setup:
+
+```toml
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+```
 
 # Commit Message Guidance
 

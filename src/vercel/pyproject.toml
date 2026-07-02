@@ -73,3 +73,20 @@ exclude = [
 
 [tool.hatch.build.targets.wheel.sources]
 "" = "vercel"
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.poe.tasks.lint]
+shell = """
+$RUFF_CHECK
+$RUFF_FORMAT
+"""
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-vercel}"
+cwd = ".."
+
+[tool.poe.tasks.test]
+cmd = "python -c \"pass\""

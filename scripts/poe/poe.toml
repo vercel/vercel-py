@@ -1,0 +1,38 @@
+[tool.poe.env]
+POE = { default = "${POE_CONF_DIR}/tasks/poe" }
+PYTEST = { default = "${POE_CONF_DIR}/tasks/pytest" }
+RUFF_CHECK = { default = "${POE_CONF_DIR}/tasks/ruff-check" }
+RUFF_CHECK_FIX = { default = "${POE_CONF_DIR}/tasks/ruff-check-fix" }
+RUFF_FORMAT = { default = "${POE_CONF_DIR}/tasks/ruff-format" }
+RUFF_FORMAT_FIX = { default = "${POE_CONF_DIR}/tasks/ruff-format-fix" }
+TY = { default = "${POE_CONF_DIR}/tasks/ty" }
+MYPY = { default = "${POE_CONF_DIR}/tasks/mypy" }
+
+[tool.poe.tasks.fix]
+shell = """
+$RUFF_CHECK_FIX
+$RUFF_FORMAT_FIX
+"""
+
+[tool.poe.tasks.lint]
+shell = """
+$RUFF_CHECK
+$RUFF_FORMAT
+"""
+
+[tool.poe.tasks.typecheck]
+shell = """
+$POE typecheck-mypy
+$POE typecheck-ty
+"""
+
+[tool.poe.tasks.typecheck-mypy]
+cmd = "$MYPY"
+
+[tool.poe.tasks.typecheck-ty]
+cmd = "$TY"
+
+[tool.poe.tasks.test]
+shell = """
+$PYTEST
+"""

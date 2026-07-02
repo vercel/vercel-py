@@ -39,3 +39,13 @@ only-include = ["/vercel/oidc"]
 exclude = [
     "/**/__pycache__",
 ]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"
+
+[tool.poe.tasks.test]
+cmd = "python -c \"pass\""
