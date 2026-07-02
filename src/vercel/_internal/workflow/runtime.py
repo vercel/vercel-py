@@ -8,8 +8,10 @@ import logging
 import math
 import random
 import re
+import sys
 import traceback
 from collections import deque
+from collections.abc import Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
@@ -147,6 +149,25 @@ def get_step_metadata() -> StepInfo:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
 
 
+def _run_in_default_loop(coro: Coroutine[Any, Any, T]) -> T:
+    if sys.version_info >= (3, 11):
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(coro)
+    else:
+        # Python 3.10 doesn't support asyncio.Runner or the
+        # loop_factory argument to asyncio.run(). I don't really want
+        # to reimplement run so instead we just warn if the loop
+        # policy is something weird.
+        pol = asyncio.get_event_loop_policy()
+        if not isinstance(pol, asyncio.DefaultEventLoopPolicy):
+            logger.warning(
+                "asyncio event loop policy %r is not the default; workflow "
+                "execution needs the stdlib event loop and may misbehave.",
+                pol,
+            )
+        return asyncio.run(coro)
+
+
 class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
@@ -172,7 +193,7 @@ class WorkflowOrchestratorContext:
     def current(cls) -> Self:
         return cls._ctx.get()
 
-    async def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
+    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
         wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input or not isinstance(workflow_run.input, list):
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
@@ -189,13 +210,31 @@ class WorkflowOrchestratorContext:
             for attr in wf.qualname.split("."):
                 obj = getattr(obj, attr)
 
-            token = self._ctx.set(self)
-            try:
+            async def inner():
                 self._fut = asyncio.ensure_future(obj.func(*args, **kwargs))
                 self.resume_wrapper()  # arm the resume callback
+                await self._fut
+
+            old_loop = asyncio.get_running_loop()
+            token = self._ctx.set(self)
+            try:
+                # The workflow is async, but it is not actually
+                # allowed to perform any IO-full operations, and
+                # resume/resume_wrapper require that it run in an
+                # isolated loop.
+                #
+                # So hide our existing loop and run everything in a
+                # fresh loop. We explicitly specify a factory because
+                # we look at ._ready, which might not exist in uvloop
+                # etc.
+                # TODO: Use a custom loop implementation.
+                asyncio._set_running_loop(None)
+                _run_in_default_loop(inner())
             finally:
+                asyncio._set_running_loop(old_loop)
                 self._ctx.reset(token)
-            return await self._fut
+            assert self._fut
+            return self._fut.result()
 
     async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         input_data = b"json" + json.dumps((args, kwargs), sort_keys=True).encode()
@@ -262,9 +301,6 @@ class WorkflowOrchestratorContext:
         # suspended, so if anything else is running or ready to run,
         # we defer. Our resume_handle callback will be at the back of
         # the _ready queue, so everything else will go first.
-        #
-        # NOTE: Since we check loop._ready, the workflow must be run
-        # in its own dedicated event loop.
         if is_ready:
             return
 
@@ -554,7 +590,7 @@ async def workflow_handler(
         events, seed=run_id, started_at=workflow_started_at, registry=registry
     )
     try:
-        result = await context.run_workflow(workflow_run)
+        result = context.run_workflow(workflow_run)
         output = b"json" + json.dumps(result).encode()
     except BaseException as e:
         if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
