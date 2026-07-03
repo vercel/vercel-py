@@ -1,4 +1,1 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-uv run --all-packages pytest tests/test_sourcecode.py -k "Typecheck" -v "$@"
+workspace-task.sh

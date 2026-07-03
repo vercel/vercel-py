@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+task_name="$(basename "$0")"
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+workspace_root="$(cd "$script_dir/../../.." && pwd -P)"
+
+case "$task_name" in
+  pytest)
+    command=(pytest)
+    ;;
+  ruff-check)
+    command=(ruff check)
+    ;;
+  ruff-check-fix)
+    command=(ruff check --fix)
+    ;;
+  ruff-format)
+    command=(ruff format --check)
+    ;;
+  ruff-format-fix)
+    command=(ruff format)
+    ;;
+  ty)
+    command=(ty check)
+    ;;
+  mypy)
+    command=(mypy)
+    ;;
+  *)
+    echo "unsupported poe tool wrapper: $task_name" >&2
+    exit 2
+    ;;
+esac
+
+extra_args=()
+if [[ -n "${POE_EXTRA_ARGS:-}" ]]; then
+  eval "extra_args=(${POE_EXTRA_ARGS})"
+fi
+if [[ "${extra_args[0]:-}" == -- ]]; then
+  extra_args=("${extra_args[@]:1}")
+fi
+
+scope_args=("$@")
+if [[ "$task_name" == mypy ]]; then
+  has_config_file=0
+  option_value=0
+  for arg in "${scope_args[@]}" "${extra_args[@]}"; do
+    if ((option_value)); then
+      option_value=0
+      continue
+    fi
+    case "$arg" in
+      --config-file)
+        has_config_file=1
+        option_value=1
+        ;;
+      --config-file=*)
+        has_config_file=1
+        ;;
+    esac
+  done
+  if ((has_config_file == 0)); then
+    scope_args=(--config-file "$workspace_root/pyproject.toml" "${scope_args[@]}")
+  fi
+fi
+if ((${#scope_args[@]} == 0)) && [[ -n "${WORKSPACE_POE_SCOPE_ARGS:-}" ]]; then
+  eval "scope_args=(${WORKSPACE_POE_SCOPE_ARGS})"
+fi
+if [[ "$task_name" == mypy ]]; then
+  has_target=0
+  option_value=0
+  for arg in "${scope_args[@]}"; do
+    if ((option_value)); then
+      option_value=0
+      continue
+    fi
+    case "$arg" in
+      --config-file|--python-version)
+        option_value=1
+        ;;
+      --config-file=*|--python-version=*)
+        ;;
+      --*)
+        ;;
+      *)
+        has_target=1
+        ;;
+    esac
+  done
+  if ((has_target == 0)); then
+    if [[ -n "${WORKSPACE_POE_SCOPE_ARGS:-}" ]]; then
+      eval "scope_args+=( ${WORKSPACE_POE_SCOPE_ARGS} )"
+    else
+      scope_args+=(.)
+    fi
+  fi
+fi
+if ((${#scope_args[@]} == 0)); then
+  if [[ "$task_name" == ruff-* && "$(pwd -P)" == "$workspace_root" ]]; then
+    scope_args=(tests examples)
+  else
+    scope_args=(.)
+  fi
+fi
+
+printf '%q ' "${command[@]}" "${scope_args[@]}" "${extra_args[@]}"
+printf '\n'
+exec "${command[@]}" "${scope_args[@]}" "${extra_args[@]}"

@@ -18,6 +18,8 @@ dev = [
     "zizmor>=1.24.1,<2",
     "hatchling>=1.27.0,<2",
     "trio>=0.33.0,<1",
+    "poethepoet>=0.47.0",
+    "tomli>=2.0.0,<3; python_version < '3.11'",
 ]
 
 [tool.uv]
@@ -30,7 +32,8 @@ members = ["src/vercel-headers", "src/vercel-oidc", "src/vercel"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+pythonpath = ["."]
+addopts = "--no-header --capture=tee-sys"
 asyncio_mode = "auto"
 markers = [
     "live: requires live API credentials (VERCEL_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",
@@ -79,3 +82,38 @@ keep-runtime-typing = false
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**/*.py" = ["E501"]
+
+[tool.poe]
+include = "scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.poe.tasks.lint]
+shell = """
+$RUFF_CHECK
+$RUFF_FORMAT
+if [ -z "$WORKSPACE_POE_SCOPE_ARGS" ]; then
+  $POE lint-zizmor
+fi
+"""
+
+[tool.poe.tasks.lint-zizmor]
+cmd = "zizmor --offline ."
+
+[tool.poe.tasks.typecheck]
+shell = """
+$POE typecheck-mypy
+"""
+
+[tool.poe.tasks.typecheck-mypy]
+cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-tests}"
+
+[tool.poe.tasks.test]
+shell = """
+if [ -n "$WORKSPACE_POE_SCOPE_ARGS" ]; then
+  $PYTEST --ignore=tests/test_examples.py $WORKSPACE_POE_SCOPE_ARGS
+elif [ -n "$POE_EXTRA_ARGS" ]; then
+  $PYTEST --ignore=tests/test_examples.py
+else
+  $PYTEST --ignore=tests/test_examples.py tests
+fi
+"""
