@@ -168,6 +168,28 @@ def _run_in_default_loop(coro: Coroutine[Any, Any, T]) -> T:
         return asyncio.run(coro)
 
 
+def _run_isolated(coro: Coroutine[Any, Any, T]) -> T:
+    # The workflow is async, but it is not actually allowed to perform
+    # any IO-full operations, and resume/resume_wrapper require that it
+    # run in an isolated loop.
+    #
+    # So hide our existing loop and run everything in a fresh loop. We
+    # explicitly specify a factory because we look at ._ready, which
+    # might not exist in uvloop etc.
+    # TODO: Use a custom loop implementation.
+    old_loop = asyncio.get_running_loop()
+    current_task = asyncio.current_task()
+    if current_task:
+        asyncio._leave_task(old_loop, current_task)
+    asyncio._set_running_loop(None)
+    try:
+        return _run_in_default_loop(coro)
+    finally:
+        asyncio._set_running_loop(old_loop)
+        if current_task:
+            asyncio._enter_task(old_loop, current_task)
+
+
 class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
@@ -215,23 +237,10 @@ class WorkflowOrchestratorContext:
                 self.resume_wrapper()  # arm the resume callback
                 await self._fut
 
-            old_loop = asyncio.get_running_loop()
             token = self._ctx.set(self)
             try:
-                # The workflow is async, but it is not actually
-                # allowed to perform any IO-full operations, and
-                # resume/resume_wrapper require that it run in an
-                # isolated loop.
-                #
-                # So hide our existing loop and run everything in a
-                # fresh loop. We explicitly specify a factory because
-                # we look at ._ready, which might not exist in uvloop
-                # etc.
-                # TODO: Use a custom loop implementation.
-                asyncio._set_running_loop(None)
-                _run_in_default_loop(inner())
+                _run_isolated(inner())
             finally:
-                asyncio._set_running_loop(old_loop)
                 self._ctx.reset(token)
             assert self._fut
             return self._fut.result()
