@@ -8,8 +8,10 @@ import logging
 import math
 import random
 import re
+import sys
 import traceback
 from collections import deque
+from collections.abc import Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
@@ -147,6 +149,47 @@ def get_step_metadata() -> StepInfo:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
 
 
+def _run_in_default_loop(coro: Coroutine[Any, Any, T]) -> T:
+    if sys.version_info >= (3, 11):
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(coro)
+    else:
+        # Python 3.10 doesn't support asyncio.Runner or the
+        # loop_factory argument to asyncio.run(). I don't really want
+        # to reimplement run so instead we just warn if the loop
+        # policy is something weird.
+        pol = asyncio.get_event_loop_policy()
+        if not isinstance(pol, asyncio.DefaultEventLoopPolicy):
+            logger.warning(
+                "asyncio event loop policy %r is not the default; workflow "
+                "execution needs the stdlib event loop and may misbehave.",
+                pol,
+            )
+        return asyncio.run(coro)
+
+
+def _run_isolated(coro: Coroutine[Any, Any, T]) -> T:
+    # The workflow is async, but it is not actually allowed to perform
+    # any IO-full operations, and resume/resume_wrapper require that it
+    # run in an isolated loop.
+    #
+    # So hide our existing loop and run everything in a fresh loop. We
+    # explicitly specify a factory because we look at ._ready, which
+    # might not exist in uvloop etc.
+    # TODO: Use a custom loop implementation.
+    old_loop = asyncio.get_running_loop()
+    current_task = asyncio.current_task()
+    if current_task:
+        asyncio._leave_task(old_loop, current_task)
+    asyncio._set_running_loop(None)
+    try:
+        return _run_in_default_loop(coro)
+    finally:
+        asyncio._set_running_loop(old_loop)
+        if current_task:
+            asyncio._enter_task(old_loop, current_task)
+
+
 class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
@@ -172,7 +215,7 @@ class WorkflowOrchestratorContext:
     def current(cls) -> Self:
         return cls._ctx.get()
 
-    async def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
+    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
         wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input or not isinstance(workflow_run.input, list):
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
@@ -189,19 +232,23 @@ class WorkflowOrchestratorContext:
             for attr in wf.qualname.split("."):
                 obj = getattr(obj, attr)
 
+            async def inner():
+                self._fut = asyncio.ensure_future(obj.func(*args, **kwargs))
+                self.resume_wrapper()  # arm the resume callback
+                await self._fut
+
             token = self._ctx.set(self)
             try:
-                self._fut = asyncio.ensure_future(obj.func(*args, **kwargs))
+                _run_isolated(inner())
             finally:
                 self._ctx.reset(token)
-            return await self._fut
+            assert self._fut
+            return self._fut.result()
 
     async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         input_data = b"json" + json.dumps((args, kwargs), sort_keys=True).encode()
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
-        if self.resume_handle is None and not self._suspended:
-            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         return await sus.future
 
     async def run_wait(self, param: int | float | datetime | str) -> None:
@@ -210,8 +257,6 @@ class WorkflowOrchestratorContext:
             resume_at=(parse_duration_to_date(param)),
         )
         self.suspensions[wait.correlation_id] = wait
-        if self.resume_handle is None and not self._suspended:
-            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         await wait.future
 
     def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
@@ -230,8 +275,6 @@ class WorkflowOrchestratorContext:
         self.suspensions[hook.correlation_id] = hook
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
-        if self.resume_handle is None and not self._suspended:
-            self.resume_handle = asyncio.get_running_loop().call_soon(self.resume)
         return await fut
 
     def dispose_hook(self, *, correlation_id: str) -> None:
@@ -257,12 +300,54 @@ class WorkflowOrchestratorContext:
         elif isinstance(sus, (Suspension, Wait)) and not sus.future.done():
             sus.future.set_exception(exc)
 
+    def resume_wrapper(self) -> None:
+        """Make sure that resume() runs on an empty event loop ready queue."""
+
+        loop = asyncio.get_running_loop()
+        is_ready = bool(loop._ready)  # type: ignore[attr-defined]
+        self.resume_handle = loop.call_soon(self.resume_wrapper)
+        # We only want to resume() when all of the workflow tasks have
+        # suspended, so if anything else is running or ready to run,
+        # we defer. Our resume_handle callback will be at the back of
+        # the _ready queue, so everything else will go first.
+        if is_ready:
+            return
+
+        self.resume()
+
     def resume(self) -> None:
-        self.resume_handle = None
+        """Run over the the event log and try to apply an event.
+
+        The idea is that resume() will be run whenever everything else in the
+        async event loop has paused.
+
+        The core invariant of how resume() interacts with the workflow
+        is that the execution needs to appear identical to the events
+        arriving one at a time (because when they originally arrive
+        they are one at a time, and it needs to be indistinguishable
+        from that.)
+
+        Resolves at most one suspension before breaking.
+
+        If the event log is exhausted, cancel the future and suspend
+        the workflow.
+        """
 
         if self._fut is None:
             return
 
+        # NOTE: resume() does single-step delivery, so we resolve at most
+        # one suspension per invocation of resume().
+        # As an optimization for processing StepCreatedEvent and similar,
+        # we still structure this as a loop, though.
+        # The cases that do *not* invoke a suspension will continue,
+        # and the main bottom of the loop will break.
+        #
+        # This makes sure that resume() gets interleaved directly one
+        # to one with event deliveries, instead of sometimes having
+        # multiple deliveries bunched up before a resume(), which can
+        # lead to mismatches between a recording trace and a replaying
+        # one.
         while (
             self.replay_index < len(self.events) or self.ooo_hook_received_events
         ) and self.suspensions:
@@ -339,9 +424,11 @@ class WorkflowOrchestratorContext:
                         )
                         return
                     sus.has_created_event = True
+                    continue
 
                 case w.HookCreatedEvent() | w.WaitCreatedEvent():
                     self.suspensions[event.correlation_id].has_created_event = True
+                    continue
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
@@ -396,9 +483,18 @@ class WorkflowOrchestratorContext:
                     self.hooks[event.correlation_id].has_dispose_event = True
                     self.dispose_hook(correlation_id=event.correlation_id)
 
-        if self.suspensions:
+            # One wake per pass: yield to the body so it drains to its next
+            # suspension before we deliver the next recorded event.
+            break
+
+        # If we did not break out of the loop, that means that the
+        # event log exhausted without doing any work.
+        # Suspend.
+        else:
             self._suspended = True
             self._fut.cancel(SUSPENDED_MESSAGE)
+            if self.resume_handle:
+                self.resume_handle.cancel()
 
 
 async def workflow_handler(
@@ -503,7 +599,7 @@ async def workflow_handler(
         events, seed=run_id, started_at=workflow_started_at, registry=registry
     )
     try:
-        result = await context.run_workflow(workflow_run)
+        result = context.run_workflow(workflow_run)
         output = b"json" + json.dumps(result).encode()
     except BaseException as e:
         if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
