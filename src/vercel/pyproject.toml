@@ -19,8 +19,10 @@ dependencies = [
     "websockets>=12.0,<17",
     "cbor2>=6.0,<7",
     "vercel-workers>=0.0.16,<1 ; python_version >= '3.12'",
+    "vercel-cache>=0.6.0",
     "vercel-headers>=0.6.0",
     "vercel-oidc>=0.6.0",
+    "vercel-internal-telemetry>=0.6.0",
 ]
 
 [project.scripts]
@@ -29,7 +31,9 @@ vercel-sandbox = "vercel.sandbox.__main__:main"
 sandbox = "vercel.sandbox.__main__:main"
 
 [tool.uv.sources]
+vercel-cache = { workspace = true }
 vercel-headers = { workspace = true }
+vercel-internal-telemetry = { workspace = true }
 vercel-oidc = { workspace = true }
 
 [tool.hatch.version]
@@ -52,10 +56,10 @@ dev-mode-dirs = [".."]
 only-include = [
     "/_internal",
     "/blob",
-    "/cache",
     "/cron",
     "/deployments",
     "/functions",
+    "/internal/README.md",
     "/projects",
     "/sandbox",
     "/workflow",

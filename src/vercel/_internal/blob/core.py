@@ -81,7 +81,7 @@ from vercel._internal.http import (
 from vercel._internal.http.retry import RetryPolicy, SleepFn
 from vercel._internal.iter_coroutine import iter_coroutine
 from vercel._internal.polyfills import UTC
-from vercel._internal.telemetry.tracker import track
+from vercel.internal.telemetry import track
 
 BlobProgressCallback = (
     Callable[[UploadProgressEvent], None] | Callable[[UploadProgressEvent], Awaitable[None]]

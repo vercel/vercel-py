@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-internal-telemetry"
+dynamic = ["version"]
+description = "Internal telemetry helpers for Vercel Python packages"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "httpx>=0.27.0,<1",
+    "vercel-oidc>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-oidc = { workspace = true }
+
+[tool.hatch.version]
+path = "vercel/internal/telemetry/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/internal/telemetry/**/*.py",
+    "/vercel/internal/telemetry/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/internal/telemetry",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"
+
+[tool.poe.tasks.test]
+cmd = "python -c \"pass\""

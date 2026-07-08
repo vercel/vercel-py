@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 import httpx
 
-from vercel._internal.telemetry.tracker import track
+from vercel.internal.telemetry import track
 
 from .types import AsyncCache, Cache
 
