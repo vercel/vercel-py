@@ -1,0 +1,12 @@
+{
+    "functions": {
+        "api/handle_order.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "typed-orders"
+                }
+            ]
+        }
+    }
+}

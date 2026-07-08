@@ -1,0 +1,12 @@
+{
+    "functions": {
+        "api/handle_image.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "images"
+                }
+            ]
+        }
+    }
+}

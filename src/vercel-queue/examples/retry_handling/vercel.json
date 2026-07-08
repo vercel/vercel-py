@@ -1,0 +1,13 @@
+{
+    "functions": {
+        "api/process_job.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "jobs",
+                    "retryAfterSeconds": 30
+                }
+            ]
+        }
+    }
+}

@@ -5,20 +5,26 @@ backend-path = ["scripts"]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.5.0,<1",
+    "ruff==0.15.20",
     "pytest>=7.0.0,<10",
     "pytest-asyncio<2",
     "pytest-xdist<4",
+    "fastapi>=0.115.0,<1",
+    "uvicorn>=0.30.0,<1",
     "hypothesis>=6.0.0,<7",
     "respx>=0.21.0,<1",
     "uvloop<1",
     "mypy>=1.20.2,<2",
     "build<2",
     "twine<7",
+    "ty==0.0.55",
     "zizmor>=1.24.1,<2",
     "hatchling>=1.27.0,<2",
+    "time-machine>=2.16,<3",
     "trio>=0.33.0,<1",
     "poethepoet>=0.47.0",
+    "tox>=4",
+    "tox-uv-bare",
     "tomli>=2.0.0,<3; python_version < '3.11'",
 ]
 
@@ -28,7 +34,7 @@ package = false
 exclude-newer = "2 days"
 
 [tool.uv.workspace]
-members = ["src/vercel-headers", "src/vercel-oidc", "src/vercel"]
+members = ["src/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -39,10 +45,29 @@ markers = [
     "live: requires live API credentials (VERCEL_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",
 ]
 
+[tool.tox]
+requires = ["tox>=4", "tox-uv-bare"]
+env_list = ["py310", "py311", "py312", "py313", "py314"]
+
+[tool.tox.env_run_base]
+runner = "uv-venv-lock-runner"
+package = "skip"
+dependency_groups = ["dev"]
+allowlist_externals = ["./scripts/test.sh"]
+uv_sync_flags = ["--all-packages"]
+commands = [["./scripts/test.sh", { replace = "posargs", extend = true }]]
+
 [tool.mypy]
+python_version = "3.10"
 ignore_missing_imports = true
 explicit_package_bases = true
-mypy_path = ["src", "src/vercel-oidc", "src/vercel-headers"]
+mypy_path = [
+    "src",
+    "src/vercel-oidc",
+    "src/vercel-headers",
+    "src/vercel-queue",
+    "tests/stubs",
+]
 
 [[tool.mypy.overrides]]
 module = [
@@ -60,6 +85,10 @@ no_implicit_optional = true
 no_implicit_reexport = true
 strict_equality = true
 warn_return_any = true
+
+[tool.ty.environment]
+python-version = "3.10"
+root = ["./src"]
 
 [tool.ruff]
 line-length = 100
