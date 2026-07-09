@@ -19,6 +19,10 @@ ASYNC_CLIENT_LIMITS = httpx.Limits(max_keepalive_connections=0)
 DEFAULT_TIMEOUT = 30.0
 
 
+class RuntimeCacheError(RuntimeError):
+    """Raised when strict Runtime Cache operations fail."""
+
+
 class BuildCache(Cache):
     def __init__(
         self,
@@ -26,10 +30,12 @@ class BuildCache(Cache):
         endpoint: str,
         headers: Mapping[str, str],
         on_error: Callable[[Exception], None] | None = None,
+        strict: bool = False,
     ) -> None:
         self._endpoint = endpoint.rstrip("/") + "/"
         self._headers = dict(headers)
         self._on_error = on_error
+        self._strict = strict
         self._client = httpx.Client(timeout=httpx.Timeout(30.0))
 
     def get(self, key: str):
@@ -49,10 +55,12 @@ class BuildCache(Cache):
                 # Track cache hit
                 track("cache_get", hit=True)
                 return r.json()
-            raise RuntimeError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
+            raise RuntimeCacheError(f"Failed to get cache: {r.status_code} {r.reason_phrase}")
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
+            if self._strict:
+                raise
             return None
 
     def set(
@@ -77,7 +85,7 @@ class BuildCache(Cache):
                 content=json.dumps(value),
             )
             if r.status_code != 200:
-                raise RuntimeError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
+                raise RuntimeCacheError(f"Failed to set cache: {r.status_code} {r.reason_phrase}")
             # Track telemetry
             track(
                 "cache_set",
@@ -87,15 +95,21 @@ class BuildCache(Cache):
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
+            if self._strict:
+                raise
 
     def delete(self, key: str) -> None:
         try:
             r = self._client.delete(self._endpoint + key, headers=self._headers)
             if r.status_code != 200:
-                raise RuntimeError(f"Failed to delete cache: {r.status_code} {r.reason_phrase}")
+                raise RuntimeCacheError(
+                    f"Failed to delete cache: {r.status_code} {r.reason_phrase}"
+                )
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
+            if self._strict:
+                raise
 
     def expire_tag(self, tag: str | Sequence[str]) -> None:
         try:
@@ -106,10 +120,14 @@ class BuildCache(Cache):
                 headers=self._headers,
             )
             if r.status_code != 200:
-                raise RuntimeError(f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}")
+                raise RuntimeCacheError(
+                    f"Failed to revalidate tag: {r.status_code} {r.reason_phrase}"
+                )
         except Exception as e:
             if self._on_error:
                 self._on_error(e)
+            if self._strict:
+                raise
 
     def __contains__(self, key: str) -> bool:
         try:

@@ -23,26 +23,29 @@ class RuntimeCache(Cache):
         key_hash_function: Callable[[str], str] | None = None,
         namespace: str | None = None,
         namespace_separator: str | None = None,
+        strict: bool = False,
     ) -> None:
         # Transform keys to match get_cache behavior
         self._make_key = create_key_transformer(key_hash_function, namespace, namespace_separator)
+        self._strict = strict
 
     def get(self, key: str):
-        return resolve_cache(sync=True).get(self._make_key(key))
+        return resolve_cache(sync=True, strict=self._strict).get(self._make_key(key))
 
     def set(self, key: str, value: object, options: dict | None = None):
-        return resolve_cache(sync=True).set(self._make_key(key), value, options)
+        cache = resolve_cache(sync=True, strict=self._strict)
+        return cache.set(self._make_key(key), value, options)
 
     def delete(self, key: str):
-        return resolve_cache(sync=True).delete(self._make_key(key))
+        return resolve_cache(sync=True, strict=self._strict).delete(self._make_key(key))
 
     def expire_tag(self, tag: str | Sequence[str]):
         # Tag invalidation is not namespaced/hashed by design
-        return resolve_cache(sync=True).expire_tag(tag)
+        return resolve_cache(sync=True, strict=self._strict).expire_tag(tag)
 
     def __contains__(self, key: str) -> bool:
         # Delegate membership to the underlying cache implementation with transformed key
-        return self._make_key(key) in resolve_cache(sync=True)
+        return self._make_key(key) in resolve_cache(sync=True, strict=self._strict)
 
     def __getitem__(self, key: str):
         if key in self:
@@ -116,7 +119,11 @@ def get_cache(
     )
 
 
-def _get_cache_implementation(debug: bool = False, sync: bool = True) -> Cache | AsyncCache:
+def _get_cache_implementation(
+    debug: bool = False,
+    sync: bool = True,
+    strict: bool = False,
+) -> Cache | AsyncCache:
     global _in_memory_cache_instance, _async_in_memory_cache_instance
     global _build_cache_instance, _async_build_cache_instance, _warned_cache_unavailable
 
@@ -163,7 +170,9 @@ def _get_cache_implementation(debug: bool = False, sync: bool = True) -> Cache |
                 headers=parsed_headers,
                 on_error=lambda e: print(e),
             )
-        return _build_cache_instance
+        if not strict:
+            return _build_cache_instance
+        return BuildCache(endpoint=endpoint, headers=parsed_headers, strict=True)
     else:
         if _async_build_cache_instance is None:
             _async_build_cache_instance = AsyncBuildCache(
@@ -175,14 +184,14 @@ def _get_cache_implementation(debug: bool = False, sync: bool = True) -> Cache |
 
 
 @overload
-def resolve_cache(sync: Literal[True] = ...) -> Cache: ...
+def resolve_cache(sync: Literal[True] = ..., strict: bool = ...) -> Cache: ...
 
 
 @overload
-def resolve_cache(sync: Literal[False]) -> AsyncCache: ...
+def resolve_cache(sync: Literal[False], strict: bool = ...) -> AsyncCache: ...
 
 
-def resolve_cache(sync: bool = True) -> Cache | AsyncCache:
+def resolve_cache(sync: bool = True, strict: bool = False) -> Cache | AsyncCache:
     ctx = get_context()
     if sync:
         cache = getattr(ctx, "cache", None)
@@ -192,4 +201,4 @@ def resolve_cache(sync: bool = True) -> Cache | AsyncCache:
         cache = getattr(ctx, "async_cache", None)
         if cache is not None:
             return cast(AsyncCache, cache)
-    return _get_cache_implementation(os.getenv("SUSPENSE_CACHE_DEBUG") == "true", sync)
+    return _get_cache_implementation(os.getenv("SUSPENSE_CACHE_DEBUG") == "true", sync, strict)
