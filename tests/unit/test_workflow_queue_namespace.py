@@ -81,7 +81,7 @@ def _run_created_contexts(world: _RecordingWorld) -> list[dict[str, Any] | None]
     ]
 
 
-def test_queue_names_default_to_legacy_prefixes() -> None:
+def test_queue_names_default_to_unnamespaced_prefixes() -> None:
     assert w.get_queue_topic_prefix("workflow") == "__wkf_workflow_"
     assert w.get_queue_topic_prefix("step") == "__wkf_step_"
     assert w.get_queue_name("workflow", "example") == "__wkf_workflow_example"
@@ -169,7 +169,7 @@ async def test_start_uses_registry_namespace_and_persists_it() -> None:
     assert _run_created_contexts(world) == [{"queueNamespace": "python"}]
 
 
-async def test_start_without_namespace_uses_legacy_topic() -> None:
+async def test_start_without_namespace_uses_unnamespaced_topic() -> None:
     world = _RecordingWorld()
     _set_world(world)
     registry = core.Workflows(as_vercel_job=False)
@@ -226,7 +226,7 @@ async def test_resume_hook_uses_stored_namespace() -> None:
     assert world.queued[0][0] == "__python_wkf_workflow_workflow//tests.example"
 
 
-async def test_resume_legacy_run_uses_default_namespace() -> None:
+async def test_resume_run_without_namespace_uses_unnamespaced_topic() -> None:
     world = _RecordingWorld(
         run=SimpleNamespace(
             workflow_name="workflow//tests.example",
