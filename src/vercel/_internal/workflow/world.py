@@ -2,6 +2,7 @@ import abc
 import dataclasses
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from typing import (
@@ -25,9 +26,40 @@ import pydantic
 from vercel._internal.polyfills import Self
 
 T = TypeVar("T")
-QueuePrefix: TypeAlias = Literal["__wkf_step_", "__wkf_workflow_"]
+QueueKind: TypeAlias = Literal["workflow", "step"]
+QueuePrefix: TypeAlias = str
 # OpenTelemetry trace context for distributed tracing
 TraceCarrier: TypeAlias = dict[str, str]
+
+_QUEUE_NAMESPACE_PATTERN = re.compile(r"^[a-z][a-z0-9]*$")
+
+
+def validate_queue_namespace(namespace: str | None) -> None:
+    """Validate an optional workflow queue namespace."""
+    if namespace is not None and not _QUEUE_NAMESPACE_PATTERN.fullmatch(namespace):
+        raise ValueError(
+            f'Invalid queue namespace "{namespace}": must be lowercase alphanumeric, '
+            "starting with a letter"
+        )
+
+
+def get_queue_topic_prefix(kind: QueueKind, namespace: str | None = None) -> QueuePrefix:
+    """Build the workflow or step queue prefix for an optional namespace."""
+    if kind not in ("workflow", "step"):
+        raise ValueError(f"Invalid queue kind: {kind}")
+    validate_queue_namespace(namespace)
+    if namespace is not None:
+        return f"__{namespace}_wkf_{kind}_"
+    return f"__wkf_{kind}_"
+
+
+def get_queue_name(
+    kind: QueueKind,
+    identifier: str,
+    namespace: str | None = None,
+) -> str:
+    """Build a queue name for an optional namespace."""
+    return f"{get_queue_topic_prefix(kind, namespace)}{identifier}"
 
 
 class BaseModel(pydantic.BaseModel):
