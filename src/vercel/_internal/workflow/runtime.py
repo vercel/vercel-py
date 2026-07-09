@@ -1122,6 +1122,5 @@ async def resume_hook(token_or_hook: str | w.Hook, payload_json: str) -> w.Hook:
     await world.queue(
         w.get_queue_name("workflow", run.workflow_name, namespace),
         w.WorkflowInvokePayload(runId=hook.run_id),
-        deployment_id=run.deployment_id,
     )
     return hook

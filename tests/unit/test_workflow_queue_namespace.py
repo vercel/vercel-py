@@ -215,7 +215,7 @@ async def test_multiple_registries_start_on_their_own_topics() -> None:
     ]
 
 
-async def test_resume_hook_uses_stored_namespace_and_original_deployment() -> None:
+async def test_resume_hook_uses_stored_namespace() -> None:
     world = _RecordingWorld(
         run=SimpleNamespace(
             workflow_name="workflow//tests.example",
@@ -229,7 +229,6 @@ async def test_resume_hook_uses_stored_namespace_and_original_deployment() -> No
     await runtime.resume_hook(hook, '{"ok": true}')
 
     assert world.queued[0][0] == "__python_wkf_workflow_workflow//tests.example"
-    assert world.queued[0][2]["deployment_id"] == "dpl_original"
 
 
 async def test_resume_legacy_run_uses_default_namespace() -> None:
@@ -246,4 +245,3 @@ async def test_resume_legacy_run_uses_default_namespace() -> None:
     await runtime.resume_hook(hook, '{"ok": true}')
 
     assert world.queued[0][0] == "__wkf_workflow_workflow//tests.example"
-    assert world.queued[0][2]["deployment_id"] == "dpl_legacy"

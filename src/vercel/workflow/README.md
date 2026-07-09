@@ -39,9 +39,6 @@ messages on dedicated queue topics:
 workflows = Workflows("billing")
 ```
 
-Namespaces must be lowercase alphanumeric and start with a letter. Omit the
-namespace to keep using the default `__wkf_*` topics.
-
 ## Hooks
 
 ```python
