@@ -63,7 +63,7 @@ class FakeWorld(w.World):
     ) -> w.HTTPHandler:
         self.prefixes.append(queue_name_prefix)
 
-        async def http_handler(_request: w.HTTPRequest) -> w.HTTPResponse:
+        async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
             return w.HTTPResponse(status=200, body=b"", headers={})
 
         return http_handler
