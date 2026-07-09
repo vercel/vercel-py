@@ -1,20 +1,33 @@
 from __future__ import annotations
 
+import sys
+import threading
 import urllib.parse
-from collections.abc import Mapping
-from contextvars import ContextVar
-from typing import Protocol, TypedDict
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import Context, ContextVar
+from dataclasses import dataclass
+from functools import wraps
+from types import MappingProxyType
+from typing import Any, ParamSpec, Protocol, TypedDict, TypeVar
 
 __all__ = [
     "ip_address",
     "geolocation",
     "Geo",
+    "HeadersContext",
     "set_headers",
     "get_headers",
+    "get_headers_context",
+    "context_aware_thread",
+    "headers_from_asgi_scope",
+    "headers_from_wsgi_environ",
 ]
 
 
 _cv_headers: ContextVar[Mapping[str, str] | None] = ContextVar("vercel_headers", default=None)
+P = ParamSpec("P")
+R = TypeVar("R")
 
 # Header constants (same as TS names)
 CITY_HEADER_NAME = "x-vercel-ip-city"
@@ -35,6 +48,89 @@ def set_headers(headers: Mapping[str, str] | None) -> None:
 
 def get_headers() -> Mapping[str, str] | None:
     return _cv_headers.get()
+
+
+@dataclass(frozen=True)
+class HeadersContext:
+    """Immutable snapshot of the current Vercel request headers."""
+
+    headers: Mapping[str, str] | None
+
+    @contextmanager
+    def use(self) -> Iterator[None]:
+        token = _cv_headers.set(self.headers)
+        try:
+            yield
+        finally:
+            _cv_headers.reset(token)
+
+    def run(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
+        with self.use():
+            return func(*args, **kwargs)
+
+
+def get_headers_context() -> HeadersContext:
+    headers = _cv_headers.get()
+    if headers is None:
+        return HeadersContext(None)
+    return HeadersContext(MappingProxyType(dict(headers)))
+
+
+if sys.version_info >= (3, 14):
+
+    def context_aware_thread(
+        group: None = None,
+        target: Callable[..., object] | None = None,
+        name: str | None = None,
+        args: Iterable[Any] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        *,
+        daemon: bool | None = None,
+        context: Context | None = None,
+    ) -> threading.Thread:
+        headers_context = get_headers_context()
+        if target is not None:
+            target = _wrap_thread_target(headers_context, target)
+        return threading.Thread(
+            group=group,
+            target=target,
+            name=name,
+            args=tuple(args),
+            kwargs=None if kwargs is None else dict(kwargs),
+            daemon=daemon,
+            context=context,
+        )
+
+else:
+
+    def context_aware_thread(
+        group: None = None,
+        target: Callable[..., object] | None = None,
+        name: str | None = None,
+        args: Iterable[Any] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        *,
+        daemon: bool | None = None,
+    ) -> threading.Thread:
+        headers_context = get_headers_context()
+        if target is not None:
+            target = _wrap_thread_target(headers_context, target)
+        return threading.Thread(
+            group=group,
+            target=target,
+            name=name,
+            args=tuple(args),
+            kwargs=None if kwargs is None else dict(kwargs),
+            daemon=daemon,
+        )
+
+
+def _wrap_thread_target(context: HeadersContext, target: Callable[P, R]) -> Callable[P, R]:
+    @wraps(target)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        return context.run(target, *args, **kwargs)
+
+    return wrapped
 
 
 class _HeadersLike(Protocol):
@@ -69,6 +165,28 @@ def _get_flag(country_code: str | None) -> str | None:
     if not country_code or len(country_code) != 2 or not country_code.isalpha():
         return None
     return "".join(chr(EMOJI_FLAG_UNICODE_STARTING_POSITION + ord(c)) for c in country_code.upper())
+
+
+def headers_from_asgi_scope(scope: Mapping[str, Any]) -> dict[str, str]:
+    """Return request headers decoded from an ASGI scope."""
+    return {
+        name.decode("latin-1"): value.decode("latin-1") for name, value in scope.get("headers", [])
+    }
+
+
+def headers_from_wsgi_environ(environ: Mapping[str, Any]) -> dict[str, str]:
+    """Return request headers decoded from a WSGI environ mapping."""
+    headers: dict[str, str] = {}
+    if "CONTENT_TYPE" in environ:
+        headers["Content-Type"] = str(environ["CONTENT_TYPE"])
+    if "CONTENT_LENGTH" in environ:
+        headers["Content-Length"] = str(environ["CONTENT_LENGTH"])
+    for name, value in environ.items():
+        if not name.startswith("HTTP_"):
+            continue
+        header_name = name[5:].replace("_", "-").title()
+        headers[header_name] = str(value)
+    return headers
 
 
 def ip_address(input: _RequestLike | _HeadersLike) -> str | None:
