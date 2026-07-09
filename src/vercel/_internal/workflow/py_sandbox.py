@@ -42,6 +42,12 @@ _sandbox_sys_modules: contextvars.ContextVar[dict[str, types.ModuleType] | None]
     contextvars.ContextVar("_sandbox_sys_modules", default=None)
 )
 
+# Extra passthrough modules for the active sandbox, from
+# SandboxPolicy.passthrough_modules.
+_policy_passthroughs: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "_policy_passthroughs", default=frozenset()
+)
+
 
 class SandboxRestrictionError(RuntimeError):
     """Raised when workflow code calls a non-deterministic function."""
@@ -573,9 +579,10 @@ class _SandboxFinder(MetaPathFinder):
         self._blocked = blocked or set()
 
     def _is_passthrough(self, name: str) -> bool:
-        for prefix in self._passthrough:
-            if name == prefix or name.startswith(prefix + "."):
-                return True
+        for prefixes in (self._passthrough, _policy_passthroughs.get()):
+            for prefix in prefixes:
+                if name == prefix or name.startswith(prefix + "."):
+                    return True
         return False
 
     def find_spec(
@@ -921,9 +928,17 @@ class SandboxPolicy:
     A handler that raises is logged and skipped, and never masks the
     workflow's own exception.  Handlers must be thread-safe: other runs
     may be executing concurrently.
+
+    ``passthrough_modules`` are extra modules — each name covering its
+    submodules too — served from the host instead of re-imported per
+    run, in addition to the built-in passthrough set.  Use for large or
+    stateful modules that are safe to share; nothing checks them for
+    nondeterminism, and their state is shared with the host and every
+    concurrent run.
     """
 
     cleanups: tuple[CleanupHandler, ...] = ()
+    passthrough_modules: frozenset[str] = frozenset()
 
 
 # TODO: we probably want to support some form of sandbox caching
@@ -946,9 +961,11 @@ def workflow_sandbox(*, random_seed: str, policy: SandboxPolicy | None = None) -
     table_token = _sandbox_sys_modules.set(table)
     sandbox_token = _in_sandbox.set(True)
     random_token = _sandbox_random.set(random.Random(random_seed))
+    passthrough_token = _policy_passthroughs.set(frozenset(policy.passthrough_modules))
     try:
         yield
     finally:
+        _policy_passthroughs.reset(passthrough_token)
         _sandbox_random.reset(random_token)
         _in_sandbox.reset(sandbox_token)
         _sandbox_sys_modules.reset(table_token)
