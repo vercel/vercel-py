@@ -63,9 +63,11 @@ ignore_missing_imports = true
 explicit_package_bases = true
 mypy_path = [
     "src",
-    "src/vercel-oidc",
+    "src/vercel-cache",
     "src/vercel-headers",
     "src/vercel-queue",
+    "src/vercel-oidc",
+    "src/vercel-internal-telemetry",
     "tests/stubs",
 ]
 

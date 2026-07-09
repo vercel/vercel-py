@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-cache"
+dynamic = ["version"]
+description = "Runtime cache helpers for Vercel Python applications"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "httpx>=0.27.0,<1",
+    "vercel-headers>=0.6.0",
+    "vercel-internal-telemetry>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-headers = { workspace = true }
+vercel-internal-telemetry = { workspace = true }
+
+[tool.hatch.version]
+path = "vercel/cache/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/cache/**/*.py",
+    "/vercel/cache/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/cache",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"

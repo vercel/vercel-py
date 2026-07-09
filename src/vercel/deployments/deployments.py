@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from vercel._internal.telemetry.tracker import track
+from vercel.internal.telemetry import track
 
 DEFAULT_API_BASE_URL = "https://api.vercel.com"
 DEFAULT_TIMEOUT = 60.0

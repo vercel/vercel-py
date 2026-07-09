@@ -1,10 +1,9 @@
 """Utilities for extracting credentials (user_id, team_id, project_id) from various sources."""
 
 import os
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    pass
+from vercel.oidc import decode_oidc_payload
+from vercel.oidc.utils import find_project_info
 
 
 def extract_credentials(
@@ -40,8 +39,6 @@ def extract_credentials(
     # Try to extract from OIDC token if available
     if token:
         try:
-            from vercel.oidc.token import decode_oidc_payload
-
             payload = decode_oidc_payload(token)
             if not resolved_project_id:
                 resolved_project_id = payload.get("project_id")
@@ -55,10 +52,7 @@ def extract_credentials(
     # Try to extract from .vercel/project.json for local dev
     if not resolved_project_id or not resolved_team_id:
         try:
-            # Import lazily to avoid hard dependency in all environments
-            from vercel.oidc.utils import find_project_info as _find_project_info  # type: ignore
-
-            project_info = _find_project_info()
+            project_info = find_project_info()
             if not resolved_project_id and project_info.get("projectId"):
                 resolved_project_id = project_info["projectId"]
             if not resolved_team_id and project_info.get("teamId"):
