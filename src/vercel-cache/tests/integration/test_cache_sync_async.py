@@ -4,7 +4,81 @@ Tests RuntimeCache and AsyncRuntimeCache using the in-memory fallback
 when cache environment variables are not set.
 """
 
+import httpx
 import pytest
+from respx import MockRouter
+
+
+class TestBuildCacheStrictErrors:
+    def test_strict_set_raises_for_non_200(self, respx_mock: MockRouter) -> None:
+        from vercel.cache.cache_build import BuildCache, RuntimeCacheError
+
+        route = respx_mock.route(method="POST", url="https://cache.test/key").mock(
+            return_value=httpx.Response(500)
+        )
+        cache = BuildCache(endpoint="https://cache.test", headers={}, strict=True)
+
+        with pytest.raises(RuntimeCacheError, match="Failed to set cache: 500"):
+            cache.set("key", {"value": "payload"})
+        assert route.called
+
+    def test_strict_delete_raises_for_non_200(self, respx_mock: MockRouter) -> None:
+        from vercel.cache.cache_build import BuildCache, RuntimeCacheError
+
+        route = respx_mock.route(method="DELETE", url="https://cache.test/key").mock(
+            return_value=httpx.Response(500)
+        )
+        cache = BuildCache(endpoint="https://cache.test", headers={}, strict=True)
+
+        with pytest.raises(RuntimeCacheError, match="Failed to delete cache: 500"):
+            cache.delete("key")
+        assert route.called
+
+    def test_strict_get_404_returns_miss(self, respx_mock: MockRouter) -> None:
+        from vercel.cache.cache_build import BuildCache
+
+        route = respx_mock.route(method="GET", url="https://cache.test/key").mock(
+            return_value=httpx.Response(404)
+        )
+        cache = BuildCache(endpoint="https://cache.test", headers={}, strict=True)
+
+        assert cache.get("key") is None
+        assert route.called
+
+    def test_strict_get_raises_for_5xx(self, respx_mock: MockRouter) -> None:
+        from vercel.cache.cache_build import BuildCache, RuntimeCacheError
+
+        route = respx_mock.route(method="GET", url="https://cache.test/key").mock(
+            return_value=httpx.Response(503)
+        )
+        cache = BuildCache(endpoint="https://cache.test", headers={}, strict=True)
+
+        with pytest.raises(RuntimeCacheError, match="Failed to get cache: 503"):
+            cache.get("key")
+        assert route.called
+
+
+class TestRuntimeCacheStrictErrors:
+    def test_strict_runtime_cache_set_raises_for_non_200(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        respx_mock: MockRouter,
+    ) -> None:
+        import vercel.cache.runtime_cache as runtime_cache
+        from vercel.cache import RuntimeCache, RuntimeCacheError
+
+        monkeypatch.setenv("RUNTIME_CACHE_ENDPOINT", "https://cache.test")
+        monkeypatch.setenv("RUNTIME_CACHE_HEADERS", "{}")
+        monkeypatch.setattr(runtime_cache, "_build_cache_instance", None)
+
+        route = respx_mock.route(method="POST", url="https://cache.test/key").mock(
+            return_value=httpx.Response(500)
+        )
+        cache = RuntimeCache(key_hash_function=lambda key: key, strict=True)
+
+        with pytest.raises(RuntimeCacheError, match="Failed to set cache: 500"):
+            cache.set("key", {"value": "payload"})
+        assert route.called
 
 
 class TestRuntimeCacheInMemory:
