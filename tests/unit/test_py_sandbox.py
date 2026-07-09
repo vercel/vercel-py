@@ -16,6 +16,13 @@ import sys
 import pytest
 
 from vercel._internal.workflow.py_sandbox import SandboxRestrictionError, workflow_sandbox
+from vercel.workflow.sandbox import (
+    ALL_CLEANUPS,
+    SandboxCleanupContext,
+    SandboxPolicy,
+)
+
+CLEANUP_ALL = SandboxPolicy(cleanups=ALL_CLEANUPS)
 
 SEED = "test-seed-42"
 
@@ -925,6 +932,68 @@ class TestModuleIsolation:
         # Outside the sandbox the finder returns None, so a normal import works.
         assert importlib.import_module("string") is sys.modules["string"]
 
+    def test_sandbox_classes_not_pinned_by_host_typing_caches(self):
+        """Regression: ``typing`` is passthrough, so subscripting a generic
+        with a sandbox-defined class (``List[C]`` — done implicitly by
+        pydantic when processing annotations) inserts a strong reference to
+        the class into host typing's lru_caches.  That pinned each run's
+        entire module graph until LRU eviction (~128 dead runs).  The
+        ``clear_typing_caches`` handler clears those caches on exit."""
+        import gc
+        import weakref
+
+        def make_ref(seed: str) -> weakref.ref:
+            with workflow_sandbox(random_seed=seed, policy=CLEANUP_ALL):
+                ns: dict = {"__builtins__": sys.modules["builtins"]}
+                exec(  # noqa: S102
+                    "import typing\n"
+                    "import weakref\n"
+                    "class C:\n"
+                    "    pass\n"
+                    "alias = typing.List[C]\n"
+                    "ref = weakref.ref(C)\n",
+                    ns,
+                )
+                return ns["ref"]
+
+        refs = [make_ref(f"seed-{i}") for i in range(3)]
+        gc.collect()
+        assert [r() for r in refs] == [None, None, None]
+
+    def test_sandbox_classes_not_pinned_by_pydantic_generics_cache(self):
+        """Regression: pydantic's ``_GENERIC_TYPES_CACHE`` is a
+        WeakValueDictionary whose keys strongly reference the parametrizing
+        classes.  The module-global binding of the parametrized model closes
+        a strong path from key to value through the cache, so entries never
+        self-evict and every run leaks its classes (and, through their
+        ``__globals__``, its module graph).  The
+        ``clear_pydantic_generics_cache`` handler clears it on exit."""
+        import gc
+        import weakref
+
+        code = (
+            "import typing\n"
+            "import weakref\n"
+            "import pydantic\n"
+            "T = typing.TypeVar('T')\n"
+            "class Param(pydantic.BaseModel):\n"
+            "    pass\n"
+            "class Gen(pydantic.BaseModel, typing.Generic[T]):\n"
+            "    x: typing.Optional[T] = None\n"
+            "alias = Gen[Param]\n"
+            "ref = weakref.ref(Param)\n"
+        )
+
+        def make_ref(seed: str) -> weakref.ref:
+            with workflow_sandbox(random_seed=seed, policy=CLEANUP_ALL):
+                ns: dict = {"__builtins__": sys.modules["builtins"]}
+                exec(code, ns)  # noqa: S102
+                return ns["ref"]
+
+        refs = [make_ref(f"seed-{i}") for i in range(3)]
+        gc.collect()
+        assert [r() for r in refs] == [None, None, None]
+
     @pytest.mark.parametrize("end_barrier", [True, False])
     @pytest.mark.parametrize("start_barrier", [True, False])
     def test_concurrent_thread_sandboxes_have_independent_module_tables(
@@ -991,6 +1060,86 @@ class TestModuleIsolation:
         # each holding exactly the single registration (no duplicate).
         assert results["a"] is not results["b"]
         assert results["a"] == results["b"] == {"step//regpkg.mod.work": 1}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  sandbox policy / teardown cleanups (vercel.workflow.sandbox)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestSandboxPolicy:
+    def test_cleanup_handler_gets_run_module_snapshot(self):
+        """Handlers run once on teardown and see the run's module table."""
+        calls: list[SandboxCleanupContext] = []
+        policy = SandboxPolicy(cleanups=(calls.append,))
+
+        with workflow_sandbox(random_seed=SEED, policy=policy):
+            import shlex  # noqa: F401
+
+            assert not calls  # not during the run
+        (context,) = calls
+        assert "shlex" in context.run_modules
+
+    def test_cleanup_handlers_run_when_body_raises(self):
+        calls: list[SandboxCleanupContext] = []
+        policy = SandboxPolicy(cleanups=(calls.append,))
+
+        with pytest.raises(ValueError, match="boom"):  # noqa: PT012
+            with workflow_sandbox(random_seed=SEED, policy=policy):
+                raise ValueError("boom")
+        assert len(calls) == 1
+
+    def test_raising_handler_is_isolated(self, caplog):
+        """A failing handler is logged; later handlers still run and the
+        sandbox exits cleanly."""
+
+        def bad(context: SandboxCleanupContext) -> None:
+            raise RuntimeError("handler broke")
+
+        calls: list[SandboxCleanupContext] = []
+        policy = SandboxPolicy(cleanups=(bad, calls.append))
+
+        with caplog.at_level("ERROR"):
+            with workflow_sandbox(random_seed=SEED, policy=policy):
+                pass
+        assert len(calls) == 1
+        assert any("cleanup handler" in r.message for r in caplog.records)
+
+    def test_no_cleanups_by_default(self):
+        """The default policy runs no handlers, so host typing caches pin
+        the run's classes — the pinning ``ALL_CLEANUPS`` opts out of."""
+        import gc
+        import weakref
+
+        from vercel._internal.workflow.py_sandbox import clear_typing_caches
+
+        with workflow_sandbox(random_seed=SEED):
+            ns: dict = {"__builtins__": sys.modules["builtins"]}
+            exec(  # noqa: S102
+                "import typing\nimport weakref\n"
+                "class C:\n    pass\n"
+                "alias = typing.List[C]\n"
+                "ref = weakref.ref(C)\n",
+                ns,
+            )
+            ref: weakref.ref = ns["ref"]
+        del ns
+        gc.collect()
+        try:
+            assert ref() is not None
+        finally:
+            # Don't leave the pinned run behind for other tests.
+            clear_typing_caches(SandboxCleanupContext(run_modules={}))
+        gc.collect()
+        assert ref() is None
+
+    def test_workflows_threads_policy_to_registry(self):
+        from vercel._internal.workflow import core
+
+        policy = SandboxPolicy(cleanups=())
+        registry = core.Workflows(as_vercel_job=False, sandbox_policy=policy)
+        assert registry._sandbox_policy is policy
+        assert core.Workflows(as_vercel_job=False)._sandbox_policy == SandboxPolicy()
 
 
 # ═══════════════════════════════════════════════════════════════

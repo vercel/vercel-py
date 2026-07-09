@@ -151,12 +151,21 @@ class BaseHook:
 
 
 class Workflows:
-    def __init__(self, *, namespace: str | None = None, as_vercel_job: bool = True):
+    def __init__(
+        self,
+        *,
+        as_vercel_job: bool = True,
+        namespace: str | None = None,
+        sandbox_policy: py_sandbox.SandboxPolicy | None = None,
+    ):
         validate_queue_namespace(namespace)
 
         self._namespace = namespace
         self._workflows: dict[str, Workflow] = {}
         self._steps: dict[str, Step] = {}
+        if sandbox_policy is None:
+            sandbox_policy = py_sandbox.SandboxPolicy()
+        self._sandbox_policy = sandbox_policy
         if as_vercel_job and not py_sandbox.in_sandbox():
             from . import runtime
 

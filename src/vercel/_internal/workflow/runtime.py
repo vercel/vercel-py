@@ -223,7 +223,9 @@ class WorkflowOrchestratorContext:
             raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
         args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
 
-        with workflow_sandbox(random_seed=workflow_run.run_id):
+        with workflow_sandbox(
+            random_seed=workflow_run.run_id, policy=self.registry._sandbox_policy
+        ):
             mod = importlib.import_module(wf.module)
 
             # Resolve the sandboxed Workflow by qualname from the
