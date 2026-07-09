@@ -151,7 +151,7 @@ class BaseHook:
 
 
 class Workflows:
-    def __init__(self, namespace: str | None = None, *, as_vercel_job: bool = True):
+    def __init__(self, *, namespace: str | None = None, as_vercel_job: bool = True):
         validate_queue_namespace(namespace)
 
         self._namespace = namespace

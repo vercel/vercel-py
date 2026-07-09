@@ -36,7 +36,7 @@ Pass a namespace to a workflow registry to isolate its workflow and step
 messages on dedicated queue topics:
 
 ```python
-workflows = Workflows("billing")
+workflows = Workflows(namespace="billing")
 ```
 
 ## Hooks

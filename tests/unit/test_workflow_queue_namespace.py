@@ -125,8 +125,13 @@ def test_invalid_queue_namespaces_are_rejected(namespace: str) -> None:
         core.Workflows(namespace=namespace, as_vercel_job=False)
 
 
-def test_workflow_namespace_accepts_positional_argument() -> None:
-    wf = Workflows("billing", as_vercel_job=False)
+def test_workflow_namespace_must_be_keyword_argument() -> None:
+    with pytest.raises(TypeError):
+        Workflows("billing", as_vercel_job=False)  # type: ignore[call-arg]
+
+
+def test_workflow_namespace_accepts_keyword_argument() -> None:
+    wf = Workflows(namespace="billing", as_vercel_job=False)
     assert wf.namespace == "billing"
 
 
@@ -134,8 +139,8 @@ def test_registries_subscribe_to_distinct_namespaced_topics() -> None:
     world = FakeWorld()
     w.set_world(world)
 
-    core.Workflows("python1")
-    core.Workflows("python2")
+    core.Workflows(namespace="python1")
+    core.Workflows(namespace="python2")
 
     assert world.prefixes == [
         "__python1_wkf_workflow_",
