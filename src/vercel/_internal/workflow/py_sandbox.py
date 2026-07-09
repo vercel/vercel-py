@@ -5,11 +5,13 @@ import contextvars
 import dataclasses
 import datetime as _dt
 import importlib
+import logging
 import os
 import random
 import sys
 import threading
 import types
+import typing
 import weakref
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
@@ -17,6 +19,9 @@ from importlib.abc import Loader, MetaPathFinder
 from importlib.machinery import ModuleSpec
 from importlib.util import spec_from_loader
 from typing import Any, NoReturn
+
+logger = logging.getLogger(__name__)
+
 
 # When True, proxy modules enforce restrictions.  When False (default),
 # attribute access on proxy modules falls through to the real module.
@@ -850,9 +855,80 @@ def _new_sandbox_table() -> dict[str, types.ModuleType]:
     return table
 
 
+@dataclasses.dataclass(frozen=True)
+class SandboxCleanupContext:
+    """Handed to each cleanup handler when a sandbox exits."""
+
+    run_modules: Mapping[str, types.ModuleType]
+    """Snapshot of the run's private module table at exit.
+
+    Values include host-shared (passthrough) modules, not just modules
+    imported freshly for the run.  Lets a handler evict host-cache
+    entries that reference the run's objects instead of clearing a
+    whole cache.
+    """
+
+
+CleanupHandler = Callable[[SandboxCleanupContext], None]
+
+
+def clear_typing_caches(context: SandboxCleanupContext) -> None:
+    """Clear ``typing``'s module-level lru_caches.
+
+    ``typing`` is passthrough, and subscriptions like ``List[X]`` are
+    memoized in its module-level lru_caches.  When workflow code (or
+    pydantic, processing annotations) subscripts a generic with a
+    sandbox-defined class, the cache pins that class — and through its
+    functions' ``__globals__``, the run's entire module graph — until LRU
+    eviction, accumulating up to ~128 dead runs.  ``typing._cleanups``
+    holds the ``cache_clear`` functions for those caches; it is private
+    but long-stable (CPython's own tests rely on it).
+    """
+    for cleanup in getattr(typing, "_cleanups", ()):
+        cleanup()
+
+
+def clear_pydantic_generics_cache(context: SandboxCleanupContext) -> None:
+    """Clear pydantic's generic-parametrization cache.
+
+    The cache is a ``WeakValueDictionary``, but its keys strongly
+    reference the parametrizing classes.  When the parametrized model is
+    reachable from those classes' module globals (the typical case:
+    ``Alias = Gen[Param]``), the key → class → ``__globals__`` → value
+    path keeps the value alive through the cache itself, so entries
+    never self-evict — unbounded growth per run.
+    """
+    generics = _real_sys_modules.get("pydantic._internal._generics")
+    if generics is not None:
+        cache = getattr(generics, "_GENERIC_TYPES_CACHE", None)
+        if cache is not None:
+            cache.clear()
+
+
+ALL_CLEANUPS: tuple[CleanupHandler, ...] = (
+    clear_typing_caches,
+    clear_pydantic_generics_cache,
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class SandboxPolicy:
+    """Configuration for the workflow sandbox, passed to ``Workflows``.
+
+    ``cleanups`` are run on the host, in order, after every sandbox
+    teardown; they exist to purge host-shared caches that would
+    otherwise pin the run's module graph (see :data:`ALL_CLEANUPS`).
+    A handler that raises is logged and skipped, and never masks the
+    workflow's own exception.  Handlers must be thread-safe: other runs
+    may be executing concurrently.
+    """
+
+    cleanups: tuple[CleanupHandler, ...] = ()
+
+
 # TODO: we probably want to support some form of sandbox caching
 @contextmanager
-def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
+def workflow_sandbox(*, random_seed: str, policy: SandboxPolicy | None = None) -> Iterator[None]:
     """Activate the workflow sandbox for the current context.
 
     Gives this context its own private ``sys.modules`` table, marks it as
@@ -862,9 +938,12 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
     """
     if not isinstance(random_seed, str):
         raise TypeError("random_seed must be a str")
+    if policy is None:
+        policy = SandboxPolicy()
 
     _ensure_installed()
-    table_token = _sandbox_sys_modules.set(_new_sandbox_table())
+    table = _new_sandbox_table()
+    table_token = _sandbox_sys_modules.set(table)
     sandbox_token = _in_sandbox.set(True)
     random_token = _sandbox_random.set(random.Random(random_seed))
     try:
@@ -873,6 +952,12 @@ def workflow_sandbox(*, random_seed: str) -> Iterator[None]:
         _sandbox_random.reset(random_token)
         _in_sandbox.reset(sandbox_token)
         _sandbox_sys_modules.reset(table_token)
+        context = SandboxCleanupContext(run_modules=dict(table))
+        for handler in policy.cleanups:
+            try:
+                handler(context)
+            except Exception:
+                logger.exception("sandbox cleanup handler %r failed", handler)
 
 
 def in_sandbox() -> bool:
