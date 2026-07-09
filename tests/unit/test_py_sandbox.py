@@ -896,6 +896,45 @@ class TestPassthroughModules:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  SandboxPolicy.passthrough_modules
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestPolicyPassthroughModules:
+    """SandboxPolicy.passthrough_modules extends the built-in passthrough set."""
+
+    def test_extra_module_shared_from_host(self):
+        import shlex as host_shlex
+
+        policy = SandboxPolicy(passthrough_modules=frozenset({"shlex"}))
+        with workflow_sandbox(random_seed=SEED, policy=policy):
+            import shlex
+
+            assert shlex is host_shlex
+
+    def test_covers_submodules(self):
+        import urllib.parse as host_parse
+
+        policy = SandboxPolicy(passthrough_modules=frozenset({"urllib"}))
+        with workflow_sandbox(random_seed=SEED, policy=policy):
+            import urllib.parse
+
+            assert urllib.parse is host_parse
+
+    def test_scoped_to_policy(self):
+        import shlex as host_shlex
+
+        policy = SandboxPolicy(passthrough_modules=frozenset({"shlex"}))
+        with workflow_sandbox(random_seed=SEED, policy=policy):
+            import shlex as inside_with_policy
+        with workflow_sandbox(random_seed=SEED):
+            import shlex as inside_plain
+
+        assert inside_with_policy is host_shlex
+        assert inside_plain is not host_shlex
+
+
+# ═══════════════════════════════════════════════════════════════
 #  module isolation
 # ═══════════════════════════════════════════════════════════════
 
