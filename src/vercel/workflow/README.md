@@ -30,6 +30,18 @@ async def main() -> None:
 steps that can be called only from inside a workflow. `sleep()` creates a
 durable wait in a workflow run.
 
+## Queue namespaces
+
+Pass a namespace to a workflow registry to isolate its workflow and step
+messages on dedicated queue topics:
+
+```python
+workflows = Workflows("billing")
+```
+
+Namespaces must be lowercase alphanumeric and start with a letter. Omit the
+namespace to keep using the default `__wkf_*` topics.
+
 ## Hooks
 
 ```python
