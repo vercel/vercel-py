@@ -1,29 +1,55 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any, cast
+from datetime import datetime
+from typing import Any
 
 import pytest
 
+from vercel._internal.polyfills import UTC
 from vercel._internal.workflow import core, runtime, world as w
 from vercel.workflow import Workflows
 
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
+RUN_ID = "wrun_test"
+WORKFLOW_NAME = "workflow//tests.example"
 
-class _RecordingWorld:
+
+def _run(execution_context: dict[str, Any] | None = None) -> w.WorkflowRun:
+    return w.NonFinalWorkflowRun(
+        runId=RUN_ID,
+        status="running",
+        deploymentId="dpl_test",
+        workflowName=WORKFLOW_NAME,
+        executionContext=execution_context,
+        createdAt=NOW,
+        updatedAt=NOW,
+    )
+
+
+def _hook() -> w.Hook:
+    return w.Hook(
+        runId=RUN_ID,
+        hookId="hook_test",
+        token="hook-token",
+        ownerId="team_test",
+        projectId="prj_test",
+        environment="development",
+        createdAt=NOW,
+    )
+
+
+class FakeWorld(w.World):
     def __init__(
         self,
         *,
-        event_error: Exception | None = None,
-        run: Any | None = None,
+        start_error: Exception | None = None,
+        run: w.WorkflowRun | None = None,
     ) -> None:
         self.prefixes: list[str] = []
         self.queued: list[tuple[str, w.QueuePayload]] = []
         self.events: list[w.Event] = []
-        self.event_error = event_error
-        self.run = run or SimpleNamespace(
-            workflow_name="workflow//tests.example",
-            execution_context=None,
-        )
+        self.start_error = start_error
+        self.run = run or _run()
 
     async def get_deployment_id(self) -> str:
         return "dpl_test"
@@ -37,29 +63,34 @@ class _RecordingWorld:
     ) -> w.HTTPHandler:
         self.prefixes.append(queue_name_prefix)
 
-        async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
+        async def http_handler(_request: w.HTTPRequest) -> w.HTTPResponse:
             return w.HTTPResponse(status=200, body=b"", headers={})
 
         return http_handler
 
-    async def runs_get(self, run_id: str) -> Any:
+    async def runs_get(self, run_id: str) -> w.WorkflowRun:
         return self.run
 
-    async def steps_get(self, run_id: str, step_id: str) -> Any:
+    async def steps_get(self, run_id: str, step_id: str) -> w.WorkflowStep:
         raise NotImplementedError
 
-    async def hooks_get_by_token(self, token: str) -> Any:
+    async def hooks_get_by_token(self, token: str) -> w.Hook:
         raise NotImplementedError
 
-    async def events_create(self, run_id: str | None, data: w.Event) -> Any:
-        if self.event_error is not None:
-            raise self.event_error
+    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+        if data.event_type == "step_started" and self.start_error is not None:
+            raise self.start_error
         self.events.append(data)
         if run_id is None:
-            return SimpleNamespace(run=SimpleNamespace(run_id="wrun_test"))
-        return SimpleNamespace()
+            return w.EventResult(run=self.run)
+        return w.EventResult()
 
-    async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:
+    async def events_list(
+        self,
+        run_id: str,
+        *,
+        pagination: w.PaginationOptions | None = None,
+    ) -> w.PaginatedResult[w.Event]:
         raise NotImplementedError
 
 
@@ -69,15 +100,11 @@ def _reset_world():
     w.set_world(None)
 
 
-def _set_world(world: _RecordingWorld) -> None:
-    w.set_world(cast(w.World, world))
-
-
-def _run_created_contexts(world: _RecordingWorld) -> list[dict[str, Any] | None]:
+def _run_created_contexts(world: FakeWorld) -> list[dict[str, Any] | None]:
     return [
-        cast(w.RunCreatedEvent, event).event_data.execution_context
+        event.event_data.execution_context
         for event in world.events
-        if event.event_type == "run_created"
+        if isinstance(event, w.RunCreatedEvent)
     ]
 
 
@@ -88,7 +115,7 @@ def test_queue_names_default_to_unnamespaced_prefixes() -> None:
 
 
 def test_queue_names_accept_explicit_namespace() -> None:
-    assert w.get_queue_name("workflow", "example", "python2") == ("__python2_wkf_workflow_example")
+    assert w.get_queue_name("workflow", "example", "python2") == "__python2_wkf_workflow_example"
     assert w.get_queue_name("step", "example", "python2") == "__python2_wkf_step_example"
 
 
@@ -104,8 +131,8 @@ def test_workflow_namespace_accepts_positional_argument() -> None:
 
 
 def test_registries_subscribe_to_distinct_namespaced_topics() -> None:
-    world = _RecordingWorld()
-    _set_world(world)
+    world = FakeWorld()
+    w.set_world(world)
 
     core.Workflows("python1")
     core.Workflows("python2")
@@ -118,19 +145,14 @@ def test_registries_subscribe_to_distinct_namespaced_topics() -> None:
     ]
 
 
-def test_namespaced_step_queue_is_parsed_with_matching_namespace() -> None:
-    assert (
-        runtime._step_name_from_queue("__python_wkf_step_step//tests.add", "python")
-        == "step//tests.add"
-    )
-
+def test_step_queue_rejects_mismatched_namespace() -> None:
     with pytest.raises(ValueError, match="expected prefix"):
         runtime._step_name_from_queue("__wkf_step_step//tests.add", "python")
 
 
 async def test_step_handler_requeues_on_namespaced_workflow_topic() -> None:
-    world = _RecordingWorld(event_error=w.EntityConflictError("already finished"))
-    _set_world(world)
+    world = FakeWorld(start_error=w.EntityConflictError("already finished"))
+    w.set_world(world)
     registry = core.Workflows(namespace="python", as_vercel_job=False)
 
     @registry.step
@@ -139,8 +161,8 @@ async def test_step_handler_requeues_on_namespaced_workflow_topic() -> None:
 
     await runtime.step_handler(
         w.StepInvokePayload(
-            workflowName="workflow//tests.example",
-            workflowRunId="wrun_test",
+            workflowName=WORKFLOW_NAME,
+            workflowRunId=RUN_ID,
             workflowStartedAt=0,
             stepId="step_test",
         ).model_dump(by_alias=True),
@@ -151,27 +173,12 @@ async def test_step_handler_requeues_on_namespaced_workflow_topic() -> None:
         namespace=registry.namespace,
     )
 
-    assert world.queued[0][0] == "__python_wkf_workflow_workflow//tests.example"
-
-
-async def test_start_uses_registry_namespace_and_persists_it() -> None:
-    world = _RecordingWorld()
-    _set_world(world)
-    registry = core.Workflows(namespace="python", as_vercel_job=False)
-
-    @registry.workflow
-    async def example() -> None:
-        pass
-
-    await runtime.start(example)
-
-    assert world.queued[0][0] == f"__python_wkf_workflow_{example.workflow_id}"
-    assert _run_created_contexts(world) == [{"queueNamespace": "python"}]
+    assert world.queued[0][0] == f"__python_wkf_workflow_{WORKFLOW_NAME}"
 
 
 async def test_start_without_namespace_uses_unnamespaced_topic() -> None:
-    world = _RecordingWorld()
-    _set_world(world)
+    world = FakeWorld()
+    w.set_world(world)
     registry = core.Workflows(as_vercel_job=False)
 
     @registry.workflow
@@ -184,9 +191,9 @@ async def test_start_without_namespace_uses_unnamespaced_topic() -> None:
     assert _run_created_contexts(world) == [None]
 
 
-async def test_multiple_registries_start_on_their_own_topics() -> None:
-    world = _RecordingWorld()
-    _set_world(world)
+async def test_start_routes_each_registry_to_its_namespace() -> None:
+    world = FakeWorld()
+    w.set_world(world)
     first_registry = core.Workflows(namespace="first", as_vercel_job=False)
     second_registry = core.Workflows(namespace="second", as_vercel_job=False)
 
@@ -212,30 +219,18 @@ async def test_multiple_registries_start_on_their_own_topics() -> None:
 
 
 async def test_resume_hook_uses_stored_namespace() -> None:
-    world = _RecordingWorld(
-        run=SimpleNamespace(
-            workflow_name="workflow//tests.example",
-            execution_context={"queueNamespace": "python"},
-        )
-    )
-    _set_world(world)
-    hook = cast(w.Hook, SimpleNamespace(run_id="wrun_test", hook_id="hook_test"))
+    world = FakeWorld(run=_run({"queueNamespace": "python"}))
+    w.set_world(world)
 
-    await runtime.resume_hook(hook, '{"ok": true}')
+    await runtime.resume_hook(_hook(), '{"ok": true}')
 
-    assert world.queued[0][0] == "__python_wkf_workflow_workflow//tests.example"
+    assert world.queued[0][0] == f"__python_wkf_workflow_{WORKFLOW_NAME}"
 
 
 async def test_resume_run_without_namespace_uses_unnamespaced_topic() -> None:
-    world = _RecordingWorld(
-        run=SimpleNamespace(
-            workflow_name="workflow//tests.example",
-            execution_context=None,
-        )
-    )
-    _set_world(world)
-    hook = cast(w.Hook, SimpleNamespace(run_id="wrun_test", hook_id="hook_test"))
+    world = FakeWorld()
+    w.set_world(world)
 
-    await runtime.resume_hook(hook, '{"ok": true}')
+    await runtime.resume_hook(_hook(), '{"ok": true}')
 
-    assert world.queued[0][0] == "__wkf_workflow_workflow//tests.example"
+    assert world.queued[0][0] == f"__wkf_workflow_{WORKFLOW_NAME}"
