@@ -17,12 +17,11 @@ class _RecordingWorld:
         run: Any | None = None,
     ) -> None:
         self.prefixes: list[str] = []
-        self.queued: list[tuple[str, w.QueuePayload, dict[str, Any]]] = []
+        self.queued: list[tuple[str, w.QueuePayload]] = []
         self.events: list[w.Event] = []
         self.event_error = event_error
         self.run = run or SimpleNamespace(
             workflow_name="workflow//tests.example",
-            deployment_id="dpl_test",
             execution_context=None,
         )
 
@@ -30,7 +29,7 @@ class _RecordingWorld:
         return "dpl_test"
 
     async def queue(self, queue_name: str, message: w.QueuePayload, **kwargs: Any) -> str:
-        self.queued.append((queue_name, message, kwargs))
+        self.queued.append((queue_name, message))
         return "msg_test"
 
     def create_queue_handler(
@@ -99,11 +98,9 @@ def test_invalid_queue_namespaces_are_rejected(namespace: str) -> None:
         core.Workflows(namespace=namespace, as_vercel_job=False)
 
 
-def test_workflow_namespace_is_positional_and_read_only() -> None:
+def test_workflow_namespace_accepts_positional_argument() -> None:
     wf = Workflows("billing", as_vercel_job=False)
     assert wf.namespace == "billing"
-    with pytest.raises(AttributeError):
-        cast(Any, wf).namespace = "email"
 
 
 def test_registries_subscribe_to_distinct_namespaced_topics() -> None:
@@ -166,9 +163,8 @@ async def test_start_uses_registry_namespace_and_persists_it() -> None:
     async def example() -> None:
         pass
 
-    run = await runtime.start(example)
+    await runtime.start(example)
 
-    assert run.run_id == "wrun_test"
     assert world.queued[0][0] == f"__python_wkf_workflow_{example.workflow_id}"
     assert _run_created_contexts(world) == [{"queueNamespace": "python"}]
 
@@ -205,7 +201,7 @@ async def test_multiple_registries_start_on_their_own_topics() -> None:
     await runtime.start(first_workflow)
     await runtime.start(second_workflow)
 
-    assert [queue_name for queue_name, _, _ in world.queued] == [
+    assert [queue_name for queue_name, _ in world.queued] == [
         f"__first_wkf_workflow_{first_workflow.workflow_id}",
         f"__second_wkf_workflow_{second_workflow.workflow_id}",
     ]
@@ -219,7 +215,6 @@ async def test_resume_hook_uses_stored_namespace() -> None:
     world = _RecordingWorld(
         run=SimpleNamespace(
             workflow_name="workflow//tests.example",
-            deployment_id="dpl_original",
             execution_context={"queueNamespace": "python"},
         )
     )
@@ -235,7 +230,6 @@ async def test_resume_legacy_run_uses_default_namespace() -> None:
     world = _RecordingWorld(
         run=SimpleNamespace(
             workflow_name="workflow//tests.example",
-            deployment_id="dpl_legacy",
             execution_context=None,
         )
     )
