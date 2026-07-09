@@ -126,8 +126,10 @@ def test_invalid_queue_namespaces_are_rejected(namespace: str) -> None:
 
 
 def test_workflow_namespace_must_be_keyword_argument() -> None:
+    workflow_factory: Any = Workflows
+
     with pytest.raises(TypeError):
-        Workflows("billing", as_vercel_job=False)  # type: ignore[call-arg]
+        workflow_factory("billing", as_vercel_job=False)
 
 
 def test_workflow_namespace_accepts_keyword_argument() -> None:
