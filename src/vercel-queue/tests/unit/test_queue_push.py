@@ -425,6 +425,7 @@ async def test_debug_logs_header_only_push_fetch(
 ) -> None:
     monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
     caplog.set_level(logging.INFO, logger="vercel.queue")
+    consumer_group = "api_Scelery__worker_Dpy"
     message_id = await eqs.client.send("emails", {"ok": True})
     assert message_id is not None
 
@@ -433,16 +434,18 @@ async def test_debug_logs_header_only_push_fetch(
         {
             CLOUD_EVENT_HEADER_TYPE: CLOUD_EVENT_TYPE_V2BETA,
             CLOUD_EVENT_HEADER_VQS_TOPIC: "emails",
-            CLOUD_EVENT_HEADER_VQS_CONSUMER_GROUP: "test-group",
+            CLOUD_EVENT_HEADER_VQS_CONSUMER_GROUP: consumer_group,
             CLOUD_EVENT_HEADER_VQS_MESSAGE_ID: message_id,
             CLOUD_EVENT_HEADER_VQS_REGION: "sfo1",
         },
     )
 
+    assert eqs.state.by_id[message_id].lease_deadline_by_consumer[consumer_group] is not None
+
     assert any(
         event["event"] == "push.header_only_fetch"
         and event["topic"] == "emails"
-        and event["consumer_group"] == "test-group"
+        and event["consumer_group"] == consumer_group
         for event in _queue_debug_events(caplog)
     )
 

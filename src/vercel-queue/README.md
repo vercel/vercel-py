@@ -576,17 +576,17 @@ All error types:
 
 ### Identifier Formats
 
-| Identifier     | Input                | Stored queue name                    |
-| -------------- | -------------------- | ------------------------------------ |
-| Topic name     | `[A-Za-z0-9_-]+`     | Same as input                        |
-| Consumer group | Any non-empty string | `sanitize_name(..., fallback=...)`   |
-| Message ID     | Opaque string        | `0-1`, `3-7K9mNpQrS`                 |
-| Receipt handle | Opaque string        | Used for ack and lease calls         |
+| Identifier     | Input                | Stored queue name            |
+| -------------- | -------------------- | ---------------------------- |
+| Topic name     | `[A-Za-z0-9_-]+`     | Same as input                |
+| Consumer group | Any non-empty string | `sanitize_name(...)`         |
+| Message ID     | Opaque string        | `0-1`, `3-7K9mNpQrS`         |
+| Receipt handle | Opaque string        | Used for ack and lease calls |
 
-Use `sanitize_name` to convert arbitrary names to queue-safe names. Plain
-strings are reversibly escaped, including underscores. Use `SanitizedName` only
-when passing a queue-safe name that has already been sanitized and must not be
-escaped again.
+Use `sanitize_name` to convert arbitrary non-empty names to `SanitizedName`
+markers. Plain strings are reversibly escaped, including underscores. Use
+`SanitizedName` only when passing a queue-safe name that has already been
+sanitized and must not be escaped again.
 
 ## Wildcard Topics
 

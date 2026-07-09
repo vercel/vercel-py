@@ -6,6 +6,8 @@ import concurrent.futures
 from collections.abc import Iterator, Mapping
 from types import TracebackType
 
+from vercel.headers import HeadersContext
+
 from .asynctools import iter_async_iterator, iter_coroutine
 from .client import BaseQueueClient, Delivery
 from .config import CURRENT_DEPLOYMENT, BaseUrl, DeploymentOption
@@ -22,6 +24,7 @@ from .lease import (
     processing_lease_seconds,
     retry_sync_follow_up,
 )
+from .log import debug_log_for_msg
 from .messages import sync_message_payload
 from .names import SanitizedName
 from .polling import run_poll_and_handle_sync, start_sync_polling_thread
@@ -176,23 +179,26 @@ class QueueClient(BaseQueueClient):
         if transport is None:
             metadata = parse_push_delivery_metadata(headers)
             transport = infer_subscriber_transport(metadata)
-        message = sync_message_payload(
-            iter_coroutine(
-                self._accept(
-                    raw_body,
-                    headers,
-                    transport=transport,
-                    lease_duration=processing_lease_duration,
+        # Delivery headers carry the auth context for follow-up queue calls,
+        # including lease renewals running outside this call stack.
+        with HeadersContext(headers).use():
+            message = sync_message_payload(
+                iter_coroutine(
+                    self._accept(
+                        raw_body,
+                        headers,
+                        transport=transport,
+                        lease_duration=processing_lease_duration,
+                    )
                 )
             )
-        )
-        lifecycle = _MessageLifecycle(
-            message,
-            client=self,
-            lease_duration=processing_lease_duration,
-        )
-        with lifecycle:
-            call_subscribers_sync(message)
+            lifecycle = _MessageLifecycle(
+                message,
+                client=self,
+                lease_duration=processing_lease_duration,
+            )
+            with lifecycle:
+                call_subscribers_sync(message)
 
     @overload
     def poll(
@@ -361,15 +367,22 @@ class _MessageLifecycle:
             finalize_payload_sync(self._message.payload)
 
         if isinstance(exc, Handoff):
+            debug_log_for_msg("message.handoff", self._message)
             return True
         if isinstance(exc, RetryAfter):
             self._renewal.extend(exc.timeout_seconds, self._client.extend_lease)
+            debug_log_for_msg(
+                "message.retry_after",
+                self._message,
+                retry_after_seconds=exc.timeout_seconds,
+            )
             return True
         if exc is None:
             retry_sync_follow_up(
                 lambda: self._client.acknowledge(self._message),
                 event_prefix="acknowledge",
             )
+            debug_log_for_msg("message.ack", self._message)
         return None
 
 

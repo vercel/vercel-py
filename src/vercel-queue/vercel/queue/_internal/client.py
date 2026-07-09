@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from types import TracebackType
 from urllib.parse import quote
 
+from vercel.headers import HeadersContext
+
 from .config import (
     CURRENT_DEPLOYMENT,
     BaseUrl,
@@ -62,7 +64,7 @@ from .lease import (
     retry_sync_follow_up,
     visibility_timeout_seconds,
 )
-from .log import debug_log
+from .log import debug_log, debug_log_for_msg
 from .messages import (
     message_from_part_async,
     message_with_region,
@@ -288,19 +290,18 @@ class BaseQueueClient:
         resolved_topic = validate_topic_name(topic)
         consumer = normalize_name(
             consumer_group,
-            fallback="consumer_group",
             field="consumer_group",
         )
         transport = transport or cast("Transport[T]", receive_transport_for_topic(topic))
         async with self._runtime.stream_post(
-            self._url(resolved_topic, "consumer", consumer),
+            self._url(resolved_topic, "consumer", str(consumer)),
             headers=headers,
         ) as response:
             if response.status_code == 204:
                 debug_log(
                     "receive.empty",
                     topic=resolved_topic,
-                    consumer_group=consumer,
+                    consumer_group=str(consumer),
                     status_code=204,
                 )
                 return
@@ -310,7 +311,7 @@ class BaseQueueClient:
             async for part_headers, body in parse_multipart_messages(response):
                 message = await message_from_part_async(
                     resolved_topic,
-                    consumer,
+                    str(consumer),
                     transport,
                     part_headers,
                     body,
@@ -339,7 +340,6 @@ class BaseQueueClient:
         topic = validate_topic_name(topic)
         consumer = normalize_name(
             consumer_group,
-            fallback="consumer_group",
             field="consumer_group",
         )
         transport = transport or cast("Transport[T]", receive_transport_for_topic(topic))
@@ -357,7 +357,7 @@ class BaseQueueClient:
             try:
                 message = await self._poll_by_id_once(
                     topic,
-                    consumer,
+                    str(consumer),
                     current_message_id,
                     lease_duration=lease_duration,
                     transport=transport,
@@ -443,7 +443,7 @@ class BaseQueueClient:
         debug_log(
             "push.header_only_fetch",
             topic=metadata.topic,
-            consumer_group=metadata.consumer_group,
+            consumer_group=str(metadata.consumer_group),
         )
         message = await self._poll_by_id(
             Topic[T](metadata.topic),
@@ -497,7 +497,7 @@ class BaseQueueClient:
                 metadata,
                 metadata.topic,
                 "consumer",
-                metadata.consumer_group,
+                str(metadata.consumer_group),
                 "lease",
                 metadata.receipt_handle,
             ),
@@ -512,12 +512,14 @@ class BaseQueueClient:
         self,
         message: Message[Any],
         lease_duration: Duration | None = None,
+        headers_context: HeadersContext | None = None,
     ) -> LeaseRenewal:
         """Create a context manager that keeps a message lease alive."""
         return LeaseRenewal(
             message,
             client=self,
             lease_duration=lease_duration,
+            headers_context=headers_context,
         )
 
 
@@ -592,15 +594,22 @@ class Delivery(Generic[T]):
             finalize_payload_sync(self._message.payload)
 
         if isinstance(exc, Handoff):
+            debug_log_for_msg("message.handoff", self._message)
             return True
         if isinstance(exc, RetryAfter):
             self._renewal.extend(exc.timeout_seconds, self._client.extend_lease)
+            debug_log_for_msg(
+                "message.retry_after",
+                self._message,
+                retry_after_seconds=exc.timeout_seconds,
+            )
             return True
         if exc is None:
             retry_sync_follow_up(
                 lambda: self._client.acknowledge(self._message),
                 event_prefix="acknowledge",
             )
+            debug_log_for_msg("message.ack", self._message)
         return None
 
     async def __aenter__(self) -> Message[T]:
@@ -774,19 +783,22 @@ class QueueClient(BaseQueueClient):
         if transport is None:
             metadata = parse_push_delivery_metadata(headers)
             transport = infer_subscriber_transport(metadata)
-        message = await self._accept(
-            raw_body,
-            headers,
-            transport=transport,
-            lease_duration=processing_lease_duration,
-        )
-        lifecycle = _AsyncMessageLifecycle(
-            message,
-            client=self,
-            lease_duration=processing_lease_duration,
-        )
-        async with lifecycle:
-            await call_subscribers(message)
+        # Delivery headers carry the auth context for follow-up queue calls,
+        # including lease renewals running outside this call stack.
+        with HeadersContext(headers).use():
+            message = await self._accept(
+                raw_body,
+                headers,
+                transport=transport,
+                lease_duration=processing_lease_duration,
+            )
+            lifecycle = _AsyncMessageLifecycle(
+                message,
+                client=self,
+                lease_duration=processing_lease_duration,
+            )
+            async with lifecycle:
+                await call_subscribers(message)
 
     @overload
     def poll(
@@ -1002,11 +1014,17 @@ class _AsyncMessageLifecycle:
             await finalize_payload_async(self._message.payload)
 
         if isinstance(exc, Handoff):
+            debug_log_for_msg("message.handoff", self._message)
             return True
         if isinstance(exc, RetryAfter):
             await self._renewal.extend_async(
                 exc.timeout_seconds,
                 self._client.extend_lease,
+            )
+            debug_log_for_msg(
+                "message.retry_after",
+                self._message,
+                retry_after_seconds=exc.timeout_seconds,
             )
             return True
         if exc is None:
@@ -1014,6 +1032,7 @@ class _AsyncMessageLifecycle:
                 lambda: self._client.acknowledge(self._message),
                 event_prefix="acknowledge",
             )
+            debug_log_for_msg("message.ack", self._message)
         return None
 
 

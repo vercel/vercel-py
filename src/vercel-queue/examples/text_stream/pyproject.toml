@@ -10,7 +10,7 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-vercel-queue = { git = "https://github.com/vercel/vercel-py.git", branch = "elprans/vercel-queues", subdirectory = "src/vercel-queue" }
+vercel-queue = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-queue" }
 
 [tool.vercel]
 entrypoint = "api.index_logs:app"

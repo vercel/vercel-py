@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import json
 import logging
@@ -8,6 +8,9 @@ import os
 import re
 from collections.abc import Mapping
 from urllib.parse import unquote, urlsplit, urlunsplit
+
+if TYPE_CHECKING:
+    from .types import Message, MessageMetadata
 
 _LOGGER_NAME = "vercel.queue"
 _REDACTED = "<redacted>"
@@ -48,6 +51,33 @@ def debug_log(event: str, **fields: Any) -> None:
     logging.getLogger(_LOGGER_NAME).info(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     )
+
+
+def _message_metadata(message: Message[Any] | MessageMetadata) -> MessageMetadata:
+    return cast("MessageMetadata", getattr(message, "metadata", message))
+
+
+def message_debug_fields(message: Message[Any] | MessageMetadata) -> dict[str, object]:
+    metadata = _message_metadata(message)
+    fields: dict[str, object] = {
+        "message_id": metadata.message_id,
+        "topic": metadata.topic,
+        "consumer_group": str(metadata.consumer_group),
+        "delivery_count": metadata.delivery_count,
+    }
+    if metadata.region is not None:
+        fields["region"] = metadata.region
+    return fields
+
+
+def debug_log_for_msg(
+    event: str,
+    message: Message[Any] | MessageMetadata,
+    **fields: Any,
+) -> None:
+    if not debug_enabled():
+        return
+    debug_log(event, **message_debug_fields(message), **fields)
 
 
 def safe_header_names(headers: Mapping[Any, object]) -> list[str]:

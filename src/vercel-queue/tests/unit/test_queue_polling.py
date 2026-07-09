@@ -1053,7 +1053,7 @@ def test_acknowledge_normalizes_unexpected_transport_error(
         delivery_count=1,
         created_at=CREATED_AT_DT,
         topic="emails",
-        consumer_group="test-group",
+        consumer_group=SanitizedName("test-group"),
         receipt_handle="rh_1",
     )
 

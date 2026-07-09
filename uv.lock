@@ -1908,6 +1908,7 @@ dependencies = [
     { name = "httpx", extra = ["http2"] },
     { name = "python-multipart" },
     { name = "typing-extensions" },
+    { name = "vercel-headers" },
     { name = "vercel-oidc" },
 ]
 
@@ -1931,6 +1932,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "typing-extensions", specifier = ">=4.0.0" },
     { name = "uvicorn", marker = "extra == 'devserver'" },
+    { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]
 provides-extras = ["devserver", "trio", "typed"]

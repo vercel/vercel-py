@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterator
 import anyio
 
 from .errors import InvalidLimitError
+from .names import SanitizedName
 from .subscribers import call_subscriber, call_subscriber_sync, poll_targets_for_subscriber
 from .types import Duration, StrContainer, duration_to_float_seconds
 
@@ -35,7 +36,7 @@ async def _poll_topic_batch_async(
     poll: Callable[..., Any],
     subscriber: Callable[..., Any],
     topic: str,
-    consumer_group: str,
+    consumer_group: SanitizedName,
     request_limit: int,
     lease_duration: Duration | None,
 ) -> int:
@@ -57,7 +58,7 @@ def _poll_topic_batch_sync(
     poll: Callable[..., Iterator[Any]],
     subscriber: Callable[..., Any],
     topic: str,
-    consumer_group: str,
+    consumer_group: SanitizedName,
     request_limit: int,
     lease_duration: Duration | None,
     stop: threading.Event,

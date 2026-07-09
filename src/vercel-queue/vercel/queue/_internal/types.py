@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .constants import DEFAULT_RETRY_AFTER_SECONDS
-from .names import SanitizedName, validate_topic_name
+from .names import SanitizedName, validate_name, validate_topic_name
 
 T = TypeVar("T")
 _TYPE_VAR_TYPE = type(T)
@@ -155,7 +155,7 @@ class MessageMetadata:
     topic: str
     """Topic name the message belongs to."""
 
-    consumer_group: str
+    consumer_group: SanitizedName
     """Consumer group that owns this delivery."""
 
     receipt_handle: ReceiptHandle | None = None
@@ -172,6 +172,13 @@ class MessageMetadata:
 
     visibility_deadline: datetime | None = None
     """Current processing deadline, when supplied by the service."""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "consumer_group",
+            SanitizedName(validate_name(self.consumer_group, field="consumer_group")),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

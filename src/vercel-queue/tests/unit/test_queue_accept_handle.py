@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any, cast
 
 import inspect
+import json
 from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
@@ -10,6 +11,7 @@ from datetime import timedelta
 import pytest
 from pydantic import BaseModel
 
+from vercel.headers import get_headers, set_headers
 from vercel.queue import (
     ALL_DEPLOYMENTS,
     ByteBufferTransport,
@@ -71,6 +73,12 @@ class _AsyncRequestLike:
         raise AssertionError("get_body should not be called")
 
 
+def _queue_debug_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    return [
+        json.loads(record.message) for record in caplog.records if record.name == "vercel.queue"
+    ]
+
+
 def test_accept_message_can_extend_lease(
     eqs: EmbeddedQueueDevServer,
 ) -> None:
@@ -86,7 +94,10 @@ def test_accept_message_can_extend_lease(
 
 def test_sync_message_lifecycle_ack_stops_renewal_without_wait(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level("INFO", logger="vercel.queue")
     waits: list[bool] = []
     acknowledged: list[str] = []
 
@@ -103,7 +114,10 @@ def test_sync_message_lifecycle_ack_stops_renewal_without_wait(
             raise AssertionError("ACK must not extend visibility")
 
     monkeypatch.setattr(LeaseRenewal, "stop", stop)
-    message = Message(payload={"ok": True}, metadata=make_leased_metadata("emails"))
+    message = Message(
+        payload={"ok": True},
+        metadata=make_leased_metadata("emails", message_id="m-ack"),
+    )
     lifecycle = _MessageLifecycle(
         message,
         client=cast("SyncQueueClient", Client()),
@@ -113,12 +127,22 @@ def test_sync_message_lifecycle_ack_stops_renewal_without_wait(
     assert lifecycle.__exit__(None, None, None) is None
 
     assert waits == [False]
-    assert acknowledged == ["m1"]
+    assert acknowledged == ["m-ack"]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.ack",
+        "message_id": "m-ack",
+        "topic": "emails",
+        "consumer_group": "c",
+        "delivery_count": 1,
+    }
 
 
 def test_sync_message_lifecycle_retry_after_waits_for_renewal_stop(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level("INFO", logger="vercel.queue")
     waits: list[bool] = []
     extensions: list[int] = []
 
@@ -136,7 +160,10 @@ def test_sync_message_lifecycle_retry_after_waits_for_renewal_stop(
             extensions.append(duration)
 
     monkeypatch.setattr(LeaseRenewal, "stop", stop)
-    message = Message(payload={"ok": True}, metadata=make_leased_metadata("emails"))
+    message = Message(
+        payload={"ok": True},
+        metadata=make_leased_metadata("emails", message_id="m-retry"),
+    )
     lifecycle = _MessageLifecycle(
         message,
         client=cast("SyncQueueClient", Client()),
@@ -149,11 +176,22 @@ def test_sync_message_lifecycle_retry_after_waits_for_renewal_stop(
 
     assert waits == [True]
     assert extensions == [12]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.retry_after",
+        "message_id": "m-retry",
+        "topic": "emails",
+        "consumer_group": "c",
+        "delivery_count": 1,
+        "retry_after_seconds": 12,
+    }
 
 
 def test_sync_message_lifecycle_handoff_waits_for_renewal_stop(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level("INFO", logger="vercel.queue")
     waits: list[bool] = []
 
     def stop(self: LeaseRenewal, *, wait: bool = True) -> None:
@@ -170,7 +208,10 @@ def test_sync_message_lifecycle_handoff_waits_for_renewal_stop(
             raise AssertionError("Handoff must not extend visibility")
 
     monkeypatch.setattr(LeaseRenewal, "stop", stop)
-    message = Message(payload={"ok": True}, metadata=make_leased_metadata("emails"))
+    message = Message(
+        payload={"ok": True},
+        metadata=make_leased_metadata("emails", message_id="m-handoff"),
+    )
     lifecycle = _MessageLifecycle(
         message,
         client=cast("SyncQueueClient", Client()),
@@ -181,12 +222,22 @@ def test_sync_message_lifecycle_handoff_waits_for_renewal_stop(
 
     assert lifecycle.__exit__(Handoff, handoff, None) is True
     assert waits == [True]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.handoff",
+        "message_id": "m-handoff",
+        "topic": "emails",
+        "consumer_group": "c",
+        "delivery_count": 1,
+    }
 
 
 @pytest.mark.anyio
 async def test_async_message_lifecycle_ack_stops_renewal_without_wait(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level("INFO", logger="vercel.queue")
     waits: list[bool] = []
     acknowledged: list[str] = []
 
@@ -203,7 +254,10 @@ async def test_async_message_lifecycle_ack_stops_renewal_without_wait(
             raise AssertionError("ACK must not extend visibility")
 
     monkeypatch.setattr(LeaseRenewal, "stop_async", stop_async)
-    message = Message(payload={"ok": True}, metadata=make_leased_metadata("emails"))
+    message = Message(
+        payload={"ok": True},
+        metadata=make_leased_metadata("emails", message_id="m-async-ack"),
+    )
     lifecycle = _AsyncMessageLifecycle(
         message,
         client=cast("QueueClient", Client()),
@@ -213,13 +267,23 @@ async def test_async_message_lifecycle_ack_stops_renewal_without_wait(
     assert await lifecycle.__aexit__(None, None, None) is None
 
     assert waits == [False]
-    assert acknowledged == ["m1"]
+    assert acknowledged == ["m-async-ack"]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.ack",
+        "message_id": "m-async-ack",
+        "topic": "emails",
+        "consumer_group": "c",
+        "delivery_count": 1,
+    }
 
 
 @pytest.mark.anyio
 async def test_async_message_lifecycle_retry_after_waits_for_renewal_stop(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level("INFO", logger="vercel.queue")
     waits: list[bool] = []
     extensions: list[int] = []
 
@@ -237,7 +301,10 @@ async def test_async_message_lifecycle_retry_after_waits_for_renewal_stop(
             extensions.append(duration)
 
     monkeypatch.setattr(LeaseRenewal, "stop_async", stop_async)
-    message = Message(payload={"ok": True}, metadata=make_leased_metadata("emails"))
+    message = Message(
+        payload={"ok": True},
+        metadata=make_leased_metadata("emails", message_id="m-async-retry"),
+    )
     lifecycle = _AsyncMessageLifecycle(
         message,
         client=cast("QueueClient", Client()),
@@ -249,12 +316,23 @@ async def test_async_message_lifecycle_retry_after_waits_for_renewal_stop(
 
     assert waits == [True]
     assert extensions == [12]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.retry_after",
+        "message_id": "m-async-retry",
+        "topic": "emails",
+        "consumer_group": "c",
+        "delivery_count": 1,
+        "retry_after_seconds": 12,
+    }
 
 
 @pytest.mark.anyio
 async def test_async_message_lifecycle_handoff_waits_for_renewal_stop(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level("INFO", logger="vercel.queue")
     waits: list[bool] = []
 
     async def stop_async(self: LeaseRenewal, *, wait: bool = True) -> None:
@@ -271,7 +349,10 @@ async def test_async_message_lifecycle_handoff_waits_for_renewal_stop(
             raise AssertionError("Handoff must not extend visibility")
 
     monkeypatch.setattr(LeaseRenewal, "stop_async", stop_async)
-    message = Message(payload={"ok": True}, metadata=make_leased_metadata("emails"))
+    message = Message(
+        payload={"ok": True},
+        metadata=make_leased_metadata("emails", message_id="m-async-handoff"),
+    )
     lifecycle = _AsyncMessageLifecycle(
         message,
         client=cast("QueueClient", Client()),
@@ -281,6 +362,13 @@ async def test_async_message_lifecycle_handoff_waits_for_renewal_stop(
 
     assert await lifecycle.__aexit__(Handoff, handoff, None) is True
     assert waits == [True]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.handoff",
+        "message_id": "m-async-handoff",
+        "topic": "emails",
+        "consumer_group": "c",
+        "delivery_count": 1,
+    }
 
 
 def test_accept_message_can_acknowledge(
@@ -1439,6 +1527,57 @@ def test_accept_and_handle_subscriber_exception_leaves_unacked(
     assert not eqs.state.by_id[delivery.message_id].acknowledged
 
 
+def test_sync_accept_and_handle_installs_delivery_headers_context(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+) -> None:
+    seen_headers: list[dict[str, str]] = []
+    set_headers({"x-existing": "outer"})
+    delivery = sync_delivery(eqs, {"ok": True})
+
+    @callback_subscribe(topic="emails")
+    def handle(payload: object) -> None:
+        seen_headers.append(dict(get_headers() or {}))
+
+    assert isinstance(delivery.client, SyncQueueClient)
+    delivery.client.accept_and_handle(
+        delivery.body,
+        {
+            **delivery.headers,
+            "x-vercel-oidc-token": "push-token",
+        },
+    )
+
+    assert seen_headers[0]["x-vercel-oidc-token"] == "push-token"
+    assert get_headers() == {"x-existing": "outer"}
+
+
+@pytest.mark.anyio
+async def test_async_accept_and_handle_installs_delivery_headers_context(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+) -> None:
+    seen_headers: list[dict[str, str]] = []
+    set_headers({"x-existing": "outer"})
+    delivery = await async_delivery(eqs, {"ok": True})
+
+    @callback_subscribe(topic="emails")
+    async def handle(payload: object) -> None:
+        seen_headers.append(dict(get_headers() or {}))
+
+    assert isinstance(delivery.client, QueueClient)
+    await delivery.client.accept_and_handle(
+        delivery.body,
+        {
+            **delivery.headers,
+            "x-vercel-oidc-token": "push-token",
+        },
+    )
+
+    assert seen_headers[0]["x-vercel-oidc-token"] == "push-token"
+    assert get_headers() == {"x-existing": "outer"}
+
+
 def test_accept_and_handle_no_matching_subscriber_raises_clearly(
     eqs: EmbeddedQueueDevServer,
     isolated_subscriptions: None,
@@ -1452,7 +1591,7 @@ def test_accept_and_handle_no_matching_subscriber_raises_clearly(
     assert isinstance(delivery.client, SyncQueueClient)
     with pytest.raises(
         UnhandledMessageError,
-        match="No queue subscribers found for topic 'emails'",
+        match="No queue subscribers found for topic 'emails' and consumer group 'tests'",
     ):
         delivery.client.accept_and_handle(
             delivery.body,

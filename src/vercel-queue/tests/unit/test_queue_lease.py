@@ -20,6 +20,7 @@ import pytest
 from anyio import to_thread
 from anyio.lowlevel import current_token
 
+from vercel.headers import get_headers, get_headers_context, set_headers
 from vercel.queue import (
     ALL_DEPLOYMENTS,
     Delivery,
@@ -29,6 +30,7 @@ from vercel.queue import (
     MessageMetadata,
     QueueClient,
     QueueError,
+    SanitizedName,
     ThrottledError,
 )
 from vercel.queue._internal.client import _AsyncMessageLifecycle
@@ -155,6 +157,39 @@ def test_sync_run_lease_renewal_extends_on_enter_and_stops_on_exit(
     assert eqs.state.by_id["msg_1"].lease_deadline_by_consumer["c"] == first_deadline
 
 
+@pytest.mark.anyio
+async def test_lease_extension_runs_with_captured_headers_context() -> None:
+    seen_headers: list[dict[str, str] | None] = []
+    message = Message(
+        payload=None,
+        metadata=replace(
+            make_leased_metadata("emails"),
+            visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
+        ),
+    )
+    set_headers({"x-vercel-oidc-token": "delivery-token"})
+    headers_context = get_headers_context()
+    set_headers({"x-vercel-oidc-token": "worker-token"})
+
+    def record_extension_headers(_message: Message[Any], _duration: object) -> None:
+        headers = get_headers()
+        seen_headers.append(dict(headers) if headers is not None else None)
+
+    request = _LeaseExtensionRequest(
+        token=_LeaseRenewalToken(object()),
+        message=message,
+        client=_FakeLeaseClient(record_extension_headers),
+        lease_seconds=30,
+        next_extension_at=time.monotonic(),
+        headers_context=headers_context,
+    )
+
+    await _run_lease_extension(request, {request.token: request})
+
+    assert seen_headers == [{"x-vercel-oidc-token": "delivery-token"}]
+    assert get_headers() == {"x-vercel-oidc-token": "worker-token"}
+
+
 def test_lease_debug_logs_worker_start_extension_success_and_stop(
     eqs: EmbeddedQueueDevServer,
     monkeypatch: pytest.MonkeyPatch,
@@ -224,7 +259,7 @@ def test_sync_lease_renewal_noops_without_receipt_handle() -> None:
         delivery_count=1,
         created_at=CREATED_AT_DT,
         topic="emails",
-        consumer_group="c",
+        consumer_group=SanitizedName("c"),
     )
     with _sync_test_client().run_lease_renewal(Message(payload=None, metadata=metadata)):
         time.sleep(0.01)
@@ -370,7 +405,7 @@ async def test_async_lease_renewal_noops_without_receipt_handle() -> None:
         delivery_count=1,
         created_at=CREATED_AT_DT,
         topic="emails",
-        consumer_group="c",
+        consumer_group=SanitizedName("c"),
     )
     renewal = _async_test_client().run_lease_renewal(Message(payload=None, metadata=metadata))
     renewal.start()
@@ -1748,6 +1783,7 @@ def _lease_request(
         client=client,
         lease_seconds=lease_seconds,
         next_extension_at=time.monotonic(),
+        headers_context=get_headers_context(),
     )
 
 

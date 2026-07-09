@@ -25,7 +25,7 @@ def _is_valid_vqs_name(name: str) -> bool:
 
 # Keep this in sync with @vercel/build-utils:lambda.ts/sanitizeConsumerName
 # https://raw.githubusercontent.com/vercel/vercel/refs/heads/main/packages/build-utils/src/lambda.ts
-def _sanitize_name(name: str, *, fallback: str) -> str:
+def _sanitize_name(name: str) -> str:
     result = ""
     for char in name:
         if char == "_":
@@ -38,19 +38,21 @@ def _sanitize_name(name: str, *, fallback: str) -> str:
             result += char
         else:
             result += f"_{ord(char):02X}"
-    return result or fallback
+    if not result:
+        raise ValueError("name must be a non-empty string")
+    return result
 
 
-def sanitize_name(name: str | SanitizedName, *, fallback: str = "queue") -> str:
-    """Return a valid VQS queue name for arbitrary input.
+def sanitize_name(name: str | SanitizedName) -> SanitizedName:
+    """Return a VQS-safe name marker for arbitrary input.
 
     Plain strings are reversibly encoded, including underscores. Use
     ``SanitizedName`` for values that are already VQS-safe and must not be
     encoded again.
     """
     if isinstance(name, SanitizedName):
-        return str(name)
-    return _sanitize_name(name, fallback=fallback)
+        return name
+    return SanitizedName(_sanitize_name(name))
 
 
 def validate_name(name: object, *, field: str = "name") -> str:
@@ -80,14 +82,13 @@ def validate_subscription_pattern(topic: str) -> str:
 def normalize_name(
     name: str | SanitizedName,
     *,
-    fallback: str = "queue",
     field: str = "name",
-) -> str:
+) -> SanitizedName:
     if isinstance(name, SanitizedName):
-        return str(name)
+        return name
     if not name:
         raise ValueError(f"{field} must be a non-empty string")
-    return sanitize_name(name, fallback=fallback)
+    return sanitize_name(name)
 
 
 # Only add public symbols to __all__; internal helpers must stay unexported.
