@@ -197,11 +197,12 @@ def test_topic_rejects_invalid_name() -> None:
 def test_name_helpers_are_public() -> None:
     sanitized = queue.SanitizedName("test-group_1")
     assert str(sanitized) == "test-group_1"
-    assert queue.sanitize_name("team/email_high") == "team_Semail__high"
+    result = queue.sanitize_name("team/email_high")
+    assert isinstance(result, queue.SanitizedName)
+    assert result == "team_Semail__high"
+    assert isinstance(queue.sanitize_name("plain-queue_1"), queue.SanitizedName)
     assert queue.sanitize_name("plain-queue_1") == "plain-queue__1"
-    assert queue.sanitize_name(sanitized) == "test-group_1"
-    assert queue.sanitize_name("") == "queue"
-    assert queue.sanitize_name("", fallback="consumer_group") == "consumer_group"
+    assert queue.sanitize_name(sanitized) is sanitized
     assert queue.sanitize_name("emails.DQ") == "emails_DDQ"
     assert "SanitizedName" in queue.__all__
     assert "sanitize_name" in queue.__all__
@@ -214,6 +215,8 @@ def test_name_helpers_are_public() -> None:
     assert not hasattr(queue, "validate_consumer_group_name")
     assert not hasattr(queue, "sanitize_consumer_group_name")
 
+    with pytest.raises(ValueError, match="name must be a non-empty string"):
+        queue.sanitize_name("")
     with pytest.raises(ValueError, match="name must be a non-empty string"):
         queue.SanitizedName("")
     with pytest.raises(ValueError, match="Invalid queue name"):

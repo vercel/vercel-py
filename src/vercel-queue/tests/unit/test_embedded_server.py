@@ -20,6 +20,7 @@ from vercel.queue import (
     MessageLockedError,
     ProtocolError,
     QueueClient,
+    SanitizedName,
     TextBufferTransport,
     Topic,
 )
@@ -518,7 +519,7 @@ async def test_async_lease_extension_redelivery_and_ack_failures(
         created_at=metadata.created_at,
         expires_at=metadata.expires_at,
         topic=metadata.topic,
-        consumer_group="wrong-test-group",
+        consumer_group=SanitizedName("wrong-test-group"),
         receipt_handle=metadata.receipt_handle,
         content_type=metadata.content_type,
     )

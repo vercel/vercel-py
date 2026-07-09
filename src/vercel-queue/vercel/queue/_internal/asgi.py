@@ -5,6 +5,8 @@ from typing import Any, TypeAlias, TypedDict
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
+from vercel.headers import HeadersContext, headers_from_asgi_scope
+
 from .client import QueueClient
 from .config import CURRENT_DEPLOYMENT, BaseUrl, DeploymentOption
 from .errors import ProtocolError
@@ -58,11 +60,13 @@ class QueueClientAsgiApp:
             await _send_status(send, 405)
             return
 
+        headers = headers_from_asgi_scope(scope)
         try:
-            await self.client.accept_and_handle(
-                _body_chunks(receive),
-                _headers_from_scope(scope),
-            )
+            with HeadersContext(headers).use():
+                await self.client.accept_and_handle(
+                    _body_chunks(receive),
+                    headers,
+                )
         except (ProtocolError, TypeError, ValueError) as exc:
             debug_log("asgi.bad_request", error=repr(exc))
             logger.warning("Vercel Queue push callback rejected: %s", exc)
@@ -123,13 +127,6 @@ async def _body_chunks(receive: AsgiReceive) -> AsyncIterator[bytes]:
             yield body
         if not message.get("more_body", False):
             return
-
-
-def _headers_from_scope(scope: AsgiScope) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for name, value in scope.get("headers", []):
-        headers[name.decode("latin-1")] = value.decode("latin-1")
-    return headers
 
 
 async def _send_status(send: AsgiSend, status: int) -> None:

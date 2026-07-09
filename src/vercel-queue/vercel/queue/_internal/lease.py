@@ -47,6 +47,8 @@ from anyio.abc import ObjectReceiveStream, ObjectSendStream, TaskGroup
 from anyio.lowlevel import EventLoopToken, current_token
 from anyio.streams.memory import MemoryObjectSendStream
 
+from vercel.headers import HeadersContext, get_headers_context
+
 from .errors import QueueError, ThrottledError
 from .log import debug_log
 from .streams import (
@@ -111,6 +113,7 @@ class _LeaseExtensionRequest:
     client: LeaseAsyncClient
     lease_seconds: int
     next_extension_at: float
+    headers_context: HeadersContext
 
 
 @dataclass(kw_only=True)
@@ -217,10 +220,12 @@ class LeaseRenewal:
         message: Message[Any],
         client: LeaseAsyncClient,
         lease_duration: Duration | None = None,
+        headers_context: HeadersContext | None = None,
     ) -> None:
         self._message = message
         self._client = client
         self._lease_seconds = processing_lease_seconds(lease_duration)
+        self._headers_context = headers_context or get_headers_context()
         self._token: _LeaseRenewalToken | None = None
         self._entered = False
         self._closed = False
@@ -277,6 +282,7 @@ class LeaseRenewal:
             client=self._client,
             lease_seconds=self._lease_seconds,
             next_extension_at=_next_extension_at(self._message.metadata, self._lease_seconds),
+            headers_context=self._headers_context,
         )
 
     def _reset_start_after_failure(self) -> None:
@@ -846,7 +852,11 @@ async def _run_lease_extension(
         lease_seconds=request.lease_seconds,
     )
     try:
-        await request.client._renew_lease(request.message, request.lease_seconds)  # noqa: SLF001
+        with request.headers_context.use():
+            await request.client._renew_lease(  # noqa: SLF001
+                request.message,
+                request.lease_seconds,
+            )
     except QueueError as exc:
         if _is_client_error(exc):
             active.pop(request.token, None)

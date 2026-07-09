@@ -38,6 +38,7 @@ from .http import (
 )
 from .log import debug_log
 from .messages import parse_optional_datetime, parse_required_datetime
+from .names import SanitizedName
 from .types import (
     Headers,
     Message,
@@ -132,7 +133,7 @@ def _parse_push_delivery_metadata(headers: Headers) -> MessageMetadata:
             delivery_count=1,
             created_at=datetime.now(timezone.utc),
             topic=topic,
-            consumer_group=consumer_group,
+            consumer_group=SanitizedName(consumer_group),
             receipt_handle=None,
             content_type=headers.get(HEADER_CONTENT_TYPE),
             region=region,
@@ -157,7 +158,7 @@ def _parse_push_delivery_metadata(headers: Headers) -> MessageMetadata:
             CLOUD_EVENT_HEADER_VQS_EXPIRES_AT,
         ),
         topic=topic,
-        consumer_group=consumer_group,
+        consumer_group=SanitizedName(consumer_group),
         receipt_handle=ReceiptHandle(receipt_handle),
         content_type=content_type,
         region=region,
@@ -175,7 +176,7 @@ def _debug_metadata(metadata: MessageMetadata) -> dict[str, object]:
         "created_at": metadata.created_at,
         "expires_at": metadata.expires_at,
         "topic": metadata.topic,
-        "consumer_group": metadata.consumer_group,
+        "consumer_group": str(metadata.consumer_group),
         "receipt_handle": metadata.receipt_handle,
         "content_type": metadata.content_type,
         "region": metadata.region,

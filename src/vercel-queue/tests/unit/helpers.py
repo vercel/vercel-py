@@ -19,6 +19,7 @@ from vercel.queue import (
     Message,
     MessageMetadata,
     QueueClient,
+    SanitizedName,
     Topic,
     subscribe,
 )
@@ -281,7 +282,7 @@ def make_metadata(
         delivery_count=1,
         created_at=CREATED_AT_DT,
         topic=topic,
-        consumer_group=consumer_group,
+        consumer_group=SanitizedName(consumer_group),
     )
 
 
@@ -291,6 +292,6 @@ def make_leased_metadata(topic: str, *, message_id: str = "m1") -> MessageMetada
         delivery_count=1,
         created_at=CREATED_AT_DT,
         topic=topic,
-        consumer_group="c",
+        consumer_group=SanitizedName("c"),
         receipt_handle="rh_1",
     )

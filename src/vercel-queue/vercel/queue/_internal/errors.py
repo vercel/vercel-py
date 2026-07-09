@@ -190,9 +190,11 @@ class ReceiptHandleMismatchError(MessageLockedError):
 class UnhandledMessageError(QueueError, RuntimeError):
     status_code = 500
 
-    def __init__(self, topic: str | None) -> None:
+    def __init__(self, topic: str | None, consumer_group: str | None = None) -> None:
         self.topic = topic
-        super().__init__(f"No queue subscribers found for topic {topic!r}.")
+        self.consumer_group = consumer_group
+        suffix = f" and consumer group {consumer_group!r}" if consumer_group is not None else ""
+        super().__init__(f"No queue subscribers found for topic {topic!r}{suffix}.")
 
 
 class ThrottledError(QueueError, RuntimeError):

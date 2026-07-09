@@ -16,6 +16,7 @@ from .constants import (
 )
 from .errors import MessageCorruptedError
 from .http import headers_from_raw
+from .names import SanitizedName
 from .streams import AsyncStreamPayload, AsyncTextStreamPayload
 from .types import (
     Message,
@@ -28,9 +29,15 @@ from .types import (
 T = TypeVar("T")
 
 
+def _ensure_sanitized_name(value: str | SanitizedName) -> SanitizedName:
+    if isinstance(value, SanitizedName):
+        return value
+    return SanitizedName(value)
+
+
 async def message_from_part_async(
     topic: str,
-    consumer_group: str,
+    consumer_group: str | SanitizedName,
     transport: Transport[T],
     headers: RawHeaders,
     payload: AsyncIterator[bytes],
@@ -48,7 +55,7 @@ async def message_from_part_async(
 
 def _message_metadata_from_part(
     topic: str,
-    consumer_group: str,
+    consumer_group: str | SanitizedName,
     headers: RawHeaders,
 ) -> MessageMetadata:
     headers = headers_from_raw(headers)
@@ -75,7 +82,7 @@ def _message_metadata_from_part(
             VQS_HEADER_EXPIRES_AT,
         ),
         topic=topic,
-        consumer_group=consumer_group,
+        consumer_group=_ensure_sanitized_name(consumer_group),
         receipt_handle=ReceiptHandle(receipt_handle),
         content_type=headers.get(HEADER_CONTENT_TYPE, ""),
     )

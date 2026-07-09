@@ -40,6 +40,7 @@ from vercel.queue import (
 )
 from vercel.queue._internal import subscribers as queue_subscribers
 from vercel.queue._internal.constants import DEFAULT_RETRY_AFTER_SECONDS
+from vercel.queue._internal.names import normalize_name
 from vercel.queue._internal.streams import (
     AsyncStreamPayload,
     SyncStreamPayload,
@@ -49,6 +50,7 @@ from vercel.queue._internal.subscribers import (
     call_subscribers,
     call_subscribers_sync,
     infer_subscriber_transport,
+    poll_targets_for_subscriber,
     register_embedded_dispatcher,
 )
 from vercel.queue.devserver import EmbeddedQueueDevServer
@@ -56,6 +58,7 @@ from vercel.queue.embedded import embedded_queue_service
 from vercel.queue.testing import clear_subscriptions
 
 from .helpers import (
+    CREATED_AT_DT,
     make_metadata,
     wait_until,
 )
@@ -383,6 +386,95 @@ async def test_call_subscribers_invokes_callable_captured_during_matching(
 
     assert calls == [{"ok": True}]
     assert subscriber_ref.calls == 1
+
+
+def test_call_subscribers_sync_debug_logs_handler_start(
+    isolated_subscriptions: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level(logging.INFO, logger="vercel.queue")
+    calls: list[object] = []
+    metadata = MessageMetadata(
+        message_id="msg-debug-sync",
+        delivery_count=3,
+        created_at=CREATED_AT_DT,
+        topic="emails",
+        consumer_group=SanitizedName("test-group"),
+        region="iad1",
+    )
+
+    @subscribe(topic="emails", consumer_group="test-group")
+    def handle(payload: object) -> None:
+        calls.append(payload)
+
+    call_subscribers_sync(Message(payload={"ok": True}, metadata=metadata))
+
+    assert calls == [{"ok": True}]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.handler_start",
+        "message_id": "msg-debug-sync",
+        "topic": "emails",
+        "consumer_group": "test-group",
+        "delivery_count": 3,
+        "region": "iad1",
+        "handler": f"{handle.__module__}.{handle.__qualname__}",
+    }
+
+
+@pytest.mark.anyio
+async def test_call_subscribers_debug_logs_handler_start(
+    isolated_subscriptions: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level(logging.INFO, logger="vercel.queue")
+    calls: list[object] = []
+    metadata = MessageMetadata(
+        message_id="msg-debug-async",
+        delivery_count=2,
+        created_at=CREATED_AT_DT,
+        topic="emails",
+        consumer_group=SanitizedName("test-group"),
+    )
+
+    @subscribe(topic="emails", consumer_group="test-group")
+    async def handle(payload: object) -> None:
+        calls.append(payload)
+
+    await call_subscribers(Message(payload={"ok": True}, metadata=metadata))
+
+    assert calls == [{"ok": True}]
+    assert _queue_debug_events(caplog)[-1] == {
+        "event": "message.handler_start",
+        "message_id": "msg-debug-async",
+        "topic": "emails",
+        "consumer_group": "test-group",
+        "delivery_count": 2,
+        "handler": f"{handle.__module__}.{handle.__qualname__}",
+    }
+
+
+def test_poll_targets_preserve_sanitized_consumer_group(
+    isolated_subscriptions: None,
+) -> None:
+    @subscribe(topic="emails", consumer_group="team/email_high")
+    def handle(payload: object) -> None:
+        del payload
+
+    ((topic, consumer_group),) = poll_targets_for_subscriber(handle, None)
+    assert topic == "emails"
+    assert isinstance(consumer_group, SanitizedName)
+    assert consumer_group == "team_Semail__high"
+    # Polling feeds targets back through normalize_name; a SanitizedName
+    # must pass through unchanged instead of being escaped a second time.
+    assert normalize_name(consumer_group) is consumer_group
+
+    ((_, explicit_topic_group),) = poll_targets_for_subscriber(handle, ["emails"])
+    assert isinstance(explicit_topic_group, SanitizedName)
+    assert explicit_topic_group == "team_Semail__high"
 
 
 def test_call_subscribers_sync_raises_when_matching_refs_are_dead(

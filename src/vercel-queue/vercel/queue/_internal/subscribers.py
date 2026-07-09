@@ -18,6 +18,7 @@ from .errors import (
     SubscriptionError,
     UnhandledMessageError,
 )
+from .log import debug_enabled, debug_log_for_msg
 from .names import (
     SanitizedName,
     normalize_name,
@@ -122,7 +123,7 @@ class InvocationPlan:
 class _Subscription:
     func_ref: _SubscriberRef
     order: int
-    consumer_group: str
+    consumer_group: SanitizedName
     invocation: InvocationPlan
     topic: str
     retry_after_seconds: int | None = None
@@ -174,12 +175,13 @@ def _build_registry_snapshot(
     exact: dict[tuple[str, str], list[_Subscription]] = {}
     prefix: dict[str, list[_Subscription]] = {}
     for sub in live_subscriptions:
+        consumer_group = str(sub.consumer_group)
         if sub.topic == "*":
-            wildcard.setdefault(sub.consumer_group, []).append(sub)
+            wildcard.setdefault(consumer_group, []).append(sub)
         elif sub.topic.endswith("*"):
-            prefix.setdefault(sub.consumer_group, []).append(sub)
+            prefix.setdefault(consumer_group, []).append(sub)
         else:
-            exact.setdefault((sub.consumer_group, sub.topic), []).append(sub)
+            exact.setdefault((consumer_group, sub.topic), []).append(sub)
 
     return _RegistrySnapshot(
         subscriptions=live_subscriptions,
@@ -222,7 +224,7 @@ def register_embedded_dispatcher(dispatcher: EmbeddedDispatcher) -> None:
     for subscription in subscriptions:
         dispatcher.register_subscription(
             topic=subscription.topic,
-            consumer_group=subscription.consumer_group,
+            consumer_group=str(subscription.consumer_group),
             retry_after_seconds=subscription.retry_after_seconds,
             initial_delay_seconds=subscription.initial_delay_seconds,
             max_concurrency=subscription.max_concurrency,
@@ -268,7 +270,7 @@ def _notify_embedded_dispatchers(subscription: _Subscription) -> None:
     for dispatcher in dispatchers:
         dispatcher.register_subscription(
             topic=subscription.topic,
-            consumer_group=subscription.consumer_group,
+            consumer_group=str(subscription.consumer_group),
             retry_after_seconds=subscription.retry_after_seconds,
             initial_delay_seconds=subscription.initial_delay_seconds,
             max_concurrency=subscription.max_concurrency,
@@ -457,9 +459,21 @@ def _call_subscription(
     invocation = matched.subscription.invocation
 
     payload = invocation.prepare_payload(message)
+    if debug_enabled():
+        debug_log_for_msg(
+            "message.handler_start",
+            metadata,
+            handler=_handler_name(matched.func),
+        )
     if invocation.mode == "message":
         return matched.func(Message(payload=payload, metadata=metadata))
     return matched.func(payload)
+
+
+def _handler_name(func: _Subscriber) -> str:
+    module = getattr(func, "__module__", type(func).__module__)
+    qualname = getattr(func, "__qualname__", type(func).__qualname__)
+    return f"{module}.{qualname}"
 
 
 def _log_handler_exception(exc: BaseException, metadata: MessageMetadata) -> None:
@@ -536,7 +550,7 @@ def reject_async_subscriber_for_sync(subscriber: _Subscriber) -> None:
 def poll_targets_for_subscriber(
     subscriber: _Subscriber,
     topics: StrContainer | None,
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[tuple[str, SanitizedName], ...]:
     matched = _subscription_for_func(subscriber)
     subscription = matched.subscription
     if topics is None:
@@ -549,7 +563,7 @@ def poll_targets_for_subscriber(
     if isinstance(topics, str):
         raise TypeError("topics must be an iterable of topic strings, not a string")
 
-    targets: list[tuple[str, str]] = []
+    targets: list[tuple[str, SanitizedName]] = []
     seen: set[str] = set()
     for topic in topics:
         if not isinstance(topic, str):
@@ -593,12 +607,12 @@ async def _maybe_await_result(result: Any) -> Any:
     return result
 
 
-def _default_consumer_group(func: _Subscriber) -> str:
+def _default_consumer_group(func: _Subscriber) -> SanitizedName:
     module = getattr(func, "__module__", None)
     qualname = getattr(func, "__qualname__", getattr(func, "__name__", "subscriber"))
     if module:
-        return sanitize_name(f"{module}.{qualname}", fallback="consumer_group")
-    return sanitize_name(str(qualname), fallback="consumer_group")
+        return sanitize_name(f"{module}.{qualname}")
+    return sanitize_name(str(qualname))
 
 
 def _fully_qualified_handler_name(func: _Subscriber) -> str:
@@ -701,7 +715,6 @@ def _register_subscription(
         if consumer_group is None
         else normalize_name(
             consumer_group,
-            fallback="consumer_group",
             field="consumer_group",
         )
     )
@@ -909,7 +922,7 @@ def get_subscriptions() -> tuple[Subscription, ...]:
                 Subscription(
                     func=func,
                     topic=sub.topic,
-                    consumer_group=sub.consumer_group,
+                    consumer_group=str(sub.consumer_group),
                     retry_after_seconds=sub.retry_after_seconds,
                     initial_delay_seconds=sub.initial_delay_seconds,
                     max_concurrency=sub.max_concurrency,
@@ -919,8 +932,11 @@ def get_subscriptions() -> tuple[Subscription, ...]:
     return tuple(subscriptions)
 
 
-def _no_matching_subscriptions_error(topic: str | None) -> UnhandledMessageError:
-    return UnhandledMessageError(topic)
+def _no_matching_subscriptions_error(
+    topic: str | None,
+    consumer_group: str | None = None,
+) -> UnhandledMessageError:
+    return UnhandledMessageError(topic, consumer_group)
 
 
 def _matching_prefix_subscriptions(
@@ -963,7 +979,7 @@ def _matching_subscriptions(
     metadata: MessageMetadata,
 ) -> tuple[_MatchedSubscription, ...]:
     snapshot = _registry_snapshot
-    consumer_group = metadata.consumer_group
+    consumer_group = str(metadata.consumer_group)
     topic = metadata.topic
     matching = _live_candidates(
         _merge_candidates_in_order(
@@ -977,7 +993,7 @@ def _matching_subscriptions(
         )
     )
     if not matching:
-        raise _no_matching_subscriptions_error(metadata.topic)
+        raise _no_matching_subscriptions_error(metadata.topic, str(metadata.consumer_group))
     return matching
 
 

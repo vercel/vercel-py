@@ -12,6 +12,7 @@ import pytest
 
 import vercel.queue._internal.devserver as queue_devserver_internal
 import vercel.queue.devserver as queue_devserver
+from vercel.headers import get_headers, set_headers
 from vercel.queue import ALL_DEPLOYMENTS, QueueClient, QueueClientAsgiApp, asgi_app, subscribe
 from vercel.queue._internal.asgi import AsgiMessage
 from vercel.queue._internal.constants import (
@@ -229,6 +230,38 @@ async def test_asgi_app_passes_request_body_as_async_stream() -> None:
 
     assert sent[0]["status"] == 204
     assert seen_chunks == [b'{"ok"', b": true}"]
+
+
+@pytest.mark.anyio
+async def test_asgi_app_installs_request_headers_for_delivery_context() -> None:
+    seen_headers: list[dict[str, str]] = []
+    set_headers({"x-existing": "outer"})
+
+    class Client(_FakeClient):
+        async def accept_and_handle(
+            self,
+            raw_body: AsyncIterable[bytes],
+            headers: dict[str, str],
+        ) -> None:
+            self.calls.append((raw_body, headers))
+            seen_headers.append(dict(get_headers() or {}))
+            async for _chunk in raw_body:
+                pass
+
+    client = Client()
+    app = QueueClientAsgiApp(cast("QueueClient", client))
+
+    sent = await _call_app(
+        app,
+        headers={
+            **callback_headers(),
+            "x-vercel-oidc-token": "push-token",
+        },
+    )
+
+    assert sent[0]["status"] == 204
+    assert seen_headers[0]["x-vercel-oidc-token"] == "push-token"
+    assert get_headers() == {"x-existing": "outer"}
 
 
 @pytest.mark.anyio
