@@ -10,18 +10,21 @@ MYPY = { default = "${POE_CONF_DIR}/tasks/mypy" }
 
 [tool.poe.tasks.fix]
 shell = """
+set -e
 $RUFF_CHECK_FIX
 $RUFF_FORMAT_FIX
 """
 
 [tool.poe.tasks.lint]
 shell = """
+set -e
 $RUFF_CHECK
 $RUFF_FORMAT
 """
 
 [tool.poe.tasks.typecheck]
 shell = """
+set -e
 $POE typecheck-mypy
 $POE typecheck-ty
 """

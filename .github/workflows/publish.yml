@@ -2,16 +2,63 @@ name: Publish PyPI
 
 on:
   push:
-    tags:
-      - "*-v*"
+    branches:
+      - main
 
 permissions: {}
 
 jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.packages.outputs.packages }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Detect changed packages
+        id: packages
+        env:
+          BASE_REF: ${{ github.event.before }}
+        run: |
+          packages_json=$(python - <<'PY'
+          import os
+          import json
+          import subprocess
+
+          base = os.environ["BASE_REF"]
+          if base == "0000000000000000000000000000000000000000":
+              base = "HEAD^"
+
+          packages = subprocess.check_output(
+              [
+                  "python",
+                  "scripts/release.py",
+                  "changed",
+                  "--base",
+                  base,
+                  "--head",
+                  "HEAD",
+              ],
+              text=True,
+          ).splitlines()
+          print(json.dumps(packages))
+          PY
+          )
+          echo "packages=$packages_json" >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: detect
+    if: needs.detect.outputs.packages != '[]'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     environment:
       name: pypi
@@ -24,54 +71,84 @@ jobs:
         with:
           enable-cache: false
 
-      - name: Select package
-        id: package
+      - name: Publish changed packages
+        id: publish
+        env:
+          PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
         run: |
+          python - <<'PY' > /tmp/packages.txt
+          import json
+          import os
+
+          for package in json.loads(os.environ["PACKAGES_JSON"]):
+              print(package)
+          PY
+          : > /tmp/tags.txt
+
           while IFS= read -r package; do
-            if [ "${GITHUB_REF_NAME}" = "$package-v$(python scripts/get-version.py "$package")" ]; then
-              echo "name=$package" >> "$GITHUB_OUTPUT"
-              exit 0
+            version=$(python scripts/get-version.py "$package")
+            tag="$package-v$version"
+            echo "$tag" >> /tmp/tags.txt
+
+            http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${package}/${version}/json")
+            if [ "$http_status" = "200" ]; then
+              echo "$package $version already exists on PyPI, skipping publish"
+              continue
+            elif [ "$http_status" != "404" ]; then
+              echo "Unexpected PyPI response for $package $version: $http_status"
+              exit 1
             fi
-          done < <(python scripts/package-names.py)
 
-          echo "No workspace package matches tag ${GITHUB_REF_NAME}"
-          exit 1
+            rm -rf dist-publish
+            uv build --package "$package" --no-sources --out-dir dist-publish
+            uv publish dist-publish/*
+          done < /tmp/packages.txt
 
-      - name: Verify tag matches package version
+          {
+            echo "tags<<EOF"
+            cat /tmp/tags.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Git Tags
+        if: steps.publish.outputs.tags != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
-          PACKAGE_NAME: ${{ steps.package.outputs.name }}
-        run: |
-          VERSION=$(python scripts/get-version.py "$PACKAGE_NAME")
-          EXPECTED="$PACKAGE_NAME-v$VERSION"
-          if [ "${GITHUB_REF_NAME}" != "$EXPECTED" ]; then
-            echo "Expected tag $EXPECTED, got ${GITHUB_REF_NAME}"
-            exit 1
-          fi
+          TAGS: ${{ steps.publish.outputs.tags }}
+        with:
+          script: |
+            const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
+            for (const tag of tags) {
+              try {
+                await github.rest.git.createRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `refs/tags/${tag}`,
+                  sha: context.sha,
+                });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+            }
 
-      - name: Check if version already published
-        id: pypi
+      - name: Create GitHub Releases
+        if: steps.publish.outputs.tags != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
-          PACKAGE_NAME: ${{ steps.package.outputs.name }}
-        run: |
-          VERSION=$(python scripts/get-version.py "$PACKAGE_NAME")
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${PACKAGE_NAME}/${VERSION}/json")
-          if [ "$HTTP_STATUS" = "200" ]; then
-            echo "$PACKAGE_NAME $VERSION already exists on PyPI, skipping publish"
-            echo "should-publish=false" >> "$GITHUB_OUTPUT"
-          elif [ "$HTTP_STATUS" = "404" ]; then
-            echo "$PACKAGE_NAME $VERSION not found on PyPI, proceeding with publish"
-            echo "should-publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Unexpected PyPI response for $PACKAGE_NAME $VERSION: $HTTP_STATUS"
-            exit 1
-          fi
-
-      - name: Build package
-        if: steps.pypi.outputs.should-publish == 'true'
-        env:
-          PACKAGE_NAME: ${{ steps.package.outputs.name }}
-        run: uv build --package "$PACKAGE_NAME" --no-sources
-
-      - name: Publish package
-        if: steps.pypi.outputs.should-publish == 'true'
-        run: uv publish
+          TAGS: ${{ steps.publish.outputs.tags }}
+        with:
+          script: |
+            const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
+            for (const tag of tags) {
+              try {
+                await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tag,
+                  name: tag,
+                  body: '',
+                });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+            }

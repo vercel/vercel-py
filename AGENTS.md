@@ -4,22 +4,26 @@
 - `ruff` for linting and formatting
 - `mypy` for type checking
 
-# Scripts
+# Commands
 
-- `./scripts/test.sh` — Run tests (excludes example tests).
+- `uv run poe qa` — Run lint, typecheck, and tests. Accepts package or file
+  scopes plus `-q`/`--quiet` and `-v`/`--verbose`; does not accept
+  tool-specific options after `--`.
+- `uv run poe test` — Run tests (excludes example tests).
+- `uv run poe lint` — Run lint checks (ruff check + format).
+- `uv run poe typecheck` — Run type checks (mypy + ty).
+- `uv run poe fix` — Auto-fix lint issues and reformat code with ruff.
 - `./scripts/test-python-matrix.sh` — Run tests through tox across local Python
   versions. Accepts tox args before `--`, then normal `test.sh` scopes and
   pytest args after `--`.
 - `./scripts/test-examples.sh` — Run example tests in parallel. Accepts extra pytest args.
-- `./scripts/lint.sh` — Run lint checks (ruff check + format).
-- `./scripts/typecheck.sh` — Run type checks (mypy + ty).
-- `./scripts/fix.sh` — Auto-fix lint issues and reformat code with ruff.
 
-The workspace `test`, `lint`, and `typecheck` scripts accept zero or more
-scopes before `--` and tool args after `--`.
+The workspace `test`, `lint`, and `typecheck` Poe commands accept zero or more
+scopes before `--` and tool args after `--`. The aggregate `qa` command accepts
+scopes but intentionally rejects tool-specific arguments after `--`.
 
-Example: `./scripts/test.sh tests/unit/test_time.py -- -k coerce_duration`
-Or by package name: `./scripts/test.sh vercel-oidc`.
+Example: `uv run poe test tests/unit/test_time.py -- -k coerce_duration`
+Or by package name: `uv run poe test vercel-oidc`.
 Matrix example: `./scripts/test-python-matrix.sh -e py310,py314 -- vercel-queue -- -k subscriptions`.
 
 The workspace task system is documented in `scripts/poe/README.md`. Workspace
