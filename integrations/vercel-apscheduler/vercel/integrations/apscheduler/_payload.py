@@ -27,6 +27,7 @@ class CursorEntry:
     fingerprint: str
     state: CursorState
     next_run_time: datetime | None = None
+    nominal_run_time: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.state == "scheduled" and self.next_run_time is None:
@@ -37,6 +38,12 @@ class CursorEntry:
                 "next_run_time",
                 as_utc(self.next_run_time, name="next_run_time"),
             )
+        if self.nominal_run_time is not None:
+            object.__setattr__(
+                self,
+                "nominal_run_time",
+                as_utc(self.nominal_run_time, name="nominal_run_time"),
+            )
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -46,6 +53,8 @@ class CursorEntry:
         }
         if self.next_run_time is not None:
             payload["next_run_time"] = self.next_run_time.isoformat()
+        if self.nominal_run_time is not None:
+            payload["nominal_run_time"] = self.nominal_run_time.isoformat()
         return payload
 
     @classmethod
@@ -75,11 +84,22 @@ class CursorEntry:
             except ValueError as exc:
                 raise ValueError("cursor entry next_run_time must be ISO-8601") from exc
 
+        nominal_run_time: datetime | None = None
+        nominal_run_time_raw = payload.get("nominal_run_time")
+        if nominal_run_time_raw is not None:
+            if not isinstance(nominal_run_time_raw, str):
+                raise ValueError("cursor entry nominal_run_time must be a string")
+            try:
+                nominal_run_time = datetime.fromisoformat(nominal_run_time_raw)
+            except ValueError as exc:
+                raise ValueError("cursor entry nominal_run_time must be ISO-8601") from exc
+
         return cls(
             job_id=job_id,
             fingerprint=fingerprint,
             state=state,
             next_run_time=next_run_time,
+            nominal_run_time=nominal_run_time,
         )
 
 

@@ -22,6 +22,7 @@ try:
         STATE_STOPPED,
         BaseScheduler,
     )
+    from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
     from apscheduler.triggers.date import DateTrigger  # type: ignore[import-untyped]
     from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-untyped]
 except ImportError as exc:  # pragma: no cover - exercised by import guards
@@ -42,6 +43,7 @@ __all__ = [
     "STATE_STOPPED",
     "BaseExecutor",
     "BaseScheduler",
+    "CronTrigger",
     "DateTrigger",
     "IntervalTrigger",
     "JobExecutionEvent",

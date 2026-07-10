@@ -6,7 +6,6 @@ from ._adapter import (
     WakeupProcessingResult,
     adopt_scheduler,
     install_vercel_apscheduler_integration,
-    maybe_auto_install_from_env,
     seed_next_wakeup,
 )
 from ._executor import VercelInlineExecutor
@@ -27,7 +26,6 @@ __all__ = [
     "adopt_scheduler",
     "get_asgi_app",
     "install_vercel_apscheduler_integration",
-    "maybe_auto_install_from_env",
     "register_scheduler",
     "seed_next_wakeup",
 ]

@@ -9,6 +9,7 @@ from datetime import datetime
 
 from ._adapter import install_vercel_apscheduler_integration, seed_next_wakeup
 from ._imports import BaseScheduler
+from ._options import VercelAPSchedulerOptions
 
 __all__ = ["main"]
 
@@ -31,7 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Defuse unguarded scheduler.start() calls while importing user code.
     os.environ.setdefault("VERCEL", "1")
-    install_vercel_apscheduler_integration()
+    install_vercel_apscheduler_integration(options=VercelAPSchedulerOptions.from_env())
 
     try:
         scheduler = _load_scheduler(args.entrypoint)

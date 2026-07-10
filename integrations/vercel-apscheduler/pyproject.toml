@@ -22,6 +22,11 @@ vercel-queue = { workspace = true }
 extend = "../ruff.toml"
 
 [tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = [
+    "D",
+    "INP001",
+    "T201",
+]
 "tests/**/*.py" = [
     "D",
     "S101",
@@ -66,6 +71,11 @@ include = [
     "/vercel/integrations/apscheduler/**/*.py",
     "/vercel/integrations/apscheduler/py.typed",
     "/README.md",
+    "/SCHEDULER.md",
+    "/examples/**/*.md",
+    "/examples/**/*.py",
+    "/examples/**/*.json",
+    "/examples/**/*.toml",
     "/pyproject.toml",
     "/LICENSE",
 ]

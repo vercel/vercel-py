@@ -5,7 +5,6 @@ from typing import Any, cast
 import json
 import logging
 import math
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -23,6 +22,9 @@ from ._imports import (
     STATE_RUNNING,
     STATE_STOPPED,
     BaseScheduler,
+    CronTrigger,
+    DateTrigger,
+    IntervalTrigger,
     JobSubmissionEvent,
     MaxInstancesReachedError,
     MemoryJobStore,
@@ -33,7 +35,8 @@ from ._time import as_utc, canonical_scheduled_logical_time, earliest, require_a
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 ADAPTER_ATTR = "_vercel_apscheduler_adapter"
-WAKEUP_KEY_PREFIX = "aps:v1"
+WAKEUP_KEY_PREFIX = "aps"
+MAX_JITTER_LOOKBACK_OCCURRENCES = 10_000
 
 __all__ = [
     "ADAPTER_ATTR",
@@ -81,6 +84,8 @@ class _DueJobPlan:
     jobstore_alias: str
     run_times: list[datetime]
     next_run_time: datetime | None
+    next_nominal_run_time: datetime | None = None
+    memory_backed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +93,8 @@ class _JobDefinition:
     schedule_key: str
     fingerprint: str
     trigger_kind: str
-    unanchored_interval: bool
+    explicit_id: bool
+    interval_has_explicit_start_date: bool
 
 
 @dataclass(slots=True)
@@ -173,7 +179,9 @@ def _build_definition(
     else:
         trigger_kind = type(getattr(job, "trigger", trigger_arg)).__name__
 
-    unanchored_interval = trigger_arg == "interval" and "start_date" not in trigger_kwargs
+    interval_has_explicit_start_date = (
+        trigger_arg == "interval" and trigger_kwargs.get("start_date") is not None
+    )
 
     fingerprint_payload = {
         "func": _job_func_name(job.func),
@@ -190,7 +198,8 @@ def _build_definition(
         schedule_key=schedule_key,
         fingerprint=_json_hash(fingerprint_payload),
         trigger_kind=str(trigger_kind),
-        unanchored_interval=unanchored_interval,
+        explicit_id=explicit_id is not None,
+        interval_has_explicit_start_date=interval_has_explicit_start_date,
     )
 
 
@@ -210,14 +219,11 @@ class SchedulerAdapter:
         self._pending_jobs_reference_time: datetime | None = None
         self._pending_cursor: MemoryCursor = MemoryCursor.empty()
         self._job_definitions: dict[str, _JobDefinition] = {}
+        self._memory_nominal_run_times: dict[str, datetime] = {}
         self._suppress_wakeup = False
         self._adopt_instance_methods()
 
     def _adopt_instance_methods(self) -> None:
-        self.scheduler.get_queue_subscriptions = MethodType(  # type: ignore[attr-defined]
-            lambda sched: self.get_queue_subscriptions(),
-            self.scheduler,
-        )
         self.scheduler.wakeup = MethodType(  # type: ignore[method-assign]
             lambda sched: self.wakeup(),
             self.scheduler,
@@ -248,20 +254,11 @@ class SchedulerAdapter:
                 "trigger": repr(job.trigger),
             }),
             trigger_kind=type(job.trigger).__name__,
-            unanchored_interval=False,
+            explicit_id=False,
+            interval_has_explicit_start_date=False,
         )
         self._job_definitions[str(job.id)] = fallback
         return fallback
-
-    def get_queue_subscriptions(self) -> list[dict[str, Any]]:
-        entry: dict[str, Any] = {
-            "topic": self.options.wakeup_topic,
-            "retry_after_seconds": self.options.retry_after_seconds,
-            "max_concurrency": self.options.max_concurrency,
-        }
-        if self.options.max_attempts is not None:
-            entry["max_deliveries"] = self.options.max_attempts
-        return [entry]
 
     def build_wakeup_idempotency_key(self, logical_time: datetime) -> str:
         logical_time_utc = as_utc(logical_time, name="logical_time")
@@ -293,6 +290,11 @@ class SchedulerAdapter:
             if self.scheduler.state == STATE_STOPPED:
                 self._inject_default_executor()
                 BaseScheduler.start(self.scheduler, paused=False)
+            self._validate_started_configuration()
+        except BaseException:
+            if self.scheduler.state != STATE_STOPPED:
+                BaseScheduler.shutdown(self.scheduler, wait=True)
+            raise
         finally:
             self._pending_jobs_reference_time = None
             self._pending_cursor = MemoryCursor.empty()
@@ -304,9 +306,165 @@ class SchedulerAdapter:
             return
         self.scheduler.add_executor(VercelInlineExecutor(), "default")
 
-    def materialize_pending_job(self, job: Any) -> None:
+    def _validate_started_configuration(self) -> None:
+        with self.scheduler._jobstores_lock:
+            for jobstore in self.scheduler._jobstores.values():
+                for job in jobstore.get_all_jobs():
+                    self._validate_executor(job)
+                    if isinstance(jobstore, MemoryJobStore):
+                        self._validate_memory_job(job)
+
+    def _validate_executor(self, job: Any) -> None:
+        executor = self.scheduler._lookup_executor(job.executor)
+        if not isinstance(executor, VercelInlineExecutor):
+            raise TypeError(
+                f'APScheduler job "{job.id}" uses executor "{job.executor}". '
+                "Vercel APScheduler requires the inline default executor so a queue "
+                "delivery cannot be acknowledged before the job finishes."
+            )
+
+    def _validate_memory_job(self, job: Any) -> None:
+        definition = self.definition_for_job(job)
+        if not definition.explicit_id:
+            raise TypeError(
+                "MemoryJobStore jobs on Vercel require an explicit stable id. "
+                f'Add id=... to APScheduler job "{job.id}".'
+            )
+
+        trigger = job.trigger
+        if isinstance(trigger, DateTrigger):
+            raise TypeError(
+                f'APScheduler job "{job.id}" uses a finite DateTrigger with MemoryJobStore. '
+                "Finite memory schedules cannot survive a cursor-free deployment seed; "
+                "use a durable job store or a recurring cron/interval trigger."
+            )
+        if isinstance(trigger, IntervalTrigger):
+            if not definition.interval_has_explicit_start_date:
+                raise RuntimeError(
+                    f'APScheduler job "{job.id}" uses an interval trigger without an explicit '
+                    "start_date. Pass trigger='interval' and start_date=... so cold starts "
+                    "cannot move the schedule. Pre-built IntervalTrigger objects are not "
+                    "accepted because APScheduler does not preserve whether their anchor "
+                    "was explicit."
+                )
+        elif not isinstance(trigger, CronTrigger):
+            raise TypeError(
+                f'APScheduler job "{job.id}" uses unsupported memory trigger '
+                f'"{type(trigger).__name__}". Vercel APScheduler supports deterministic '
+                "CronTrigger and explicitly anchored IntervalTrigger schedules."
+            )
+
+    def _get_nominal_fire_time(
+        self,
+        job: Any,
+        previous_nominal_run_time: datetime | None,
+        now: datetime,
+    ) -> datetime | None:
+        trigger = job.trigger
+        jitter = getattr(trigger, "jitter", None)
+        if hasattr(trigger, "jitter"):
+            trigger.jitter = None
+        try:
+            return trigger.get_next_fire_time(previous_nominal_run_time, now)
+        finally:
+            if hasattr(trigger, "jitter"):
+                trigger.jitter = jitter
+
+    def _apply_deterministic_jitter(
+        self,
+        job: Any,
+        nominal_run_time: datetime | None,
+    ) -> datetime | None:
+        if nominal_run_time is None:
+            return None
+        jitter = getattr(job.trigger, "jitter", None)
+        if not jitter:
+            return nominal_run_time
+
+        definition = self.definition_for_job(job)
+        identity = "\0".join((
+            self.options.scheduler_id,
+            definition.schedule_key,
+            definition.fingerprint,
+            as_utc(nominal_run_time, name="nominal_run_time").isoformat(),
+        ))
+        random_bits = int.from_bytes(sha256(identity.encode("utf-8")).digest(), "big")
+        maximum_microseconds = max(0, int(float(jitter) * 1_000_000))
+        following_nominal_run_time = self._get_nominal_fire_time(
+            job,
+            nominal_run_time,
+            nominal_run_time,
+        )
+        if following_nominal_run_time is not None:
+            gap_microseconds = max(
+                0,
+                int((following_nominal_run_time - nominal_run_time).total_seconds() * 1_000_000)
+                - 1,
+            )
+            maximum_microseconds = min(maximum_microseconds, gap_microseconds)
+        offset_microseconds = (random_bits * (maximum_microseconds + 1)) >> 256
+        jittered_run_time = nominal_run_time + timedelta(microseconds=offset_microseconds)
+
+        end_date = getattr(job.trigger, "end_date", None)
+        if isinstance(job.trigger, CronTrigger) and end_date is not None:
+            return min(jittered_run_time, end_date)
+        if isinstance(job.trigger, IntervalTrigger) and end_date is not None:
+            return jittered_run_time if jittered_run_time <= end_date else None
+        return jittered_run_time
+
+    def _get_next_memory_fire_time(
+        self,
+        job: Any,
+        previous_nominal_run_time: datetime | None,
+        now: datetime,
+    ) -> tuple[datetime | None, datetime | None]:
+        nominal_run_time = self._get_nominal_fire_time(
+            job,
+            previous_nominal_run_time,
+            now,
+        )
+        return nominal_run_time, self._apply_deterministic_jitter(job, nominal_run_time)
+
+    def _get_initial_memory_fire_time(
+        self,
+        job: Any,
+        reference_time: datetime,
+    ) -> tuple[datetime | None, datetime | None]:
+        jitter = getattr(job.trigger, "jitter", None)
+        if not jitter:
+            return self._get_next_memory_fire_time(job, None, reference_time)
+
+        search_time = reference_time - timedelta(seconds=float(jitter))
+        nominal_run_time = self._get_nominal_fire_time(job, None, search_time)
+        for _ in range(MAX_JITTER_LOOKBACK_OCCURRENCES):
+            jittered_run_time = self._apply_deterministic_jitter(job, nominal_run_time)
+            if jittered_run_time is None or jittered_run_time >= reference_time:
+                return nominal_run_time, jittered_run_time
+            nominal_run_time = self._get_nominal_fire_time(
+                job,
+                nominal_run_time,
+                reference_time,
+            )
+            if nominal_run_time is None:
+                return None, None
+
+        raise RuntimeError(
+            f'APScheduler job "{job.id}" has more than '
+            f"{MAX_JITTER_LOOKBACK_OCCURRENCES} nominal occurrences inside its jitter "
+            "window. Reduce jitter or use a less frequent schedule."
+        )
+
+    def materialize_pending_job(self, job: Any, jobstore_alias: str) -> None:
+        jobstore = self.scheduler._lookup_jobstore(jobstore_alias)
+        memory_backed = isinstance(jobstore, MemoryJobStore)
+        self._validate_executor(job)
+        if memory_backed:
+            self._validate_memory_job(job)
+
         reference = self._pending_jobs_reference_time
         if reference is None or hasattr(job, "next_run_time"):
+            if memory_backed and getattr(job, "next_run_time", None) is not None:
+                self._memory_nominal_run_times[str(job.id)] = job.next_run_time
             return
 
         definition = self.definition_for_job(job)
@@ -314,23 +472,24 @@ class SchedulerAdapter:
         if cursor_entry is not None and cursor_entry.fingerprint == definition.fingerprint:
             if cursor_entry.state == "scheduled":
                 job._modify(next_run_time=cursor_entry.next_run_time)
+                self._memory_nominal_run_times[str(job.id)] = (
+                    cursor_entry.nominal_run_time or cursor_entry.next_run_time
+                )
             else:
                 job._modify(next_run_time=None)
+                self._memory_nominal_run_times.pop(str(job.id), None)
             return
 
-        if definition.unanchored_interval:
-            raise RuntimeError(
-                f'APScheduler job "{job.id}" uses an interval trigger without an explicit '
-                "start_date. This is not supported with MemoryJobStore on Vercel because "
-                "APScheduler anchors it to import time on every cold start."
-            )
-
-        job._modify(
-            next_run_time=job.trigger.get_next_fire_time(
-                None,
+        if memory_backed:
+            nominal_run_time, next_run_time = self._get_initial_memory_fire_time(
+                job,
                 reference,
             )
-        )
+            if nominal_run_time is not None:
+                self._memory_nominal_run_times[str(job.id)] = nominal_run_time
+            job._modify(next_run_time=next_run_time)
+        else:
+            job._modify(next_run_time=job.trigger.get_next_fire_time(None, reference))
 
     def _memory_cursor(self) -> MemoryCursor:
         jobs: dict[str, CursorEntry] = {}
@@ -353,6 +512,10 @@ class SchedulerAdapter:
                             fingerprint=definition.fingerprint,
                             state="scheduled",
                             next_run_time=next_run_time,
+                            nominal_run_time=self._memory_nominal_run_times.get(
+                                str(job.id),
+                                next_run_time,
+                            ),
                         )
         return MemoryCursor(jobs=jobs)
 
@@ -368,9 +531,31 @@ class SchedulerAdapter:
                     )
         return next_wakeup_time
 
+    def _has_durable_jobstore_unchecked(self) -> bool:
+        return any(
+            not isinstance(jobstore, MemoryJobStore)
+            for jobstore in self.scheduler._jobstores.values()
+        )
+
+    def _cap_for_durable_jobstores(
+        self,
+        next_wakeup_time: datetime | None,
+        *,
+        reference_time: datetime,
+    ) -> datetime | None:
+        if not self._has_durable_jobstore_unchecked():
+            return next_wakeup_time
+        poll_time = reference_time + timedelta(seconds=self.options.durable_poll_interval_seconds)
+        return earliest(next_wakeup_time, poll_time)
+
     def get_next_wakeup_time(self) -> datetime | None:
         self.ensure_started(pending_jobs_reference_time=datetime.now(UTC))
-        return self._get_next_wakeup_time_unchecked()
+        next_wakeup_time = self._get_next_wakeup_time_unchecked()
+        with self.scheduler._jobstores_lock:
+            return self._cap_for_durable_jobstores(
+                next_wakeup_time,
+                reference_time=datetime.now(self.scheduler.timezone),
+            )
 
     def seed(
         self,
@@ -385,7 +570,18 @@ class SchedulerAdapter:
 
         next_wakeup_time = self._get_next_wakeup_time_unchecked()
         if next_wakeup_time is None:
-            return None
+            with self.scheduler._jobstores_lock:
+                if not self._has_durable_jobstore_unchecked():
+                    return None
+                next_wakeup_time = now_utc.astimezone(self.scheduler.timezone) + timedelta(
+                    seconds=self.options.durable_poll_interval_seconds
+                )
+        else:
+            with self.scheduler._jobstores_lock:
+                next_wakeup_time = self._cap_for_durable_jobstores(
+                    next_wakeup_time,
+                    reference_time=now_utc.astimezone(self.scheduler.timezone),
+                )
         return self.publish_wakeup(
             next_wakeup_time,
             cursor=self._memory_cursor(),
@@ -486,6 +682,11 @@ class SchedulerAdapter:
             retry_wakeup_time,
             self._get_next_wakeup_time_unchecked(),
         )
+        with self.scheduler._jobstores_lock:
+            next_wakeup_time = self._cap_for_durable_jobstores(
+                next_wakeup_time,
+                reference_time=effective_logical_time,
+            )
         published_wakeup = (
             self.publish_wakeup(
                 next_wakeup_time,
@@ -526,24 +727,61 @@ class SchedulerAdapter:
                     continue
 
                 for job in due_store_jobs:
-                    run_times = job._get_run_times(logical_time)
+                    memory_backed = isinstance(jobstore, MemoryJobStore)
+                    next_nominal_run_time: datetime | None = None
+                    if memory_backed:
+                        (
+                            run_times,
+                            next_nominal_run_time,
+                            next_run_time,
+                        ) = self._get_memory_run_times(job, logical_time)
+                    else:
+                        run_times = job._get_run_times(logical_time)
+                        next_run_time = (
+                            job.trigger.get_next_fire_time(run_times[-1], logical_time)
+                            if run_times
+                            else None
+                        )
                     if run_times and job.coalesce:
                         run_times = run_times[-1:]
 
                     if not run_times:
                         continue
 
-                    next_run_time = job.trigger.get_next_fire_time(run_times[-1], logical_time)
                     due_jobs.append(
                         _DueJobPlan(
                             job=job,
                             jobstore_alias=jobstore_alias,
                             run_times=list(run_times),
                             next_run_time=next_run_time,
+                            next_nominal_run_time=next_nominal_run_time,
+                            memory_backed=memory_backed,
                         )
                     )
 
         return due_jobs, retry_wakeup_time
+
+    def _get_memory_run_times(
+        self,
+        job: Any,
+        logical_time: datetime,
+    ) -> tuple[list[datetime], datetime | None, datetime | None]:
+        run_times: list[datetime] = []
+        next_run_time = job.next_run_time
+        nominal_run_time = self._memory_nominal_run_times.get(
+            str(job.id),
+            next_run_time,
+        )
+
+        while next_run_time is not None and next_run_time <= logical_time:
+            run_times.append(next_run_time)
+            nominal_run_time, next_run_time = self._get_next_memory_fire_time(
+                job,
+                nominal_run_time,
+                logical_time,
+            )
+
+        return run_times, nominal_run_time, next_run_time
 
     def _submit_due_jobs(
         self,
@@ -564,6 +802,8 @@ class SchedulerAdapter:
                         plan.job,
                     )
                     self.scheduler.remove_job(plan.job.id, plan.jobstore_alias)
+                    if plan.memory_backed:
+                        self._memory_nominal_run_times.pop(str(plan.job.id), None)
                     continue
 
                 try:
@@ -603,9 +843,15 @@ class SchedulerAdapter:
 
                 if plan.next_run_time is not None:
                     plan.job._modify(next_run_time=plan.next_run_time)
+                    if plan.memory_backed and plan.next_nominal_run_time is not None:
+                        self._memory_nominal_run_times[str(plan.job.id)] = (
+                            plan.next_nominal_run_time
+                        )
                     self.scheduler._lookup_jobstore(plan.jobstore_alias).update_job(plan.job)
                 else:
                     self.scheduler.remove_job(plan.job.id, plan.jobstore_alias)
+                    if plan.memory_backed:
+                        self._memory_nominal_run_times.pop(str(plan.job.id), None)
 
         for event in events:
             self.scheduler._dispatch_event(event)
@@ -672,7 +918,7 @@ def _patched_real_add_job(
 ) -> Any:
     adapter = get_adapter(self)
     if adapter is not None:
-        adapter.materialize_pending_job(job)
+        adapter.materialize_pending_job(job, jobstore_alias)
     original_real_add_job = _PATCH_STATE.original_real_add_job
     if original_real_add_job is None:
         raise RuntimeError("APScheduler integration patch is not initialized")
@@ -734,8 +980,8 @@ def install_vercel_apscheduler_integration(
     *,
     options: VercelAPSchedulerOptions | dict[str, Any] | None = None,
 ) -> None:
-    resolved_options = VercelAPSchedulerOptions.from_value(options)
-    _PATCH_STATE.default_options = resolved_options
+    if options is not None or _PATCH_STATE.default_options is None:
+        _PATCH_STATE.default_options = VercelAPSchedulerOptions.from_value(options)
     if _PATCH_STATE.installed:
         return
 
@@ -748,9 +994,3 @@ def install_vercel_apscheduler_integration(
     BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
     _patch_scheduler_start_methods()
     _PATCH_STATE.installed = True
-
-
-def maybe_auto_install_from_env() -> None:
-    value = os.environ.get("VERCEL_PYTHON_AUTO_APSCHEDULER")
-    if value and value.strip().casefold() in {"1", "true", "yes", "on"}:
-        install_vercel_apscheduler_integration()

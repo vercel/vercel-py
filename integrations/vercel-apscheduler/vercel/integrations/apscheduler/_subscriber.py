@@ -74,6 +74,6 @@ def get_asgi_app(
     scheduler: BaseScheduler,
     *,
     options: VercelAPSchedulerOptions | dict[str, Any] | None = None,
-) -> vqs.QueueClientAsgiApp:
+) -> Any:
     register_scheduler(scheduler, options=options)
     return vqs.asgi_app()
