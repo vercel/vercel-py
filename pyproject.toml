@@ -68,6 +68,7 @@ mypy_path = [
     "src/vercel-queue",
     "src/vercel-oidc",
     "src/vercel-internal-telemetry",
+    "integrations/vercel-apscheduler",
     "integrations/vercel-celery",
     "tests/stubs",
 ]

@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-apscheduler"
+dynamic = ["version"]
+description = "APScheduler integration for Vercel Queues"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "APScheduler>=3.10.4,<4",
+    "vercel-queue>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-queue = { workspace = true }
+
+[tool.ruff]
+extend = "../ruff.toml"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "D",
+    "S101",
+    "SLF001",
+    "PLC2701",
+]
+"vercel/integrations/apscheduler/_adapter.py" = [
+    "BLE001",  # APScheduler itself treats job store/executor failures broadly.
+    "FBT001",  # patched APScheduler signatures must match upstream.
+    "FBT002",  # patched APScheduler signatures must match upstream.
+    "N806",  # scheduler class names imported lazily mirror upstream names.
+    "PLC0415",  # optional scheduler classes are imported only when patching.
+    "SLF001",  # integration relies on APScheduler private extension points.
+    "TRY400",  # executor lookup failure is logged with APScheduler context.
+]
+"vercel/integrations/apscheduler/_executor.py" = [
+    "BLE001",  # mirrors APScheduler BaseExecutor error handling.
+    "S101",  # mirrors APScheduler executor invariants.
+    "SLF001",  # APScheduler job metadata is private.
+    "TID251",  # async job support needs stdlib event-loop detection.
+]
+"vercel/integrations/apscheduler/_imports.py" = [
+    "PLW0717",  # grouped optional APScheduler import guard.
+]
+"vercel/integrations/apscheduler/_payload.py" = [
+    "TRY004",  # payload parse failures are reported uniformly as ValueError.
+]
+"vercel/integrations/apscheduler/version.py" = [
+    "D100",
+]
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "vercel/integrations/apscheduler/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/integrations/apscheduler/**/*.py",
+    "/vercel/integrations/apscheduler/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/integrations/apscheduler",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
