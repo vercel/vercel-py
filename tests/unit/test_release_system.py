@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from scripts import bundle_release, hatch_build, release, workspace
+from scripts import bundle_release, clogedit, hatch_build, release, workspace
 
 
 def _derived_vendoring_config(include: str) -> bundle_release.VendoringConfig:
@@ -580,7 +581,7 @@ def test_fragment_pr_number_reads_subjects_only(
 
 
 def test_check_fragments_requires_changed_package_fragment(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     version_file = tmp_path / "pkg/version.py"
     version_file.parent.mkdir(parents=True)
@@ -599,6 +600,9 @@ def test_check_fragments_requires_changed_package_fragment(
     )
 
     assert release.check_fragments(base="origin/main") == 1
+    output = capsys.readouterr().out
+    assert "Missing news fragments for changed packages: pkg" in output
+    assert "Run `poe changelog`" in output
 
 
 def test_check_fragments_exempts_release_prep_version_bumps(
@@ -663,6 +667,258 @@ def test_changed_packages_accepts_explicit_range(
 
     assert release.changed_packages(base="abc", head="def") == ["pkg"]
     assert seen == {"base": "abc", "head": "def", "code_only": False}
+
+
+def test_collect_changelog_diff_paths_staged_uses_cached_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def fake_git_name_paths(args: list[str]) -> set[Path]:
+        seen.append(args)
+        return {release.ROOT / "src/pkg/module.py"}
+
+    monkeypatch.setattr(release, "_git_name_paths", fake_git_name_paths)
+
+    assert release.collect_changelog_diff_paths("staged") == {release.ROOT / "src/pkg/module.py"}
+    assert seen == [["diff", "--cached", "--name-only"]]
+
+
+def test_collect_changelog_diff_paths_tracked_uses_head_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def fake_git_name_paths(args: list[str]) -> set[Path]:
+        seen.append(args)
+        return {release.ROOT / "src/pkg/module.py"}
+
+    monkeypatch.setattr(release, "_git_name_paths", fake_git_name_paths)
+
+    assert release.collect_changelog_diff_paths("tracked") == {release.ROOT / "src/pkg/module.py"}
+    assert seen == [["diff", "HEAD", "--name-only"]]
+
+
+def test_collect_changelog_diff_paths_all_includes_untracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values: dict[tuple[str, ...], set[Path]] = {
+        ("diff", "HEAD", "--name-only"): {release.ROOT / "src/pkg/module.py"},
+        ("ls-files", "--others", "--exclude-standard"): {release.ROOT / "src/pkg/new.py"},
+    }
+
+    def fake_git_name_paths(args: list[str]) -> set[Path]:
+        return values[tuple(args)]
+
+    monkeypatch.setattr(release, "_git_name_paths", fake_git_name_paths)
+
+    assert release.collect_changelog_diff_paths("all") == {
+        release.ROOT / "src/pkg/module.py",
+        release.ROOT / "src/pkg/new.py",
+    }
+
+
+def test_collect_changelog_diff_paths_base_uses_lower_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+    monkeypatch.setattr(release, "changelog_base_lower_bound", lambda: "abc123")
+
+    def fake_git_name_paths(args: list[str]) -> set[Path]:
+        seen.append(args)
+        return {release.ROOT / "src/pkg/module.py"}
+
+    monkeypatch.setattr(release, "_git_name_paths", fake_git_name_paths)
+
+    assert release.collect_changelog_diff_paths("base") == {release.ROOT / "src/pkg/module.py"}
+    assert seen == [["diff", "abc123..HEAD", "--name-only"]]
+
+
+def test_changelog_base_lower_bound_uses_newest_news_fragment_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release.changelog_base_lower_bound.cache_clear()
+    monkeypatch.setattr(release, "_default_base_ref", lambda: "origin/main")
+
+    def fake_git_lines(args: list[str]) -> list[str]:
+        assert args == ["log", "-m", "--format=%x00%H", "--name-only", "origin/main..HEAD"]
+        return [
+            "\0new",
+            "src/pkg/module.py",
+            "\0old",
+            "changes/pkg/123.feature.md",
+        ]
+
+    monkeypatch.setattr(release, "_git_lines", fake_git_lines)
+
+    assert release.changelog_base_lower_bound() == "old"
+
+
+def test_changelog_base_lower_bound_defaults_to_base_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release.changelog_base_lower_bound.cache_clear()
+    monkeypatch.setattr(release, "_default_base_ref", lambda: "origin/main")
+    monkeypatch.setattr(release, "_git_lines", lambda _args: [])
+
+    assert release.changelog_base_lower_bound() == "origin/main"
+
+
+def test_changelog_base_lower_bound_requires_base_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release.changelog_base_lower_bound.cache_clear()
+    monkeypatch.setattr(release, "_default_base_ref", lambda: None)
+
+    with pytest.raises(SystemExit, match="could not find origin/main"):
+        release.changelog_base_lower_bound()
+
+
+def test_initial_changelog_selection_marks_changed_uncovered_packages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    packages = {
+        "lib": workspace.Package("lib", tmp_path / "lib", tmp_path / "lib/version.py", ()),
+        "app": workspace.Package("app", tmp_path / "app", tmp_path / "app/version.py", ("lib",)),
+    }
+    monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["lib", "app"])
+
+    selection = clogedit.initial_changelog_selection(packages, {"lib", "app"}, {"app"})
+
+    assert list(selection.packages) == ["lib", "app"]
+    assert selection.packages["lib"].selected is True
+    assert selection.packages["app"].selected is False
+    assert selection.packages["app"].covered is True
+
+
+def test_packages_for_paths_detects_package_code(tmp_path: Path) -> None:
+    package = workspace.Package("pkg", tmp_path / "pkg", tmp_path / "pkg/version.py", ())
+
+    assert release.packages_for_paths(
+        {"pkg": package}, {tmp_path / "pkg/module.py"}, code_only=True
+    ) == {"pkg"}
+    assert (
+        release.packages_for_paths(
+            {"pkg": package}, {tmp_path / "pkg/tests/test_module.py"}, code_only=True
+        )
+        == set()
+    )
+
+
+def test_clean_news_fragment_text_strips_blank_and_comment_lines() -> None:
+    assert release.clean_news_fragment_text(
+        "# template\n\nAdd thing.  \n  # ignored\n- Fix thing.\n"
+    ) == ("Add thing.\n- Fix thing.")
+
+
+def test_clean_news_fragment_text_ignores_cutoff_section() -> None:
+    assert (
+        release.clean_news_fragment_text(
+            "Add thing.\n"
+            f"{release.CUTOFF_MARKER}\n"
+            "# Do not modify or remove the line above.\n"
+            "diff --git a/pkg/module.py b/pkg/module.py\n"
+            "+This is not news.\n"
+        )
+        == "Add thing."
+    )
+
+
+def test_validate_fragment_kind_rejects_unknown_type() -> None:
+    with pytest.raises(ValueError, match="invalid news fragment type"):
+        release.validate_fragment_kind("security")
+
+
+def test_write_news_fragment_uses_utc_timestamp_and_collision_suffix(tmp_path: Path) -> None:
+    timestamp = datetime(2026, 7, 10, 12, 34, 56, tzinfo=timezone.utc)
+    package_dir = tmp_path / "changes/pkg"
+    package_dir.mkdir(parents=True)
+    (package_dir / "20260710123456.bugfix.md").write_text("Existing.\n", encoding="utf-8")
+
+    path = release.write_news_fragment(
+        release.NewsFragmentDraft("pkg", "bugfix", "Fix cleanup."),
+        timestamp=timestamp,
+        changes=tmp_path / "changes",
+    )
+
+    assert path == package_dir / "20260710123456-1.bugfix.md"
+    assert path.read_text(encoding="utf-8") == "Fix cleanup.\n"
+
+
+def test_edit_news_fragment_runs_editor_and_requires_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VISUAL", "test-editor --flag")
+    seen: list[str] = []
+    templates: list[str] = []
+
+    def fake_runner(cmd: Sequence[str]) -> int:
+        seen.extend(cmd[:2])
+        assert Path(cmd[-1]).name == "COMMIT_EDITMSG"
+        templates.append(Path(cmd[-1]).read_text(encoding="utf-8"))
+        Path(cmd[-1]).write_text("# comment\n\nAdd feature.\n", encoding="utf-8")
+        return 0
+
+    assert release.edit_news_fragment("pkg", "feature", editor_runner=fake_runner) == "Add feature."
+    assert seen == ["test-editor", "--flag"]
+    assert templates == [release.FRAGMENT_GUIDANCE.format(package="pkg", package_diff_section="")]
+    assert templates[0].startswith("\n\n# Write a concise news fragment for pkg.")
+
+
+def test_edit_news_fragment_includes_package_diffstat_and_diff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VISUAL", "test-editor")
+    package_path = release.ROOT / "src/pkg"
+    seen_args: list[list[str]] = []
+    templates: list[str] = []
+
+    def fake_git_output(args: list[str], *, check: bool = True) -> str:
+        seen_args.append(args)
+        if args == ["diff", "HEAD", "--stat", "--", "src/pkg"]:
+            return " src/pkg/module.py | 2 ++\n 1 file changed, 2 insertions(+)\n"
+        if args == ["diff", "HEAD", "--", "src/pkg"]:
+            return "diff --git a/src/pkg/module.py b/src/pkg/module.py\n+new line\n"
+        raise AssertionError(args)
+
+    def fake_runner(cmd: Sequence[str]) -> int:
+        assert Path(cmd[-1]).name == "COMMIT_EDITMSG"
+        templates.append(Path(cmd[-1]).read_text(encoding="utf-8"))
+        Path(cmd[-1]).write_text("Add feature.\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(release, "_git_output", fake_git_output)
+
+    assert (
+        release.edit_news_fragment(
+            "pkg",
+            "feature",
+            package_path=package_path,
+            editor_runner=fake_runner,
+        )
+        == "Add feature."
+    )
+    assert seen_args == [
+        ["diff", "HEAD", "--stat", "--", "src/pkg"],
+        ["diff", "HEAD", "--", "src/pkg"],
+    ]
+    assert templates[0].startswith("\n\n# Write a concise news fragment for pkg.")
+    assert release.CUTOFF_MARKER in templates[0]
+    assert "# Everything below it will be ignored." in templates[0]
+    assert "src/pkg/module.py | 2 ++" in templates[0]
+    assert "diff --git a/src/pkg/module.py b/src/pkg/module.py" in templates[0]
+
+
+def test_edit_news_fragment_rejects_empty_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+
+    def fake_runner(cmd: Sequence[str]) -> int:
+        Path(cmd[-1]).write_text("# only comments\n\n", encoding="utf-8")
+        return 0
+
+    with pytest.raises(SystemExit, match="empty news fragment"):
+        release.edit_news_fragment("pkg", "docs", editor_runner=fake_runner)
 
 
 def test_package_hatch_build_loader_uses_shared_hook() -> None:

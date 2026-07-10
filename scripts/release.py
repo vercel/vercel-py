@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-
 try:
     from scripts import workspace
 except ImportError:  # pragma: no cover - script execution path
@@ -36,7 +38,26 @@ TYPE_BUMPS = {
     "docs": "patch",
     "internal": "patch",
 }
+FRAGMENT_TYPE_ALTERNATION = "|".join(FRAGMENT_TYPES)
+FRAGMENT_FILE_RE = re.compile(rf".+\.({FRAGMENT_TYPE_ALTERNATION})\.md")
 RELEASE_COMMIT_TITLE = "Release Packages"
+CHANGELOG_DIFF_MODES = ("staged", "tracked", "all", "base")
+CUTOFF_MARKER = "# ------------------------ >8 ------------------------"
+FRAGMENT_GUIDANCE = """
+
+# Write a concise news fragment for {package}.
+#
+# Each non-empty, non-comment line becomes changelog text.
+# The release script adds '- ' when a line does not already start with a bullet.
+{package_diff_section}
+"""
+
+
+@dataclass(frozen=True)
+class NewsFragmentDraft:
+    package: str
+    kind: str
+    text: str
 
 
 @dataclass(frozen=True)
@@ -71,11 +92,9 @@ def parse_fragments(packages: set[str]) -> list[Fragment]:
                 continue
             if fragment_path.name in IGNORED_FRAGMENT_FILES:
                 continue
-            match = re.fullmatch(
-                r".+\.(breaking|feature|bugfix|docs|internal)\.md", fragment_path.name
-            )
+            match = FRAGMENT_FILE_RE.fullmatch(fragment_path.name)
             if match is None:
-                expected = "<id>.(breaking|feature|bugfix|docs|internal).md"
+                expected = f"<id>.({FRAGMENT_TYPE_ALTERNATION}).md"
                 raise SystemExit(
                     "invalid news fragment name "
                     f"{fragment_path.relative_to(ROOT)}; expected {expected}"
@@ -272,8 +291,7 @@ def _ensure_clean_tree() -> None:
 
 def _create_release_branch() -> str:
     username = _gh_username()
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    branch = f"{username}/release-{timestamp}"
+    branch = f"{username}/release-{fragment_timestamp()}"
     subprocess.check_call(["git", "switch", "-c", branch], cwd=ROOT)
     return branch
 
@@ -451,6 +469,232 @@ def lint_towncrier() -> int:
     return 0
 
 
+def changelog(diff: str = "tracked") -> int:
+    if diff not in CHANGELOG_DIFF_MODES:
+        expected = ", ".join(CHANGELOG_DIFF_MODES)
+        raise SystemExit(f"invalid diff mode {diff!r}; expected one of: {expected}")
+
+    # Imported lazily: the TUI needs textual, which is not installed in the
+    # environments that run the non-interactive subcommands (e.g. the publish
+    # workflow runs `release.py changed` with a bare system Python).
+    try:
+        from scripts import clogedit
+    except ImportError:  # pragma: no cover - script execution path
+        import clogedit  # type: ignore[no-redef]
+    return clogedit.changelog(diff)
+
+
+def collect_changelog_diff_paths(diff: str) -> set[Path]:
+    paths = _git_name_paths([*changelog_diff_args(diff), "--name-only"])
+    if diff == "all":
+        paths |= _git_name_paths(["ls-files", "--others", "--exclude-standard"])
+    return paths
+
+
+def changelog_diff_args(diff: str) -> list[str]:
+    if diff == "staged":
+        return ["diff", "--cached"]
+    if diff in ("tracked", "all"):
+        return ["diff", "HEAD"]
+    if diff == "base":
+        return ["diff", f"{changelog_base_lower_bound()}..HEAD"]
+    expected = ", ".join(CHANGELOG_DIFF_MODES)
+    raise ValueError(f"invalid diff mode {diff!r}; expected one of: {expected}")
+
+
+@functools.cache
+def changelog_base_lower_bound() -> str:
+    base = _default_base_ref()
+    if base is None:
+        raise SystemExit("could not find origin/main or origin/master for `--diff base`")
+    # `git log --name-only` lists each commit (newest first) followed by the
+    # paths it touched; the NUL prefix cannot appear in a path, so it safely
+    # marks the commit lines.  -m makes merge commits list paths too.
+    commit: str | None = None
+    for line in _git_lines(["log", "-m", "--format=%x00%H", "--name-only", f"{base}..HEAD"]):
+        if line.startswith("\0"):
+            commit = line[1:]
+        elif commit is not None and _is_valid_news_fragment_path(Path(line)):
+            return commit
+    return base
+
+
+def _is_valid_news_fragment_path(path: Path) -> bool:
+    parts = path.parts
+    if len(parts) != 3 or parts[0] != "changes":
+        return False
+    return FRAGMENT_FILE_RE.fullmatch(parts[2]) is not None
+
+
+def _git_name_paths(args: list[str]) -> set[Path]:
+    return {ROOT / line for line in _git_lines(args) if line}
+
+
+def _git_lines(args: list[str]) -> list[str]:
+    # quotepath=off keeps non-ASCII path names literal instead of C-quoted.
+    output = subprocess.check_output(
+        ["git", "-c", "core.quotepath=off", *args], cwd=ROOT, text=True
+    )
+    return [line for line in output.splitlines() if line]
+
+
+def packages_for_paths(
+    packages_by_name: dict[str, workspace.Package], paths: Iterable[Path], *, code_only: bool
+) -> set[str]:
+    changed_paths = set(paths)
+    result: set[str] = set()
+    for name, package in packages_by_name.items():
+        if code_only:
+            if any(_is_package_code_path(path, package.path) for path in changed_paths):
+                result.add(name)
+        elif (
+            package.version_file in changed_paths or package.path / "CHANGELOG.md" in changed_paths
+        ):
+            result.add(name)
+    return result
+
+
+def edit_news_fragment(
+    package: str,
+    kind: str,
+    *,
+    package_path: Path | None = None,
+    diff: str = "tracked",
+    editor_runner: Callable[[Sequence[str]], int] | None = None,
+) -> str:
+    validate_fragment_kind(kind)
+    with tempfile.TemporaryDirectory(prefix=f"{package}-{kind}-") as tmpdir:
+        # Vim detects this basename as gitcommit for commit-message highlighting.
+        tmp_path = Path(tmpdir) / "COMMIT_EDITMSG"
+        tmp_path.write_text(
+            FRAGMENT_GUIDANCE.format(
+                package=package,
+                package_diff_section=package_diff_section(package_path, diff=diff),
+            ),
+            encoding="utf-8",
+        )
+        editor = _select_editor()
+        runner = subprocess.call if editor_runner is None else editor_runner
+        try:
+            result = runner([*editor, str(tmp_path)])
+        except OSError as exc:
+            raise SystemExit(f"could not run editor {editor[0]!r}: {exc}") from exc
+        if result != 0:
+            raise SystemExit(f"editor exited with status {result}")
+        text = clean_news_fragment_text(tmp_path.read_text(encoding="utf-8"))
+    if not text:
+        raise SystemExit(f"empty news fragment for {package}")
+    return text
+
+
+def package_diff_section(package_path: Path | None, *, diff: str) -> str:
+    if package_path is None:
+        return ""
+    diffstat = package_diffstat(package_path, diff=diff).rstrip()
+    diff_text = package_diff(package_path, diff=diff).rstrip()
+    diff_parts = [part for part in (diffstat, diff_text) if part]
+    if not diff_parts:
+        return ""
+    diff_body = "\n\n".join(diff_parts)
+    return (
+        "\n"
+        f"{CUTOFF_MARKER}\n"
+        "# Do not modify or remove the line above.\n"
+        "# Everything below it will be ignored.\n"
+        f"{diff_body}\n"
+    )
+
+
+def package_diffstat(package_path: Path, *, diff: str) -> str:
+    return _package_diff_output(package_path, diff=diff, stat=True)
+
+
+def package_diff(package_path: Path, *, diff: str) -> str:
+    return _package_diff_output(package_path, diff=diff, stat=False)
+
+
+def _package_diff_output(package_path: Path, *, diff: str, stat: bool) -> str:
+    relative_package = package_path.relative_to(ROOT).as_posix()
+    stat_args = ["--stat"] if stat else []
+    tracked = _git_output([*changelog_diff_args(diff), *stat_args, "--", relative_package])
+    if diff != "all":
+        return tracked
+    untracked = "\n".join(
+        _git_untracked_output(path, stat=stat)
+        for path in sorted(_git_name_paths(["ls-files", "--others", "--exclude-standard"]))
+        if path.is_relative_to(package_path)
+    )
+    return "\n".join(part for part in (tracked.rstrip(), untracked.rstrip()) if part)
+
+
+def _git_untracked_output(path: Path, *, stat: bool) -> str:
+    relative_path = path.relative_to(ROOT).as_posix()
+    stat_args = ["--stat"] if stat else []
+    return _git_output(
+        ["diff", "--no-index", *stat_args, "--", "/dev/null", relative_path],
+        check=False,
+    )
+
+
+def _git_output(args: list[str], *, check: bool = True) -> str:
+    return subprocess.run(
+        ["git", "-c", "core.quotepath=off", *args],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        check=check,
+    ).stdout
+
+
+def _select_editor() -> list[str]:
+    for name in ("VISUAL", "EDITOR"):
+        value = os.environ.get(name)
+        if value:
+            return shlex.split(value)
+    return ["vi"]
+
+
+def clean_news_fragment_text(text: str) -> str:
+    text = text.split(CUTOFF_MARKER, 1)[0]
+    lines = [
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return "\n".join(lines).strip()
+
+
+def validate_fragment_kind(kind: str) -> None:
+    if kind not in FRAGMENT_TYPES:
+        expected = ", ".join(FRAGMENT_TYPES)
+        raise ValueError(f"invalid news fragment type {kind!r}; expected one of: {expected}")
+
+
+def write_news_fragment(
+    draft: NewsFragmentDraft, *, timestamp: datetime | None = None, changes: Path | None = None
+) -> Path:
+    validate_fragment_kind(draft.kind)
+    root = CHANGES if changes is None else changes
+    package_dir = root / draft.package
+    package_dir.mkdir(parents=True, exist_ok=True)
+    stem = fragment_timestamp(timestamp)
+    path = package_dir / f"{stem}.{draft.kind}.md"
+    suffix = 1
+    while path.exists():
+        path = package_dir / f"{stem}-{suffix}.{draft.kind}.md"
+        suffix += 1
+    path.write_text(f"{draft.text.rstrip()}\n", encoding="utf-8")
+    return path
+
+
+def fragment_timestamp(value: datetime | None = None) -> str:
+    if value is None:
+        value = datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
 def check_fragments(base: str | None = None) -> int:
     packages_by_name = workspace.packages()
     fragments = parse_fragments(set(packages_by_name))
@@ -468,7 +712,10 @@ def check_fragments(base: str | None = None) -> int:
     if missing:
         packages = ", ".join(missing)
         print(f"Missing news fragments for changed packages: {packages}")
-        print("Add changes/<package>/<id>.<type>.md or adjust the changed files.")
+        print(
+            "Run `poe changelog`, add changes/<package>/<id>.<type>.md, "
+            "or adjust the changed files."
+        )
         return 1
     return 0
 
@@ -492,17 +739,11 @@ def _changed_packages(
     head: str | None,
     code_only: bool,
 ) -> set[str]:
-    changed_paths = _changed_paths(base=base, head=head)
-    result: set[str] = set()
-    for name, package in packages_by_name.items():
-        if code_only:
-            if any(_is_package_code_path(path, package.path) for path in changed_paths):
-                result.add(name)
-        elif (
-            package.version_file in changed_paths or package.path / "CHANGELOG.md" in changed_paths
-        ):
-            result.add(name)
-    return result
+    return packages_for_paths(
+        packages_by_name,
+        _changed_paths(base=base, head=head),
+        code_only=code_only,
+    )
 
 
 def _release_prepped_packages(
@@ -566,6 +807,15 @@ def main(argv: list[str] | None = None) -> int:
     github_release_body_parser = subparsers.add_parser("github-release-body")
     github_release_body_parser.add_argument("package")
     github_release_body_parser.set_defaults(func=print_github_release_body)
+
+    changelog_parser = subparsers.add_parser("changelog")
+    changelog_parser.add_argument(
+        "--diff",
+        choices=CHANGELOG_DIFF_MODES,
+        default="tracked",
+        help="changed-path source used to preselect packages",
+    )
+    changelog_parser.set_defaults(func=lambda args: changelog(args.diff))
 
     check_parser = subparsers.add_parser("check-news-fragments")
     check_parser.add_argument("--base")
