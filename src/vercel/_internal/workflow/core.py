@@ -74,6 +74,28 @@ async def sleep(param: int | float | datetime.datetime | str) -> None:
     await ctx.run_wait(param)
 
 
+def now() -> datetime.datetime:
+    from . import runtime
+
+    try:
+        ctx = runtime.WorkflowOrchestratorContext.current()
+    except LookupError:
+        raise RuntimeError("cannot call now() outside workflow") from None
+
+    return ctx.now()
+
+
+def time_ns() -> int:
+    from . import runtime
+
+    try:
+        ctx = runtime.WorkflowOrchestratorContext.current()
+    except LookupError:
+        raise RuntimeError("cannot call time_ns() outside workflow") from None
+
+    return ctx.time_ns()
+
+
 class HookEvent(Generic[T]):
     def __init__(self, *, correlation_id: str, token: str) -> None:
         self._correlation_id = correlation_id

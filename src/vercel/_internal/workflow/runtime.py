@@ -27,6 +27,7 @@ P = ParamSpec("P")
 T = TypeVar("T")
 SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 logger = logging.getLogger("vercel.workflow")
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # Wait-continuation dispatch — mirrors @workflow/core's wait-continuation.ts.
 # The delayed re-enqueue that wakes a run when a pending wait elapses is keyed on
@@ -260,6 +261,17 @@ class WorkflowOrchestratorContext:
         )
         self.suspensions[wait.correlation_id] = wait
         await wait.future
+
+    def now(self) -> datetime:
+        if not self.events:
+            raise RuntimeError("now() requires at least one event in the run's event log")
+        event = self.events[max(self.replay_index - 1, 0)]
+        assert event.server_props is not None
+        return event.server_props.created_at
+
+    def time_ns(self) -> int:
+        delta = self.now() - _EPOCH
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
 
     def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
         hook = Hook(
