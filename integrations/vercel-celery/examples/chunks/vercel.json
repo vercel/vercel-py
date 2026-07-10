@@ -4,7 +4,7 @@
             "experimentalTriggers": [
                 {
                     "type": "queue/v2beta",
-                    "topic": "celery"
+                    "topic": "celery-vercel__celery__example__chunks-celery"
                 }
             ]
         }

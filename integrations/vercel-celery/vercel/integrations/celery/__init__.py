@@ -9,12 +9,17 @@ from ._broker import (
     AutoChannel,
     PollChannel,
     PushChannel,
+    _configure_existing_app_defaults,
     _install_app_finalize_hook,
+    _install_connection_transport_options_hook,
     _register_existing_app_queues,
+    _set_default_broker_set_by_installer,
     register_celery_app_queues,
 )
 from ._result_backend import DEFAULT_RESULT_BACKEND_ALIAS, VercelRuntimeCacheBackend
 from .version import __version__
+
+_DEFAULT_CONNECTION_PARAMS = {"hostname": None, "port": None}
 
 
 class VercelQueueTransport(virtual.Transport):
@@ -27,6 +32,7 @@ class VercelQueueTransport(virtual.Transport):
     Channel = AutoChannel
     driver_type = "vercel"
     driver_name = "Vercel Queue Service"
+    default_connection_params = _DEFAULT_CONNECTION_PARAMS
 
 
 class VercelQueuePollTransport(virtual.Transport):
@@ -39,6 +45,7 @@ class VercelQueuePollTransport(virtual.Transport):
     Channel = PollChannel
     driver_type = "vercel"
     driver_name = "Vercel Queue Service (poll)"
+    default_connection_params = _DEFAULT_CONNECTION_PARAMS
 
 
 class VercelQueuePushTransport(virtual.Transport):
@@ -51,6 +58,7 @@ class VercelQueuePushTransport(virtual.Transport):
     Channel = PushChannel
     driver_type = "vercel"
     driver_name = "Vercel Queue Service (push)"
+    default_connection_params = _DEFAULT_CONNECTION_PARAMS
 
 
 def install_vercel_celery_integration(
@@ -84,12 +92,22 @@ def install_vercel_celery_integration(
     celery_backends.BACKEND_ALIASES[DEFAULT_RESULT_BACKEND_ALIAS] = (
         f"{VercelRuntimeCacheBackend.__module__}:{VercelRuntimeCacheBackend.__name__}"
     )
+    default_broker_url = "vercel://" if set_default_broker else None
+    default_result_backend = (
+        f"{DEFAULT_RESULT_BACKEND_ALIAS}://" if set_default_result_backend else None
+    )
     if set_default_broker and CELERY_DEFAULTS.get("broker_url") is None:
-        CELERY_DEFAULTS["broker_url"] = "vercel://"
+        CELERY_DEFAULTS["broker_url"] = default_broker_url
+        _set_default_broker_set_by_installer(value=True)
     if set_default_result_backend and CELERY_DEFAULTS.get("result_backend") is None:
-        CELERY_DEFAULTS["result_backend"] = f"{DEFAULT_RESULT_BACKEND_ALIAS}://"
+        CELERY_DEFAULTS["result_backend"] = default_result_backend
+    _install_connection_transport_options_hook()
+    _install_app_finalize_hook(register_queues=register_queues)
+    _configure_existing_app_defaults(
+        broker_url=default_broker_url,
+        result_backend=default_result_backend,
+    )
     if register_queues:
-        _install_app_finalize_hook()
         _register_existing_app_queues()
 
 

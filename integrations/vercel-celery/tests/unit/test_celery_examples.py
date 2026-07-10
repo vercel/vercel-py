@@ -28,7 +28,7 @@ def test_chunks_example_worker_registers_celery_subscription(
         importlib.import_module("api.celery_worker")
         tasks = importlib.import_module("tasks")
 
-        assert ("celery", "api_Scelery__worker_Dpy") in [
+        assert ("celery-vercel__celery__example__chunks-celery", "api_Scelery__worker_Dpy") in [
             (sub.topic, sub.consumer_group) for sub in get_subscriptions()
         ]
         assert tasks.celery_app in started_apps

@@ -3,17 +3,22 @@ from __future__ import annotations
 from typing import Any, ClassVar, cast
 from typing_extensions import Self
 
+import gc
 import inspect
+import json
+import logging
+import sys
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from weakref import ref
 
 import pytest
 from celery import Celery as CeleryApp
 from celery.app import backends as celery_backends
 from celery.app.defaults import DEFAULTS as CELERY_DEFAULTS
-from kombu import Queue
+from kombu import Connection, Queue
 from kombu.exceptions import ChannelError
 from kombu.transport import TRANSPORT_ALIASES
 from kombu.transport.virtual.base import Empty
@@ -151,7 +156,8 @@ class FakeSyncQueueClient:
     def acknowledge(self, message: Message[dict[str, Any]] | MessageMetadata) -> None:
         if self.ack_error is not None:
             raise self.ack_error
-        self.ack_headers.append(dict(get_headers()) if get_headers() is not None else None)
+        headers = get_headers()
+        self.ack_headers.append(dict(headers) if headers is not None else None)
         self.acknowledged.append(message.metadata if isinstance(message, Message) else message)
 
     def extend_lease(
@@ -162,7 +168,8 @@ class FakeSyncQueueClient:
         if self.extend_error is not None:
             raise self.extend_error
         metadata = message.metadata if isinstance(message, Message) else message
-        self.visibility_headers.append(dict(get_headers()) if get_headers() is not None else None)
+        headers = get_headers()
+        self.visibility_headers.append(dict(headers) if headers is not None else None)
         self.visibility_changes.append((metadata, duration))
 
     def run_lease_renewal(
@@ -229,21 +236,27 @@ def clean_celery_integration_state() -> Iterator[None]:
     original_result_backend = CELERY_DEFAULTS.get("result_backend")
     CELERY_DEFAULTS["broker_url"] = None
     CELERY_DEFAULTS["result_backend"] = None
+    vqs_celery._set_default_broker_set_by_installer(value=False)
     vqs_celery._registered_app_queues.clear()
+    vqs_celery._registered_queue_subscriptions.clear()
     vqs_celery._embedded_workers.clear()
     vqs_celery._registered_callbacks.clear()
     vqs_celery._push_channels.clear()
     vqs_celery._finalize_hook_state.installed = False
+    vqs_celery._finalize_hook_state.register_queues = False
     try:
         yield
     finally:
         CELERY_DEFAULTS["broker_url"] = original_broker_url
         CELERY_DEFAULTS["result_backend"] = original_result_backend
+        vqs_celery._set_default_broker_set_by_installer(value=False)
         vqs_celery._registered_app_queues.clear()
+        vqs_celery._registered_queue_subscriptions.clear()
         vqs_celery._embedded_workers.clear()
         vqs_celery._registered_callbacks.clear()
         vqs_celery._push_channels.clear()
         vqs_celery._finalize_hook_state.installed = False
+        vqs_celery._finalize_hook_state.register_queues = False
 
 
 @pytest.fixture(autouse=True)
@@ -306,6 +319,30 @@ def fake_renewal(tracked: vqs_celery._TrackedDelivery) -> FakeLeaseRenewal:
     return cast("FakeLeaseRenewal", tracked.lease_renewal)
 
 
+def registered_callbacks() -> list[Any]:
+    return [
+        callback
+        for app_callbacks in vqs_celery._registered_callbacks.values()
+        for callback in app_callbacks.values()
+    ]
+
+
+def registered_callback(index: int = 0) -> Any:
+    return registered_callbacks()[index]
+
+
+def registered_callback_count() -> int:
+    return len({id(callback) for callback in registered_callbacks()})
+
+
+def celery_debug_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    return [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "vercel.integrations.celery"
+    ]
+
+
 def test_install_vercel_celery_integration_clean_break() -> None:
     TRANSPORT_ALIASES.pop("vercel", None)
     celery_backends.BACKEND_ALIASES.pop("vercel-runtime-cache", None)
@@ -337,7 +374,19 @@ def test_install_vercel_celery_integration_can_skip_queue_registration() -> None
     assert TRANSPORT_ALIASES["vercel-push"] == (
         "vercel.integrations.celery:VercelQueuePushTransport"
     )
-    assert vqs_celery._finalize_hook_state.installed is False
+    assert vqs_celery._finalize_hook_state.installed is True
+    assert vqs_celery._finalize_hook_state.register_queues is False
+
+
+def test_install_vercel_celery_integration_seeds_prefix_without_queue_registration() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+    app = CeleryApp("producer-only")
+    app.conf.broker_url = "vercel-poll://"
+
+    with app.connection_for_write() as connection:
+        channel = connection.channel()
+
+    assert channel.queue_name_prefix == "celery-producer-only-"
 
 
 def test_install_vercel_celery_integration_can_skip_default_broker() -> None:
@@ -422,6 +471,21 @@ def test_consumer_group_and_lease_duration_are_shared() -> None:
     assert push_channel.lease_duration == 30
 
 
+def test_queue_name_prefix_maps_celery_queue_to_vqs_topic() -> None:
+    channel = make_poll_channel(queue_name_prefix="celery-billing-")
+
+    topic = channel._topic("emails")
+
+    assert topic_name(topic) == "celery-billing-emails"
+    assert topic_transport(topic) is channel._message_transport
+
+
+def test_queue_name_prefix_can_be_disabled() -> None:
+    channel = make_poll_channel(queue_name_prefix="")
+
+    assert topic_name(channel._topic("emails")) == "emails"
+
+
 def test_poll_put_publishes_native_kombu_message() -> None:
     channel = make_poll_channel(retention=60, delay=2, headers={"x-test": "ok"})
     payload = message()
@@ -451,6 +515,223 @@ def test_poll_put_normalizes_queue_name_to_topic() -> None:
     sent_topic = FakeSyncQueueClient.instances[0].sent[0]["topic"]
     assert topic_name(sent_topic) == "emails_Dhigh"
     assert topic_transport(sent_topic) is channel._message_transport
+
+
+def test_poll_put_normalizes_prefixed_topic_after_joining() -> None:
+    channel = make_poll_channel(queue_name_prefix="celery-billing.api-")
+    payload = message()
+
+    channel._put("emails.high", payload)
+
+    sent_topic = FakeSyncQueueClient.instances[0].sent[0]["topic"]
+    assert topic_name(sent_topic) == "celery-billing_Dapi-emails_Dhigh"
+
+
+def test_task_publish_seeds_prefix_before_channel_creation() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+    app = CeleryApp("publisher-app")
+
+    @app.task(name="publisher.add")
+    def add(left: int, right: int) -> int:
+        return left + right
+
+    add.chunks(zip(range(2), range(2), strict=False), 1).apply_async()
+
+    sent_topics = [topic_name(sent["topic"]) for sent in FakeSyncQueueClient.instances[0].sent]
+    assert sent_topics == ["celery-publisher-app-celery", "celery-publisher-app-celery"]
+
+
+def test_channel_seeds_prefix_for_default_vercel_broker() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+
+    app = CeleryApp("default-prefix")
+    with app.connection_for_write() as connection:
+        channel = connection.channel()
+
+    assert app.conf.broker_transport_options == {}
+    assert channel.queue_name_prefix == "celery-default-prefix-"
+
+
+def test_channel_skips_prefix_for_explicit_non_vercel_broker() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+
+    app = CeleryApp("memory-prefix", broker="memory://")
+    with app.connection_for_write() as connection:
+        channel = connection.channel()
+
+    assert "queue_name_prefix" not in app.conf.broker_transport_options
+    assert "queue_name_prefix" not in connection.transport_options
+    assert channel.__class__.__module__.startswith("kombu.")
+
+
+def test_channel_seeds_prefix_for_explicit_vercel_broker() -> None:
+    public_vqs_celery.install_vercel_celery_integration(
+        register_queues=False,
+        set_default_broker=False,
+    )
+
+    app = CeleryApp("poll-prefix", broker="vercel-poll://")
+    with app.connection_for_write() as connection:
+        channel = connection.channel()
+
+    assert app.conf.broker_transport_options == {}
+    assert channel.queue_name_prefix == "celery-poll-prefix-"
+
+
+def test_channel_preserves_explicit_empty_prefix() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+
+    app = CeleryApp(
+        "empty-prefix",
+        broker_transport_options={"queue_name_prefix": ""},
+    )
+    with app.connection_for_write() as connection:
+        channel = connection.channel()
+
+    assert not app.conf.broker_transport_options["queue_name_prefix"]
+    assert not connection.transport_options["queue_name_prefix"]
+    assert not channel.queue_name_prefix
+
+
+def test_plain_kombu_connection_keeps_empty_prefix_without_celery_app() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+
+    with Connection("vercel-poll://") as connection:
+        channel = connection.channel()
+
+    assert not channel.queue_name_prefix
+
+
+def test_celery_connection_prefix_uses_owner_not_current_app() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+    owner = CeleryApp("owner-prefix")
+    current = CeleryApp("current-prefix")
+    current.set_current()
+
+    with owner.connection_for_write() as connection:
+        channel = connection.channel()
+
+    assert channel.queue_name_prefix == "celery-owner-prefix-"
+    assert connection.transport_options["queue_name_prefix"] == "celery-owner-prefix-"
+    assert owner.conf.broker_transport_options == {}
+
+
+def test_install_applies_defaults_to_existing_loaded_app() -> None:
+    app = CeleryApp("existing-loaded")
+    assert app.conf.broker_url is None
+    assert app.conf.result_backend is None
+
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+
+    assert app.conf.broker_url == "vercel://"
+    assert app.conf.result_backend == "vercel-runtime-cache://"
+
+
+def test_config_from_object_keeps_transport_options_without_shadowing() -> None:
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+    app = CeleryApp("object-config")
+
+    app.config_from_object(
+        {
+            "broker_url": "vercel-poll://",
+            "broker_transport_options": {
+                "consumer_group": "workers",
+                "lease_duration": 30,
+            },
+        },
+        force=True,
+    )
+    app.finalize()
+    channel = make_poll_channel(**app.conf.broker_transport_options)
+
+    assert app.conf.broker_transport_options == {
+        "consumer_group": "workers",
+        "lease_duration": 30,
+        "queue_name_prefix": "celery-object-config-",
+    }
+    assert channel.queue_name_prefix == "celery-object-config-"
+
+
+def test_config_from_object_module_keeps_transport_options_without_shadowing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_module = tmp_path / "celery_module_config.py"
+    config_module.write_text(
+        "broker_url = 'vercel-poll://'\n"
+        "broker_transport_options = {\n"
+        "    'consumer_group': 'module-workers',\n"
+        "    'lease_duration': 45,\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+    app = CeleryApp("module-config")
+
+    app.config_from_object("celery_module_config", force=True)
+    app.finalize()
+    channel = make_poll_channel(**app.conf.broker_transport_options)
+
+    assert app.conf.broker_transport_options == {
+        "consumer_group": "module-workers",
+        "lease_duration": 45,
+        "queue_name_prefix": "celery-module-config-",
+    }
+    assert channel.queue_name_prefix == "celery-module-config-"
+    sys.modules.pop("celery_module_config", None)
+
+
+def test_config_from_envvar_keeps_transport_options_without_shadowing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_module = tmp_path / "celery_config.py"
+    config_module.write_text(
+        "broker_url = 'vercel-poll://'\n"
+        "broker_transport_options = {\n"
+        "    'consumer_group': 'workers',\n"
+        "    'lease_duration': 30,\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("CELERY_CONFIG_MODULE", "celery_config")
+
+    public_vqs_celery.install_vercel_celery_integration(register_queues=False)
+    app = CeleryApp("env-config")
+
+    app.config_from_envvar("CELERY_CONFIG_MODULE", force=True)
+    app.finalize()
+    channel = make_poll_channel(**app.conf.broker_transport_options)
+
+    assert app.conf.broker_transport_options == {
+        "consumer_group": "workers",
+        "lease_duration": 30,
+        "queue_name_prefix": "celery-env-config-",
+    }
+    assert channel.queue_name_prefix == "celery-env-config-"
+    sys.modules.pop("celery_config", None)
+
+
+def test_post_finalize_transport_reconfiguration_keeps_channel_and_registration_prefix(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("post-finalize-config")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+    app.finalize()
+
+    app.conf.update(broker_transport_options={"consumer_group": "workers"})
+    with app.connection_for_write() as connection:
+        channel = connection.channel()
+        vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    assert channel.consumer_group == "workers"
+    assert channel.queue_name_prefix == "celery-post-finalize-config-"
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-post-finalize-config-emails"]
+    assert [sub.consumer_group for sub in fake_queue_subscribe] == ["workers"]
 
 
 @pytest.mark.asyncio
@@ -516,6 +797,79 @@ def test_poll_get_polls_one_delivery_and_tracks_delivery_tag() -> None:
     }
 
 
+def test_poll_drain_events_batches_to_available_prefetch() -> None:
+    channel = make_poll_channel(lease_duration=30)
+    channel.qos.prefetch_count = 3
+    queued_messages = [FakeMessage(message(f"tag_{index}"), topic="emails") for index in range(3)]
+    FakeSyncQueueClient.instances[0].message_batches.append(queued_messages)
+    received: list[Any] = []
+
+    channel.basic_consume("emails", no_ack=False, callback=received.append, consumer_tag="ctag")
+    channel.drain_events()
+
+    assert len(received) == 3
+    assert FakeSyncQueueClient.instances[0].last_poll_kwargs == {
+        "limit": 3,
+        "lease_duration": 30,
+    }
+    assert len(channel._messages_by_tag) == 3
+    assert len(channel.qos._delivered) == 3
+
+
+def test_poll_drain_events_caps_batch_size_at_vqs_limit() -> None:
+    channel = make_poll_channel()
+    channel.qos.prefetch_count = 20
+    FakeSyncQueueClient.instances[0].message_batches.append([])
+    channel.basic_consume("emails", no_ack=False, callback=lambda value: None, consumer_tag="ctag")
+
+    with pytest.raises(Empty):
+        channel.drain_events()
+
+    assert FakeSyncQueueClient.instances[0].last_poll_kwargs["limit"] == 10
+
+
+def test_poll_drain_events_rotates_starting_queue() -> None:
+    channel = make_poll_channel()
+    channel.qos.prefetch_count = 1
+    channel.basic_consume("critical", no_ack=False, callback=lambda value: None, consumer_tag="c1")
+    channel.basic_consume("bulk", no_ack=False, callback=lambda value: None, consumer_tag="c2")
+
+    assert channel._poll_queue_order(["critical", "bulk"]) == ("critical", "bulk")
+    assert channel._poll_queue_order(["critical", "bulk"]) == ("bulk", "critical")
+    assert channel._poll_queue_order(["critical", "bulk"]) == ("critical", "bulk")
+
+
+def test_poll_drain_events_releases_unhandled_batch_remainder_on_delivery_failure() -> None:
+    channel = make_poll_channel(requeue_delay_seconds=6)
+    queued_messages = [
+        FakeMessage(message(f"tag_{index}"), topic="emails", consumer_group="celery")
+        for index in range(4)
+    ]
+    FakeSyncQueueClient.instances[0].message_batches.append(queued_messages)
+    seen: list[Any] = []
+
+    def callback(value: Any) -> None:
+        seen.append(value)
+        if len(seen) == 2:
+            raise RuntimeError("decode failed")
+
+    channel.qos.prefetch_count = 10
+    channel.basic_consume("emails", no_ack=False, callback=callback, consumer_tag="ctag")
+
+    with pytest.raises(RuntimeError, match="decode failed"):
+        channel.drain_events()
+
+    assert [metadata for metadata, _ in FakeSyncQueueClient.instances[0].visibility_changes] == [
+        queued_messages[2].metadata,
+        queued_messages[3].metadata,
+    ]
+    assert [duration for _, duration in FakeSyncQueueClient.instances[0].visibility_changes] == [
+        6,
+        6,
+    ]
+    assert len(channel._messages_by_tag) == 2
+
+
 def test_poll_get_normalizes_queue_name_to_topic() -> None:
     channel = make_poll_channel()
     queued_message = FakeMessage(message(), topic="emails_Dhigh")
@@ -556,6 +910,17 @@ def test_auto_channel_uses_push_when_running_on_vercel(monkeypatch: pytest.Monke
     assert vqs_celery._push_channels == [channel]
 
 
+def test_auto_channel_drain_events_does_not_poll_on_vercel(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VERCEL", "1")
+    channel = make_auto_channel()
+    channel.basic_consume("emails", no_ack=False, callback=lambda value: None, consumer_tag="ctag")
+
+    with pytest.raises(Empty):
+        channel.drain_events()
+
+    assert not hasattr(FakeSyncQueueClient.instances[0], "last_poll_kwargs")
+
+
 def test_install_vercel_celery_integration_is_idempotent() -> None:
     public_vqs_celery.install_vercel_celery_integration()
     public_vqs_celery.install_vercel_celery_integration()
@@ -573,7 +938,7 @@ def test_install_vercel_celery_integration_registers_existing_apps(
     public_vqs_celery.install_vercel_celery_integration()
 
     assert app.finalized is False
-    assert ("celery", "celery-existing-app") in [
+    assert ("celery-existing-app-celery", "celery") in [
         (sub.topic, sub.consumer_group) for sub in fake_queue_subscribe
     ]
 
@@ -589,8 +954,8 @@ def test_register_celery_app_queues_accepts_push_broker_transport(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
-    assert [sub.consumer_group for sub in fake_queue_subscribe] == ["celery-push-transport"]
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-push-transport-emails"]
+    assert [sub.consumer_group for sub in fake_queue_subscribe] == ["celery"]
     topic = fake_queue_subscribe[0].raw_topic
     assert isinstance(topic, Topic)
     assert getattr(type(topic), "__topic_origin__", None) is None
@@ -609,7 +974,7 @@ def test_register_celery_app_queues_can_skip_embedded_worker(
 
     vqs_celery.register_celery_app_queues(app, start_worker=False)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-push-no-worker-emails"]
     assert fake_embedded_worker_start == []
 
 
@@ -685,6 +1050,7 @@ def test_start_embedded_worker_uses_solo_worker_options(
     assert worker_options == [
         {
             "concurrency": 1,
+            "hostname": "vercel-celery-embedded-worker@localhost",
             "pool": "solo",
             "loglevel": "INFO",
             "without_gossip": True,
@@ -698,6 +1064,34 @@ def test_start_embedded_worker_uses_solo_worker_options(
     assert embedded.thread.daemon is True
 
 
+def test_embedded_worker_ready_requires_channel_for_same_app() -> None:
+    @dataclass
+    class FakeWorker:
+        consumer: ClassVar[object] = object()
+        app: CeleryApp
+
+    @dataclass
+    class FakeClient:
+        app: CeleryApp
+
+    @dataclass
+    class FakeChannelConnection:
+        client: FakeClient
+
+    class FakeChannel:
+        closed = False
+
+        def __init__(self, app: CeleryApp) -> None:
+            self.connection = FakeChannelConnection(FakeClient(app))
+
+    first_app = CeleryApp("ready-first")
+    second_app = CeleryApp("ready-second")
+    vqs_celery._push_channels[:] = cast("Any", [FakeChannel(first_app)])
+
+    assert vqs_celery._embedded_worker_channel_ready(FakeWorker(second_app)) is False
+    assert vqs_celery._embedded_worker_channel_ready(FakeWorker(first_app)) is True
+
+
 def test_register_celery_app_queues_registers_untyped_message_callback(
     fake_queue_subscribe: list[FakeSubscription],
 ) -> None:
@@ -706,7 +1100,7 @@ def test_register_celery_app_queues_registers_untyped_message_callback(
     app.conf.broker_transport = "vercel-push"
     app.conf.task_queues = (Queue("emails"),)
 
-    vqs_celery.register_celery_app_queues(app)
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
 
     topic = fake_queue_subscribe[0].raw_topic
     assert isinstance(topic, Topic)
@@ -730,7 +1124,7 @@ def test_register_celery_app_queues_accepts_auto_broker_on_vercel(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-auto-transport-emails"]
 
 
 def test_register_celery_app_queues_rejects_auto_broker_off_vercel(
@@ -757,7 +1151,112 @@ def test_register_celery_app_queues_normalizes_subscription_topic(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails_Dhigh"]
+    assert [sub.topic for sub in fake_queue_subscribe] == [
+        "celery-push-normalized-topic-emails_Dhigh"
+    ]
+
+
+def test_register_celery_app_queues_honors_transport_queue_name_prefix(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("push-prefix")
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"queue_name_prefix": "jobs-"}
+    app.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(app)
+
+    assert [sub.topic for sub in fake_queue_subscribe] == ["jobs-emails"]
+    assert app.conf.broker_transport_options["queue_name_prefix"] == "jobs-"
+
+
+def test_register_celery_app_queues_can_disable_queue_name_prefix(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("push-prefix-disabled")
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"queue_name_prefix": ""}
+    app.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(app)
+
+    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
+
+
+def test_register_celery_app_queues_reuses_shared_topic_subscription(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    first = CeleryApp("first-shared")
+    second = CeleryApp("second-shared")
+    configure_push_broker(first)
+    configure_push_broker(second)
+    first.conf.broker_transport_options = {"queue_name_prefix": "shared-"}
+    second.conf.broker_transport_options = {"queue_name_prefix": "shared-"}
+    first.conf.task_queues = (Queue("emails"),)
+    second.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(first)
+    vqs_celery.register_celery_app_queues(second)
+
+    assert [sub.topic for sub in fake_queue_subscribe] == ["shared-emails"]
+    assert registered_callback_count() == 1
+    assert ("shared-emails", "celery") in vqs_celery._registered_app_queues[first]
+    assert ("shared-emails", "celery") in vqs_celery._registered_app_queues[second]
+    assert vqs_celery._registered_queue_subscriptions[first]["shared-emails", "celery"] == (
+        "emails"
+    )
+    assert vqs_celery._registered_queue_subscriptions[second]["shared-emails", "celery"] == (
+        "emails"
+    )
+
+
+def test_registered_queue_subscriptions_are_scoped_to_live_apps(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("weak-subscription", set_as_current=False)
+    app_ref = ref(app)
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"queue_name_prefix": "weak-"}
+    app.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    assert app in vqs_celery._registered_queue_subscriptions
+    app.close()
+    del app
+
+    for _ in range(3):
+        gc.collect()
+        if app_ref() is None:
+            break
+
+    assert app_ref() is None
+    assert list(vqs_celery._registered_queue_subscriptions.items()) == []
+
+
+def test_registered_callbacks_are_scoped_to_live_apps(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("weak-callback", set_as_current=False)
+    app_ref = ref(app)
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    assert registered_callback_count() == 1
+    assert app in vqs_celery._registered_callbacks
+    assert len(fake_queue_subscribe) == 1
+    app.close()
+    del app
+
+    for _ in range(3):
+        gc.collect()
+        if app_ref() is None:
+            break
+
+    assert app_ref() is None
+    assert registered_callback_count() == 0
 
 
 def test_register_celery_app_queues_honors_transport_consumer_group(
@@ -770,12 +1269,13 @@ def test_register_celery_app_queues_honors_transport_consumer_group(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-push-consumer-group-emails"]
     assert [sub.consumer_group for sub in fake_queue_subscribe] == ["api_Scelery__worker_Dpy"]
     assert app.conf.broker_transport_options["consumer_group"] == "api/celery_worker.py"
+    assert app.conf.broker_transport_options["queue_name_prefix"] == "celery-push-consumer-group-"
 
 
-def test_register_celery_app_queues_derives_consumer_group_from_main(
+def test_register_celery_app_queues_derives_queue_name_prefix_from_main(
     fake_queue_subscribe: list[FakeSubscription],
 ) -> None:
     app = CeleryApp("push.consumer_group")
@@ -784,9 +1284,10 @@ def test_register_celery_app_queues_derives_consumer_group_from_main(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
-    assert [sub.consumer_group for sub in fake_queue_subscribe] == ["celery-push_Dconsumer__group"]
-    assert app.conf.broker_transport_options["consumer_group"] == "celery-push_Dconsumer__group"
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-push_Dconsumer__group-emails"]
+    assert [sub.consumer_group for sub in fake_queue_subscribe] == ["celery"]
+    assert app.conf.broker_transport_options["consumer_group"] == "celery"
+    assert app.conf.broker_transport_options["queue_name_prefix"] == "celery-push.consumer_group-"
 
 
 def test_register_celery_app_queues_falls_back_without_main(
@@ -801,6 +1302,7 @@ def test_register_celery_app_queues_falls_back_without_main(
     assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
     assert [sub.consumer_group for sub in fake_queue_subscribe] == ["celery"]
     assert app.conf.broker_transport_options["consumer_group"] == "celery"
+    assert not app.conf.broker_transport_options["queue_name_prefix"]
 
 
 def test_register_celery_app_queues_accepts_push_transport_subclass(
@@ -815,7 +1317,7 @@ def test_register_celery_app_queues_accepts_push_transport_subclass(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-subclass-push-emails"]
 
 
 @pytest.mark.parametrize(
@@ -859,6 +1361,15 @@ def test_app_finalize_skips_non_push_brokers(
     assert fake_queue_subscribe == []
 
 
+def test_app_finalize_does_not_seed_defaults_for_non_vercel_brokers() -> None:
+    app = CeleryApp("finalize-memory")
+    app.conf.broker_url = "memory://"
+
+    vqs_celery._register_finalized_app_queues(app)
+
+    assert not app.conf.broker_transport_options
+
+
 def test_app_finalize_skips_auto_broker_off_vercel(
     fake_queue_subscribe: list[FakeSubscription],
 ) -> None:
@@ -884,7 +1395,8 @@ def test_app_finalize_registers_auto_broker_on_vercel(
 
     vqs_celery._register_finalized_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
+    assert fake_queue_subscribe == []
+    assert app.conf.broker_transport_options["queue_name_prefix"] == "celery-finalize-auto-vercel-"
 
 
 def test_app_finalize_registers_push_brokers(
@@ -896,7 +1408,8 @@ def test_app_finalize_registers_push_brokers(
 
     vqs_celery._register_finalized_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
+    assert fake_queue_subscribe == []
+    assert app.conf.broker_transport_options["queue_name_prefix"] == "celery-finalize-push-"
 
 
 def test_app_finalize_registers_subscriptions_for_configured_queues(
@@ -908,12 +1421,15 @@ def test_app_finalize_registers_subscriptions_for_configured_queues(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails", "reports"]
-    assert [sub.consumer_group for sub in fake_queue_subscribe] == [
-        "celery-configured",
-        "celery-configured",
+    assert [sub.topic for sub in fake_queue_subscribe] == [
+        "celery-configured-emails",
+        "celery-configured-reports",
     ]
-    assert len(vqs_celery._registered_callbacks) == 2
+    assert [sub.consumer_group for sub in fake_queue_subscribe] == [
+        "celery",
+        "celery",
+    ]
+    assert registered_callback_count() == 2
 
 
 def test_app_finalize_registers_synthesized_default_queue(
@@ -924,8 +1440,8 @@ def test_app_finalize_registers_synthesized_default_queue(
 
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["celery"]
-    assert len(vqs_celery._registered_callbacks) == 1
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-default-celery"]
+    assert registered_callback_count() == 1
 
 
 def test_app_finalize_registration_is_idempotent(
@@ -938,8 +1454,8 @@ def test_app_finalize_registration_is_idempotent(
     vqs_celery.register_celery_app_queues(app)
     vqs_celery.register_celery_app_queues(app)
 
-    assert [sub.topic for sub in fake_queue_subscribe] == ["emails"]
-    assert len(vqs_celery._registered_callbacks) == 1
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-idempotent-emails"]
+    assert registered_callback_count() == 1
 
 
 def test_registered_callback_delivers_to_active_push_channel() -> None:
@@ -953,7 +1469,7 @@ def test_registered_callback_delivers_to_active_push_channel() -> None:
 
     vqs_celery.register_celery_app_queues(app)
     with pytest.raises(Handoff):
-        vqs_celery._registered_callbacks[0](queued_message)
+        registered_callback()(queued_message)
     delivery_tag = received[0].delivery_tag
 
     assert len(received) == 1
@@ -980,20 +1496,21 @@ def test_push_delivery_follow_ups_use_delivery_header_contexts() -> None:
 
     set_headers({"x-vercel-oidc-token": "token-1"})
     with pytest.raises(Handoff):
-        vqs_celery._registered_callbacks[0](FakeMessage(message(), topic="emails"))
+        registered_callback()(FakeMessage(message(), topic="emails"))
     first_tag = received[-1].delivery_tag
 
     set_headers({"x-vercel-oidc-token": "token-2"})
     with pytest.raises(Handoff):
-        vqs_celery._registered_callbacks[0](FakeMessage(message(), topic="emails"))
+        registered_callback()(FakeMessage(message(), topic="emails"))
     second_tag = received[-1].delivery_tag
 
     set_headers({"x-vercel-oidc-token": "current"})
     channel.basic_ack(first_tag)
     channel.basic_reject(second_tag, requeue=True)
 
-    assert channel._queue_client.ack_headers == [{"x-vercel-oidc-token": "token-1"}]
-    assert channel._queue_client.visibility_headers == [{"x-vercel-oidc-token": "token-2"}]
+    fake_client = cast("FakeSyncQueueClient", channel._queue_client)
+    assert fake_client.ack_headers == [{"x-vercel-oidc-token": "token-1"}]
+    assert fake_client.visibility_headers == [{"x-vercel-oidc-token": "token-2"}]
     assert get_headers() == {"x-vercel-oidc-token": "current"}
     assert len(FakeSyncQueueClient.instances) == 1
 
@@ -1024,12 +1541,35 @@ def test_registered_callback_matches_push_channel_consumer_group() -> None:
     vqs_celery.register_celery_app_queues(app)
     assert workers_channel.consumer_group == "api_Scelery__worker_Dpy"
     with pytest.raises(Handoff):
-        vqs_celery._registered_callbacks[0](queued_message)
+        registered_callback()(queued_message)
 
     assert celery_received == []
     assert len(workers_received) == 1
     assert celery_channel.connection.delivered == []
     assert workers_channel.connection.delivered[0][1] == "emails"
+
+
+def test_registered_callback_uses_channel_that_consumes_queue() -> None:
+    connection = FakeConnection(FakeClientOptions())
+    consuming_channel = vqs_celery.PushChannel(connection)
+    idle_channel = vqs_celery.PushChannel(connection)
+    received: list[Any] = []
+    consuming_channel.basic_consume(
+        "emails",
+        no_ack=False,
+        callback=received.append,
+        consumer_tag="ctag",
+    )
+
+    assert "emails" in idle_channel.connection._callbacks
+    assert vqs_celery._find_push_channel("emails", "celery") is consuming_channel
+
+    with pytest.raises(Handoff):
+        vqs_celery._make_queue_callback("emails")(FakeMessage(message()))
+
+    delivery_tag = received[0].delivery_tag
+    assert delivery_tag in consuming_channel._messages_by_tag
+    assert idle_channel._messages_by_tag == {}
 
 
 def test_registered_callback_retries_when_consumer_group_has_no_channel() -> None:
@@ -1044,9 +1584,9 @@ def test_registered_callback_retries_when_consumer_group_has_no_channel() -> Non
 
     vqs_celery.register_celery_app_queues(app)
     with pytest.raises(RetryAfter) as exc_info:
-        vqs_celery._registered_callbacks[0](queued_message)
+        registered_callback()(queued_message)
 
-    assert exc_info.value.timeout_seconds == 0
+    assert exc_info.value.timeout_seconds == 1
     assert received == []
     assert channel.connection.delivered == []
 
@@ -1059,9 +1599,9 @@ def test_registered_callback_retries_without_active_channel() -> None:
 
     vqs_celery.register_celery_app_queues(app)
     with pytest.raises(RetryAfter) as exc_info:
-        vqs_celery._registered_callbacks[0](queued_message)
+        registered_callback()(queued_message)
 
-    assert exc_info.value.timeout_seconds == 0
+    assert exc_info.value.timeout_seconds == 1
 
 
 def test_find_push_channel_uses_stable_snapshot_when_registry_changes() -> None:
@@ -1083,6 +1623,9 @@ def test_find_push_channel_uses_stable_snapshot_when_registry_changes() -> None:
             if self.mutate_on_closed and ready_channel in vqs_celery._push_channels:
                 vqs_celery._push_channels.remove(cast("Any", ready_channel))
             return False
+
+        def _consumes_queue(self, queue: str) -> bool:
+            return queue in self.connection._callbacks
 
     ready_channel = FakePushChannel({"emails": lambda value: None})
     mutating_channel = FakePushChannel({"other": lambda value: None}, mutate_on_closed=True)
@@ -1126,7 +1669,9 @@ def test_push_queue_callback_dispatches_to_consumer_and_hands_off_lifecycle() ->
 
     channel.basic_ack(delivery_tag)
 
-    assert channel._queue_client.acknowledged == [queued_message.metadata]
+    assert cast("FakeSyncQueueClient", channel._queue_client).acknowledged == [
+        queued_message.metadata
+    ]
     assert renewal.closed == 1
     assert channel._messages_by_tag == {}
 
@@ -1176,18 +1721,18 @@ def test_push_queue_callback_retries_when_no_consumer_is_registered() -> None:
             queue="unknown",
         )
 
-    assert exc_info.value.timeout_seconds == 0
+    assert exc_info.value.timeout_seconds == 1
     assert FakeSyncQueueClient.instances[0].acknowledged == []
     assert FakeSyncQueueClient.instances[0].visibility_changes == []
     assert channel._messages_by_tag == {}
 
 
 def test_push_queue_callback_retries_when_prefetch_is_exhausted() -> None:
-    channel = make_push_channel(requeue_delay_seconds=8)
+    channel = make_push_channel(requeue_delay_seconds=8, push_retry_delay_seconds=3)
     channel.qos.prefetch_count = 1
     cast("Any", channel.qos._delivered)["existing"] = object()
     queued_message = FakeMessage(message())
-    channel.connection._callbacks["emails"] = lambda value: None
+    channel.basic_consume("emails", no_ack=False, callback=lambda value: None, consumer_tag="ctag")
 
     with pytest.raises(RetryAfter) as exc_info:
         channel._handle_queue_delivery(
@@ -1196,14 +1741,14 @@ def test_push_queue_callback_retries_when_prefetch_is_exhausted() -> None:
             queue="emails",
         )
 
-    assert exc_info.value.timeout_seconds == 8
+    assert exc_info.value.timeout_seconds == 3
     assert FakeSyncQueueClient.instances[0].acknowledged == []
     assert FakeSyncQueueClient.instances[0].visibility_changes == []
     assert channel._messages_by_tag == {}
 
 
 def test_push_accept_releases_lease_when_callback_fails() -> None:
-    channel = make_push_channel(requeue_delay_seconds=9)
+    channel = make_push_channel(requeue_delay_seconds=9, push_retry_delay_seconds=4)
     queued_message = FakeMessage(message())
 
     def fail(message: Any) -> None:
@@ -1220,7 +1765,7 @@ def test_push_accept_releases_lease_when_callback_fails() -> None:
         )
 
     assert FakeSyncQueueClient.instances[0].acknowledged == []
-    assert FakeSyncQueueClient.instances[0].visibility_changes == [(queued_message.metadata, 9)]
+    assert FakeSyncQueueClient.instances[0].visibility_changes == [(queued_message.metadata, 4)]
     assert FakeSyncQueueClient.instances[0].lease_renewals[0].closed == 1
     assert channel._messages_by_tag == {}
     assert len(channel.qos._dirty) == 1
@@ -1245,16 +1790,19 @@ def test_basic_ack_acknowledges_leased_delivery() -> None:
     assert channel._messages_by_tag == {}
 
 
-def test_basic_ack_keeps_delivery_tracked_when_ack_fails() -> None:
+def test_basic_ack_stops_tracking_when_ack_fails() -> None:
     channel = make_poll_channel()
     queued_message = FakeMessage({})
     track(channel, "tag_1", queued_message)
+    cast("Any", channel.qos._delivered)["tag_1"] = object()
     FakeSyncQueueClient.instances[0].ack_error = RuntimeError("ack failed")
 
     with pytest.raises(RuntimeError, match="ack failed"):
         channel.basic_ack("tag_1")
 
-    assert channel._messages_by_tag["tag_1"].message is queued_message
+    assert FakeSyncQueueClient.instances[0].lease_renewals[0].closed == 1
+    assert channel._messages_by_tag == {}
+    assert channel.qos._dirty == {"tag_1"}
 
 
 def test_basic_reject_requeues_by_changing_visibility() -> None:
@@ -1270,7 +1818,7 @@ def test_basic_reject_requeues_by_changing_visibility() -> None:
     assert channel._messages_by_tag == {}
 
 
-def test_basic_reject_keeps_delivery_tracked_when_visibility_change_fails() -> None:
+def test_basic_reject_stops_tracking_when_visibility_change_fails() -> None:
     channel = make_poll_channel(requeue_delay_seconds=7)
     queued_message = FakeMessage({})
     track(channel, "tag_1", queued_message)
@@ -1279,7 +1827,8 @@ def test_basic_reject_keeps_delivery_tracked_when_visibility_change_fails() -> N
     with pytest.raises(RuntimeError, match="extend failed"):
         channel.basic_reject("tag_1", requeue=True)
 
-    assert channel._messages_by_tag["tag_1"].message is queued_message
+    assert FakeSyncQueueClient.instances[0].lease_renewals[0].closed == 1
+    assert channel._messages_by_tag == {}
 
 
 def test_basic_reject_without_requeue_acknowledges_leased_delivery() -> None:
@@ -1307,6 +1856,22 @@ def test_basic_get_no_ack_acknowledges_immediately_and_does_not_track() -> None:
     assert channel._messages_by_tag == {}
 
 
+def test_basic_ack_for_unknown_tag_does_not_dirty_qos() -> None:
+    channel = make_poll_channel()
+
+    channel.basic_ack("unknown-tag")
+
+    assert channel.qos._dirty == set()
+
+
+def test_basic_reject_for_unknown_tag_does_not_dirty_qos() -> None:
+    channel = make_poll_channel()
+
+    channel.basic_reject("unknown-tag", requeue=True)
+
+    assert channel.qos._dirty == set()
+
+
 def test_basic_consume_no_ack_acknowledges_after_delivery() -> None:
     channel = make_poll_channel()
     queued_message = FakeMessage(message())
@@ -1319,6 +1884,7 @@ def test_basic_consume_no_ack_acknowledges_after_delivery() -> None:
     assert len(received) == 1
     assert FakeSyncQueueClient.instances[0].acknowledged == [queued_message.metadata]
     assert channel._messages_by_tag == {}
+    assert channel.qos._dirty == set()
 
 
 def test_basic_consume_no_ack_does_not_ack_when_callback_fails() -> None:
@@ -1357,6 +1923,42 @@ def test_push_accept_no_ack_acknowledges_after_delivery() -> None:
     assert len(received) == 1
     assert FakeSyncQueueClient.instances[0].acknowledged == [queued_message.metadata]
     assert channel._messages_by_tag == {}
+    assert channel.qos._dirty == set()
+
+
+def test_debug_log_uses_celery_debug_env(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("VERCEL_CELERY_DEBUG", "1")
+    caplog.set_level(logging.INFO, logger="vercel.integrations.celery")
+
+    vqs_celery.debug_log(
+        "celery.test",
+        queue="emails",
+        message_id="msg_1",
+        ignored=None,
+    )
+
+    [event] = celery_debug_events(caplog)
+    assert event == {
+        "event": "celery.test",
+        "message_id": "msg_1",
+        "queue": "emails",
+    }
+
+
+def test_debug_log_ignores_queue_debug_env(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("VERCEL_CELERY_DEBUG", raising=False)
+    monkeypatch.setenv("VERCEL_QUEUE_DEBUG", "1")
+    caplog.set_level(logging.INFO, logger="vercel.integrations.celery")
+
+    vqs_celery.debug_log("celery.test", queue="emails")
+
+    assert celery_debug_events(caplog) == []
 
 
 def test_queue_purge_raises_channel_error() -> None:
@@ -1375,6 +1977,9 @@ def test_close_does_not_republish_unacked_messages() -> None:
 
     assert channel.closed
     assert renewal.closed == 1
+    assert FakeSyncQueueClient.instances[0].visibility_changes == [
+        (FakeSyncQueueClient.instances[0].lease_renewals[0].message.metadata, 0)
+    ]
 
 
 def test_celery_integration_does_not_import_internal_lease_helpers() -> None:

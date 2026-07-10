@@ -894,6 +894,61 @@ class TestPassthroughModules:
         ns = _run_in_sandbox("from collections import Counter; result = dict(Counter('aabbc'))")
         assert ns["result"] == {"a": 2, "b": 2, "c": 1}
 
+    def test_encodings_passthrough_shares_host_codec_modules(self):
+        """Regression: the C codec machinery imports ``encodings.<codec>``
+        on first use of an encoding and pins the module — plus a freshly
+        re-registered ``search_function`` — in interpreter state that can
+        never be cleared.  With ``encodings`` sandboxed, every first-use
+        codec lookup inside a run leaked a private copy of the package
+        (``encodings.aliases`` and the codec module); passthrough reuses
+        the host's modules so nothing new is pinned."""
+        import encodings
+
+        with workflow_sandbox(random_seed="enc"):
+            # Exercise the C lookup path
+            assert b"\x81".decode("cp1006")
+            mod = sys.modules["encodings.cp1006"]
+            seen = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == "encodings" or name.startswith("encodings.")
+            }
+
+        assert seen["encodings"] is encodings
+        assert seen["encodings.cp1006"] is mod
+        for name, module in seen.items():
+            assert sys.modules[name] is module
+
+    def test_passthrough_submodule_not_loaded_in_host(self, tmp_path):
+        """A submodule of a passthrough package that the host has not
+        imported yet must be imported into the host and shared — a fresh
+        sandbox import would be grafted onto the shared parent package,
+        mutating the host."""
+        import importlib
+
+        from vercel._internal.workflow import py_sandbox
+
+        pkg = tmp_path / "pt_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "sub.py").write_text("value = 7\n")
+        sys.path.insert(0, str(tmp_path))
+        py_sandbox._PASSTHROUGHS.add("pt_pkg")
+        try:
+            host_pkg = importlib.import_module("pt_pkg")
+            assert "pt_pkg.sub" not in sys.modules
+            with workflow_sandbox(random_seed=SEED):
+                sand_pkg = importlib.import_module("pt_pkg")
+                sub = importlib.import_module("pt_pkg.sub")
+                assert sand_pkg is host_pkg
+            assert sys.modules["pt_pkg.sub"] is sub
+            assert host_pkg.sub is sub
+        finally:
+            py_sandbox._PASSTHROUGHS.discard("pt_pkg")
+            sys.path.remove(str(tmp_path))
+            sys.modules.pop("pt_pkg", None)
+            sys.modules.pop("pt_pkg.sub", None)
+
 
 # ═══════════════════════════════════════════════════════════════
 #  SandboxPolicy.passthrough_modules

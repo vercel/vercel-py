@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import timedelta
 
 import pytest
 from celery import Celery
@@ -14,7 +15,8 @@ from kombu import Queue
 
 import vercel.integrations.celery as public_vqs_celery
 import vercel.integrations.celery._broker as vqs_celery
-from vercel.queue import ALL_DEPLOYMENTS
+from vercel.queue import ALL_DEPLOYMENTS, sanitize_name
+from vercel.queue._internal.embedded import ManualEmbeddedQueueClock
 from vercel.queue.devserver import EmbeddedQueueDevServer, embedded_queue_dev_server
 from vercel.queue.sync import QueueClient as SyncQueueClient
 from vercel.queue.testing import (
@@ -115,7 +117,7 @@ def test_poll_worker_processes_and_acknowledges_task(
     _wait_for_acknowledged(isolated_eqs, poll_worker)
 
     assert len(isolated_eqs.state.messages) == 1
-    assert isolated_eqs.state.messages[0].topic == "emails"
+    assert isolated_eqs.state.messages[0].topic == _vqs_topic(poll_worker, "emails")
     assert isolated_eqs.state.messages[0].acknowledged is True
 
 
@@ -124,12 +126,12 @@ def test_push_worker_processes_sdk_callback_and_acknowledges_task(
     push_worker: WorkerApp,
 ) -> None:
     result = push_worker.add.apply_async((3, 4), queue="emails")
-    _deliver_push(isolated_eqs)
+    _deliver_push(isolated_eqs, push_worker)
     assert result.get(timeout=10, disable_sync_subtasks=False) == 7
     _wait_for_acknowledged(isolated_eqs, push_worker)
 
     assert len(isolated_eqs.state.messages) == 1
-    assert isolated_eqs.state.messages[0].topic == "emails"
+    assert isolated_eqs.state.messages[0].topic == _vqs_topic(push_worker, "emails")
     assert isolated_eqs.state.messages[0].acknowledged is True
 
 
@@ -141,15 +143,18 @@ def test_push_callback_retries_until_worker_channel_is_available(
     push_channels = list(vqs_celery._push_channels)
     vqs_celery._push_channels.clear()
     try:
-        _deliver_push(isolated_eqs)
+        _deliver_push(isolated_eqs, push_worker)
     finally:
         vqs_celery._push_channels[:] = push_channels
 
     message = isolated_eqs.state.messages[0]
     assert message.acknowledged is False
-    assert message.lease_deadline_by_consumer["celery"] == isolated_eqs.state.now
+    assert message.lease_deadline_by_consumer["celery"] == (
+        isolated_eqs.state.now + timedelta(seconds=1)
+    )
 
-    _deliver_push(isolated_eqs)
+    cast("ManualEmbeddedQueueClock", isolated_eqs.state.clock).shift(1)
+    _deliver_push(isolated_eqs, push_worker)
     assert result.get(timeout=10, disable_sync_subtasks=False) == 21
     _wait_for_acknowledged(isolated_eqs, push_worker)
 
@@ -190,7 +195,7 @@ def test_auto_worker_polls_locally(
             _wait_for_acknowledged(eqs, worker_app)
 
         assert len(eqs.state.messages) == 1
-        assert eqs.state.messages[0].topic == queue_name
+        assert eqs.state.messages[0].topic == _vqs_topic(worker_app, queue_name)
         assert eqs.state.messages[0].acknowledged is True
     finally:
         if previous_vercel is None:
@@ -237,12 +242,12 @@ def test_auto_worker_uses_push_on_vercel(
                 push_channels=tuple(vqs_celery._push_channels),
             )
             result = add.apply_async((21, 34), queue=queue_name)
-            _deliver_push(eqs, queue=queue_name)
+            _deliver_push(eqs, worker_app, queue=queue_name)
             assert result.get(timeout=10, disable_sync_subtasks=False) == 55
             _wait_for_acknowledged(eqs, worker_app)
 
         assert len(eqs.state.messages) == 1
-        assert eqs.state.messages[0].topic == queue_name
+        assert eqs.state.messages[0].topic == _vqs_topic(worker_app, queue_name)
         assert eqs.state.messages[0].acknowledged is True
     finally:
         if previous_vercel is None:
@@ -274,6 +279,7 @@ def _celery_app(
             "base_url": base_url,
             "deployment": ALL_DEPLOYMENTS,
             "consumer_group": "celery",
+            "queue_name_prefix": f"celery-{name}-",
             "lease_duration": 30,
             "requeue_delay_seconds": 0,
             "timeout": 5,
@@ -283,7 +289,9 @@ def _celery_app(
 
 
 def _clear_celery_broker_state() -> None:
+    vqs_celery._set_default_broker_set_by_installer(value=False)
     vqs_celery._registered_app_queues.clear()
+    vqs_celery._registered_queue_subscriptions.clear()
     vqs_celery._embedded_workers.clear()
     vqs_celery._registered_callbacks.clear()
     vqs_celery._push_channels.clear()
@@ -291,9 +299,10 @@ def _clear_celery_broker_state() -> None:
 
 
 def _reset_celery_broker_state(push_worker: WorkerApp) -> None:
-    reset_default_queue_clients()
     clear_subscriptions()
+    vqs_celery._set_default_broker_set_by_installer(value=False)
     vqs_celery._registered_app_queues.clear()
+    vqs_celery._registered_queue_subscriptions.clear()
     vqs_celery._embedded_workers.clear()
     vqs_celery._registered_callbacks.clear()
     vqs_celery._push_channels[:] = list(push_worker.push_channels)
@@ -301,8 +310,20 @@ def _reset_celery_broker_state(push_worker: WorkerApp) -> None:
     vqs_celery.register_celery_app_queues(push_worker.app, start_worker=False)
 
 
-def _deliver_push(vqs_server: EmbeddedQueueDevServer, *, queue: str = "emails") -> None:
-    delivery = next(vqs_server.iter_push_deliveries(queue, "celery", lease_seconds=30), None)
+def _vqs_topic(worker_app: WorkerApp, queue: str) -> str:
+    return str(sanitize_name(f"celery-{worker_app.app.main}-{queue}"))
+
+
+def _deliver_push(
+    vqs_server: EmbeddedQueueDevServer,
+    worker_app: WorkerApp,
+    *,
+    queue: str = "emails",
+) -> None:
+    delivery = next(
+        vqs_server.iter_push_deliveries(_vqs_topic(worker_app, queue), "celery", lease_seconds=30),
+        None,
+    )
     assert delivery is not None
     client = SyncQueueClient(
         token="token",

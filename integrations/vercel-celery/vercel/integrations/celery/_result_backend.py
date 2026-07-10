@@ -4,10 +4,12 @@ from typing import Any
 
 import base64
 from collections.abc import Callable, Iterable
+from datetime import timedelta
 
 import httpx
 
 from celery.backends.base import BackendGetMetaError, BackendStoreError, KeyValueStoreBackend
+from celery.utils.time import maybe_timedelta
 from vercel.cache import RuntimeCache, RuntimeCacheError
 from vercel.queue import sanitize_name
 
@@ -101,8 +103,12 @@ class VercelRuntimeCacheBackend(KeyValueStoreBackend):
 
     def _option_ttl(self) -> int | None:
         ttl = self.options.get("ttl")
-        if isinstance(ttl, int) and ttl > 0:
-            return ttl
+        if isinstance(ttl, bool):
+            return None
+        if isinstance(ttl, (int, float, timedelta)):
+            seconds = int(maybe_timedelta(ttl).total_seconds())
+            if seconds > 0:
+                return seconds
         return None
 
     def _option_namespace(self) -> str | None:

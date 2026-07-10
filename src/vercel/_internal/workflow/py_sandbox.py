@@ -410,6 +410,7 @@ _PASSTHROUGHS: set[str] = {
     "decimal",
     "difflib",
     "dis",
+    "encodings",
     "enum",
     "errno",
     "fractions",
@@ -553,6 +554,21 @@ class _StubModule(types.ModuleType):
         return _restricted(f"{self.__name__}.{name}")
 
 
+def _host_import(fullname: str) -> types.ModuleType:
+    """Import *fullname* into the host module table and return it.
+
+    Temporarily leaves the sandbox context so the import runs with the real
+    ``sys.modules`` and the normal (unrestricted) finders.
+    """
+    table_token = _sandbox_sys_modules.set(None)
+    sandbox_token = _in_sandbox.set(False)
+    try:
+        return importlib.import_module(fullname)
+    finally:
+        _in_sandbox.reset(sandbox_token)
+        _sandbox_sys_modules.reset(table_token)
+
+
 class _SandboxFinder(MetaPathFinder):
     """A MetaPathFinder that controls module loading inside the sandbox.
 
@@ -560,8 +576,8 @@ class _SandboxFinder(MetaPathFinder):
 
     1. If ``X`` **has restrictions** — return a ``_ProxyModule`` that
        intercepts the restricted attributes.
-    2. If ``X`` **is already imported in the host and matches the
-       passthrough set** — return the host module as-is (shared).
+    2. If ``X`` **matches the passthrough set** — return the host module
+       as-is (importing it into the host first if needed).
     3. Otherwise — return ``None`` for a fresh re-import.
     """
 
@@ -627,11 +643,11 @@ class _SandboxFinder(MetaPathFinder):
                 origin=real_spec.origin,
                 is_package=real_spec.submodule_search_locations is not None,
             )
-        if fullname in self._host and self._is_passthrough(fullname):
-            # Unrestricted passthrough — serve from host as-is.
+        if self._is_passthrough(fullname):
+            # Unrestricted passthrough modules: always import from the host
             return spec_from_loader(
                 fullname,
-                _PreloadedLoader(self._host[fullname]),
+                _PreloadedLoader(_host_import(fullname)),
                 origin="sandbox",
             )
         return None

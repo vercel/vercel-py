@@ -29,8 +29,8 @@ queued chunk group <group-id>
 ```
 
 The `vercel.json` file declares `api/celery_worker.py` as a queue-triggered
-function for the default `celery` topic. The HTTP sender in `api/send_chunks.py`
-uses Celery canvas chunks:
+function for the app-prefixed default Celery topic. The HTTP sender in
+`api/send_chunks.py` uses Celery canvas chunks:
 
 ```python
 add.chunks(zip(range(100), range(100), strict=False), 10).apply_async()

@@ -11,10 +11,17 @@ from vercel.integrations.celery import install_vercel_celery_integration
 install_vercel_celery_integration()
 ```
 
-By default, the broker derives the Vercel Queue consumer group from the
-Celery app name, for example `Celery("my_app")` uses `celery-my_app`. If the
-app has no name, the consumer group falls back to `celery`. To override it, set
-`broker_transport_options = {"consumer_group": "workers"}`.
+By default, named Celery apps publish to app-prefixed Vercel Queue topics. For
+example, `Celery("my_app")` maps Celery queue `emails` to the Vercel Queue topic
+`celery-my__app-emails` after Vercel Queue name sanitization. Apps with no name
+use unprefixed topics. To override this, set
+`broker_transport_options = {"queue_name_prefix": "jobs-"}`. Set
+`queue_name_prefix` to `""` to use Celery queue names as Vercel Queue topics.
+
+The broker's Vercel Queue consumer group defaults to `celery`. Workers sharing
+the same Vercel Queue topic and consumer group compete for tasks. Workers using
+the same topic with different consumer groups receive fan-out copies. To
+override it, set `broker_transport_options = {"consumer_group": "workers"}`.
 
 The installer sets Celery's default `broker_url` to `vercel://` when Celery has
 no broker default configured. Pass `set_default_broker=False` to opt out.

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, ClassVar, cast
 
 from collections.abc import Iterator
+from datetime import timedelta
 
 import pytest
 from celery import Celery as CeleryApp, group
@@ -12,6 +13,13 @@ from celery.backends.base import BackendGetMetaError, BackendStoreError
 import vercel.integrations.celery as public_vqs_celery
 import vercel.integrations.celery._broker as vqs_celery
 import vercel.integrations.celery._result_backend as vqs_celery_backend
+
+
+def install_result_backend_integration() -> None:
+    public_vqs_celery.install_vercel_celery_integration(
+        register_queues=False,
+        set_default_broker=False,
+    )
 
 
 def unwrap_cache_payload(value: object) -> str | bytes:
@@ -87,7 +95,7 @@ def fake_runtime_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_runtime_cache_result_backend_round_trips_success_result() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-success", backend="vercel-runtime-cache://")
     app.conf.result_backend_transport_options = {"namespace": "results", "ttl": 60}
 
@@ -119,7 +127,7 @@ def test_runtime_cache_result_backend_round_trips_success_result() -> None:
 
 
 def test_runtime_cache_result_backend_round_trips_failure_result() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-failure", backend="vercel-runtime-cache://")
     error = ValueError("bad value")
 
@@ -132,7 +140,7 @@ def test_runtime_cache_result_backend_round_trips_failure_result() -> None:
 
 
 def test_runtime_cache_result_backend_round_trips_pickle_bytes_payload() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-pickle", backend="vercel-runtime-cache://")
     app.conf.result_serializer = "pickle"
     app.conf.accept_content = ["pickle"]
@@ -147,7 +155,7 @@ def test_runtime_cache_result_backend_round_trips_pickle_bytes_payload() -> None
 
 
 def test_runtime_cache_result_backend_saves_and_restores_group_result() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-group", backend="vercel-runtime-cache://")
     signature = app.signature("tasks.add", args=(1, 2))
     result = group(signature).freeze(group_id="group-1")
@@ -164,7 +172,7 @@ def test_runtime_cache_result_backend_transport_options_control_cache_set() -> N
     def key_hash(key: str) -> str:
         return f"hashed:{key}"
 
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-options", backend="vercel-runtime-cache://")
     app.conf.result_backend_transport_options = {
         "key_hash_function": key_hash,
@@ -192,7 +200,7 @@ def test_runtime_cache_result_backend_transport_options_control_cache_set() -> N
 
 
 def test_runtime_cache_result_backend_derives_namespace_from_main() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-app", backend="vercel-runtime-cache://")
 
     app.backend.store_result("task-1", "ok", "SUCCESS")
@@ -201,7 +209,7 @@ def test_runtime_cache_result_backend_derives_namespace_from_main() -> None:
 
 
 def test_runtime_cache_result_backend_sanitizes_derived_namespace() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result.app", backend="vercel-runtime-cache://")
 
     app.backend.store_result("task-1", "ok", "SUCCESS")
@@ -210,7 +218,7 @@ def test_runtime_cache_result_backend_sanitizes_derived_namespace() -> None:
 
 
 def test_runtime_cache_result_backend_falls_back_without_main() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp(backend="vercel-runtime-cache://")
 
     app.backend.store_result("task-1", "ok", "SUCCESS")
@@ -219,7 +227,7 @@ def test_runtime_cache_result_backend_falls_back_without_main() -> None:
 
 
 def test_runtime_cache_result_backend_capabilities_match_runtime_cache() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-capabilities", backend="vercel-runtime-cache://")
 
     assert app.backend.supports_native_join is False
@@ -228,7 +236,7 @@ def test_runtime_cache_result_backend_capabilities_match_runtime_cache() -> None
 
 
 def test_runtime_cache_result_backend_uses_result_expires_as_default_ttl() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-expires", backend="vercel-runtime-cache://")
     app.conf.result_expires = 30
 
@@ -242,7 +250,7 @@ def test_runtime_cache_result_backend_uses_result_expires_as_default_ttl() -> No
 
 
 def test_runtime_cache_result_backend_respects_constructor_expires() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-constructor-expires")
     backend = vqs_celery_backend.VercelRuntimeCacheBackend(app=app, expires=45)
 
@@ -256,7 +264,7 @@ def test_runtime_cache_result_backend_respects_constructor_expires() -> None:
 
 
 def test_runtime_cache_result_backend_zero_result_expires_omits_ttl() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-zero-expires", backend="vercel-runtime-cache://")
     app.conf.result_expires = 0
 
@@ -269,7 +277,7 @@ def test_runtime_cache_result_backend_zero_result_expires_omits_ttl() -> None:
 
 
 def test_runtime_cache_result_backend_explicit_ttl_overrides_result_expires() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-explicit-ttl", backend="vercel-runtime-cache://")
     app.conf.result_expires = 30
     app.conf.result_backend_transport_options = {"ttl": 90}
@@ -281,8 +289,44 @@ def test_runtime_cache_result_backend_explicit_ttl_overrides_result_expires() ->
     assert options["ttl"] == 90
 
 
+@pytest.mark.parametrize(
+    ("ttl", "expected"),
+    [
+        (12.9, 12),
+        (timedelta(seconds=15), 15),
+    ],
+)
+def test_runtime_cache_result_backend_accepts_duration_ttl(
+    ttl: object,
+    expected: int,
+) -> None:
+    install_result_backend_integration()
+    app = CeleryApp("result-duration-ttl", backend="vercel-runtime-cache://")
+    app.conf.result_backend_transport_options = {"ttl": ttl}
+
+    app.backend.store_result("task-1", "ok", "SUCCESS")
+
+    options = FakeRuntimeCache.instances[0].set_options["celery-task-meta-task-1"]
+    assert options is not None
+    assert options["ttl"] == expected
+
+
+@pytest.mark.parametrize("ttl", [True, False, 0, 0.0, timedelta(0)])
+def test_runtime_cache_result_backend_ignores_non_positive_or_bool_ttl(ttl: object) -> None:
+    install_result_backend_integration()
+    app = CeleryApp("result-ignored-ttl", backend="vercel-runtime-cache://")
+    app.conf.result_backend_transport_options = {"ttl": ttl}
+
+    app.backend.store_result("task-1", "ok", "SUCCESS")
+
+    assert FakeRuntimeCache.instances[0].set_options["celery-task-meta-task-1"] == {
+        "name": "celery-task-meta-task-1",
+        "ttl": 86400,
+    }
+
+
 def test_runtime_cache_result_backend_forget_deletes_task_key() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-forget", backend="vercel-runtime-cache://")
     app.backend.store_result("task-1", "ok", "SUCCESS")
 
@@ -292,7 +336,7 @@ def test_runtime_cache_result_backend_forget_deletes_task_key() -> None:
 
 
 def test_runtime_cache_result_backend_malformed_wrapper_raises_get_error() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-malformed", backend="vercel-runtime-cache://")
     backend = app.backend
     FakeRuntimeCache.instances[0].values["celery-task-meta-task-1"] = {"payload": "broken"}
@@ -302,7 +346,7 @@ def test_runtime_cache_result_backend_malformed_wrapper_raises_get_error() -> No
 
 
 def test_runtime_cache_result_backend_set_error_propagates() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-set-error", backend="vercel-runtime-cache://")
     backend = app.backend
     FakeRuntimeCache.instances[0].set_error = RuntimeError("set failed")
@@ -312,7 +356,7 @@ def test_runtime_cache_result_backend_set_error_propagates() -> None:
 
 
 def test_runtime_cache_result_backend_delete_error_propagates() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-delete-error", backend="vercel-runtime-cache://")
     app.backend.store_result("task-1", "ok", "SUCCESS")
     FakeRuntimeCache.instances[0].delete_error = RuntimeError("delete failed")
@@ -322,10 +366,12 @@ def test_runtime_cache_result_backend_delete_error_propagates() -> None:
 
 
 def test_runtime_cache_result_backend_mget_preserves_key_order() -> None:
-    public_vqs_celery.install_vercel_celery_integration()
+    install_result_backend_integration()
     app = CeleryApp("result-mget", backend="vercel-runtime-cache://")
     backend = app.backend
     backend.set("first", "one")
     backend.set("second", "two")
 
     assert backend.mget(["second", "missing", "first"]) == ["two", None, "one"]
+    assert backend.mget(["first", "second"]) == ["one", "two"]
+    assert not hasattr(backend, "_mget_executor")

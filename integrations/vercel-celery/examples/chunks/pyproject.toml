@@ -4,9 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "celery>=5.3,<6",
-    "vercel-cache @ git+https://github.com/vercel/vercel-py.git@main#subdirectory=src/vercel-cache",
-    "vercel-celery @ git+https://github.com/vercel/vercel-py.git@main#subdirectory=integrations/vercel-celery",
-    "vercel-queue @ git+https://github.com/vercel/vercel-py.git@main#subdirectory=src/vercel-queue",
+    "vercel-cache>=0.7.0",
+    "vercel-celery>=0.7.0",
+    "vercel-queue>=0.7.0",
 ]
 
 [tool.uv]
