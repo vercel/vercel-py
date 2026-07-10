@@ -5,7 +5,7 @@ Covers:
 - _BLOCKED: subprocess, ssl, ctypes, multiprocessing, signal, etc.
 - _PASSTHROUGHS: stdlib modules that pass through unchanged
 - Loop proxy: allowlisted methods pass, everything else restricted
-- Random determinism: seeded random produces repeatable results
+- random: module-level functions blocked; explicit Random(seed) allowed
 - Module isolation: non-passthrough modules are freshly imported
 """
 
@@ -24,26 +24,24 @@ from vercel.workflow.sandbox import (
 
 CLEANUP_ALL = SandboxPolicy(cleanups=ALL_CLEANUPS)
 
-SEED = "test-seed-42"
-
 
 # ── helpers ────────────────────────────────────────────────────
 
 
-def _run_in_sandbox(code: str, seed: str = SEED) -> dict:
+def _run_in_sandbox(code: str) -> dict:
     """exec *code* inside a sandbox and return its local namespace."""
     ns: dict = {}
-    with workflow_sandbox(random_seed=seed):
+    with workflow_sandbox():
         # Pass sandbox builtins so that exec'd code sees the proxy.
         ns["__builtins__"] = sys.modules["builtins"]
         exec(code, ns)  # noqa: S102
     return ns
 
 
-def _raises_in_sandbox(code: str, seed: str = SEED) -> None:
+def _raises_in_sandbox(code: str) -> None:
     """Assert that *code* raises SandboxRestrictionError inside a sandbox."""
     with pytest.raises(SandboxRestrictionError):
-        _run_in_sandbox(code, seed)
+        _run_in_sandbox(code)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -157,13 +155,13 @@ class TestOsRestrictions:
         _raises_in_sandbox("import os; os.getpid()")
 
     def test_os_fork_dropped(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import os
 
             assert not hasattr(os, "fork")
 
     def test_os_register_at_fork_dropped(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import os
 
             assert not hasattr(os, "register_at_fork")
@@ -247,7 +245,7 @@ class TestTimeRestrictions:
 
         async def sandbox_task():
             """Activates the sandbox and waits inside it."""
-            with workflow_sandbox(random_seed="test"):
+            with workflow_sandbox():
                 barrier.set()
                 await asyncio.sleep(0.05)
 
@@ -276,14 +274,14 @@ class TestTimeRestrictions:
         ready_b = asyncio.Event()
 
         async def sandbox_a():
-            with workflow_sandbox(random_seed="a"):
+            with workflow_sandbox():
                 ready_a.set()
                 await ready_b.wait()
                 _raises_in_sandbox("import time; time.time()")
                 await asyncio.sleep(0.02)
 
         async def sandbox_b():
-            with workflow_sandbox(random_seed="b"):
+            with workflow_sandbox():
                 ready_b.set()
                 await ready_a.wait()
                 _raises_in_sandbox("import time; time.time()")
@@ -294,97 +292,6 @@ class TestTimeRestrictions:
         assert sys.modules.get("time") is real_time
         # Sanity check: no proxy modules leaked
         assert isinstance(sys.modules["time"].time, type(real_time.time))
-
-    @pytest.mark.asyncio
-    async def test_concurrent_sandboxes_have_independent_random_seeds(self):
-        """Two concurrent sandboxes with different seeds must each see
-        their own deterministic random sequence, not interfere with
-        each other."""
-        import asyncio
-
-        results: dict[str, list[float]] = {}
-
-        async def run_sandbox(
-            seed: str,
-            res: dict[str, list[float]],
-            ready: asyncio.Event,
-            other: asyncio.Event,
-        ):
-            with workflow_sandbox(random_seed=seed):
-                ready.set()
-                await other.wait()
-                ns: dict[str, object] = {}
-                ns["__builtins__"] = sys.modules["builtins"]
-                exec(  # noqa: S102
-                    "import random; result = [random.random() for _ in range(5)]",
-                    ns,
-                )
-                res[seed] = ns["result"]  # type: ignore[assignment]
-
-        r1, r2 = asyncio.Event(), asyncio.Event()
-        await asyncio.gather(
-            run_sandbox("seed-A", results, r1, r2),
-            run_sandbox("seed-B", results, r2, r1),
-        )
-        assert "seed-A" in results and "seed-B" in results
-        assert results["seed-A"] != results["seed-B"]
-
-        # Each sequence must be deterministic: run again and compare
-        results2: dict[str, list[float]] = {}
-        r1, r2 = asyncio.Event(), asyncio.Event()
-        await asyncio.gather(
-            run_sandbox("seed-A", results2, r1, r2),
-            run_sandbox("seed-B", results2, r2, r1),
-        )
-        assert results["seed-A"] == results2["seed-A"]
-        assert results["seed-B"] == results2["seed-B"]
-
-    @pytest.mark.asyncio
-    async def test_concurrent_sandboxes_interleaved_random(self):
-        """When two sandboxes interleave their random calls, each must
-        still get its own deterministic sequence."""
-        import asyncio
-
-        step1 = asyncio.Event()
-        step2 = asyncio.Event()
-        results: dict[str, list[float]] = {}
-
-        async def sandbox_a():
-            with workflow_sandbox(random_seed="aaa"):
-                ns = {}
-                ns["__builtins__"] = sys.modules["builtins"]
-                exec("import random; r1 = random.random()", ns)  # noqa: S102
-                step1.set()  # let B run
-                await step2.wait()  # wait for B to call random
-                exec("r2 = random.random()", ns)  # noqa: S102
-                results["a"] = [ns["r1"], ns["r2"]]
-
-        async def sandbox_b():
-            with workflow_sandbox(random_seed="bbb"):
-                await step1.wait()  # wait for A's first call
-                ns = {}
-                ns["__builtins__"] = sys.modules["builtins"]
-                exec("import random; r1 = random.random()", ns)  # noqa: S102
-                step2.set()  # let A continue
-                results["b"] = [ns["r1"]]
-
-        await asyncio.gather(sandbox_a(), sandbox_b())
-
-        # Run A alone to get the expected sequence
-        expected_a: list[float] = []
-        with workflow_sandbox(random_seed="aaa"):
-            ns = {}
-            ns["__builtins__"] = sys.modules["builtins"]
-            exec(  # noqa: S102
-                "import random; result = [random.random(), random.random()]",
-                ns,
-            )
-            expected_a = ns["result"]
-
-        assert results["a"] == expected_a, (
-            f"Sandbox A's random sequence was corrupted by concurrent sandbox B: "
-            f"got {results['a']}, expected {expected_a}"
-        )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -420,39 +327,24 @@ class TestSocketRestrictions:
 
 
 class TestRandomRestrictions:
+    def test_random_module_random_blocked(self):
+        _raises_in_sandbox("import random; random.random()")
+
+    def test_random_module_randint_blocked(self):
+        _raises_in_sandbox("import random; random.randint(0, 10)")
+
+    def test_random_module_seed_blocked(self):
+        _raises_in_sandbox("import random; random.seed(42)")
+
+    def test_random_module_getstate_blocked(self):
+        _raises_in_sandbox("import random; random.getstate()")
+
+    def test_system_random_blocked(self):
+        _raises_in_sandbox("import random; random.SystemRandom()")
+
     def test_random_new_instance_seed_none_blocked(self):
         """New Random() instances use _RestrictedRandom which blocks seed(None)."""
         _raises_in_sandbox("import random; random.Random().seed()")
-
-    def test_random_seed_explicit_allowed(self):
-        _run_in_sandbox("import random; random.seed(42)")
-
-    def test_random_deterministic(self):
-        """Same seed should produce the same sequence."""
-        ns1 = _run_in_sandbox("import random; result = [random.random() for _ in range(5)]")
-        ns2 = _run_in_sandbox("import random; result = [random.random() for _ in range(5)]")
-        assert ns1["result"] == ns2["result"]
-
-    def test_random_different_seeds(self):
-        """Different seeds should produce different sequences."""
-        ns1 = _run_in_sandbox(
-            "import random; result = [random.random() for _ in range(5)]",
-            seed="seed-a",
-        )
-        ns2 = _run_in_sandbox(
-            "import random; result = [random.random() for _ in range(5)]",
-            seed="seed-b",
-        )
-        assert ns1["result"] != ns2["result"]
-
-    def test_random_randint_deterministic(self):
-        ns1 = _run_in_sandbox(
-            "import random; result = [random.randint(0, 1000) for _ in range(10)]"
-        )
-        ns2 = _run_in_sandbox(
-            "import random; result = [random.randint(0, 1000) for _ in range(10)]"
-        )
-        assert ns1["result"] == ns2["result"]
 
     def test_random_instance_seed_none_blocked(self):
         _raises_in_sandbox("import random; r = random.Random(); r.seed()")
@@ -466,7 +358,7 @@ class TestRandomRestrictions:
         import random
 
         state_before = random.getstate()
-        _run_in_sandbox("import random; random.random()")
+        _run_in_sandbox("import random; r = random.Random(42); r.random()")
         state_after = random.getstate()
         assert state_before == state_after
 
@@ -511,7 +403,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_call_later_blocked(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
@@ -520,7 +412,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_call_at_blocked(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
@@ -529,7 +421,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_create_connection_blocked(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
@@ -538,7 +430,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_subprocess_exec_blocked(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
@@ -547,7 +439,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_subprocess_shell_blocked(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
@@ -556,7 +448,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_call_soon_allowed(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
@@ -569,7 +461,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_create_future_allowed(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
@@ -578,7 +470,7 @@ class TestAsyncioRestrictions:
 
     @pytest.mark.asyncio
     async def test_loop_create_task_allowed(self):
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             async def noop():
@@ -597,7 +489,7 @@ class TestAsyncioRestrictions:
         returned None inside the sandbox, causing RuntimeError:
         'TaskGroup cannot determine the parent task'.
         """
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             results = []
@@ -622,7 +514,7 @@ class TestAsyncioRestrictions:
         _on_task_done failed with:
             AttributeError: 'NoneType' object has no attribute 'append'
         """
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import asyncio
 
             cancelled = asyncio.Event()
@@ -670,7 +562,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -683,7 +575,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -696,7 +588,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -709,7 +601,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -722,7 +614,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -737,7 +629,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 async def noop():
@@ -753,7 +645,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -766,7 +658,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -780,7 +672,7 @@ class TestUvloopProxy:
         loop = _use_uvloop
 
         async def go():
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
@@ -904,7 +796,7 @@ class TestPassthroughModules:
         the host's modules so nothing new is pinned."""
         import encodings
 
-        with workflow_sandbox(random_seed="enc"):
+        with workflow_sandbox():
             # Exercise the C lookup path
             assert b"\x81".decode("cp1006")
             mod = sys.modules["encodings.cp1006"]
@@ -937,7 +829,7 @@ class TestPassthroughModules:
         try:
             host_pkg = importlib.import_module("pt_pkg")
             assert "pt_pkg.sub" not in sys.modules
-            with workflow_sandbox(random_seed=SEED):
+            with workflow_sandbox():
                 sand_pkg = importlib.import_module("pt_pkg")
                 sub = importlib.import_module("pt_pkg.sub")
                 assert sand_pkg is host_pkg
@@ -962,7 +854,7 @@ class TestPolicyPassthroughModules:
         import shlex as host_shlex
 
         policy = SandboxPolicy(passthrough_modules=frozenset({"shlex"}))
-        with workflow_sandbox(random_seed=SEED, policy=policy):
+        with workflow_sandbox(policy=policy):
             import shlex
 
             assert shlex is host_shlex
@@ -971,7 +863,7 @@ class TestPolicyPassthroughModules:
         import urllib.parse as host_parse
 
         policy = SandboxPolicy(passthrough_modules=frozenset({"urllib"}))
-        with workflow_sandbox(random_seed=SEED, policy=policy):
+        with workflow_sandbox(policy=policy):
             import urllib.parse
 
             assert urllib.parse is host_parse
@@ -980,9 +872,9 @@ class TestPolicyPassthroughModules:
         import shlex as host_shlex
 
         policy = SandboxPolicy(passthrough_modules=frozenset({"shlex"}))
-        with workflow_sandbox(random_seed=SEED, policy=policy):
+        with workflow_sandbox(policy=policy):
             import shlex as inside_with_policy
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             import shlex as inside_plain
 
         assert inside_with_policy is host_shlex
@@ -1037,7 +929,7 @@ class TestModuleIsolation:
         import weakref
 
         def make_ref(seed: str) -> weakref.ref:
-            with workflow_sandbox(random_seed=seed, policy=CLEANUP_ALL):
+            with workflow_sandbox(policy=CLEANUP_ALL):
                 ns: dict = {"__builtins__": sys.modules["builtins"]}
                 exec(  # noqa: S102
                     "import typing\n"
@@ -1079,7 +971,7 @@ class TestModuleIsolation:
         )
 
         def make_ref(seed: str) -> weakref.ref:
-            with workflow_sandbox(random_seed=seed, policy=CLEANUP_ALL):
+            with workflow_sandbox(policy=CLEANUP_ALL):
                 ns: dict = {"__builtins__": sys.modules["builtins"]}
                 exec(code, ns)  # noqa: S102
                 return ns["ref"]
@@ -1126,7 +1018,7 @@ class TestModuleIsolation:
 
         def run(seed: str) -> None:
             try:
-                with workflow_sandbox(random_seed=seed):
+                with workflow_sandbox():
                     if start_barrier:
                         barrier.wait()
                     importlib.import_module("regpkg.mod")
@@ -1167,7 +1059,7 @@ class TestSandboxPolicy:
         calls: list[SandboxCleanupContext] = []
         policy = SandboxPolicy(cleanups=(calls.append,))
 
-        with workflow_sandbox(random_seed=SEED, policy=policy):
+        with workflow_sandbox(policy=policy):
             import shlex  # noqa: F401
 
             assert not calls  # not during the run
@@ -1179,7 +1071,7 @@ class TestSandboxPolicy:
         policy = SandboxPolicy(cleanups=(calls.append,))
 
         with pytest.raises(ValueError, match="boom"):  # noqa: PT012
-            with workflow_sandbox(random_seed=SEED, policy=policy):
+            with workflow_sandbox(policy=policy):
                 raise ValueError("boom")
         assert len(calls) == 1
 
@@ -1194,7 +1086,7 @@ class TestSandboxPolicy:
         policy = SandboxPolicy(cleanups=(bad, calls.append))
 
         with caplog.at_level("ERROR"):
-            with workflow_sandbox(random_seed=SEED, policy=policy):
+            with workflow_sandbox(policy=policy):
                 pass
         assert len(calls) == 1
         assert any("cleanup handler" in r.message for r in caplog.records)
@@ -1207,7 +1099,7 @@ class TestSandboxPolicy:
 
         from vercel._internal.workflow.py_sandbox import clear_typing_caches
 
-        with workflow_sandbox(random_seed=SEED):
+        with workflow_sandbox():
             ns: dict = {"__builtins__": sys.modules["builtins"]}
             exec(  # noqa: S102
                 "import typing\nimport weakref\n"
@@ -1234,20 +1126,3 @@ class TestSandboxPolicy:
         registry = core.Workflows(as_vercel_job=False, sandbox_policy=policy)
         assert registry._sandbox_policy is policy
         assert core.Workflows(as_vercel_job=False)._sandbox_policy == SandboxPolicy()
-
-
-# ═══════════════════════════════════════════════════════════════
-#  workflow_sandbox API
-# ═══════════════════════════════════════════════════════════════
-
-
-class TestWorkflowSandboxAPI:
-    def test_random_seed_required(self):
-        with pytest.raises(TypeError):
-            with workflow_sandbox():  # type: ignore[call-arg]
-                pass
-
-    def test_random_seed_must_be_str(self):
-        with pytest.raises(TypeError):
-            with workflow_sandbox(random_seed=None):  # type: ignore[arg-type]
-                pass
