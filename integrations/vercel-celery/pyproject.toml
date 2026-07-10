@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-celery"
+dynamic = ["version"]
+description = "Celery integration for Vercel Queue and Runtime Cache"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "celery>=5.3,<6",
+    "vercel-cache>=0.6.0",
+    "vercel-queue>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-cache = { workspace = true }
+vercel-queue = { workspace = true }
+
+[tool.ruff]
+extend = "../ruff.toml"
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "vercel/integrations/celery/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/integrations/celery/**/*.py",
+    "/vercel/integrations/celery/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/integrations/celery",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1

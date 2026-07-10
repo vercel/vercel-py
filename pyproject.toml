@@ -34,7 +34,7 @@ package = false
 exclude-newer = "2 days"
 
 [tool.uv.workspace]
-members = ["src/*"]
+members = ["src/*", "integrations/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -68,6 +68,7 @@ mypy_path = [
     "src/vercel-queue",
     "src/vercel-oidc",
     "src/vercel-internal-telemetry",
+    "integrations/vercel-celery",
     "tests/stubs",
 ]
 
@@ -90,7 +91,7 @@ warn_return_any = true
 
 [tool.ty.environment]
 python-version = "3.10"
-root = ["./src"]
+root = ["./src", "./integrations"]
 
 [tool.ruff]
 line-length = 100

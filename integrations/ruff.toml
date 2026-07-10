@@ -1,0 +1,151 @@
+extend = "../pyproject.toml"
+preview = true
+
+[lint]
+extend-select = [
+  "A",     # flake8-builtins
+  "ANN",   # flake8-annotations
+  "ASYNC", # flake8-async
+  "BLE",   # flake8-blind-except
+  "C4",    # flake8-comprehensions
+  "D",     # pydocstyle
+  "DTZ",   # flake8-datetimez
+  "ERA",   # flake8-eradicate
+  "FA",    # flake8-future-annotations
+  "FBT",   # flake8-boolean-trap
+  "FLY",   # flynt
+  "FIX",   # flake8-fixme
+  "FURB",  # refurb
+  "G",     # flake8-logging-format
+  "ICN",   # flake8-import-conventions
+  "INP",   # flake8-no-pep420 (on PyPI)
+  "LOG",   # flake8-logging
+  "N",     # pep8-naming
+  "PERF",  # perflint
+  "PGH",   # pygrep-hooks
+  "PIE",   # flake8-pie
+  "PLC",   # pylint-convention
+  "PLE",   # pylint-error
+  "PLR",   # pylint-refactor
+  "PLW",   # pylint-warning
+  "PT",    # flake8-pytest-style
+  "PTH",   # flake8-use-pathlib
+  "PYI",   # flake8-pyi
+  "Q",     # flake8-quotes
+  "RET",   # flake8-return
+  "RSE",   # flake8-raise
+  "RUF",   # ruff specific
+  "S",     # flake8-bandit
+  "SIM",   # flake8-simplify
+  "SLF",   # flake8-self
+  "SLOT",  # flake8-slots
+  "T10",   # flake8-debugger
+  "T20",   # flake8-print
+  "TC",    # flake8-type-checking
+  "TRY",   # tryceratops
+  "YTT",   # flake8-2020
+
+  "banned-api", # prefer-anyio-primitives
+  "explicit-string-concatenation",
+  "implicit-string-concatenation-in-collection-literal",
+  "import-outside-top-level",
+  "import-private-name",
+  "manual-list-comprehension",
+  "single-line-implicit-string-concatenation",
+  "sorted-min-max",
+  "trailing-comma-on-bare-tuple",
+  "type-name-incorrect-variance",
+]
+extend-ignore = [
+  "any-type",
+  "f-string-missing-placeholders",
+  "incorrect-blank-line-before-class",
+  "multi-line-summary-second-line",
+  "no-self-use",
+  "non-empty-init-module",
+  "raise-vanilla-args",
+  "suppressible-exception",
+  "try-except-in-loop",
+  "typing-only-first-party-import",
+  "typing-only-standard-library-import",
+  "typing-only-third-party-import",
+  "unused-async",
+]
+
+[lint.isort]
+section-order = [
+  "future",
+  "typing",
+  "standard-library",
+  "third-party",
+  "first-party",
+  "local-folder",
+]
+
+[lint.isort.sections]
+typing = ["typing", "typing_extensions"]
+
+[lint.per-file-ignores]
+"*/vercel/integrations/celery/_broker.py" = [
+    "private-member-access",
+    "unnecessary-dunder-call",
+]
+"examples/**/*.py" = [
+    "D",  # docstrings not required in examples
+    "INP",  # examples can be standalone apps without package markers
+    "N999",  # deployable example directories can use distribution-style names
+    "T20",  # examples print expected output for logs/CLI use
+]
+"*/examples/**/*.py" = [
+    "D",  # docstrings not required in examples
+    "INP",  # examples can be standalone apps without package markers
+    "N999",  # deployable example directories can use distribution-style names
+    "T20",  # examples print expected output for logs/CLI use
+]
+"tests/**/*.py" = [
+    "D",       # docstrings not required in tests
+    "assert",  # pytests are all about asserts
+    "hardcoded-password-default",   # tests set tokens
+    "hardcoded-password-func-arg",  # tests set tokens
+    "hardcoded-password-string",    # tests assert tokens
+    "import-private-name",
+    "magic-value-comparison",
+    "private-member-access",
+    "too-many-statements",
+    "unnecessary-dunder-call",
+]
+"*/tests/**/*.py" = [
+    "D",       # docstrings not required in tests
+    "assert",  # pytests are all about asserts
+    "hardcoded-password-default",   # tests set tokens
+    "hardcoded-password-func-arg",  # tests set tokens
+    "hardcoded-password-string",    # tests assert tokens
+    "import-private-name",
+    "magic-value-comparison",
+    "private-member-access",
+    "too-many-statements",
+    "unnecessary-dunder-call",
+]
+
+[lint.pylint]
+allow-magic-value-types = ["int", "str"]
+max-args = 10
+max-returns = 10
+
+[lint.flake8-tidy-imports.banned-api]
+"asyncio.Condition".msg = "prefer-anyio-primitives: use anyio.Condition instead."
+"asyncio.Event".msg = "prefer-anyio-primitives: use anyio.Event instead."
+"asyncio.Lock".msg = "prefer-anyio-primitives: use anyio.Lock instead."
+"asyncio.Queue".msg = "prefer-anyio-primitives: use anyio memory streams instead."
+"asyncio.Semaphore".msg = "prefer-anyio-primitives: use anyio.Semaphore instead."
+"asyncio.TaskGroup".msg = "prefer-anyio-primitives: use anyio.create_task_group instead."
+"asyncio.create_task".msg = "prefer-anyio-primitives: use an AnyIO task group instead."
+"asyncio.gather".msg = "prefer-anyio-primitives: use an AnyIO task group instead."
+"asyncio.get_event_loop".msg = "prefer-anyio-primitives: avoid asyncio loop APIs."
+"asyncio.get_running_loop".msg = "prefer-anyio-primitives: avoid asyncio loop APIs."
+"asyncio.new_event_loop".msg = "prefer-anyio-primitives: avoid asyncio loop APIs."
+"asyncio.run".msg = "prefer-anyio-primitives: use anyio.run instead."
+"asyncio.sleep".msg = "prefer-anyio-primitives: use anyio.sleep instead."
+"asyncio.timeout".msg = "prefer-anyio-primitives: use anyio fail_after or move_on_after instead."
+"asyncio.to_thread".msg = "prefer-anyio-primitives: use anyio.to_thread.run_sync instead."
+"asyncio.wait_for".msg = "prefer-anyio-primitives: use anyio fail_after or move_on_after instead."

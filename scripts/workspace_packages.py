@@ -10,6 +10,7 @@ PACKAGE_PATHS: dict[str, Path] = {
     "vercel-oidc": ROOT / "src/vercel-oidc",
     "vercel-queue": ROOT / "src/vercel-queue",
     "vercel-cache": ROOT / "src/vercel-cache",
+    "vercel-celery": ROOT / "integrations/vercel-celery",
     "vercel": ROOT / "src/vercel",
 }
 
@@ -20,6 +21,7 @@ VERSION_FILES: dict[str, Path] = {
     "vercel-oidc": PACKAGE_PATHS["vercel-oidc"] / "vercel/oidc/version.py",
     "vercel-queue": PACKAGE_PATHS["vercel-queue"] / "vercel/queue/version.py",
     "vercel-cache": PACKAGE_PATHS["vercel-cache"] / "vercel/cache/version.py",
+    "vercel-celery": PACKAGE_PATHS["vercel-celery"] / "vercel/integrations/celery/version.py",
     "vercel": PACKAGE_PATHS["vercel"] / "version.py",
 }
 
