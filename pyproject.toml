@@ -22,7 +22,7 @@ dev = [
     "hatchling>=1.27.0,<2",
     "time-machine>=2.16,<3",
     "trio>=0.33.0,<1",
-    "poethepoet>=0.47.0",
+    "poethepoet>=0.48.0",
     "tox>=4",
     "tox-uv-bare",
     "tomli>=2.0.0,<3; python_version < '3.11'",
@@ -119,10 +119,49 @@ keep-runtime-typing = false
 include = "scripts/poe/poe.toml"
 verbosity = -1
 
-[tool.poe.tasks.lint]
+[tool.poe.tasks.setup]
+sequence = ["sync-githooks"]
+
+[tool.poe.tasks.sync-githooks]
+cmd = "python scripts/sync-githooks.py"
+
+[tool.poe.tasks.check-news-fragments]
+cmd = "./scripts/workspace-root-task.sh check-news-fragments-root"
+
+[tool.poe.tasks.check-news-fragments-root]
+cmd = "python scripts/release.py check-news-fragments"
+
+[tool.poe.tasks.fix]
+cmd = "./scripts/fix.sh ${scopes}"
+args = [{ name = "scopes", positional = true, multiple = true }]
+
+[tool.poe.tasks.fix-root]
 shell = """
+set -e
+$RUFF_CHECK_FIX
+$RUFF_FORMAT_FIX
+"""
+
+[tool.poe.tasks.pre-commit]
+parallel = ["lint", "typecheck"]
+output_mode = "buffer"
+ignore_fail = "return_non_zero"
+
+[tool.poe.tasks.pre-push]
+parallel = ["check-news-fragments", "lint", "typecheck", "test"]
+output_mode = "buffer"
+ignore_fail = "return_non_zero"
+
+[tool.poe.tasks.lint]
+cmd = "./scripts/lint.sh ${scopes}"
+args = [{ name = "scopes", positional = true, multiple = true }]
+
+[tool.poe.tasks.lint-root]
+shell = """
+set -e
 $RUFF_CHECK
 $RUFF_FORMAT
+uv run poe lint-towncrier
 if [ -z "$WORKSPACE_POE_SCOPE_ARGS" ]; then
   $POE lint-zizmor
 fi
@@ -131,8 +170,25 @@ fi
 [tool.poe.tasks.lint-zizmor]
 cmd = "zizmor --offline ."
 
+[tool.poe.tasks.lint-towncrier]
+cmd = "python scripts/release.py lint-towncrier"
+
+[tool.poe.tasks.release-status]
+cmd = "python scripts/release.py status"
+
+[tool.poe.tasks.release]
+cmd = "python scripts/release.py release"
+
+[tool.poe.tasks.build-packages]
+cmd = "./scripts/build.sh"
+
 [tool.poe.tasks.typecheck]
+cmd = "./scripts/typecheck.sh ${scopes}"
+args = [{ name = "scopes", positional = true, multiple = true }]
+
+[tool.poe.tasks.typecheck-root]
 shell = """
+set -e
 $POE typecheck-mypy
 """
 
@@ -140,6 +196,10 @@ $POE typecheck-mypy
 cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-tests}"
 
 [tool.poe.tasks.test]
+cmd = "./scripts/test.sh ${scopes}"
+args = [{ name = "scopes", positional = true, multiple = true }]
+
+[tool.poe.tasks.test-root]
 shell = """
 if [ -n "$WORKSPACE_POE_SCOPE_ARGS" ]; then
   $PYTEST --ignore=tests/test_examples.py $WORKSPACE_POE_SCOPE_ARGS
@@ -149,3 +209,21 @@ else
   $PYTEST --ignore=tests/test_examples.py tests
 fi
 """
+
+[tool.poe.tasks.qa]
+shell = """
+set --
+if [ "${quiet:-}" = "True" ]; then
+  set -- "$@" -q
+fi
+if [ "${verbose:-}" = "True" ]; then
+  set -- "$@" -v
+fi
+set -- "$@" ${scopes}
+./scripts/qa.sh "$@"
+"""
+args = [
+  { name = "quiet", options = ["-q", "--quiet"], type = "boolean" },
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]

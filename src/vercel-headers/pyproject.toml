@@ -4,23 +4,30 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vercel-headers"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Request header helpers for Vercel Python applications"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.vercel.release.dependencies]
 dependencies = []
 
 [tool.hatch.version]
 path = "vercel/headers/version.py"
 
 [tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
 include = [
     "/vercel/headers/**/*.py",
     "/vercel/headers/py.typed",
     "/README.md",
     "/pyproject.toml",
+    "/hatch_build.py",
     "/LICENSE",
 ]
 exclude = [

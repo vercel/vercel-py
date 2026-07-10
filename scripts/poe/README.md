@@ -16,7 +16,8 @@ its local configuration differences.
 
 The top-level `scripts/fix.sh`, `scripts/lint.sh`, `scripts/test.sh`, and
 `scripts/typecheck.sh` are symlinks to `scripts/workspace-task.sh`. The symlink
-name selects the Poe task to run.
+name selects the Poe task to run. The root `pyproject.toml` also exposes
+top-level Poe commands for `lint`, `typecheck`, `test`, and `qa`.
 
 ## Package Setup
 
@@ -119,6 +120,19 @@ The symlinked runners accept zero or more scopes before `--`, and tool args afte
 ./scripts/test.sh tests/unit/test_time.py -- -k coerce_duration
 ```
 
+The equivalent Poe commands are available at the workspace root:
+
+```sh
+uv run poe lint vercel-oidc
+uv run poe typecheck vercel-oidc
+uv run poe test tests/unit/test_time.py -- -k coerce_duration
+uv run poe qa tests/unit/test_time.py
+```
+
+`qa` runs lint, typecheck, and test for the selected scopes. It accepts only
+scope arguments and `-q`/`--quiet` or `-v`/`--verbose`; it intentionally rejects
+tool-specific passthrough after `--`.
+
 Scopes can be workspace package names, `root`, or paths. Path scopes are mapped
 to owning packages and rewritten relative to the package task working directory.
 
@@ -128,7 +142,43 @@ output line with the package name. Package colors are enabled when stdin is a TT
 and selected by a stable hash.
 
 Root runs execute after package runs. Root tasks use `uv run --all-packages` so
-workspace packages remain importable for root tests.
+workspace packages remain importable for root tests. At the workspace root,
+public Poe tasks such as `test` dispatch back through the top-level runner, so
+root-scope execution uses internal `test-root`, `lint-root`, and
+`typecheck-root` task names to avoid recursion.
+
+Set `WORKSPACE_POE_GIT_SCOPE=staged` to run a workspace task against a temporary
+snapshot of the staged Git index instead of the current working tree:
+
+```sh
+WORKSPACE_POE_GIT_SCOPE=staged uv run poe check-news-fragments
+WORKSPACE_POE_GIT_SCOPE=staged uv run poe lint tests/unit/test_release_system.py
+```
+
+Staged mode materializes `git checkout-index --all` into a temporary directory,
+links that snapshot back to the real `.git` directory, and runs the normal
+workspace task machinery from the snapshot while using the real project for
+`uv run`. This keeps pre-commit checks focused on staged files and avoids
+unrelated dirty worktree changes influencing hook results.
+
+The managed `pre-commit.checks` hook invokes `uv run poe pre-commit`, a Poe
+parallel task that runs lint and typecheck concurrently with buffered output.
+
+Set `WORKSPACE_POE_GIT_SCOPE=commit` to run a workspace task against a commit
+tree instead of the current working tree:
+
+```sh
+WORKSPACE_POE_GIT_SCOPE=commit uv run poe lint tests/unit/test_release_system.py
+```
+
+Commit mode materializes `git archive` for `WORKSPACE_POE_GIT_COMMIT`, or
+`HEAD` when that variable is unset, into a temporary directory. Managed pre-push
+hooks use this mode and set `WORKSPACE_POE_GIT_COMMIT` from Git's pre-push
+input so checks run against the commit tree being pushed.
+
+The managed `pre-push.checks` hook invokes `uv run poe pre-push`, a Poe parallel
+task that runs news-fragment, lint, typecheck, and test checks concurrently with
+buffered output.
 
 ## Maintenance
 

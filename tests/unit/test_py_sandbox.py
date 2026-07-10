@@ -903,7 +903,6 @@ class TestPassthroughModules:
         (``encodings.aliases`` and the codec module); passthrough reuses
         the host's modules so nothing new is pinned."""
         import encodings
-        import importlib
 
         with workflow_sandbox(random_seed="enc"):
             # Exercise the C lookup path
@@ -949,6 +948,7 @@ class TestPassthroughModules:
             sys.path.remove(str(tmp_path))
             sys.modules.pop("pt_pkg", None)
             sys.modules.pop("pt_pkg.sub", None)
+
 
 # ═══════════════════════════════════════════════════════════════
 #  SandboxPolicy.passthrough_modules
