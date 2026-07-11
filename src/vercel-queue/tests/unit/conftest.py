@@ -4,6 +4,8 @@ from collections.abc import Iterator
 
 import pytest
 
+from vercel.headers import set_headers
+from vercel.oidc.token import _clear_cached_oidc_token
 from vercel.queue._internal.http import reset_http_client_pools_for_tests
 from vercel.queue._internal.lease import reset_lease_renewal_worker_for_tests
 from vercel.queue.devserver import EmbeddedQueueDevServer
@@ -41,12 +43,17 @@ def reset_default_queue_clients() -> Iterator[None]:
     reset_lease_renewal_worker_for_tests()
     reset_http_client_pools_for_tests()
     reset_queue_clients()
+    set_headers(None)
+    _clear_cached_oidc_token()
 
-    yield
-
-    reset_lease_renewal_worker_for_tests()
-    reset_http_client_pools_for_tests()
-    reset_queue_clients()
+    try:
+        yield
+    finally:
+        reset_lease_renewal_worker_for_tests()
+        reset_http_client_pools_for_tests()
+        reset_queue_clients()
+        set_headers(None)
+        _clear_cached_oidc_token()
 
 
 @pytest.fixture

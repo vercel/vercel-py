@@ -6,9 +6,7 @@ import pytest
 
 from vercel.headers import (
     HeadersContext,
-    context_aware_thread,
     get_headers,
-    get_headers_context,
     headers_from_asgi_scope,
     headers_from_wsgi_environ,
     set_headers,
@@ -26,7 +24,7 @@ def isolated_headers_context() -> Generator[None, None, None]:
 
 def test_headers_context_run_installs_and_restores_headers() -> None:
     set_headers({"x-current": "outer"})
-    context = get_headers_context()
+    context = HeadersContext(dict(get_headers() or {}))
     set_headers({"x-current": "inner"})
 
     def read_headers() -> Mapping[str, str] | None:
@@ -38,7 +36,7 @@ def test_headers_context_run_installs_and_restores_headers() -> None:
 
 def test_headers_context_use_installs_and_restores_headers() -> None:
     set_headers({"x-current": "outer"})
-    context = get_headers_context()
+    context = HeadersContext(dict(get_headers() or {}))
     set_headers({"x-current": "inner"})
 
     with context.use():
@@ -58,7 +56,7 @@ def test_headers_context_use_accepts_explicit_headers() -> None:
 
 def test_headers_context_restores_after_exception() -> None:
     set_headers({"x-current": "outer"})
-    context = get_headers_context()
+    context = HeadersContext(dict(get_headers() or {}))
     set_headers({"x-current": "inner"})
 
     def fail() -> None:
@@ -73,7 +71,7 @@ def test_headers_context_restores_after_exception() -> None:
 
 def test_headers_context_use_restores_after_exception() -> None:
     set_headers({"x-current": "outer"})
-    context = get_headers_context()
+    context = HeadersContext(dict(get_headers() or {}))
     set_headers({"x-current": "inner"})
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -87,27 +85,12 @@ def test_headers_context_use_restores_after_exception() -> None:
 def test_headers_context_is_snapshot_isolated() -> None:
     headers = {"x-current": "initial"}
     set_headers(headers)
-    context = get_headers_context()
+    context = HeadersContext(dict(get_headers() or {}))
 
     headers["x-current"] = "mutated"
     set_headers({"x-current": "latest"})
 
     assert context.run(get_headers) == {"x-current": "initial"}
-    with pytest.raises(TypeError):
-        context.headers["x-current"] = "changed"  # type: ignore[index]
-
-
-def test_context_aware_thread_runs_with_creation_headers() -> None:
-    seen: list[Mapping[str, str] | None] = []
-    set_headers({"x-current": "thread"})
-    thread = context_aware_thread(target=lambda: seen.append(get_headers()))
-    set_headers({"x-current": "main"})
-
-    thread.start()
-    thread.join(timeout=5)
-
-    assert seen == [{"x-current": "thread"}]
-    assert get_headers() == {"x-current": "main"}
 
 
 def test_headers_from_asgi_scope_decodes_latin1_headers() -> None:

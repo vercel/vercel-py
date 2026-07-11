@@ -5,8 +5,15 @@ Tests token retrieval from context, environment, and JWT payload decoding.
 
 import base64
 import json
+import time
 
 import pytest
+
+
+def _oidc_token(exp: float, *, subject: str = "test") -> str:
+    payload_json = json.dumps({"sub": subject, "exp": exp})
+    payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
+    return f"header.{payload_b64}.signature"
 
 
 class TestOidcTokenFromContext:
@@ -58,6 +65,65 @@ class TestOidcTokenFromContext:
             assert token == "header_token"
         finally:
             set_headers(None)
+
+    def test_live_unexpired_header_token_is_remembered(self, mock_env_clear):
+        """Test live OIDC headers refresh the process-wide fallback token."""
+        from vercel.headers import set_headers
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        token = _oidc_token(9999999999, subject="remembered")
+        set_headers({"x-vercel-oidc-token": token})
+        assert get_vercel_oidc_token_sync() == token
+
+        set_headers(None)
+        assert get_vercel_oidc_token_sync() == token
+
+    def test_expired_cached_token_falls_through_to_missing_token_error(self, mock_env_clear):
+        """Test expired OIDC headers are not exposed as fallback credentials."""
+        from vercel.headers import set_headers
+        from vercel.oidc import VercelOidcTokenError, get_vercel_oidc_token_sync
+
+        set_headers({"x-vercel-oidc-token": _oidc_token(1, subject="expired")})
+        with pytest.raises(VercelOidcTokenError, match="x-vercel-oidc-token"):
+            get_vercel_oidc_token_sync()
+
+    def test_header_token_inside_refresh_buffer_is_returned(self, mock_env_clear):
+        """Test currently valid ambient tokens are returned inside the refresh buffer."""
+        from vercel.headers import set_headers
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        token = _oidc_token(time.time() + 60, subject="inside-buffer")
+        set_headers({"x-vercel-oidc-token": token})
+
+        assert get_vercel_oidc_token_sync() == token
+
+    def test_newer_exp_claim_wins_over_ambient_token(self, mock_env_clear):
+        """Test an older ambient token does not shadow the freshest cached token."""
+        from vercel.headers import set_headers
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        newer = _oidc_token(9999999999, subject="newer")
+        older = _oidc_token(9999999998, subject="older")
+
+        set_headers({"x-vercel-oidc-token": newer})
+        assert get_vercel_oidc_token_sync() == newer
+        set_headers({"x-vercel-oidc-token": older})
+
+        assert get_vercel_oidc_token_sync() == newer
+
+    def test_expired_ambient_token_does_not_shadow_cached_token(self, mock_env_clear):
+        """Test expired live headers fall back to a newer cached token."""
+        from vercel.headers import set_headers
+        from vercel.oidc import get_vercel_oidc_token_sync
+
+        cached = _oidc_token(9999999999, subject="cached")
+        expired = _oidc_token(1, subject="expired")
+
+        set_headers({"x-vercel-oidc-token": cached})
+        assert get_vercel_oidc_token_sync() == cached
+        set_headers({"x-vercel-oidc-token": expired})
+
+        assert get_vercel_oidc_token_sync() == cached
 
     def test_oidc_standalone_header_context(self, mock_env_clear, monkeypatch):
         """Test the OIDC compatibility header setter."""

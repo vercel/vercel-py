@@ -20,7 +20,9 @@ import pytest
 from anyio import to_thread
 from anyio.lowlevel import current_token
 
-from vercel.headers import get_headers, get_headers_context, set_headers
+from vercel.headers import get_headers, set_headers
+from vercel.oidc import get_vercel_oidc_token_sync
+from vercel.oidc.token import _clear_cached_oidc_token
 from vercel.queue import (
     ALL_DEPLOYMENTS,
     CommunicationError,
@@ -158,7 +160,7 @@ def test_sync_run_lease_renewal_extends_on_enter_and_stops_on_exit(
 
 
 @pytest.mark.anyio
-async def test_lease_extension_runs_with_captured_headers_context() -> None:
+async def test_lease_extension_does_not_install_captured_headers_context() -> None:
     seen_headers: list[dict[str, str] | None] = []
     message = Message(
         payload=None,
@@ -168,7 +170,6 @@ async def test_lease_extension_runs_with_captured_headers_context() -> None:
         ),
     )
     set_headers({"x-vercel-oidc-token": "delivery-token"})
-    headers_context = get_headers_context()
     set_headers({"x-vercel-oidc-token": "worker-token"})
 
     def record_extension_headers(_message: Message[Any], _duration: object) -> None:
@@ -181,13 +182,35 @@ async def test_lease_extension_runs_with_captured_headers_context() -> None:
         client=_FakeLeaseClient(record_extension_headers),
         lease_seconds=30,
         next_extension_at=time.monotonic(),
-        headers_context=headers_context,
     )
 
     await _run_lease_extension(request, {request.token: request})
 
-    assert seen_headers == [{"x-vercel-oidc-token": "delivery-token"}]
+    assert seen_headers == [{"x-vercel-oidc-token": "worker-token"}]
     assert get_headers() == {"x-vercel-oidc-token": "worker-token"}
+
+
+def test_lease_start_primes_oidc_cache_from_ambient_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    message = Message(payload=None, metadata=make_leased_metadata("emails"))
+    renewal = _sync_test_client().run_lease_renewal(message, lease_duration=30)
+
+    monkeypatch.setattr(
+        "vercel.queue._internal.lease._ensure_lease_renewal_thread",
+        lambda: None,
+    )
+    monkeypatch.setattr("vercel.queue._internal.lease._send_lease_extension_start", calls.append)
+
+    _clear_cached_oidc_token()
+    token = "header.eyJleHAiOjk5OTk5OTk5OTl9.signature"
+    set_headers({"x-vercel-oidc-token": token})
+    renewal.start()
+    set_headers(None)
+
+    assert len(calls) == 1
+    assert get_vercel_oidc_token_sync() == token
 
 
 def test_lease_debug_logs_worker_start_extension_success_and_stop(
@@ -1786,7 +1809,6 @@ def _lease_request(
         client=client,
         lease_seconds=lease_seconds,
         next_extension_at=time.monotonic(),
-        headers_context=get_headers_context(),
     )
 
 

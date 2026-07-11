@@ -39,9 +39,12 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
         monkeypatch.delenv(var, raising=False)
 
     from vercel.headers import set_headers
+    from vercel.oidc.token import _clear_cached_oidc_token
 
     set_headers(None)
+    _clear_cached_oidc_token()
     yield
+    _clear_cached_oidc_token()
     set_headers(None)
 
 
