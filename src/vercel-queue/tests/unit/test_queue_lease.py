@@ -23,6 +23,7 @@ from anyio.lowlevel import current_token
 from vercel.headers import get_headers, get_headers_context, set_headers
 from vercel.queue import (
     ALL_DEPLOYMENTS,
+    CommunicationError,
     Delivery,
     Handoff,
     LeaseRenewal,
@@ -53,10 +54,9 @@ from vercel.queue._internal.lease import (
     _signal_lease_start_scheduled,
     _signal_lease_stop_complete,
     _wait_for_lease_worker_ready,
-    retry_async_follow_up,
-    retry_sync_follow_up,
     visibility_timeout_seconds,
 )
+from vercel.queue._internal.retry import retry_async_follow_up, retry_sync_follow_up
 from vercel.queue._internal.types import Duration
 from vercel.queue.devserver import EmbeddedQueueDevServer
 from vercel.queue.sync import QueueClient as SyncQueueClient
@@ -548,11 +548,11 @@ async def test_retry_async_follow_up_does_not_retry_throttle_without_retry_after
 
 
 @pytest.mark.anyio
-async def test_retry_async_follow_up_retries_request_timeout(
+async def test_retry_async_follow_up_does_not_retry_http_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class RequestTimeoutError(QueueError):
-        status_code = 408
+    class ServerError(QueueError):
+        status_code = 500
 
     calls = 0
     sleeps: list[float] = []
@@ -563,15 +563,15 @@ async def test_retry_async_follow_up_retries_request_timeout(
     async def operation() -> None:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            raise RequestTimeoutError("request timeout")
+        raise ServerError("server error")
 
     monkeypatch.setattr(anyio, "sleep", sleep)
 
-    await retry_async_follow_up(operation)
+    with pytest.raises(ServerError):
+        await retry_async_follow_up(operation)
 
-    assert calls == 2
-    assert sleeps == [0.1]
+    assert calls == 1
+    assert sleeps == []
 
 
 def test_retry_sync_follow_up_retries_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -585,7 +585,7 @@ def test_retry_sync_follow_up_retries_transport_error(monkeypatch: pytest.Monkey
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise httpx.ConnectError("network")
+            raise CommunicationError("network")
 
     monkeypatch.setattr(time, "sleep", sleep)
     retry_sync_follow_up(operation)
@@ -594,7 +594,9 @@ def test_retry_sync_follow_up_retries_transport_error(monkeypatch: pytest.Monkey
     assert sleeps == [0.1]
 
 
-def test_retry_sync_follow_up_retries_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_sync_follow_up_does_not_retry_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class ServerError(QueueError):
         status_code = 500
 
@@ -611,10 +613,11 @@ def test_retry_sync_follow_up_retries_server_error(monkeypatch: pytest.MonkeyPat
             raise ServerError("server error")
 
     monkeypatch.setattr(time, "sleep", sleep)
-    retry_sync_follow_up(operation)
+    with pytest.raises(ServerError):
+        retry_sync_follow_up(operation)
 
-    assert calls == 2
-    assert sleeps == [0.1]
+    assert calls == 1
+    assert sleeps == []
 
 
 def test_retry_sync_follow_up_does_not_retry_throttle_without_retry_after() -> None:
