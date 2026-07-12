@@ -205,6 +205,7 @@ class WorkflowOrchestratorContext:
         prng = random.Random(seed)
         self.generate_ulid = functools.partial(ulid.monotonic_factory(prng.random), started_at)
         self.generate_nanoid = nanoid.custom_random(nanoid.URL_ALPHABET, 21, prng.random)
+        self._user_random = random.Random(f"{seed}:random")
         self._fut: asyncio.Future[Any] | None = None
         self.suspensions: dict[str, BaseSuspension] = {}
         self.hooks: dict[str, Hook] = {}
@@ -224,9 +225,7 @@ class WorkflowOrchestratorContext:
             raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
         args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
 
-        with workflow_sandbox(
-            random_seed=workflow_run.run_id, policy=self.registry._sandbox_policy
-        ):
+        with workflow_sandbox(policy=self.registry._sandbox_policy):
             mod = importlib.import_module(wf.module)
 
             # Resolve the sandboxed Workflow by qualname from the
@@ -272,6 +271,9 @@ class WorkflowOrchestratorContext:
     def time_ns(self) -> int:
         delta = self.now() - _EPOCH
         return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+
+    def random(self) -> random.Random:
+        return self._user_random
 
     def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
         hook = Hook(

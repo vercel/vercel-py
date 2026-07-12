@@ -4,6 +4,7 @@ import dataclasses
 import datetime
 import functools
 import json
+import random as _random
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
 
@@ -94,6 +95,17 @@ def time_ns() -> int:
         raise RuntimeError("cannot call time_ns() outside workflow") from None
 
     return ctx.time_ns()
+
+
+def random() -> _random.Random:
+    from . import runtime
+
+    try:
+        ctx = runtime.WorkflowOrchestratorContext.current()
+    except LookupError:
+        raise RuntimeError("cannot call random() outside workflow") from None
+
+    return ctx.random()
 
 
 class HookEvent(Generic[T]):

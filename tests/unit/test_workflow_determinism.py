@@ -19,10 +19,12 @@ async def _greet(name: str) -> str:
     return name
 
 
-def _context(events: list[w.Event]) -> runtime.WorkflowOrchestratorContext:
+def _context(
+    events: list[w.Event], *, seed: str = "wrun_test"
+) -> runtime.WorkflowOrchestratorContext:
     ctx = runtime.WorkflowOrchestratorContext(
         events,
-        seed="wrun_test",
+        seed=seed,
         started_at=0,
         registry=core.Workflows(as_vercel_job=False),
     )
@@ -287,3 +289,31 @@ async def test_time_ns_matches_now_as_nanoseconds() -> None:
 async def test_core_time_ns_raises_outside_workflow() -> None:
     with pytest.raises(RuntimeError):
         core.time_ns()
+
+
+# --- random(): per-run deterministic Random, decoupled from the ambient module ---
+
+
+async def test_random_same_seed_same_sequence() -> None:
+    ctx1 = _context([], seed="wrun_a")
+    ctx2 = _context([], seed="wrun_a")
+
+    assert [ctx1.random().random() for _ in range(5)] == [ctx2.random().random() for _ in range(5)]
+
+
+async def test_random_different_seed_different_sequence() -> None:
+    ctx1 = _context([], seed="wrun_a")
+    ctx2 = _context([], seed="wrun_b")
+
+    assert [ctx1.random().random() for _ in range(5)] != [ctx2.random().random() for _ in range(5)]
+
+
+async def test_random_returns_memoized_instance() -> None:
+    ctx = _context([], seed="wrun_a")
+
+    assert ctx.random() is ctx.random()
+
+
+async def test_core_random_raises_outside_workflow() -> None:
+    with pytest.raises(RuntimeError):
+        core.random()
