@@ -10,6 +10,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+import pytest
+
 from vercel._internal.workflow import core, runtime, world as w
 
 
@@ -212,3 +214,76 @@ async def test_resume_parks_and_cancels_heartbeat_when_nothing_to_deliver() -> N
     assert ctx._suspended
     assert ctx._fut is not None and ctx._fut.cancelled()
     assert ctx.resume_handle.cancelled()  # heartbeat stopped
+
+
+# --- now(): deterministic clock anchored to replay progress, not list tail ------
+
+
+def _stamp(event: w.Event, ts: datetime, *, event_id: str) -> w.Event:
+    return event.model_copy(
+        update={"server_props": w.ServerProps(runId="wrun_test", eventId=event_id, createdAt=ts)}
+    )
+
+
+async def test_now_uses_first_event_before_any_replay() -> None:
+    """Before any suspension has been created/consumed, now() must fall back to
+    the first event in the log, not the last. The log already contains
+    everything from prior invocations, so `events[-1]` would leak a later
+    invocation's timestamp into a call site reached before any of it happened.
+    """
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t1 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    step = core.Step(_greet)
+    events: list[w.Event] = [
+        _stamp(_created(step, "step_1"), t0, event_id="evt_1"),
+        _stamp(_created(step, "step_2"), t1, event_id="evt_2"),
+    ]
+    ctx = _context(events)
+
+    assert ctx.now() == t0
+
+
+async def test_now_advances_with_replay_index() -> None:
+    """Once resume() has delivered a completion, now() reflects that event's
+    timestamp, not a later, not-yet-consumed event further down the log."""
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t1 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 3, tzinfo=timezone.utc)
+    step = core.Step(_greet)
+    events: list[w.Event] = [
+        _stamp(_created(step, "step_1"), t0, event_id="evt_1"),
+        _stamp(_completed("step_1", b'"one"'), t1, event_id="evt_2"),
+        _stamp(_created(step, "step_2"), t2, event_id="evt_3"),
+    ]
+    ctx = _context(events)
+    sus1 = _suspension("step_1", _ARGS)
+    ctx.suspensions["step_1"] = sus1
+
+    ctx.resume()
+
+    assert sus1.future.done() and sus1.future.result() == "one"
+    assert ctx.now() == t1
+
+
+async def test_ctx_now_raises_when_events_empty() -> None:
+    ctx = _context([])
+    with pytest.raises(RuntimeError):
+        ctx.now()
+
+
+async def test_core_now_raises_outside_workflow() -> None:
+    with pytest.raises(RuntimeError):
+        core.now()
+
+
+async def test_time_ns_matches_now_as_nanoseconds() -> None:
+    t0 = datetime(2026, 1, 1, 12, 30, 45, 123456, tzinfo=timezone.utc)
+    events: list[w.Event] = [_stamp(_created(core.Step(_greet), "step_1"), t0, event_id="evt_1")]
+    ctx = _context(events)
+
+    assert ctx.time_ns() == int(t0.timestamp()) * 1_000_000_000 + t0.microsecond * 1_000
+
+
+async def test_core_time_ns_raises_outside_workflow() -> None:
+    with pytest.raises(RuntimeError):
+        core.time_ns()
