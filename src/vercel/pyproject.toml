@@ -90,6 +90,15 @@ exclude = [
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
 
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel"
+explicit_package_bases = true
+packages = ["vercel"]
+
+[[tool.mypy.overrides]]
+module = ["vercel.workers", "vercel.workers.*"]
+ignore_missing_imports = true
+
 [tool.poe.tasks.lint]
 shell = """
 $RUFF_CHECK

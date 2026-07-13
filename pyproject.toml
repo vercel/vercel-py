@@ -60,6 +60,7 @@ commands = [["./scripts/test.sh", { replace = "posargs", extend = true }]]
 
 [tool.mypy]
 python_version = "3.10"
+cache_dir = "$MYPY_CONFIG_FILE_DIR/.mypy_cache/root"
 ignore_missing_imports = true
 explicit_package_bases = true
 mypy_path = [
@@ -145,11 +146,29 @@ $RUFF_FORMAT_FIX
 """
 
 [tool.poe.tasks.pre-commit]
+shell = """
+/usr/bin/env bash -c '
+  set -euo pipefail
+  . scripts/poe/workspace-poe.sh
+  workspace_poe_run_color_if_supported "$POE" pre-commit-buffered
+'
+"""
+
+[tool.poe.tasks.pre-commit-buffered]
 parallel = ["lint", "typecheck"]
 output_mode = "buffer"
 ignore_fail = "return_non_zero"
 
 [tool.poe.tasks.pre-push]
+shell = """
+/usr/bin/env bash -c '
+  set -euo pipefail
+  . scripts/poe/workspace-poe.sh
+  workspace_poe_run_color_if_supported "$POE" pre-push-buffered
+'
+"""
+
+[tool.poe.tasks.pre-push-buffered]
 parallel = ["check-news-fragments", "lint", "typecheck", "test"]
 output_mode = "buffer"
 ignore_fail = "return_non_zero"

@@ -9,6 +9,7 @@ workspace_poe_enter_tree
 qa_scopes=()
 qa_verbose=0
 qa_quiet=0
+qa_emit_task_header=1
 
 if [[ -n "${POE_EXTRA_ARGS:-}" ]]; then
   echo "qa does not accept tool-specific arguments after --" >&2
@@ -64,7 +65,9 @@ done
 
 qa_run() {
   local task="$1"
-  printf '==> %s\n' "$task"
+  if ((qa_emit_task_header)); then
+    printf '==> %s\n' "$task"
+  fi
   workspace_poe_subcommand_args=()
   workspace_poe_poe_args=(-q)
   if ((${#qa_poe_flags[@]})); then
@@ -78,6 +81,16 @@ workspace_poe_scope_args=()
 if ((${#qa_scopes[@]})); then
   workspace_poe_scope_args+=("${qa_scopes[@]}")
 fi
-qa_run lint
-qa_run typecheck
-qa_run test
+if workspace_poe_parallel_enabled; then
+  qa_emit_task_header=0
+  workspace_poe_reset_jobs
+  workspace_poe_start_job lint qa_run lint
+  workspace_poe_start_job typecheck qa_run typecheck
+  workspace_poe_start_job test qa_run test
+  workspace_poe_wait_jobs || true
+  workspace_poe_print_jobs
+else
+  qa_run lint
+  qa_run typecheck
+  qa_run test
+fi

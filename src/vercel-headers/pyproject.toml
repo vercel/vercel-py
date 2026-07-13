@@ -47,6 +47,11 @@ exclude = [
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
 
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-headers"
+explicit_package_bases = true
+packages = ["vercel.headers"]
+
 [tool.poe.tasks.typecheck]
 cmd = "$MYPY"
 

@@ -62,3 +62,12 @@ exclude = [
 [tool.poe]
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-celery"
+explicit_package_bases = true
+packages = ["vercel.integrations.celery"]
+
+[[tool.mypy.overrides]]
+module = ["celery", "celery.*", "kombu", "kombu.*"]
+ignore_missing_imports = true
