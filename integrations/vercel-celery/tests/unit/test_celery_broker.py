@@ -1702,7 +1702,10 @@ def test_registered_callback_uses_channel_that_consumes_queue() -> None:
     assert idle_channel._messages_by_tag == {}
 
 
-def test_registered_callback_retries_when_consumer_group_has_no_channel() -> None:
+def test_registered_callback_retries_when_consumer_group_has_no_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(vqs_celery, "_PUSH_CHANNEL_WAIT_SECONDS", 0.0)
     app = CeleryApp("callback-group-retry")
     configure_push_broker(app)
     app.conf.broker_transport_options = {"consumer_group": "workers"}
@@ -1721,7 +1724,10 @@ def test_registered_callback_retries_when_consumer_group_has_no_channel() -> Non
     assert channel.connection.delivered == []
 
 
-def test_registered_callback_retries_without_active_channel() -> None:
+def test_registered_callback_retries_without_active_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(vqs_celery, "_PUSH_CHANNEL_WAIT_SECONDS", 0.0)
     app = CeleryApp("callback-retry")
     configure_push_broker(app)
     app.conf.task_queues = (Queue("emails"),)
@@ -1841,7 +1847,7 @@ def test_push_queue_callback_uses_registered_queue_name() -> None:
 
 
 def test_push_queue_callback_retries_when_no_consumer_is_registered() -> None:
-    channel = make_push_channel()
+    channel = make_push_channel(push_handoff_wait_seconds=0)
     queued_message = FakeMessage(message())
 
     with pytest.raises(RetryAfter) as exc_info:
@@ -1858,7 +1864,11 @@ def test_push_queue_callback_retries_when_no_consumer_is_registered() -> None:
 
 
 def test_push_queue_callback_retries_when_prefetch_is_exhausted() -> None:
-    channel = make_push_channel(requeue_delay_seconds=8, push_retry_delay_seconds=3)
+    channel = make_push_channel(
+        requeue_delay_seconds=8,
+        push_retry_delay_seconds=3,
+        push_handoff_wait_seconds=0,
+    )
     channel.qos.prefetch_count = 1
     cast("Any", channel.qos._delivered)["existing"] = object()
     queued_message = FakeMessage(message())
@@ -1875,6 +1885,125 @@ def test_push_queue_callback_retries_when_prefetch_is_exhausted() -> None:
     assert FakeSyncQueueClient.instances[0].acknowledged == []
     assert FakeSyncQueueClient.instances[0].visibility_changes == []
     assert channel._messages_by_tag == {}
+
+
+@dataclass
+class _FakeWorkController:
+    consumer: Any
+
+
+def _register_fake_embedded_worker(app: CeleryApp, consumer: Any) -> None:
+    vqs_celery._embedded_workers[app] = vqs_celery._EmbeddedWorker(
+        app=app,
+        worker=_FakeWorkController(consumer),
+        thread=cast("Any", None),
+    )
+
+
+def test_push_queue_delivery_settles_deferred_ack_inline() -> None:
+    app = CeleryApp("inline-settle")
+    channel = make_push_channel()
+    queued_message = FakeMessage(message())
+    pending_operations: list[Any] = []
+    received: list[Any] = []
+
+    def consume(delivered: Any) -> None:
+        received.append(delivered)
+        # Celery consumers defer settlement into the worker's pending
+        # operations; emulate that instead of acking inline.
+        pending_operations.append(lambda: channel.basic_ack(delivered.delivery_tag))
+
+    class FakeConsumer:
+        def perform_pending_operations(self) -> None:
+            while pending_operations:
+                pending_operations.pop()()
+
+    _register_fake_embedded_worker(app, FakeConsumer())
+    channel.basic_consume("emails", no_ack=False, callback=consume, consumer_tag="ctag")
+
+    with pytest.raises(Handoff):
+        channel._handle_queue_delivery(
+            queued_message.payload,
+            queued_message.metadata,
+            queue="emails",
+        )
+
+    assert len(received) == 1
+    assert cast("FakeSyncQueueClient", channel._queue_client).acknowledged == [
+        queued_message.metadata
+    ]
+    assert channel._messages_by_tag == {}
+    assert pending_operations == []
+
+
+def test_push_queue_delivery_waits_for_prefetch_capacity() -> None:
+    app = CeleryApp("capacity-wait")
+    channel = make_push_channel(push_handoff_wait_seconds=5)
+    channel.qos.prefetch_count = 1
+    cast("Any", channel.qos._delivered)["existing"] = object()
+    queued_message = FakeMessage(message())
+    received: list[Any] = []
+
+    def consume(delivered: Any) -> None:
+        received.append(delivered)
+        channel.basic_ack(delivered.delivery_tag)
+
+    class FakeConsumer:
+        def perform_pending_operations(self) -> None:
+            # Emulate the deferred ACK of a previously delivered message
+            # freeing prefetch capacity.
+            cast("Any", channel.qos._delivered).pop("existing", None)
+
+    _register_fake_embedded_worker(app, FakeConsumer())
+    channel.basic_consume("emails", no_ack=False, callback=consume, consumer_tag="ctag")
+
+    with pytest.raises(Handoff):
+        channel._handle_queue_delivery(
+            queued_message.payload,
+            queued_message.metadata,
+            queue="emails",
+        )
+
+    assert len(received) == 1
+
+
+def test_push_queue_delivery_waits_for_handoff_lock() -> None:
+    channel = make_push_channel(push_handoff_wait_seconds=5)
+    queued_message = FakeMessage(message())
+    received: list[Any] = []
+
+    def consume(delivered: Any) -> None:
+        received.append(delivered)
+        channel.basic_ack(delivered.delivery_tag)
+
+    channel.basic_consume("emails", no_ack=False, callback=consume, consumer_tag="ctag")
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with channel._push_handoff_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert held.wait(5)
+    releaser = threading.Timer(0.1, release.set)
+    releaser.start()
+    try:
+        with pytest.raises(Handoff):
+            channel._handle_queue_delivery(
+                queued_message.payload,
+                queued_message.metadata,
+                queue="emails",
+            )
+    finally:
+        release.set()
+        holder.join(5)
+        releaser.cancel()
+
+    assert len(received) == 1
 
 
 def test_push_accept_releases_lease_when_callback_fails() -> None:
