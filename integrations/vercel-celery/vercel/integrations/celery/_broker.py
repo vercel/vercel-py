@@ -28,6 +28,14 @@ from .version import __version__
 DEFAULT_CONSUMER_GROUP = "celery"
 DEFAULT_REQUEUE_DELAY_SECONDS = 0
 DEFAULT_PUSH_RETRY_DELAY_SECONDS = 1
+# On Vercel, bouncing a push delivery with RetryAfter is expensive: redelivery
+# is paced by the server and can take up to the full remaining visibility
+# deadline. Prefer waiting in-request for the worker to become ready over
+# bouncing, up to this budget.
+DEFAULT_PUSH_HANDOFF_WAIT_SECONDS = 30.0
+_PUSH_CHANNEL_WAIT_SECONDS = 5.0
+_PUSH_WAIT_POLL_INTERVAL_SECONDS = 0.05
+_PUSH_SETTLE_POLL_INTERVAL_SECONDS = 0.01
 _EMBEDDED_WORKER_STARTUP_WAIT_SECONDS = 1.0
 _QUEUE_LOGGER_NAME = "vercel.integrations.celery"
 _DEBUG_ENV = "VERCEL_CELERY_DEBUG"
@@ -54,7 +62,12 @@ PUBLISH_TRANSPORT_OPTIONS = (
     "delay",
     "use_task_id_as_idempotency_key",
 )
-LEASE_TRANSPORT_OPTIONS = ("requeue_delay_seconds", "push_retry_delay_seconds", "lease_duration")
+LEASE_TRANSPORT_OPTIONS = (
+    "requeue_delay_seconds",
+    "push_retry_delay_seconds",
+    "push_handoff_wait_seconds",
+    "lease_duration",
+)
 CONSUMER_TRANSPORT_OPTIONS = ("consumer_group",)
 QUEUE_TRANSPORT_OPTIONS = ("queue_name_prefix",)
 # Celery apps can be short-lived in tests and app factories, so registration
@@ -171,6 +184,7 @@ class _BaseChannel(virtual.Channel):
     timeout: vqs.Duration | None = 10.0
     requeue_delay_seconds: int = DEFAULT_REQUEUE_DELAY_SECONDS
     push_retry_delay_seconds: int = DEFAULT_PUSH_RETRY_DELAY_SECONDS
+    push_handoff_wait_seconds: float = DEFAULT_PUSH_HANDOFF_WAIT_SECONDS
     lease_duration: vqs.Duration | None = None
     retention: vqs.Duration | None = None
     delay: vqs.Duration | None = None
@@ -481,7 +495,13 @@ class _BaseChannel(virtual.Channel):
         *,
         queue: str,
     ) -> None:
-        if not self._push_handoff_lock.acquire(blocking=False):
+        # Bouncing a push delivery with RetryAfter is a last resort: VQS paces
+        # redelivery on its own schedule, which can be far slower than the
+        # requested delay. While this callback runs the function instance is
+        # guaranteed to be executing, so prefer waiting here for the handoff
+        # lock, consumer readiness, and prefetch capacity over bouncing.
+        deadline = time.monotonic() + max(self.push_handoff_wait_seconds, 0.0)
+        if not self._acquire_push_handoff_lock(deadline):
             debug_log(
                 "celery.push_handoff_busy",
                 queue=queue,
@@ -494,7 +514,7 @@ class _BaseChannel(virtual.Channel):
         try:
             # Raising RetryAfter lets the queue SDK update VQS visibility when
             # Kombu has no active callback or its QoS prefetch window is full.
-            if not self._consumes_queue(queue) or not self.qos.can_consume():
+            if not self._wait_for_push_capacity(queue, deadline):
                 debug_log(
                     "celery.push_handoff_unavailable",
                     queue=queue,
@@ -540,6 +560,12 @@ class _BaseChannel(virtual.Channel):
                     push_retry_delay_seconds=self.push_retry_delay_seconds,
                 )
                 raise
+            # Celery queues the ACK/reject for this delivery as a pending
+            # operation drained by the worker consumer loop, but on Vercel that
+            # thread is suspended whenever no request is executing. Settle the
+            # delivery now, while this push invocation still has compute, or
+            # the lease silently expires and the task re-runs on redelivery.
+            self._settle_push_delivery(payload, deadline)
         finally:
             self._push_handoff_lock.release()
         debug_log(
@@ -553,6 +579,41 @@ class _BaseChannel(virtual.Channel):
         # Delivery succeeded into Kombu. Do not let vercel.queue auto-ACK here;
         # Celery/Kombu owns manual ACK/reject semantics from this point onward.
         raise vqs.Handoff
+
+    def _acquire_push_handoff_lock(self, deadline: float) -> bool:
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            return self._push_handoff_lock.acquire(blocking=False)
+        return self._push_handoff_lock.acquire(timeout=timeout)
+
+    def _wait_for_push_capacity(self, queue: str, deadline: float) -> bool:
+        while True:
+            if self._consumes_queue(queue) and self.qos.can_consume():
+                return True
+            # Deferred ACKs are what free prefetch capacity, and consumer
+            # registration happens on the worker startup thread; pump pending
+            # operations because the worker loop may never get scheduled
+            # between push requests.
+            _flush_embedded_worker_operations()
+            if self._consumes_queue(queue) and self.qos.can_consume():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_PUSH_WAIT_POLL_INTERVAL_SECONDS)
+
+    def _settle_push_delivery(self, payload: dict[str, Any], deadline: float) -> None:
+        delivery_tag = self._delivery_tag(payload)
+        if delivery_tag is None:
+            return
+        while delivery_tag in self._messages_by_tag:
+            if not _flush_embedded_worker_operations():
+                # No embedded worker owns pending operations in this process
+                # (e.g. a standalone `celery worker`); its own consumer loop
+                # keeps running and will settle the delivery.
+                return
+            if delivery_tag not in self._messages_by_tag or time.monotonic() >= deadline:
+                return
+            time.sleep(_PUSH_SETTLE_POLL_INTERVAL_SECONDS)
 
     def _register_push_channel(self) -> None:
         with _push_channels_lock:
@@ -714,7 +775,17 @@ def _make_queue_callback(queue: str) -> Any:
         # This is the real VQS trigger callback. The queue SDK has already
         # accepted/deserialized the delivery and will perform follow-up lease
         # actions according to the directive raised here.
-        channel = _find_push_channel(queue, str(message.metadata.consumer_group))
+        consumer_group = str(message.metadata.consumer_group)
+        channel = _find_push_channel(queue, consumer_group)
+        if channel is None:
+            # A delivery can race worker startup on a cold boot: the embedded
+            # worker opens its push channel moments after the HTTP server
+            # starts accepting push callbacks. Waiting briefly beats bouncing,
+            # because VQS redelivery pacing is far coarser than this window.
+            deadline = time.monotonic() + _PUSH_CHANNEL_WAIT_SECONDS
+            while channel is None and time.monotonic() < deadline:
+                time.sleep(_PUSH_WAIT_POLL_INTERVAL_SECONDS)
+                channel = _find_push_channel(queue, consumer_group)
         if channel is None:
             raise vqs.RetryAfter(DEFAULT_PUSH_RETRY_DELAY_SECONDS)
         channel._handle_queue_delivery(
@@ -725,6 +796,36 @@ def _make_queue_callback(queue: str) -> Any:
 
     handle_queue_delivery.__name__ = f"vercel_celery_{queue}_subscriber"
     return handle_queue_delivery
+
+
+def _flush_embedded_worker_operations() -> bool:
+    """Drain deferred consumer operations (ACKs/rejects) of embedded workers.
+
+    Returns whether any embedded worker consumer was available to drain.
+    Celery consumers defer message settlement to their consuming loop thread,
+    which on Vercel is suspended outside of request handling; push delivery
+    paths call this to run those operations on the delivering thread instead.
+    ``perform_pending_operations`` pops from a plain list and handles each
+    operation's errors, so concurrent draining by the worker loop is safe.
+    """
+    flushed = False
+    with _embedded_workers_lock:
+        embedded_workers = tuple(_embedded_workers.values())
+    for embedded in embedded_workers:
+        consumer = getattr(embedded.worker, "consumer", None)
+        if consumer is None:
+            continue
+        try:
+            consumer.perform_pending_operations()
+        except Exception as exc:  # noqa: BLE001
+            debug_log(
+                "celery.pending_operations_flush_failed",
+                exception_class=exc.__class__.__name__,
+                exception_message=str(exc),
+            )
+            continue
+        flushed = True
+    return flushed
 
 
 def _start_embedded_worker(app: Celery) -> None:

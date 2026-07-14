@@ -118,6 +118,14 @@ class _FakeLeaseClient:
         if inspect.isawaitable(result):
             await result
 
+    async def _extend_lease(
+        self,
+        message: Message[Any] | MessageMetadata,
+        duration: Duration,
+    ) -> None:
+        assert isinstance(message, Message)
+        await self.extend_lease(message, duration)
+
     async def _renew_lease(self, message: Message[Any], duration: Duration) -> None:
         await self.extend_lease(message, duration)
 

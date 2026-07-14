@@ -84,7 +84,7 @@ from .push import (
     parse_push_delivery_metadata,
 )
 from .response import queue_response_error, send_response_error
-from .retry import retry_async_follow_up, retry_sync_follow_up
+from .retry import retry_async_follow_up
 from .streams import AsyncStreamPayload, AsyncTextStreamPayload
 from .subscribers import (
     QueueSubscriber,
@@ -607,7 +607,7 @@ class Delivery(Generic[T]):
             debug_log_for_msg("message.handoff", self._message)
             return True
         if isinstance(exc, RetryAfter):
-            self._renewal.extend(exc.timeout_seconds, self._client.extend_lease)
+            self._renewal.extend(exc.timeout_seconds)
             debug_log_for_msg(
                 "message.retry_after",
                 self._message,
@@ -615,10 +615,8 @@ class Delivery(Generic[T]):
             )
             return True
         if exc is None:
-            retry_sync_follow_up(
-                lambda: self._client.acknowledge(self._message),
-                event_prefix="acknowledge",
-            )
+            # acknowledge() already retries transient failures internally.
+            self._client.acknowledge(self._message)
             debug_log_for_msg("message.ack", self._message)
         return None
 
@@ -1070,10 +1068,7 @@ class _AsyncMessageLifecycle:
             debug_log_for_msg("message.handoff", self._message)
             return True
         if isinstance(exc, RetryAfter):
-            await self._renewal.extend_async(
-                exc.timeout_seconds,
-                self._client.extend_lease,
-            )
+            await self._renewal.extend_async(exc.timeout_seconds)
             debug_log_for_msg(
                 "message.retry_after",
                 self._message,
@@ -1081,10 +1076,8 @@ class _AsyncMessageLifecycle:
             )
             return True
         if exc is None:
-            await retry_async_follow_up(
-                lambda: self._client.acknowledge(self._message),
-                event_prefix="acknowledge",
-            )
+            # acknowledge() already retries transient failures internally.
+            await self._client.acknowledge(self._message)
             debug_log_for_msg("message.ack", self._message)
         return None
 

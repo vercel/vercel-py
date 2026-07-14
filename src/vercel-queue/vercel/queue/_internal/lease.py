@@ -48,6 +48,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from vercel.oidc import get_vercel_oidc_token_sync
 
+from .asynctools import iter_coroutine
 from .errors import MessageNotFoundError, QueueError, ThrottledError
 from .log import debug_log
 from .retry import retry_async_follow_up, retry_sync_follow_up
@@ -100,6 +101,12 @@ class LeaseAsyncClient(Protocol):
     def _renew_lease(
         self,
         message: Message[Any],
+        duration: Duration,
+    ) -> Coroutine[Any, Any, None]: ...
+
+    def _extend_lease(
+        self,
+        message: Message[Any] | MessageMetadata,
         duration: Duration,
     ) -> Coroutine[Any, Any, None]: ...
 
@@ -386,25 +393,31 @@ class LeaseRenewal:
         except Exception as exc:  # noqa: BLE001
             _log_best_effort_lease_stop_failure(exc)
 
-    async def extend_async(
-        self,
-        duration: Duration,
-        extend_lease: AsyncExtendMessageLease,
-    ) -> None:
-        """Extend the lease immediately if this message has lease metadata."""
-        if self._message.metadata.receipt_handle is None:
-            return
-        await retry_message_after_async(self._message, duration, extend_lease)
+    async def extend_async(self, duration: Duration) -> None:
+        """Extend the lease immediately if this message has lease metadata.
 
-    def extend(
-        self,
-        duration: Duration,
-        extend_lease: ExtendMessageLease,
-    ) -> None:
-        """Extend the lease immediately if this message has lease metadata."""
+        Applies settlement retry semantics: transient failures are retried
+        and an already-missing lease is tolerated with a warning.
+        """
         if self._message.metadata.receipt_handle is None:
             return
-        retry_message_after_sync(self._message, duration, extend_lease)
+        await retry_message_after_async(
+            self._message,
+            duration,
+            self._client._extend_lease,  # noqa: SLF001
+        )
+
+    def extend(self, duration: Duration) -> None:
+        """Sync flavor of :meth:`extend_async`."""
+        if self._message.metadata.receipt_handle is None:
+            return
+        retry_message_after_sync(
+            self._message,
+            duration,
+            lambda message, duration: iter_coroutine(
+                self._client._extend_lease(message, duration)  # noqa: SLF001
+            ),
+        )
 
 
 def _prime_oidc_token_cache() -> None:

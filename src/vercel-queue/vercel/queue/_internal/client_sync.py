@@ -414,7 +414,7 @@ class _MessageLifecycle:
             debug_log_for_msg("message.handoff", self._message)
             return True
         if isinstance(exc, RetryAfter):
-            self._renewal.extend(exc.timeout_seconds, self._client.extend_lease)
+            self._renewal.extend(exc.timeout_seconds)
             debug_log_for_msg(
                 "message.retry_after",
                 self._message,
@@ -422,10 +422,8 @@ class _MessageLifecycle:
             )
             return True
         if exc is None:
-            retry_sync_follow_up(
-                lambda: self._client.acknowledge(self._message),
-                event_prefix="acknowledge",
-            )
+            # acknowledge() already retries transient failures internally.
+            self._client.acknowledge(self._message)
             debug_log_for_msg("message.ack", self._message)
         return None
 
