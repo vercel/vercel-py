@@ -84,11 +84,13 @@ jobs:
               print(package)
           PY
           : > /tmp/tags.txt
+          mkdir -p /tmp/release-bodies
 
           while IFS= read -r package; do
             version=$(python scripts/get-version.py "$package")
             tag="$package-v$version"
             echo "$tag" >> /tmp/tags.txt
+            python scripts/release.py github-release-body "$package" > "/tmp/release-bodies/$tag.md"
 
             http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${package}/${version}/json")
             if [ "$http_status" = "200" ]; then
@@ -112,41 +114,60 @@ jobs:
 
       - name: Create Git Tags
         if: steps.publish.outputs.tags != ''
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAGS: ${{ steps.publish.outputs.tags }}
         with:
           script: |
+            const fs = require('fs');
             const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
             for (const tag of tags) {
+              const ref = `tags/${tag}`;
               try {
-                await github.rest.git.createRef({
+                await github.rest.git.getRef({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  ref: `refs/tags/${tag}`,
-                  sha: context.sha,
                 });
+                continue;
               } catch (error) {
-                if (error.status !== 422) throw error;
+                if (error.status !== 404) throw error;
               }
+
+              const message = fs.readFileSync(`/tmp/release-bodies/${tag}.md`, 'utf8');
+              const tagObject = await github.rest.git.createTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+                message,
+                object: context.sha,
+                type: 'commit',
+              });
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/${ref}`,
+                sha: tagObject.data.sha,
+              });
             }
 
       - name: Create GitHub Releases
         if: steps.publish.outputs.tags != ''
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAGS: ${{ steps.publish.outputs.tags }}
         with:
           script: |
+            const fs = require('fs');
             const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
             for (const tag of tags) {
+              const body = fs.readFileSync(`/tmp/release-bodies/${tag}.md`, 'utf8');
               try {
                 await github.rest.repos.createRelease({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   tag_name: tag,
                   name: tag,
-                  body: '',
+                  body,
                 });
               } catch (error) {
                 if (error.status !== 422) throw error;
