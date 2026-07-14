@@ -3,7 +3,7 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Literal, cast, overload
 
-from .cache_build import AsyncBuildCache, BuildCache
+from .cache_build import AsyncBuildCache, BuildCache, RuntimeCacheError
 from .cache_in_memory import AsyncInMemoryCache, InMemoryCache
 from .context import get_context
 from .types import AsyncCache, Cache
@@ -13,6 +13,8 @@ _in_memory_cache_instance: InMemoryCache | None = None
 _async_in_memory_cache_instance: AsyncInMemoryCache | None = None
 _build_cache_instance: BuildCache | None = None
 _async_build_cache_instance: AsyncBuildCache | None = None
+_cached_cache_instance: Cache | None = None
+_cached_async_cache_instance: AsyncCache | None = None
 _warned_cache_unavailable = False
 
 
@@ -137,6 +139,8 @@ def _get_cache_implementation(
     if os.getenv("RUNTIME_CACHE_DISABLE_BUILD_CACHE") == "true":
         if debug:
             print("Using InMemoryCache as build cache is disabled")
+        if strict:
+            raise RuntimeCacheError("Runtime Cache unavailable: build cache is disabled")
         return _in_memory_cache_instance if sync else _async_in_memory_cache_instance
 
     endpoint = os.getenv("RUNTIME_CACHE_ENDPOINT")
@@ -149,6 +153,13 @@ def _get_cache_implementation(
         )
 
     if not endpoint or not headers:
+        cached = _cached_cache_instance if sync else _cached_async_cache_instance
+        if cached is not None:
+            return cached
+        if strict:
+            raise RuntimeCacheError(
+                "Runtime Cache unavailable: no request cache context or runtime cache environment"
+            )
         if not _warned_cache_unavailable:
             print("Runtime Cache unavailable in this environment. Falling back to in-memory cache.")
             _warned_cache_unavailable = True
@@ -161,6 +172,10 @@ def _get_cache_implementation(
             raise ValueError("RUNTIME_CACHE_HEADERS must be a JSON object")
     except Exception as e:
         print("Failed to parse RUNTIME_CACHE_HEADERS:", e)
+        if strict:
+            raise RuntimeCacheError(
+                "Runtime Cache unavailable: invalid RUNTIME_CACHE_HEADERS"
+            ) from e
         return _in_memory_cache_instance if sync else _async_in_memory_cache_instance  # type: ignore[return-value]
 
     if sync:
@@ -171,8 +186,11 @@ def _get_cache_implementation(
                 on_error=lambda e: print(e),
             )
         if not strict:
+            remember_cache(_build_cache_instance, sync=True)
             return _build_cache_instance
-        return BuildCache(endpoint=endpoint, headers=parsed_headers, strict=True)
+        cache = BuildCache(endpoint=endpoint, headers=parsed_headers, strict=True)
+        remember_cache(cache, sync=True)
+        return cache
     else:
         if _async_build_cache_instance is None:
             _async_build_cache_instance = AsyncBuildCache(
@@ -180,7 +198,25 @@ def _get_cache_implementation(
                 headers=parsed_headers,
                 on_error=lambda e: print(e),
             )
+        remember_cache(_async_build_cache_instance, sync=False)
         return _async_build_cache_instance
+
+
+def remember_cache(cache: Cache | AsyncCache, *, sync: bool) -> None:
+    """Remember a live Runtime Cache client for background worker threads."""
+    global _cached_cache_instance, _cached_async_cache_instance
+    if sync:
+        _cached_cache_instance = cast(Cache, cache)
+    else:
+        _cached_async_cache_instance = cast(AsyncCache, cache)
+
+
+def prime_runtime_cache() -> None:
+    """Prime process-wide Runtime Cache fallback from the current request context."""
+    try:
+        resolve_cache(sync=True, strict=True)
+    except RuntimeCacheError:
+        return
 
 
 @overload
@@ -196,9 +232,14 @@ def resolve_cache(sync: bool = True, strict: bool = False) -> Cache | AsyncCache
     if sync:
         cache = getattr(ctx, "cache", None)
         if cache is not None:
-            return cast(Cache, cache)
-    else:
-        cache = getattr(ctx, "async_cache", None)
-        if cache is not None:
-            return cast(AsyncCache, cache)
-    return _get_cache_implementation(os.getenv("SUSPENSE_CACHE_DEBUG") == "true", sync, strict)
+            resolved = cast(Cache, cache)
+            remember_cache(resolved, sync=True)
+            return resolved
+        return _get_cache_implementation(os.getenv("SUSPENSE_CACHE_DEBUG") == "true", True, strict)
+
+    async_cache = getattr(ctx, "async_cache", None)
+    if async_cache is not None:
+        resolved_async = cast(AsyncCache, async_cache)
+        remember_cache(resolved_async, sync=False)
+        return resolved_async
+    return _get_cache_implementation(os.getenv("SUSPENSE_CACHE_DEBUG") == "true", False, strict)
