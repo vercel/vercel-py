@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import os
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -324,10 +324,25 @@ def _release_commit_body(
     lines: list[str] = []
     for item in releases:
         package = packages_by_name[item.package]
-        lines.extend([f"## {item.package}", ""])
-        lines.extend(_demote_markdown_headings(_latest_changelog_entry(package.path)).splitlines())
+        lines.extend([item.package, "-" * len(item.package), ""])
+        lines.extend(_format_commit_markdown(_latest_changelog_entry(package.path)).splitlines())
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _github_release_body(
+    package_name: str, *, packages_by_name: dict[str, workspace.Package]
+) -> str:
+    try:
+        package = packages_by_name[package_name]
+    except KeyError:
+        raise SystemExit(f"unknown package: {package_name}") from None
+    return _latest_changelog_entry(package.path).rstrip() + "\n"
+
+
+def print_github_release_body(args: argparse.Namespace) -> int:
+    sys.stdout.write(_github_release_body(args.package, packages_by_name=workspace.packages()))
+    return 0
 
 
 def _latest_changelog_entry(package_path: Path) -> str:
@@ -343,11 +358,12 @@ def _latest_changelog_entry(package_path: Path) -> str:
     return "\n".join(lines[start:end]).rstrip()
 
 
-def _demote_markdown_headings(text: str) -> str:
+def _format_commit_markdown(text: str) -> str:
     lines = []
     for line in text.splitlines():
         if line.startswith("#"):
-            lines.append(f"#{line}")
+            heading = line.lstrip("#").strip()
+            lines.extend([heading, "-" * len(heading)])
         else:
             lines.append(line)
     return "\n".join(lines)
@@ -513,6 +529,10 @@ def main(argv: list[str] | None = None) -> int:
     changed_parser.add_argument("--base", default="HEAD^")
     changed_parser.add_argument("--head", default="HEAD")
     changed_parser.set_defaults(func=print_changed_packages)
+
+    github_release_body_parser = subparsers.add_parser("github-release-body")
+    github_release_body_parser.add_argument("package")
+    github_release_body_parser.set_defaults(func=print_github_release_body)
 
     check_parser = subparsers.add_parser("check-news-fragments")
     check_parser.add_argument("--base")

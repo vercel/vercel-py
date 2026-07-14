@@ -238,16 +238,73 @@ def test_release_commit_body_uses_latest_changelog_entries(tmp_path: Path) -> No
     assert (
         body
         == """
-## pkg
+pkg
+---
 
-### 0.7.0 - 2026-07-10
+0.7.0 - 2026-07-10
+------------------
 
-#### Features
+Features
+--------
 
 - Add feature.
 """.lstrip()
     )
     assert "Previous release" not in body
+
+
+def test_github_release_body_uses_package_latest_changelog_entry(tmp_path: Path) -> None:
+    package_path = tmp_path / "pkg"
+    other_package_path = tmp_path / "other"
+    package_path.mkdir()
+    other_package_path.mkdir()
+    (package_path / "CHANGELOG.md").write_text(
+        """
+# Changelog
+
+## 0.7.0 - 2026-07-10
+
+### Features
+
+- Add package feature.
+
+## 0.6.0 - 2026-01-01
+
+- Previous package release.
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (other_package_path / "CHANGELOG.md").write_text(
+        """
+# Changelog
+
+## 1.0.0 - 2026-07-10
+
+- Add other package feature.
+""".lstrip(),
+        encoding="utf-8",
+    )
+    packages = {
+        "pkg": workspace.Package("pkg", package_path, package_path / "version.py", ()),
+        "other": workspace.Package(
+            "other", other_package_path, other_package_path / "version.py", ()
+        ),
+    }
+
+    body = release._github_release_body("pkg", packages_by_name=packages)
+
+    assert (
+        body
+        == """
+## 0.7.0 - 2026-07-10
+
+### Features
+
+- Add package feature.
+""".lstrip()
+    )
+    assert "Previous package release" not in body
+    assert "other package" not in body
 
 
 def test_release_stages_commits_pushes_and_opens_pr(
@@ -287,11 +344,13 @@ def test_release_stages_commits_pushes_and_opens_pr(
         if cmd[:3] == ["git", "commit", "-v"]:
             template = Path(cmd[cmd.index("--template") + 1])
             message = template.read_text(encoding="utf-8")
-            assert message.startswith("Release Packages\n\n## pkg\n")
-            assert "### 0.7.0 - 2026-07-10" in message
+            assert message.startswith("Release Packages\n\npkg\n---\n")
+            assert "0.7.0 - 2026-07-10\n------------------" in message
+            assert "#" not in message
         if cmd[:3] == ["gh", "pr", "create"]:
             body = Path(cmd[cmd.index("--body-file") + 1]).read_text(encoding="utf-8")
-            assert body.startswith("## pkg\n")
+            assert body.startswith("pkg\n---\n")
+            assert "#" not in body
 
     def fake_check_output(cmd: list[str], *, cwd: Path, text: bool) -> str:
         assert cwd == root
