@@ -11,6 +11,14 @@ class QueueError(Exception):
     status_code: int | None = None
 
 
+class RetryableError(QueueError):
+    """Mixin for errors that follow-up operations may retry."""
+
+    @property
+    def retryable(self) -> bool:
+        return True
+
+
 class BadRequestError(QueueError, ValueError):
     status_code = 400
     default_message: Final[str] = "Invalid parameters"
@@ -35,7 +43,17 @@ class ForbiddenError(QueueError, PermissionError):
         super().__init__(message or self.default_message)
 
 
-class ProtocolError(QueueError, RuntimeError):
+class CommunicationError(RetryableError, ConnectionError):
+    """Network-level failure while communicating with the queue service.
+
+    Wraps the underlying HTTP library's transport errors (connect failures,
+    resets, TLS errors, timeouts) so callers do not need to depend on it.
+    Subclasses the built-in :class:`ConnectionError` so generic
+    connection-failure handling catches it without knowing about this package.
+    """
+
+
+class ProtocolError(QueueError):
     """The queue service returned malformed or incomplete protocol metadata."""
 
 
@@ -51,7 +69,8 @@ class DuplicateSubscriptionError(SubscriptionError):
     """Raised when a queue subscriber overlaps an existing local registration."""
 
 
-class ServiceError(QueueError, RuntimeError):
+class ServiceError(QueueError):
+    status_code: int
     default_message = "Unexpected queue response"
 
     def __init__(self, status_code: int, message: str | None = None) -> None:
@@ -67,26 +86,26 @@ class InternalServerError(ServiceError):
         super().__init__(status_code, message or self.default_message)
 
 
-class TokenResolutionError(QueueError, RuntimeError):
+class TokenResolutionError(QueueError):
     status_code = 500
 
 
-class DeploymentResolutionError(QueueError, RuntimeError):
+class DeploymentResolutionError(QueueError):
     status_code = 500
 
 
-class DuplicateIdempotencyKeyError(QueueError, RuntimeError):
+class DuplicateIdempotencyKeyError(QueueError):
     status_code = 409
 
 
-class ConsumerDiscoveryError(QueueError, RuntimeError):
+class ConsumerDiscoveryError(QueueError):
     status_code = 502
 
     def __init__(self, message: str | None = None) -> None:
         super().__init__(message or "Failed to discover queue consumer")
 
 
-class ConsumerRegistryNotConfiguredError(QueueError, RuntimeError):
+class ConsumerRegistryNotConfiguredError(QueueError):
     status_code = 503
 
     def __init__(self, message: str | None = None) -> None:
@@ -113,7 +132,7 @@ class MessageNotFoundError(QueueError, LookupError):
         super().__init__(f"Message {message_id} not found")
 
 
-class MessageAlreadyProcessedError(QueueError, RuntimeError):
+class MessageAlreadyProcessedError(QueueError):
     status_code = 410
 
     def __init__(self, message_id: MessageID) -> None:
@@ -121,7 +140,7 @@ class MessageAlreadyProcessedError(QueueError, RuntimeError):
         super().__init__(f"Message {message_id} has already been processed")
 
 
-class MessageUnavailableError(QueueError, RuntimeError):
+class MessageUnavailableError(QueueError):
     status_code = 409
 
     def __init__(
@@ -138,7 +157,7 @@ class MessageUnavailableError(QueueError, RuntimeError):
         super().__init__(f"Message {message_id} not available for processing{suffix}")
 
 
-class MessageCorruptedError(QueueError, RuntimeError):
+class MessageCorruptedError(QueueError):
     status_code = 500
 
     def __init__(self, message_id: MessageID, reason: str) -> None:
@@ -147,7 +166,7 @@ class MessageCorruptedError(QueueError, RuntimeError):
         super().__init__(f"Message {message_id} is corrupted: {reason}")
 
 
-class MessageLockedError(QueueError, RuntimeError):
+class MessageLockedError(QueueError):
     status_code = 409
 
     def __init__(
@@ -187,7 +206,7 @@ class ReceiptHandleMismatchError(MessageLockedError):
         )
 
 
-class UnhandledMessageError(QueueError, RuntimeError):
+class UnhandledMessageError(QueueError):
     status_code = 500
 
     def __init__(self, topic: str | None, consumer_group: str | None = None) -> None:
@@ -197,7 +216,7 @@ class UnhandledMessageError(QueueError, RuntimeError):
         super().__init__(f"No queue subscribers found for topic {topic!r}{suffix}.")
 
 
-class ThrottledError(QueueError, RuntimeError):
+class ThrottledError(RetryableError):
     status_code = 429
 
     def __init__(self, retry_after: int | None = None) -> None:
@@ -205,10 +224,15 @@ class ThrottledError(QueueError, RuntimeError):
         suffix = f", Retry-After={retry_after}" if retry_after is not None else ""
         super().__init__(f"Throttled by queue service{suffix}")
 
+    @property
+    def retryable(self) -> bool:
+        return self.retry_after is not None
+
 
 # Only add public symbols to __all__; internal helpers must stay unexported.
 __all__: tuple[str, ...] = (
     "BadRequestError",
+    "CommunicationError",
     "ConsumerDiscoveryError",
     "ConsumerRegistryNotConfiguredError",
     "DeploymentResolutionError",
@@ -228,6 +252,7 @@ __all__: tuple[str, ...] = (
     "ProtocolError",
     "QueueError",
     "ReceiptHandleMismatchError",
+    "RetryableError",
     "ServiceError",
     "SubscriptionError",
     "ThrottledError",

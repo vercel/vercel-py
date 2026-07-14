@@ -43,7 +43,12 @@ from .constants import (
     VQS_HEADER_RETENTION_SECONDS,
     VQS_HEADER_VISIBILITY_TIMEOUT_SECONDS,
 )
-from .errors import InvalidLimitError, MessageUnavailableError, ProtocolError
+from .errors import (
+    InvalidLimitError,
+    MessageNotFoundError,
+    MessageUnavailableError,
+    ProtocolError,
+)
 from .http import (
     AsyncHttpClientFactory,
     AsyncHttpMessage,
@@ -60,8 +65,7 @@ from .lease import (
     finalize_payload_async,
     finalize_payload_sync,
     processing_lease_seconds,
-    retry_async_follow_up,
-    retry_sync_follow_up,
+    retry_message_after_async,
     visibility_timeout_seconds,
 )
 from .log import debug_log, debug_log_for_msg
@@ -80,6 +84,7 @@ from .push import (
     parse_push_delivery_metadata,
 )
 from .response import queue_response_error, send_response_error
+from .retry import retry_async_follow_up, retry_sync_follow_up
 from .streams import AsyncStreamPayload, AsyncTextStreamPayload
 from .subscribers import (
     QueueSubscriber,
@@ -105,6 +110,7 @@ from .types import (
 
 T = TypeVar("T")
 QUEUE_API_PATH = "/api/v3/topic"
+
 
 if TYPE_CHECKING:
     from .asgi import QueueClientAsgiApp
@@ -460,6 +466,12 @@ class BaseQueueClient:
         headers = self._headers(token=await self._runtime.token(self.token))
         response = await self._runtime.delete(target.url, headers=headers)
         if error := await queue_response_error(response, message_id=target.metadata.message_id):
+            if isinstance(error, MessageNotFoundError):
+                # ACK deletes the lease; a missing lease means the message is
+                # already settled (prior ACK or lease expiry), which is success
+                # as far as the caller is concerned.
+                debug_log_for_msg("ack.lease_already_gone", target.metadata)
+                return
             raise error
 
     async def _extend_lease(
@@ -471,12 +483,12 @@ class BaseQueueClient:
     ) -> None:
         lease_duration = visibility_timeout_seconds(duration)
         target = self._lease_target(message)
-        runtime = runtime or self._runtime
+        send_runtime = runtime or self._runtime
         headers = self._headers(
-            token=await runtime.token(self.token),
+            token=await send_runtime.token(self.token),
             content_type=CONTENT_TYPE_JSON,
         )
-        response = await runtime.patch(
+        response = await send_runtime.patch(
             target.url,
             json={"visibilityTimeoutSeconds": int(lease_duration)},
             headers=headers,
@@ -920,6 +932,11 @@ class QueueClient(BaseQueueClient):
     async def acknowledge(self, message: Message[T] | MessageMetadata) -> None:
         """Acknowledge a received message.
 
+        This is a lower-level API for integrations that manage message
+        lifecycles manually. Application code should usually process messages
+        through ``poll`` delivery context managers or ``accept_and_handle`` so
+        acknowledgement happens automatically.
+
         Args:
             message: Message or metadata containing a delivery token.
 
@@ -928,7 +945,10 @@ class QueueClient(BaseQueueClient):
             QueueError: If the service rejects the acknowledgement.
 
         """
-        await self._acknowledge(message)
+        await retry_async_follow_up(
+            lambda: self._acknowledge(message),
+            event_prefix="ack",
+        )
 
     async def extend_lease(
         self,
@@ -936,6 +956,11 @@ class QueueClient(BaseQueueClient):
         duration: Duration,
     ) -> None:
         """Extend message processing.
+
+        This is a lower-level API for integrations that manage message
+        lifecycles manually. Application code should usually rely on delivery
+        context managers or ``LeaseRenewal`` to keep leases alive while a
+        handler runs.
 
         Args:
             message: Message or metadata containing a delivery token.
@@ -946,7 +971,37 @@ class QueueClient(BaseQueueClient):
             QueueError: If the service rejects the update.
 
         """
-        await self._extend_lease(message, duration)
+        await retry_async_follow_up(
+            lambda: self._extend_lease(message, duration),
+            event_prefix="visibility",
+        )
+
+    async def retry_after(
+        self,
+        message: Message[T] | MessageMetadata,
+        delay: Duration,
+    ) -> None:
+        """Request redelivery of a received message after ``delay``.
+
+        This is a lower-level API for integrations that manage message
+        lifecycles manually. Application code should usually raise
+        ``RetryAfter`` from a handler instead of calling this directly.
+
+        Unlike ``extend_lease``, this is a settlement-style follow-up:
+        transient failures are retried, and a lease that no longer exists is
+        tolerated with a warning because the message will be redelivered
+        anyway.
+
+        Args:
+            message: Message or metadata containing a delivery token.
+            delay: Time until the message becomes available again.
+
+        Raises:
+            ValueError: If delay or delivery metadata is invalid.
+            QueueError: If the service rejects the update.
+
+        """
+        await retry_message_after_async(message, delay, self._extend_lease)
 
     def asgi_app(self) -> QueueClientAsgiApp:
         """Return an ASGI push-callback app backed by this client."""

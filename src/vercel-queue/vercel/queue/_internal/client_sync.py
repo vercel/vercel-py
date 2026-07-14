@@ -22,13 +22,14 @@ from .lease import (
     LeaseRenewal,
     finalize_payload_sync,
     processing_lease_seconds,
-    retry_sync_follow_up,
+    retry_message_after_sync,
 )
 from .log import debug_log_for_msg
 from .messages import sync_message_payload
 from .names import SanitizedName
 from .polling import run_poll_and_handle_sync, start_sync_polling_thread
 from .push import accept_input_sync, parse_push_delivery_metadata
+from .retry import retry_sync_follow_up
 from .streams import SyncStreamPayload, SyncTextStreamPayload
 from .subscribers import (
     QueueSubscriber,
@@ -297,15 +298,58 @@ class QueueClient(BaseQueueClient):
         )
 
     def acknowledge(self, message: Message[T] | MessageMetadata) -> None:
-        """Acknowledge a received message."""
-        iter_coroutine(self._acknowledge(message))
+        """Acknowledge a received message.
+
+        This is a lower-level API for integrations that manage message
+        lifecycles manually. Application code should usually process messages
+        through ``poll`` delivery context managers or ``accept_and_handle`` so
+        acknowledgement happens automatically.
+        """
+        retry_sync_follow_up(
+            lambda: iter_coroutine(self._acknowledge(message)),
+            event_prefix="ack",
+        )
 
     def extend_lease(
         self,
         message: Message[T] | MessageMetadata,
         duration: Duration,
     ) -> None:
-        """Extend message processing."""
+        """Extend message processing.
+
+        This is a lower-level API for integrations that manage message
+        lifecycles manually. Application code should usually rely on delivery
+        context managers or ``LeaseRenewal`` to keep leases alive while a
+        handler runs.
+        """
+        retry_sync_follow_up(
+            lambda: iter_coroutine(self._extend_lease(message, duration)),
+            event_prefix="visibility",
+        )
+
+    def retry_after(
+        self,
+        message: Message[T] | MessageMetadata,
+        delay: Duration,
+    ) -> None:
+        """Request redelivery of a received message after ``delay``.
+
+        This is a lower-level API for integrations that manage message
+        lifecycles manually. Application code should usually raise
+        ``RetryAfter`` from a handler instead of calling this directly.
+
+        Unlike ``extend_lease``, this is a settlement-style follow-up:
+        transient failures are retried, and a lease that no longer exists is
+        tolerated with a warning because the message will be redelivered
+        anyway.
+        """
+        retry_message_after_sync(message, delay, self._extend_lease_sync)
+
+    def _extend_lease_sync(
+        self,
+        message: Message[Any] | MessageMetadata,
+        duration: Duration,
+    ) -> None:
         iter_coroutine(self._extend_lease(message, duration))
 
     async def _renew_lease(self, message: Message[Any], duration: Duration) -> None:
