@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from collections.abc import Mapping
+from typing import Any
 
 import httpx
 
@@ -18,6 +21,9 @@ from .utils import (
 )
 
 BASE_URL = "https://api.vercel.com/v1"
+_cached_oidc_token_lock = threading.Lock()
+_cached_oidc_token: str | None = None
+_cached_oidc_payload: dict[str, Any] | None = None
 
 
 class VercelOidcTokenError(Exception):
@@ -31,26 +37,15 @@ class VercelOidcTokenError(Exception):
 def get_vercel_oidc_token_from_context() -> str:
     # Prefer request header registered in the OIDC context,
     # fall back to environment variable like the TypeScript SDK.
-    headers = get_headers()
-    if headers:
-        # Normalize headers to lowercase keys
-        lower_headers: dict[str, str] = {}
-        if isinstance(headers, Mapping):
-            for k, v in headers.items():
-                lower_headers[str(k).lower()] = v
-        elif isinstance(headers, (list, tuple)):
-            for item in headers:
-                if isinstance(item, (list, tuple)) and len(item) == 2:
-                    k, v = item
-                    lower_headers[str(k).lower()] = v
-        elif hasattr(headers, "keys") and hasattr(headers, "__getitem__"):
-            for k in headers.keys():
-                v = headers[k]
-                lower_headers[str(k).lower()] = v
-
-        token_from_header = lower_headers.get("x-vercel-oidc-token")
-        if token_from_header:
-            return token_from_header
+    token_from_header = _token_from_headers(get_headers())
+    if token_from_header:
+        token = _select_header_or_cached_token(token_from_header)
+        if token is not None:
+            return token
+    else:
+        token_from_cache = _get_cached_unexpired_token()
+        if token_from_cache is not None:
+            return token_from_cache
 
     token_from_env = os.getenv("VERCEL_OIDC_TOKEN")
     if not token_from_env:
@@ -59,6 +54,86 @@ def get_vercel_oidc_token_from_context() -> str:
             "Do you have the OIDC option enabled in the Vercel project settings?"
         )
     return token_from_env
+
+
+def _token_from_headers(headers: object) -> str | None:
+    if not headers:
+        return None
+    lower_headers: dict[str, str] = {}
+    if isinstance(headers, Mapping):
+        for k, v in headers.items():
+            lower_headers[str(k).lower()] = v
+    elif isinstance(headers, (list, tuple)):
+        for item in headers:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                k, v = item
+                lower_headers[str(k).lower()] = v
+    elif hasattr(headers, "keys") and hasattr(headers, "__getitem__"):
+        for k in headers.keys():
+            v = headers[k]
+            lower_headers[str(k).lower()] = v
+    return lower_headers.get("x-vercel-oidc-token")
+
+
+def _select_header_or_cached_token(token: str) -> str | None:
+    try:
+        payload = get_token_payload(token)
+    except Exception:
+        return token
+    if _is_past_expiration(payload):
+        return _get_cached_unexpired_token()
+
+    with _cached_oidc_token_lock:
+        global _cached_oidc_payload, _cached_oidc_token
+        if _cached_oidc_token is None or _cached_oidc_payload is None:
+            _cached_oidc_token = token
+            _cached_oidc_payload = payload
+            return token
+        if _is_past_expiration(_cached_oidc_payload):
+            _cached_oidc_token = token
+            _cached_oidc_payload = payload
+            return token
+        if _expires_after(payload, _cached_oidc_payload):
+            _cached_oidc_token = token
+            _cached_oidc_payload = payload
+            return token
+        return _cached_oidc_token
+
+
+def _get_cached_unexpired_token() -> str | None:
+    with _cached_oidc_token_lock:
+        global _cached_oidc_payload, _cached_oidc_token
+        if _cached_oidc_token is None or _cached_oidc_payload is None:
+            return None
+        if _is_past_expiration(_cached_oidc_payload):
+            _cached_oidc_token = None
+            _cached_oidc_payload = None
+            return None
+        return _cached_oidc_token
+
+
+def _is_past_expiration(payload: dict[str, Any]) -> bool:
+    exp = payload.get("exp")
+    if not isinstance(exp, (int, float)):
+        return True
+    return exp <= time.time()
+
+
+def _expires_after(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_exp = left.get("exp")
+    right_exp = right.get("exp")
+    if not isinstance(left_exp, (int, float)):
+        return False
+    if not isinstance(right_exp, (int, float)):
+        return True
+    return left_exp > right_exp
+
+
+def _clear_cached_oidc_token() -> None:
+    with _cached_oidc_token_lock:
+        global _cached_oidc_payload, _cached_oidc_token
+        _cached_oidc_token = None
+        _cached_oidc_payload = None
 
 
 # for TS parity

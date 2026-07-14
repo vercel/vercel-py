@@ -22,7 +22,6 @@ from kombu.utils import json as kombu_json
 import vercel.queue as vqs
 import vercel.queue.sync as vqs_sync
 from celery import Celery, _state as celery_state
-from vercel.headers import HeadersContext, get_headers_context
 
 from .version import __version__
 
@@ -142,7 +141,6 @@ class _TrackedDelivery:
     message: vqs.Message[dict[str, Any]]
     lease_renewal: vqs.LeaseRenewal
     queue_client: vqs_sync.QueueClient
-    headers_context: HeadersContext
 
 
 def is_vercel_runtime() -> bool:
@@ -250,14 +248,10 @@ class _BaseChannel(virtual.Channel):
             if requeue:
                 tracked_message = self._stop_tracking_delivery(delivery_tag)
                 if tracked_message is not None:
-                    message.headers_context.run(
-                        message.queue_client.extend_lease,
-                        tracked_message,
-                        self.requeue_delay_seconds,
-                    )
+                    message.queue_client.retry_after(tracked_message, self.requeue_delay_seconds)
             else:
                 try:
-                    message.headers_context.run(message.queue_client.acknowledge, message.message)
+                    message.queue_client.acknowledge(message.message)
                 finally:
                     self._stop_tracking_delivery(delivery_tag)
         if message is not None and self._qos is not None:
@@ -324,11 +318,7 @@ class _BaseChannel(virtual.Channel):
         tracked_message = self._stop_tracking_delivery(delivery_tag)
         if tracked_message is None:
             return
-        tracked.headers_context.run(
-            tracked.queue_client.extend_lease,
-            tracked_message,
-            self.requeue_delay_seconds,
-        )
+        tracked.queue_client.retry_after(tracked_message, self.requeue_delay_seconds)
 
     def _restore(self, message: Any) -> None:
         return None
@@ -344,10 +334,8 @@ class _BaseChannel(virtual.Channel):
         message: vqs.Message[dict[str, Any]],
         *,
         queue_client: vqs_sync.QueueClient | None = None,
-        headers_context: HeadersContext | None = None,
     ) -> dict[str, Any]:
         queue_client = queue_client or self._queue_client
-        headers_context = headers_context or get_headers_context()
         payload = dict(message.payload)
         properties = payload.get("properties")
         properties = {} if not isinstance(properties, dict) else dict(properties)
@@ -365,14 +353,12 @@ class _BaseChannel(virtual.Channel):
         lease_renewal = queue_client.run_lease_renewal(
             tracked_message,
             lease_duration=self.lease_duration,
-            headers_context=headers_context,
         )
         lease_renewal.__enter__()
         self._messages_by_tag[delivery_tag] = _TrackedDelivery(
             message=tracked_message,
             lease_renewal=lease_renewal,
             queue_client=queue_client,
-            headers_context=headers_context,
         )
         return payload
 
@@ -388,7 +374,7 @@ class _BaseChannel(virtual.Channel):
         if tracked is None:
             return
         try:
-            tracked.headers_context.run(tracked.queue_client.acknowledge, tracked.message)
+            tracked.queue_client.acknowledge(tracked.message)
         finally:
             self._stop_tracking_delivery(delivery_tag)
 
@@ -402,11 +388,7 @@ class _BaseChannel(virtual.Channel):
             if tracked_message is None:
                 continue
             try:
-                tracked.headers_context.run(
-                    tracked.queue_client.extend_lease,
-                    tracked_message,
-                    0,
-                )
+                tracked.queue_client.retry_after(tracked_message, 0)
             except Exception as exc:  # noqa: BLE001
                 debug_log(
                     "celery.delivery_release_failed",
@@ -477,7 +459,7 @@ class _BaseChannel(virtual.Channel):
         for delivery in deliveries:
             message = delivery.accept()
             try:
-                self._queue_client.extend_lease(message, self.requeue_delay_seconds)
+                self._queue_client.retry_after(message, self.requeue_delay_seconds)
             except Exception as exc:  # noqa: BLE001
                 debug_log(
                     "celery.poll_batch_release_failed",
@@ -527,8 +509,7 @@ class _BaseChannel(virtual.Channel):
                 raise vqs.RetryAfter(self.push_retry_delay_seconds)
 
             message = vqs.Message(payload=payload, metadata=metadata)
-            headers_context = get_headers_context()
-            payload = self._track_message(message, headers_context=headers_context)
+            payload = self._track_message(message)
             try:
                 # _deliver enters Kombu's normal consumer path. That path is now
                 # responsible for basic_ack/basic_reject, which in turn ACKs or
@@ -546,11 +527,7 @@ class _BaseChannel(virtual.Channel):
                     if self._qos is not None:
                         super().basic_reject(delivery_tag, requeue=False)
                 if tracked_message is not None:
-                    headers_context.run(
-                        self._queue_client.extend_lease,
-                        tracked_message,
-                        self.push_retry_delay_seconds,
-                    )
+                    self._queue_client.retry_after(tracked_message, self.push_retry_delay_seconds)
                 debug_log(
                     "celery.push_handoff_failed",
                     queue=queue,

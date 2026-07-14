@@ -46,7 +46,7 @@ from anyio.abc import ObjectReceiveStream, ObjectSendStream, TaskGroup
 from anyio.lowlevel import EventLoopToken, current_token
 from anyio.streams.memory import MemoryObjectSendStream
 
-from vercel.headers import HeadersContext, get_headers_context
+from vercel.oidc import get_vercel_oidc_token_sync
 
 from .errors import MessageNotFoundError, QueueError, ThrottledError
 from .log import debug_log
@@ -111,7 +111,6 @@ class _LeaseExtensionRequest:
     client: LeaseAsyncClient
     lease_seconds: int
     next_extension_at: float
-    headers_context: HeadersContext
 
 
 @dataclass(kw_only=True)
@@ -218,12 +217,10 @@ class LeaseRenewal:
         message: Message[Any],
         client: LeaseAsyncClient,
         lease_duration: Duration | None = None,
-        headers_context: HeadersContext | None = None,
     ) -> None:
         self._message = message
         self._client = client
         self._lease_seconds = processing_lease_seconds(lease_duration)
-        self._headers_context = headers_context or get_headers_context()
         self._token: _LeaseRenewalToken | None = None
         self._entered = False
         self._closed = False
@@ -272,6 +269,7 @@ class LeaseRenewal:
         if self._message.metadata.receipt_handle is None:
             return None
         self._entered = True
+        _prime_oidc_token_cache()
         _ensure_lease_renewal_thread()
         self._token = _LeaseRenewalToken(object())
         return _LeaseExtensionRequest(
@@ -280,7 +278,6 @@ class LeaseRenewal:
             client=self._client,
             lease_seconds=self._lease_seconds,
             next_extension_at=_next_extension_at(self._message.metadata, self._lease_seconds),
-            headers_context=self._headers_context,
         )
 
     def _reset_start_after_failure(self) -> None:
@@ -408,6 +405,17 @@ class LeaseRenewal:
         if self._message.metadata.receipt_handle is None:
             return
         retry_message_after_sync(self._message, duration, extend_lease)
+
+
+def _prime_oidc_token_cache() -> None:
+    try:
+        get_vercel_oidc_token_sync()
+    except Exception as exc:  # noqa: BLE001
+        debug_log(
+            "lease.oidc_cache_prime_failed",
+            exception_class=exc.__class__.__name__,
+            exception_message=str(exc),
+        )
 
 
 async def retry_message_after_async(
@@ -897,11 +905,10 @@ async def _run_lease_extension(
         lease_seconds=request.lease_seconds,
     )
     try:
-        with request.headers_context.use():
-            await request.client._renew_lease(  # noqa: SLF001
-                request.message,
-                request.lease_seconds,
-            )
+        await request.client._renew_lease(  # noqa: SLF001
+            request.message,
+            request.lease_seconds,
+        )
     except QueueError as exc:
         if _is_client_error(exc):
             active.pop(request.token, None)

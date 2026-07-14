@@ -524,14 +524,12 @@ class BaseQueueClient:
         self,
         message: Message[Any],
         lease_duration: Duration | None = None,
-        headers_context: HeadersContext | None = None,
     ) -> LeaseRenewal:
         """Create a context manager that keeps a message lease alive."""
         return LeaseRenewal(
             message,
             client=self,
             lease_duration=lease_duration,
-            headers_context=headers_context,
         )
 
 
