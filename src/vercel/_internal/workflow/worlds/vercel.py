@@ -1,4 +1,3 @@
-import asyncio
 import datetime
 import json
 import math
@@ -14,8 +13,9 @@ import httpx
 import pydantic
 
 from vercel._internal.polyfills import UTC
-from vercel.workers import client as vqs_client
-from vercel.workers.exceptions import DuplicateIdempotencyKeyError
+import vercel.queue as vqs
+from vercel.queue._internal.errors import DuplicateIdempotencyKeyError
+from vercel.queue._internal.names import SanitizedName
 
 from .. import world as w
 
@@ -114,6 +114,30 @@ class VercelWorld(w.World):
         # directly to the workflow-server so this header has no effect.
         if WORKFLOW_SERVER_URL_OVERRIDE and self._using_proxy:
             self._headers["x-vercel-workflow-api-url"] = WORKFLOW_SERVER_URL_OVERRIDE
+
+        self._queue_client: vqs.QueueClient | None = None
+        # Strong references to @subscribe handlers to prevent GC.
+        self._subscriber_refs: list[object] = []
+
+    def _get_queue_client(self) -> vqs.QueueClient:
+        """Lazily create the vqs.QueueClient on first use.
+
+        Deferred so that tests and code paths that never call ``queue()``
+        don't need a VERCEL_REGION env var.
+        """
+        if self._queue_client is None:
+            queue_base_url: str | None = None
+            queue_region: str | None = None
+            if self._using_proxy:
+                queue_base_url = f"{self._base_url}/queues-proxy"
+                queue_region = os.getenv("VERCEL_REGION", "iad1")
+            self._queue_client = vqs.QueueClient(
+                token=self._token if self._using_proxy else None,
+                base_url=queue_base_url,
+                region=queue_region,
+                headers=self._headers if self._using_proxy else None,
+            )
+        return self._queue_client
 
     async def _cbor_request(
         self,
@@ -234,23 +258,21 @@ class VercelWorld(w.World):
             # Store deploymentId in the message so it can be preserved when re-enqueueing
             "deploymentId": deployment_id,
         }
-        headers = {}
+        sanitized_topic = "".join(
+            char if char.isalnum() or char in "-_" else "-" for char in queue_name
+        )
+        vqs_delay: int | None = None
         if delay_seconds is not None:
-            headers["Vqs-Delay-Seconds"] = str(max(1, math.ceil(delay_seconds)))
+            vqs_delay = max(1, math.ceil(delay_seconds))
         try:
-            response = await vqs_client.send_async(
-                "".join(char if char.isalnum() or char in "-_" else "-" for char in queue_name),
+            message_id = await self._get_queue_client().send(
+                sanitized_topic,
                 payload,
                 idempotency_key=idempotency_key,
-                deployment_id=deployment_id,
-                token=self._token if self._using_proxy else None,
-                base_url=self._base_url if self._using_proxy else None,
-                # The proxy will strip the `/queues-proxy` prefix before forwarding to VQS,
-                # so `/queues-proxy/api/v3/topic` arrives as `/api/v3/topic` at the queue server.
-                base_path="/queues-proxy/api/v3/topic" if self._using_proxy else None,
-                headers=self._headers | headers,
+                deployment=deployment_id,
+                delay=vqs_delay,
             )
-            return response["messageId"]
+            return str(message_id) if message_id is not None else f"msg_deferred_{queue_name}"
         except DuplicateIdempotencyKeyError:
             # Silently handle idempotency key conflicts - the message was already queued
             # This matches the behavior of world-local and world-postgres
@@ -261,10 +283,30 @@ class VercelWorld(w.World):
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
-        @vqs_client.subscribe(
-            topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
+        # Sanitize prefix for use as consumer group name.
+        # Wrap in SanitizedName so @subscribe doesn't re-encode underscores.
+        consumer_group = SanitizedName(
+            "".join(
+                char if char.isalnum() or char in "-_" else "-"
+                for char in f"wkf-{queue_name_prefix}"
+            )
         )
-        async def async_handler(body: Any, meta: vqs_client.MessageMetadata) -> None:
+
+        @vqs.subscribe(
+            topic=f"{queue_name_prefix}*",
+            consumer_group=consumer_group,
+        )
+        async def async_handler(message: Any) -> None:
+            # Extract body from Message object or use raw value
+            if isinstance(message, vqs.Message):
+                body = message.payload
+                meta_delivery_count = message.metadata.delivery_count
+                meta_message_id = str(message.metadata.message_id)
+            else:
+                body = message
+                meta_delivery_count = 1
+                meta_message_id = ""
+
             try:
                 if isinstance(body, (bytes, bytearray)):
                     if body:
@@ -282,8 +324,8 @@ class VercelWorld(w.World):
                 result = await handler(
                     payload,
                     queue_name=queue_name,
-                    attempt=meta["deliveryCount"],
-                    message_id=meta["messageId"],
+                    attempt=meta_delivery_count,
+                    message_id=meta_message_id,
                 )
                 if result is not None:
                     # Use delaySeconds approach: send new message with delay, then delete current
@@ -305,17 +347,17 @@ class VercelWorld(w.World):
                 traceback.print_exc()
                 raise
 
+        # Keep a strong reference so the subscriber isn't garbage-collected
+        # (the vercel-queue registry uses weak references).
+        self._subscriber_refs.append(async_handler)
+
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
-            content_type = request.get_header("content-type")
-            if not content_type or "application/cloudevents+json" not in content_type:
-                return w.HTTPResponse.json(
-                    {"error": 'Invalid content type: expected "application/cloudevents+json"'},
-                    status=400,
-                )
             raw_body = await request.get_body()
-            # Build WSGI-style environ from request headers so that
-            # handle_queue_callback can detect v2beta callbacks correctly.
-            environ: dict[str, Any] = {"CONTENT_TYPE": content_type}
+            if not raw_body:
+                return w.HTTPResponse.json({"error": "Missing request body"}, status=400)
+
+            # Collect headers from the request for accept_and_handle
+            ce_headers: dict[str, str] = {}
             for hdr in (
                 "ce-type",
                 "ce-specversion",
@@ -330,14 +372,18 @@ class VercelWorld(w.World):
                 "ce-vqscreatedat",
                 "ce-vqsexpiresat",
                 "ce-vqsregion",
+                "ce-vqsvisibilitydeadline",
+                "content-type",
             ):
                 val = request.get_header(hdr)
                 if val is not None:
-                    environ["HTTP_" + hdr.upper().replace("-", "_")] = val
-            status_code, headers, body = await asyncio.to_thread(
-                vqs_client.handle_queue_callback, raw_body, environ
-            )
-            return w.HTTPResponse(status_code, body, dict(headers))
+                    ce_headers[hdr] = val
+
+            try:
+                await vqs.accept_and_handle(raw_body, ce_headers)
+                return w.HTTPResponse.json({"ok": True})
+            except Exception as error:
+                return w.HTTPResponse.json({"error": str(error)}, status=500)
 
         return http_handler
 

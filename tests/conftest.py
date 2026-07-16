@@ -114,13 +114,12 @@ requires_sandbox_credentials = pytest.mark.skipif(
 )
 
 
-# Workflow tests import the workflow worlds, which depend on vercel-workers
-# (installed only on Python >= 3.12; see pyproject). Skip collecting them when the
-# package is unavailable, so collection doesn't error on older interpreters.
-_HAS_VERCEL_WORKERS = importlib.util.find_spec("vercel.workers") is not None
+# Workflow tests import the workflow worlds, which depend on vercel-queue.
+# Skip collecting them when the package is unavailable.
+_HAS_VERCEL_QUEUE = importlib.util.find_spec("vercel.queue") is not None
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    if not _HAS_VERCEL_WORKERS and collection_path.name.startswith("test_workflow_"):
+    if not _HAS_VERCEL_QUEUE and collection_path.name.startswith("test_workflow_"):
         return True
     return None

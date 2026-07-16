@@ -23,7 +23,7 @@ dependencies = [
     "python-dotenv>=1.0.0,<2",
     "websockets>=12.0,<17",
     "cbor2>=6.0,<7",
-    "vercel-workers>=0.0.16,<1 ; python_version >= '3.12'",
+    "vercel-queue>=0.7.0",
     "vercel-cache>=0.6.0",
     "vercel-headers>=0.6.0",
     "vercel-oidc>=0.6.0",
@@ -40,6 +40,7 @@ vercel-cache = { workspace = true }
 vercel-headers = { workspace = true }
 vercel-internal-telemetry = { workspace = true }
 vercel-oidc = { workspace = true }
+vercel-queue = { workspace = true }
 
 [tool.hatch.version]
 path = "version.py"

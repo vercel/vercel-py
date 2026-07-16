@@ -542,7 +542,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -711,7 +711,7 @@ name = "importlib-metadata"
 version = "9.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.12'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405, upload-time = "2026-03-20T06:42:56.999Z" }
 wheels = [
@@ -2280,12 +2280,12 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.11'" },
-    { name = "jsonschema", marker = "python_full_version < '3.11'" },
-    { name = "packaging", marker = "python_full_version < '3.11'" },
-    { name = "requests", marker = "python_full_version < '3.11'" },
-    { name = "rich", marker = "python_full_version < '3.11'" },
-    { name = "toml", marker = "python_full_version < '3.11'" },
+    { name = "click" },
+    { name = "jsonschema" },
+    { name = "packaging" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "toml" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/bd/b92bbd4a5e6fb52c05af4fdef86726e05c38e5a36313716cf37e38183c65/vendoring-1.2.0.tar.gz", hash = "sha256:6340a84bf542222c96f22ebc3cb87e4d86932dc04bc8d446e38285594702c00e", size = 21475, upload-time = "2021-10-14T06:18:33.641Z" }
 wheels = [
@@ -2302,13 +2302,13 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "click", marker = "python_full_version >= '3.11'" },
-    { name = "jsonschema", marker = "python_full_version >= '3.11'" },
-    { name = "packaging", marker = "python_full_version >= '3.11'" },
-    { name = "pip", marker = "python_full_version >= '3.11'" },
-    { name = "requests", marker = "python_full_version >= '3.11'" },
-    { name = "rich", marker = "python_full_version >= '3.11'" },
-    { name = "tomli", marker = "python_full_version >= '3.11'" },
+    { name = "click" },
+    { name = "jsonschema" },
+    { name = "packaging" },
+    { name = "pip" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "tomli" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/55/a6/2ad9ec99117eccf78ba6e69e7c904a3dc08ca2fba50e8869a3f02c1bc518/vendoring-1.4.0.tar.gz", hash = "sha256:48113adfb29db5e5051da823c083219567b9b3405859682cc04400a7743279d9", size = 24761, upload-time = "2026-05-19T14:39:50.773Z" }
 wheels = [
@@ -2329,7 +2329,7 @@ dependencies = [
     { name = "vercel-headers" },
     { name = "vercel-internal-telemetry" },
     { name = "vercel-oidc" },
-    { name = "vercel-workers", marker = "python_full_version >= '3.12'" },
+    { name = "vercel-queue" },
     { name = "websockets" },
 ]
 
@@ -2345,7 +2345,7 @@ requires-dist = [
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
-    { name = "vercel-workers", marker = "python_full_version >= '3.12'", specifier = ">=0.0.16,<1" },
+    { name = "vercel-queue", editable = "src/vercel-queue" },
     { name = "websockets", specifier = ">=12.0,<17" },
 ]
 
@@ -2465,22 +2465,6 @@ requires-dist = [
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]
 provides-extras = ["devserver", "trio", "typed"]
-
-[[package]]
-name = "vercel-workers"
-version = "0.0.22"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio", marker = "python_full_version >= '3.12'" },
-    { name = "httpx", marker = "python_full_version >= '3.12'" },
-    { name = "pydantic", marker = "python_full_version >= '3.12'" },
-    { name = "python-dotenv", marker = "python_full_version >= '3.12'" },
-    { name = "vercel", marker = "python_full_version >= '3.12'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/0c/fb/994dee0f9d2d22dce84c861b62e388b93f19a88b9d5a0bcb2fe6acfe5f29/vercel_workers-0.0.22.tar.gz", hash = "sha256:e189fb0e3c4cabf89e4d38f21c8f13b9dfcd4b1deedd5dc8b43aadbdf145e3a4", size = 62536, upload-time = "2026-05-04T19:17:53.348Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c2/8c/fb781b58edcb6ced4a6f15392315f88d7021cc2c242638e77f98ee300638/vercel_workers-0.0.22-py3-none-any.whl", hash = "sha256:83cf099a3a3dceb1cd47f8575446fb75a1e7ccbfe1304dbbbc1de3287bd640d6", size = 61175, upload-time = "2026-05-04T19:17:52.332Z" },
-]
 
 [[package]]
 name = "vine"
