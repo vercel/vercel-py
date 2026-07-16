@@ -10,6 +10,16 @@ import pytest
 from scripts import bundle_release, hatch_build, release, workspace
 
 
+def _derived_vendoring_config(include: str) -> bundle_release.VendoringConfig:
+    package = workspace.Package("pkg", Path("/tmp/pkg"), Path("/tmp/pkg/version.py"), ())
+    config = bundle_release._vendoring_config_for_package(  # noqa: SLF001
+        package,
+        {"tool": {"hatch": {"build": {"targets": {"wheel": {"only-include": [include]}}}}}},
+    )
+    assert config is not None
+    return config
+
+
 def test_topological_names_orders_dependencies_before_dependents(tmp_path: Path) -> None:
     packages = {
         "app": workspace.Package("app", tmp_path / "app", tmp_path / "app/version.py", ("lib",)),
@@ -539,22 +549,86 @@ def test_package_hatch_build_loader_uses_shared_hook() -> None:
     assert module.get_metadata_hook().__name__ == "WorkspaceDependenciesMetadataHook"
 
 
-def test_vendored_eligibility_uses_generated_config(tmp_path: Path) -> None:
+def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> None:
     queue = workspace.Package(
-        "vercel-queue", tmp_path / "src/vercel-queue", tmp_path / "version.py", ()
+        "vercel-queue",
+        tmp_path / "src/vercel-queue",
+        tmp_path / "src/vercel-queue/vercel/queue/version.py",
+        (),
     )
     integration = workspace.Package(
-        "vercel-celery", tmp_path / "integrations/vercel-celery", tmp_path / "version.py", ()
+        "vercel-celery",
+        tmp_path / "integrations/vercel-celery",
+        tmp_path / "integrations/vercel-celery/vercel/integrations/celery/version.py",
+        (),
+    )
+    dramatiq = workspace.Package(
+        "vercel-dramatiq",
+        tmp_path / "integrations/vercel-dramatiq",
+        tmp_path / "integrations/vercel-dramatiq/vercel/integrations/dramatiq/version.py",
+        (),
     )
     headers = workspace.Package(
-        "vercel-headers", tmp_path / "src/vercel-headers", tmp_path / "version.py", ()
+        "vercel-headers",
+        tmp_path / "src/vercel-headers",
+        tmp_path / "src/vercel-headers/vercel/headers/version.py",
+        (),
     )
-    for package in (queue, integration, headers):
+    umbrella = workspace.Package(
+        "vercel", tmp_path / "src/vercel", tmp_path / "src/vercel/version.py", ()
+    )
+    for package in (queue, integration, dramatiq, headers):
         package.path.mkdir(parents=True)
+        include = {
+            "vercel-queue": "/vercel/queue",
+            "vercel-celery": "/vercel/integrations/celery",
+            "vercel-dramatiq": "/vercel/integrations/dramatiq",
+            "vercel-headers": "/vercel/headers",
+        }[package.name]
+        (package.path / "pyproject.toml").write_text(
+            f"""
+[project]
+name = "{package.name}"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["{include}"]
+""".lstrip(),
+            encoding="utf-8",
+        )
+    umbrella.path.mkdir(parents=True)
+    (umbrella.path / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["/_internal", "/blob"]
+""".lstrip(),
+        encoding="utf-8",
+    )
 
     assert bundle_release.is_vendored_eligible(queue)
     assert bundle_release.is_vendored_eligible(integration)
+    assert bundle_release.is_vendored_eligible(dramatiq)
     assert bundle_release.is_vendored_eligible(headers)
+    assert not bundle_release.is_vendored_eligible(umbrella)
+
+    fallback_path = tmp_path / "src/vercel-fallback"
+    fallback = workspace.Package(
+        "vercel-fallback",
+        fallback_path,
+        fallback_path / "vercel/fallback/version.py",
+        (),
+    )
+    fallback.path.mkdir(parents=True)
+    (fallback.path / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel-fallback"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    assert bundle_release.is_vendored_eligible(fallback)
 
 
 def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_deps(
@@ -597,6 +671,50 @@ def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_dep
         (),
     ) == (
         "celery>=5.3,<6",
+        "vercel-cache-bundle>=0.7.0",
+        "vercel-queue-bundle>=0.7.0",
+        "vercel-internal-shared-vendored-deps>=0.7.0",
+    )
+
+
+def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.0")
+    cache_version = tmp_path / "vercel-cache/version.py"
+    queue_version = tmp_path / "vercel-queue/version.py"
+    cache_version.parent.mkdir()
+    queue_version.parent.mkdir()
+    cache_version.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    queue_version.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    monkeypatch.setattr(
+        workspace,
+        "packages",
+        lambda: {
+            "vercel-cache": workspace.Package(
+                "vercel-cache", tmp_path / "vercel-cache", cache_version, ()
+            ),
+            "vercel-queue": workspace.Package(
+                "vercel-queue", tmp_path / "vercel-queue", queue_version, ()
+            ),
+        },
+    )
+    data = {
+        "project": {
+            "dependencies": [
+                "dramatiq>=2.2,<3",
+                "vercel-cache>=0.6.0",
+                "vercel-queue>=0.6.0",
+            ]
+        }
+    }
+
+    assert bundle_release._external_dependencies(  # noqa: SLF001
+        "vercel-dramatiq",
+        data,
+        (),
+    ) == (
+        "dramatiq>=2.2,<3",
         "vercel-cache-bundle>=0.7.0",
         "vercel-queue-bundle>=0.7.0",
         "vercel-internal-shared-vendored-deps>=0.7.0",
@@ -738,7 +856,7 @@ path = "vercel/queue/version.py"
             "vercel-queue", package_path, package_path / "vercel/queue/version.py", ()
         ),
         variant_name="vercel-queue-bundle",
-        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        config=_derived_vendoring_config("/vercel/queue"),
         vendored_requirements=("python-multipart==0.0.32",),
         external_dependencies=(),
     )
@@ -750,6 +868,33 @@ path = "vercel/queue/version.py"
     assert 'requirements = "vercel/queue/_vendor/vendor.txt"' in pyproject
     assert 'namespace = "vercel.queue._vendor"' in pyproject
     assert "[tool.vendoring.transformations]" in pyproject
+    assert "import anyio\\\\.from_thread" not in pyproject
+
+
+def test_vendoring_config_includes_anyio_from_thread_transform(tmp_path: Path) -> None:
+    package_path = tmp_path / "pkg"
+    package_path.mkdir()
+    (package_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "pkg"
+
+[tool.hatch.version]
+path = "vercel/pkg/version.py"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package("pkg", package_path, package_path / "vercel/pkg/version.py", ()),
+        variant_name="pkg-bundle",
+        config=_derived_vendoring_config("/vercel/pkg"),
+        vendored_requirements=("anyio==4.13.0",),
+        external_dependencies=(),
+    )
+
+    bundle_release._write_vendoring_config(plan, package_path)  # noqa: SLF001
+
+    pyproject = (package_path / "pyproject.toml").read_text(encoding="utf-8")
     assert "import anyio\\\\.from_thread" in pyproject
 
 
@@ -759,7 +904,7 @@ def test_vendored_license_files_are_copied_from_dist_info(tmp_path: Path) -> Non
             "vercel-queue", tmp_path / "pkg", tmp_path / "pkg/vercel/queue/version.py", ()
         ),
         variant_name="vercel-queue-bundle",
-        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        config=_derived_vendoring_config("/vercel/queue"),
         vendored_requirements=("python-multipart==0.0.32",),
         external_dependencies=(),
     )
@@ -844,7 +989,7 @@ only-include = ["/vercel/queue"]
             "vercel-queue", package_path, package_path / "vercel/queue/version.py", ()
         ),
         variant_name="vercel-queue-bundle",
-        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        config=_derived_vendoring_config("/vercel/queue"),
         vendored_requirements=("python-multipart==0.0.32",),
         external_dependencies=(),
     )
@@ -855,6 +1000,58 @@ only-include = ["/vercel/queue"]
     assert 'name = "vercel-queue-bundle"' in pyproject
     assert '"vercel/queue/_vendor/LICEN[CS]E*"' in pyproject
     assert '"/vercel/queue/_vendor/LICEN[CS]E*"' in pyproject
+
+
+def test_bundle_pyproject_rewrites_static_project_dependencies(tmp_path: Path) -> None:
+    package_path = tmp_path / "pkg"
+    package_path.mkdir()
+    (package_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel-dramatiq"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "dramatiq>=2.2,<3",
+    "vercel-cache>=0.6.0",
+    "vercel-queue>=0.6.0",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/integrations/dramatiq/**/*.py",
+    "/LICENSE",
+]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package(
+            "vercel-dramatiq",
+            package_path,
+            package_path / "vercel/integrations/dramatiq/version.py",
+            (),
+        ),
+        variant_name="vercel-dramatiq-bundle",
+        config=_derived_vendoring_config("/vercel/integrations/dramatiq"),
+        vendored_requirements=(),
+        external_dependencies=(
+            "dramatiq>=2.2,<3",
+            "vercel-cache-bundle>=0.7.1",
+            "vercel-queue-bundle>=0.7.1",
+            "vercel-internal-shared-vendored-deps>=0.1.0",
+        ),
+    )
+
+    bundle_release._rewrite_pyproject(plan, package_path)  # noqa: SLF001
+
+    pyproject = (package_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'name = "vercel-dramatiq-bundle"' in pyproject
+    assert '"dramatiq>=2.2,<3"' in pyproject
+    assert '"vercel-cache-bundle>=0.7.1"' in pyproject
+    assert '"vercel-queue-bundle>=0.7.1"' in pyproject
+    assert '"vercel-cache>=0.6.0"' not in pyproject
+    assert '"vercel-queue>=0.6.0"' not in pyproject
 
 
 def test_generated_vendoring_substitutions_escape_newlines() -> None:
@@ -876,7 +1073,7 @@ def test_bundle_readme_recommends_unbundled_package(tmp_path: Path) -> None:
             "vercel-queue", package_path, package_path / "vercel/queue/version.py", ()
         ),
         variant_name="vercel-queue-bundle",
-        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        config=_derived_vendoring_config("/vercel/queue"),
         vendored_requirements=("python-multipart==0.0.32",),
         external_dependencies=(),
     )

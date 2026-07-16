@@ -15,7 +15,6 @@ from datetime import datetime, timedelta, timezone
 
 import anyio
 import anyio.from_thread
-import httpx
 import pytest
 from anyio import to_thread
 from anyio.lowlevel import current_token
@@ -66,6 +65,8 @@ from vercel.queue.sync import QueueClient as SyncQueueClient
 from .helpers import (
     CREATED_AT_DT,
     make_leased_metadata,
+    queue_httpx_module,
+    queue_lease_anyio_module,
 )
 
 
@@ -462,14 +463,15 @@ def test_sync_lease_start_reuses_worker_async_client_by_config(
         visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
     created = 0
-    original_client = httpx.AsyncClient
+    queue_httpx = queue_httpx_module()
+    original_client = queue_httpx.AsyncClient
 
-    def client_factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+    def client_factory(*args: Any, **kwargs: Any) -> Any:
         nonlocal created
         created += 1
         return original_client(*args, **kwargs)
 
-    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(queue_httpx, "AsyncClient", client_factory)
     first = client.run_lease_renewal(first_message, lease_duration=30)
     second = client.run_lease_renewal(second_message, lease_duration=45)
     first.start()
@@ -510,14 +512,15 @@ async def test_async_client_reuses_worker_runtime_for_background_lease_extension
         visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
     created = 0
-    original_client = httpx.AsyncClient
+    queue_httpx = queue_httpx_module()
+    original_client = queue_httpx.AsyncClient
 
-    def client_factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+    def client_factory(*args: Any, **kwargs: Any) -> Any:
         nonlocal created
         created += 1
         return original_client(*args, **kwargs)
 
-    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(queue_httpx, "AsyncClient", client_factory)
 
     first = client.run_lease_renewal(first_message, lease_duration=30)
     second = client.run_lease_renewal(second_message, lease_duration=45)
@@ -555,9 +558,7 @@ async def test_retry_async_follow_up_retries_throttled_operation(
         if calls == 1:
             raise ThrottledError(2)
 
-    monkeypatch.setattr(anyio, "sleep", sleep)
-
-    await retry_async_follow_up(operation)
+    await retry_async_follow_up(operation, sleep=sleep)
 
     assert calls == 2
     assert sleeps == [2.0]
@@ -596,10 +597,8 @@ async def test_retry_async_follow_up_does_not_retry_http_error(
         calls += 1
         raise ServerError("server error")
 
-    monkeypatch.setattr(anyio, "sleep", sleep)
-
     with pytest.raises(ServerError):
-        await retry_async_follow_up(operation)
+        await retry_async_follow_up(operation, sleep=sleep)
 
     assert calls == 1
     assert sleeps == []
@@ -845,7 +844,7 @@ async def test_lease_worker_stop_after_start_timeout_cancels_renewal() -> None:
         lease_seconds=30,
         client=_FakeLeaseClient(extend),
     )
-    command_send, command_receive = anyio.create_memory_object_stream(10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream(10)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_lease_worker_async, command_receive)
@@ -893,7 +892,7 @@ async def test_lease_renewal_start_async_does_not_block_caller_loop(
 
 @pytest.mark.anyio
 async def test_send_lease_extension_start_waits_for_real_worker_schedule() -> None:
-    command_send, command_receive = anyio.create_memory_object_stream[Any](10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream[Any](10)
     request = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
@@ -948,7 +947,7 @@ def test_signal_lease_start_scheduled_uses_asyncio_native_token(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
     )
-    monkeypatch.setattr(anyio.from_thread, "run_sync", fallback)
+    monkeypatch.setattr(queue_lease_anyio_module().from_thread, "run_sync", fallback)
 
     _signal_lease_start_scheduled(
         _LeaseExtensionStart(
@@ -989,7 +988,7 @@ def test_signal_lease_start_scheduled_uses_trio_native_token(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
     )
-    monkeypatch.setattr(anyio.from_thread, "run_sync", fallback)
+    monkeypatch.setattr(queue_lease_anyio_module().from_thread, "run_sync", fallback)
 
     _signal_lease_start_scheduled(
         _LeaseExtensionStart(
@@ -1027,7 +1026,7 @@ def test_signal_lease_start_scheduled_falls_back_to_anyio_from_thread(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
     )
-    monkeypatch.setattr(anyio.from_thread, "run_sync", fallback)
+    monkeypatch.setattr(queue_lease_anyio_module().from_thread, "run_sync", fallback)
 
     _signal_lease_start_scheduled(
         _LeaseExtensionStart(
@@ -1271,8 +1270,9 @@ async def test_lease_worker_processes_stop_while_extension_is_in_flight() -> Non
                 await after_cancel_release.wait()
             raise
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
-    done_send, done_receive = anyio.create_memory_object_stream[None](1)
+    queue_lease_anyio = queue_lease_anyio_module()
+    command_send, command_receive = queue_lease_anyio.create_memory_object_stream(10)
+    done_send, done_receive = queue_lease_anyio.create_memory_object_stream[None](1)
     request = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
@@ -1586,7 +1586,7 @@ async def test_signal_lease_stop_complete_failed_send_does_not_block_event_signa
         def set(self) -> None:
             self.signaled = True
 
-    done_send, done_receive = anyio.create_memory_object_stream[None](1)
+    done_send, done_receive = queue_lease_anyio_module().create_memory_object_stream[None](1)
     await done_send.aclose()
     await done_receive.aclose()
     event = Event()
@@ -1667,8 +1667,9 @@ async def test_lease_worker_ignores_registration_after_stop() -> None:
         del message, duration
         calls += 1
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
-    done_send, done_receive = anyio.create_memory_object_stream[None](1)
+    queue_lease_anyio = queue_lease_anyio_module()
+    command_send, command_receive = queue_lease_anyio.create_memory_object_stream(10)
+    done_send, done_receive = queue_lease_anyio.create_memory_object_stream[None](1)
     request = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
@@ -1726,7 +1727,7 @@ async def test_lease_worker_bounds_stopped_token_cache(
     )
     second_request.token = second
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream(10)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_lease_worker_async, command_receive)
         await command_send.send(_LeaseExtensionStop(token=second))
@@ -1756,7 +1757,7 @@ async def test_lease_worker_one_renewal_in_flight_does_not_block_another_token()
         if message.metadata.message_id == "second":
             second_started.set()
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream(10)
     client = _FakeLeaseClient(extend)
     first = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails", message_id="first")),
