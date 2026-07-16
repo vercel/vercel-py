@@ -80,6 +80,44 @@ class TestRuntimeCacheStrictErrors:
             cache.set("key", {"value": "payload"})
         assert route.called
 
+    def test_strict_runtime_cache_raises_when_unavailable(
+        self,
+        mock_env_clear,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import vercel.cache.runtime_cache as runtime_cache
+        from vercel.cache import RuntimeCache, RuntimeCacheError
+
+        monkeypatch.delenv("RUNTIME_CACHE_ENDPOINT", raising=False)
+        monkeypatch.delenv("RUNTIME_CACHE_HEADERS", raising=False)
+        monkeypatch.setattr(runtime_cache, "_cached_cache_instance", None)
+
+        cache = RuntimeCache(key_hash_function=lambda key: key, strict=True)
+
+        with pytest.raises(RuntimeCacheError, match="Runtime Cache unavailable"):
+            cache.set("key", "value")
+
+    def test_runtime_cache_uses_cached_context_cache_without_request_context(
+        self,
+        mock_env_clear,
+    ) -> None:
+        import vercel.cache.runtime_cache as runtime_cache
+        from vercel.cache import RuntimeCache, context
+        from vercel.cache.cache_in_memory import InMemoryCache
+
+        context_cache = InMemoryCache()
+        context.set_context(cache=context_cache)
+        try:
+            runtime_cache.prime_runtime_cache()
+        finally:
+            context.set_context(cache=None)
+
+        cache = RuntimeCache(key_hash_function=lambda key: key, strict=True)
+        cache.set("key", "value")
+
+        assert context_cache.get("key") == "value"
+        assert cache.get("key") == "value"
+
 
 class TestRuntimeCacheInMemory:
     """Test RuntimeCache with in-memory fallback."""
