@@ -1,6 +1,8 @@
+import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import pathlib
@@ -14,10 +16,23 @@ import cbor2
 import pydantic
 
 from vercel._internal.polyfills import UTC
-from vercel.workers import client as vqs_client
+import vercel.queue as vqs
+from vercel.queue._internal.constants import (
+    HEADER_CONTENT_TYPE,
+    VQS_HEADER_DELAY_SECONDS,
+    VQS_HEADER_DEPLOYMENT_ID,
+    VQS_HEADER_IDEMPOTENCY_KEY,
+)
+from vercel.queue._internal.embedded import (
+    EmbeddedQueueDispatcher,
+    create_embedded_queue_app,
+)
+from vercel.queue._internal.names import SanitizedName
 
 from .. import world as w
 from ..ulid import monotonic_factory
+
+logger = logging.getLogger("vercel.workflow")
 
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
@@ -110,6 +125,22 @@ class LocalWorld(w.World):
         # don't think it would really help.
         self._run_locks: dict[str, threading.Lock] = {}
 
+        # Embedded queue: in-process message storage and dispatch.
+        # Uses the same EmbeddedQueueAsgiApp + EmbeddedQueueDispatcher pattern
+        # as vercel-queue's embedded_queue_service(), with the dispatcher
+        # delivering messages through QueueClient.accept_and_handle() to
+        # handlers registered via @subscribe.
+        self._eq_app = create_embedded_queue_app()
+        self._eq_server = self._eq_app.server
+        self._eq_dispatcher = EmbeddedQueueDispatcher(
+            self._eq_server,
+            client_factory=lambda: self._eq_app.get_async_client(),
+        )
+        self._dispatcher_started = False
+        self._recovery_pending = False
+        # Strong references to @subscribe handlers to prevent GC.
+        self._subscriber_refs: list[object] = []
+
     def _run_lock(self, run_id: str) -> threading.Lock:
         # dict.setdefault is atomic, so concurrent callers for the same run_id
         # converge on one lock without a separate guard lock.
@@ -132,6 +163,64 @@ class LocalWorld(w.World):
     async def get_deployment_id(self) -> str:
         return ""
 
+    def _ensure_dispatcher_running(self) -> None:
+        """Lazily start the embedded queue dispatcher on first use.
+
+        Must be called from an async context (there must be a running
+        event loop).  Also kicks off deferred recovery if pending.
+        """
+        if self._dispatcher_started:
+            return
+        self._dispatcher_started = True
+        loop = asyncio.get_running_loop()
+        loop.create_task(self._eq_dispatcher.run())
+        self._eq_dispatcher.wake()
+
+        # Recovery is deferred to here because create_queue_handler()
+        # runs at module import time when no event loop exists yet.
+        if self._recovery_pending and not os.getenv("WORKFLOW_LOCAL_DISABLE_RECOVERY"):
+            self._recovery_pending = False
+
+            async def _recover() -> None:
+                try:
+                    await self._resume_pending_runs()
+                except Exception as e:
+                    logger.warning("Local run recovery failed: %r", e)
+
+            loop.create_task(_recover())
+
+    async def _resume_pending_runs(self) -> None:
+        """Re-enqueue runs left mid-flight by a server restart.
+
+        The embedded queue is in-memory, so a ``sleep``'s delayed wake-up
+        message is lost on restart, stranding the run in ``running``.
+        Re-invoking the run lets ``workflow_handler`` turn any elapsed
+        wait into a ``wait_completed`` and continue. Replay is idempotent,
+        so re-invoking a healthy run is harmless.
+        """
+        runs_dir = self.data_dir / "runs"
+        if not runs_dir.exists():
+            return
+
+        for run_file in runs_dir.glob("*.json"):
+            try:
+                run = await self.runs_get(run_file.stem)
+            except Exception:
+                continue
+            if run.status in ("pending", "running"):
+                try:
+                    # Recover the namespace from the run's execution context
+                    # so the re-enqueue targets the correct namespaced topic.
+                    exec_ctx = run.execution_context or {}
+                    ns = exec_ctx.get("queueNamespace")
+                    queue_name = w.get_queue_name("workflow", run.workflow_name, ns)
+                    await self.queue(
+                        queue_name,
+                        w.WorkflowInvokePayload(runId=run.run_id),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to re-enqueue stranded run %s: %r", run.run_id, e)
+
     async def queue(
         self,
         queue_name: str,
@@ -142,31 +231,62 @@ class LocalWorld(w.World):
         delay_seconds: float | None = None,
         **kwargs,
     ) -> str:
+        self._ensure_dispatcher_running()
+
         payload = {
             "payload": message.model_dump(),
             "queueName": queue_name,
             "deploymentId": "<local>",
         }
-        vqs_delay: int | None = None
+        payload_bytes = json.dumps(payload).encode()
+
+        headers: dict[str, str] = {
+            HEADER_CONTENT_TYPE: "application/json",
+            VQS_HEADER_DEPLOYMENT_ID: "<local>",
+        }
+        if idempotency_key is not None:
+            headers[VQS_HEADER_IDEMPOTENCY_KEY] = idempotency_key
         if delay_seconds is not None:
-            vqs_delay = max(1, math.ceil(delay_seconds))
-        response = await vqs_client.send_async(
-            "".join(char if char.isalnum() or char in "-_" else "-" for char in queue_name),
-            payload,
-            idempotency_key=idempotency_key,
-            deployment_id="<local>",
-            delay_seconds=vqs_delay,
-        )
-        return response["messageId"]
+            headers[VQS_HEADER_DELAY_SECONDS] = str(max(1, math.ceil(delay_seconds)))
+
+        stored = self._eq_server.put(queue_name, payload_bytes, headers)
+        return stored.message_id
 
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
-        @vqs_client.subscribe(
-            topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
+        # Sanitize prefix for use as consumer group name.
+        # Wrap in SanitizedName so @subscribe doesn't re-encode underscores.
+        consumer_group = SanitizedName(
+            "".join(
+                char if char.isalnum() or char in "-_" else "-"
+                for char in f"wkf-{queue_name_prefix}"
+            )
         )
-        async def async_handler(body: Any, meta: vqs_client.MessageMetadata) -> None:
+
+        # Register a @subscribe handler — the standard vercel-queue subscriber
+        # mechanism. The embedded dispatcher will deliver messages through
+        # QueueClient.accept_and_handle() → call_subscribers() → this handler.
+        @vqs.subscribe(
+            topic=f"{queue_name_prefix}*",
+            consumer_group=consumer_group,
+        )
+        async def async_handler(message: Any) -> None:
+            if isinstance(message, vqs.Message):
+                body = message.payload
+                meta_delivery_count = message.metadata.delivery_count
+                meta_message_id = str(message.metadata.message_id)
+            else:
+                body = message
+                meta_delivery_count = 1
+                meta_message_id = ""
+
             try:
+                if isinstance(body, (bytes, bytearray)):
+                    if body:
+                        body = json.loads(body)
+                    else:
+                        return  # empty body from delayed re-delivery; skip
                 if not isinstance(body, dict):
                     raise ValueError("Invalid message body: expected a JSON object")
                 if "payload" not in body:
@@ -178,8 +298,8 @@ class LocalWorld(w.World):
                 result = await handler(
                     payload,
                     queue_name=queue_name,
-                    attempt=meta["deliveryCount"],
-                    message_id=meta["messageId"],
+                    attempt=meta_delivery_count,
+                    message_id=meta_message_id,
                 )
                 if result is not None:
                     # Use delaySeconds approach: send new message with delay, then delete current
@@ -201,6 +321,20 @@ class LocalWorld(w.World):
                 traceback.print_exc()
                 raise
 
+        # Keep a strong reference so the subscriber isn't garbage-collected
+        # (the vercel-queue registry uses weak references).
+        self._subscriber_refs.append(async_handler)
+
+        # Mark recovery as pending on first workflow-topic registration.
+        # Actual recovery is deferred to _ensure_dispatcher_running() which
+        # runs in an async context (the event loop may not exist at import time).
+        # Topic prefixes are "__wkf_workflow_" (no namespace) or
+        # "__{ns}_wkf_workflow_" (with namespace).
+        if "_wkf_workflow_" in queue_name_prefix and not self._recovery_pending:
+            self._recovery_pending = True
+
+        # Return an HTTP handler for backward compatibility (e.g. vercel dev
+        # delivering messages over HTTP).  In embedded mode this is unused.
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
             # Get request body
             body = await request.get_body()

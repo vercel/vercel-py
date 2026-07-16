@@ -2,26 +2,25 @@
 
 When a step fails below ``max_retries``, ``step_handler`` returns a retry timeout
 (``return 1.0``). The wrapper registered by ``World.create_queue_handler``
-(``async_handler``) is responsible for rescheduling the step after that delay.
+(``@subscribe`` handler) is responsible for rescheduling the step after that delay.
 
-``async_handler`` must re-enqueue the retry preserving the message's payload type.
+The handler must re-enqueue the retry preserving the message's payload type.
 Previously it re-enqueued *every* timeout return as a ``WorkflowInvokePayload``,
 which raised ``ValidationError`` for a ``StepInvokePayload`` → the handler 500'd and
 the step only retried via un-acked redelivery (wrong cadence, no backoff). The fix
 validates against the ``QueuePayload`` union, so a step retry re-enqueues a
 ``StepInvokePayload`` on its own queue with the delay.
 
-This drives the real ``async_handler`` closure with a step payload and a handler
-that asks to retry.
+This drives the ``@subscribe`` handler via ``accept_and_handle`` with a step
+payload and a handler that asks to retry.
 """
 
 from __future__ import annotations
 
-import pytest
+import json
 
 from vercel._internal.workflow import world as w
 from vercel._internal.workflow.worlds.local import LocalWorld
-from vercel.workers._queue.subscribe import subscriptions as _subs_registry
 
 
 class _RecordingWorld(LocalWorld):
@@ -38,42 +37,44 @@ class _RecordingWorld(LocalWorld):
         return "msg_test"
 
 
-@pytest.fixture
-def isolated_subscriptions():
-    saved = list(_subs_registry)
-    _subs_registry.clear()
-    try:
-        yield _subs_registry
-    finally:
-        _subs_registry[:] = saved
-
-
-async def test_step_retry_timeout_reschedules_step(isolated_subscriptions) -> None:
+async def test_step_retry_timeout_reschedules_step() -> None:
     world = _RecordingWorld()
 
     async def handler(payload, *, queue_name, attempt, message_id):
         # Stand in for step_handler deciding to retry: a non-None continuation.
         return w.QueueContinuation(delay_seconds=1.0)
 
-    # Registers async_handler into the global subscription registry as a side effect.
     world.create_queue_handler("__wkf_step_", handler)
-    assert len(isolated_subscriptions) == 1
-    async_handler = isolated_subscriptions[0].func
 
+    # Simulate push delivery through accept_and_handle, which invokes
+    # the @subscribe handler registered by create_queue_handler.
     step_payload = w.StepInvokePayload(
         workflowName="wf",
         workflowRunId="wrun_1",
         workflowStartedAt=0.0,
         stepId="step_1",
     ).model_dump()
-    body = {
-        "payload": step_payload,
-        "queueName": "__wkf_step_wf",
-        "deploymentId": "<local>",
+    body = json.dumps(
+        {
+            "payload": step_payload,
+            "queueName": "__wkf_step_wf",
+            "deploymentId": "<local>",
+        }
+    ).encode()
+    headers = {
+        "ce-type": "com.vercel.queue.v2beta",
+        "ce-vqsqueuename": "__wkf_step_wf",
+        "ce-vqsmessageid": "m1",
+        "ce-vqsdeliverycount": "1",
+        "ce-vqsconsumergroup": "wkf-__wkf_step_",
+        "ce-vqsreceipthandle": "receipt_1",
+        "ce-vqscreatedat": "2026-01-01T00:00:00Z",
+        "ce-vqsregion": "iad1",
+        "content-type": "application/json",
     }
-    meta = {"deliveryCount": 1, "messageId": "m1", "topic": "__wkf_step_wf"}
 
-    await async_handler(body, meta)
+    client = world._eq_app.get_async_client()
+    await client._accept_and_handle(body, headers)
 
     assert world.queued, "step retry was not re-enqueued"
     qn, msg, delay, _idem = world.queued[-1]
@@ -85,7 +86,7 @@ async def test_step_retry_timeout_reschedules_step(isolated_subscriptions) -> No
     assert delay == 1.0
 
 
-async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions) -> None:
+async def test_wait_continuation_forwards_idempotency_key() -> None:
     """A QueueContinuation return re-enqueues with its idempotency key, so repeated
     suspension passes over the same pending wait dedupe to one delayed wake-up."""
     world = _RecordingWorld()
@@ -95,18 +96,29 @@ async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions
         return w.QueueContinuation(delay_seconds=5.0, idempotency_key="wait_xyz")
 
     world.create_queue_handler("__wkf_workflow_", handler)
-    assert len(isolated_subscriptions) == 1
-    async_handler = isolated_subscriptions[0].func
 
     wf_payload = w.WorkflowInvokePayload(runId="wrun_1").model_dump()
-    body = {
-        "payload": wf_payload,
-        "queueName": "__wkf_workflow_wf",
-        "deploymentId": "<local>",
+    body = json.dumps(
+        {
+            "payload": wf_payload,
+            "queueName": "__wkf_workflow_wf",
+            "deploymentId": "<local>",
+        }
+    ).encode()
+    headers = {
+        "ce-type": "com.vercel.queue.v2beta",
+        "ce-vqsqueuename": "__wkf_workflow_wf",
+        "ce-vqsmessageid": "m2",
+        "ce-vqsdeliverycount": "1",
+        "ce-vqsconsumergroup": "wkf-__wkf_workflow_",
+        "ce-vqsreceipthandle": "receipt_2",
+        "ce-vqscreatedat": "2026-01-01T00:00:00Z",
+        "ce-vqsregion": "iad1",
+        "content-type": "application/json",
     }
-    meta = {"deliveryCount": 1, "messageId": "m1", "topic": "__wkf_workflow_wf"}
 
-    await async_handler(body, meta)
+    client = world._eq_app.get_async_client()
+    await client._accept_and_handle(body, headers)
 
     assert world.queued, "wait continuation was not re-enqueued"
     qn, _msg, delay, idem = world.queued[-1]
