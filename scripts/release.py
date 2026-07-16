@@ -55,6 +55,7 @@ class Release:
     bump: str
     fragments: tuple[Fragment, ...]
     dependency_only: bool = False
+    forced: bool = False
 
 
 def parse_fragments(packages: set[str]) -> list[Fragment]:
@@ -107,7 +108,7 @@ def bump_version(version: str, bump: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def compute_releases() -> list[Release]:
+def compute_releases(*, force_bump: str | None = None) -> list[Release]:
     packages_by_name = workspace.packages()
     versions = {
         name: workspace.read_version(package.version_file)
@@ -120,6 +121,10 @@ def compute_releases() -> list[Release]:
         fragments_by_package[fragment.package].append(fragment)
         bump = _bump_for_fragment(fragment.kind, versions[fragment.package])
         bumps[fragment.package] = _larger(bumps.get(fragment.package, "patch"), bump)
+
+    if force_bump:
+        for name in packages_by_name:
+            bumps[name] = _larger(bumps.get(name, "patch"), force_bump)
 
     reverse_edges = workspace.reverse_dependencies(packages_by_name)
     queue = list(bumps)
@@ -141,7 +146,8 @@ def compute_releases() -> list[Release]:
             new_version=bump_version(versions[name], bumps[name]),
             bump=bumps[name],
             fragments=tuple(fragments_by_package[name]),
-            dependency_only=not fragments_by_package[name],
+            dependency_only=not force_bump and not fragments_by_package[name],
+            forced=force_bump is not None and not fragments_by_package[name],
         )
         for name in ordered
     ]
@@ -150,6 +156,9 @@ def compute_releases() -> list[Release]:
 def _render_changelog_entry(release: Release, *, pr_numbers: dict[Path, int] | None = None) -> str:
     today = date.today().isoformat()
     lines = [f"## {release.new_version} - {today}", ""]
+    if release.forced:
+        lines.extend(["- No changes.", ""])
+        return "\n".join(lines)
     if release.dependency_only:
         lines.extend(["- Update dependencies.", ""])
         return "\n".join(lines)
@@ -161,12 +170,26 @@ def _render_changelog_entry(release: Release, *, pr_numbers: dict[Path, int] | N
         lines.extend([f"### {title}", ""])
         for fragment in fragments:
             pr_number = pr_numbers.get(fragment.path) if pr_numbers is not None else None
-            for item in fragment.text.splitlines():
-                item = item.strip()
-                if item:
-                    lines.append(_render_changelog_bullet(item, pr_number=pr_number))
+            for item in _fragment_changelog_items(fragment.text):
+                lines.append(_render_changelog_bullet(item, pr_number=pr_number))
         lines.append("")
     return "\n".join(lines)
+
+
+def _fragment_changelog_items(text: str) -> list[str]:
+    items: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                items.append(" ".join(current))
+                current = []
+            continue
+        current.append(stripped)
+    if current:
+        items.append(" ".join(current))
+    return items
 
 
 def _render_changelog_bullet(item: str, *, pr_number: int | None) -> str:
@@ -197,8 +220,10 @@ def write_changelog(
     path.write_text(content, encoding="utf-8")
 
 
-def prepare_release_files() -> tuple[list[Release], dict[Path, int]]:
-    releases = compute_releases()
+def prepare_release_files(
+    *, force_bump: str | None = None
+) -> tuple[list[Release], dict[Path, int]]:
+    releases = compute_releases(force_bump=force_bump)
     if not releases:
         print("No news fragments found.")
         return [], {}
@@ -224,10 +249,10 @@ def prepare() -> int:
     return 0
 
 
-def release() -> int:
+def release(*, force_bump: str | None = None) -> int:
     _ensure_clean_tree()
     branch = _create_release_branch()
-    releases, _pr_numbers = prepare_release_files()
+    releases, _pr_numbers = prepare_release_files(force_bump=force_bump)
     if not releases:
         return 0
 
@@ -276,7 +301,9 @@ def _stage_all() -> None:
 def _commit_release(body: str) -> None:
     message_path = _write_temp_text(_release_commit_message(body), prefix="release-commit-")
     try:
-        subprocess.check_call(["git", "commit", "-v", "--template", str(message_path)], cwd=ROOT)
+        subprocess.check_call(
+            ["git", "commit", "-v", "--file", str(message_path), "--edit"], cwd=ROOT
+        )
     finally:
         message_path.unlink(missing_ok=True)
 
@@ -524,7 +551,13 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status").set_defaults(func=lambda _args: status())
     subparsers.add_parser("prepare").set_defaults(func=lambda _args: prepare())
-    subparsers.add_parser("release").set_defaults(func=lambda _args: release())
+    release_parser = subparsers.add_parser("release")
+    release_parser.add_argument(
+        "--force-bump",
+        choices=tuple(BUMP_ORDER),
+        help="bump every package by this amount and write No changes changelog entries",
+    )
+    release_parser.set_defaults(func=lambda args: release(force_bump=args.force_bump))
     changed_parser = subparsers.add_parser("changed")
     changed_parser.add_argument("--base", default="HEAD^")
     changed_parser.add_argument("--head", default="HEAD")

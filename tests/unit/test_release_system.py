@@ -50,6 +50,84 @@ def test_compute_releases_cascades_dependency_only_patch(
     ]
 
 
+def test_compute_releases_force_bumps_all_packages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    changes.mkdir()
+
+    lib_version = tmp_path / "lib/version.py"
+    app_version = tmp_path / "app/version.py"
+    lib_version.parent.mkdir()
+    app_version.parent.mkdir()
+    lib_version.write_text('__version__ = "0.6.0"\n', encoding="utf-8")
+    app_version.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+
+    packages = {
+        "lib": workspace.Package("lib", tmp_path / "lib", lib_version, ()),
+        "app": workspace.Package("app", tmp_path / "app", app_version, ("lib",)),
+    }
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+    monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["lib", "app"])
+
+    releases = release.compute_releases(force_bump="minor")
+
+    assert [
+        (item.package, item.new_version, item.bump, item.dependency_only, item.forced)
+        for item in releases
+    ] == [
+        ("lib", "0.7.0", "minor", False, True),
+        ("app", "1.3.0", "minor", False, True),
+    ]
+
+
+def test_compute_releases_force_accepts_patch_bump(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    changes.mkdir()
+
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+
+    packages = {"pkg": workspace.Package("pkg", tmp_path / "pkg", version_file, ())}
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+    monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["pkg"])
+
+    releases = release.compute_releases(force_bump="patch")
+
+    assert [(item.package, item.new_version, item.bump, item.forced) for item in releases] == [
+        ("pkg", "1.2.4", "patch", True)
+    ]
+
+
+def test_compute_releases_force_preserves_larger_fragment_bump(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    fragment_dir = changes / "pkg"
+    fragment_dir.mkdir(parents=True)
+    (fragment_dir / "123.breaking.md").write_text("Break API.\n", encoding="utf-8")
+
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+
+    packages = {"pkg": workspace.Package("pkg", tmp_path / "pkg", version_file, ())}
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+    monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["pkg"])
+
+    releases = release.compute_releases(force_bump="minor")
+
+    assert [(item.package, item.new_version, item.bump, item.forced) for item in releases] == [
+        ("pkg", "2.0.0", "major", False)
+    ]
+
+
 def test_workspace_dependency_hook_rewrites_lower_bound(tmp_path: Path) -> None:
     workspace_root = tmp_path
     package_root = workspace_root / "src/app"
@@ -161,6 +239,38 @@ def test_render_changelog_entry_does_not_duplicate_pr_number(tmp_path: Path) -> 
     assert entry.count("#42") == 1
 
 
+def test_render_changelog_entry_treats_paragraphs_as_items(tmp_path: Path) -> None:
+    fragment = release.Fragment(
+        package="pkg",
+        path=tmp_path / "123.bugfix.md",
+        kind="bugfix",
+        text=(
+            "Remember the last live Runtime Cache client process-wide and fall back to it\n"
+            "on threads that have no request context, and make strict=True raise\n"
+            "RuntimeCacheError when no cache is available.\n"
+            "\n"
+            "Prime the cache while request context is still visible.\n"
+        ),
+    )
+    item = release.Release(
+        package="pkg",
+        old_version="0.6.0",
+        new_version="0.6.1",
+        bump="patch",
+        fragments=(fragment,),
+    )
+
+    entry = release._render_changelog_entry(item, pr_numbers={fragment.path: 178})
+
+    assert (
+        "- Remember the last live Runtime Cache client process-wide and fall back to it "
+        "on threads that have no request context, and make strict=True raise "
+        "RuntimeCacheError when no cache is available. (#178)"
+    ) in entry
+    assert "- Prime the cache while request context is still visible. (#178)" in entry
+    assert entry.count("#178") == 2
+
+
 def test_dependency_only_changelog_omits_pr_number() -> None:
     item = release.Release(
         package="pkg",
@@ -175,6 +285,22 @@ def test_dependency_only_changelog_omits_pr_number() -> None:
 
     assert "- Update dependencies." in entry
     assert "#42" not in entry
+
+
+def test_forced_changelog_entry_uses_no_changes() -> None:
+    item = release.Release(
+        package="pkg",
+        old_version="0.6.0",
+        new_version="0.7.0",
+        bump="minor",
+        fragments=(),
+        forced=True,
+    )
+
+    entry = release._render_changelog_entry(item, pr_numbers={})
+
+    assert "- No changes." in entry
+    assert "- Update dependencies." not in entry
 
 
 def test_write_changelog_separates_prepended_entry(tmp_path: Path) -> None:
@@ -336,14 +462,14 @@ def test_release_stages_commits_pushes_and_opens_pr(
 
     monkeypatch.setattr(release, "ROOT", root)
     monkeypatch.setattr(release, "datetime", FakeDatetime)
-    monkeypatch.setattr(release, "prepare_release_files", lambda: ([item], {}))
+    monkeypatch.setattr(release, "prepare_release_files", lambda *, force_bump=None: ([item], {}))
     monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
 
     def fake_check_call(cmd: list[str], *, cwd: Path) -> None:
         calls.append(cmd)
         if cmd[:3] == ["git", "commit", "-v"]:
-            template = Path(cmd[cmd.index("--template") + 1])
-            message = template.read_text(encoding="utf-8")
+            message_file = Path(cmd[cmd.index("--file") + 1])
+            message = message_file.read_text(encoding="utf-8")
             assert message.startswith("Release Packages\n\npkg\n---\n")
             assert "0.7.0 - 2026-07-10\n------------------" in message
             assert "#" not in message
@@ -367,7 +493,8 @@ def test_release_stages_commits_pushes_and_opens_pr(
     assert release.release() == 0
     assert calls[0] == ["git", "switch", "-c", "octocat/release-20260710123456"]
     assert calls[1] == ["git", "add", "-A"]
-    assert calls[2][:4] == ["git", "commit", "-v", "--template"]
+    assert calls[2][:4] == ["git", "commit", "-v", "--file"]
+    assert calls[2][-1] == "--edit"
     assert calls[3] == ["git", "push", "--set-upstream", "origin", "HEAD"]
     assert calls[4][:3] == ["gh", "pr", "create"]
     assert "--title" in calls[4]
