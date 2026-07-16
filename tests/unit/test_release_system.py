@@ -558,9 +558,24 @@ def test_vendored_eligibility_uses_generated_config(tmp_path: Path) -> None:
 
 
 def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_deps(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.0")
+    cache_version = tmp_path / "vercel-cache/version.py"
+    queue_version = tmp_path / "vercel-queue/version.py"
+    cache_version.parent.mkdir()
+    queue_version.parent.mkdir()
+    cache_version.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    queue_version.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    packages = {
+        "vercel-cache": workspace.Package(
+            "vercel-cache", tmp_path / "vercel-cache", cache_version, ()
+        ),
+        "vercel-queue": workspace.Package(
+            "vercel-queue", tmp_path / "vercel-queue", queue_version, ()
+        ),
+    }
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
     data = {
         "tool": {
             "vercel": {
@@ -736,6 +751,110 @@ path = "vercel/queue/version.py"
     assert 'namespace = "vercel.queue._vendor"' in pyproject
     assert "[tool.vendoring.transformations]" in pyproject
     assert "import anyio\\\\.from_thread" in pyproject
+
+
+def test_vendored_license_files_are_copied_from_dist_info(tmp_path: Path) -> None:
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package(
+            "vercel-queue", tmp_path / "pkg", tmp_path / "pkg/vercel/queue/version.py", ()
+        ),
+        variant_name="vercel-queue-bundle",
+        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        vendored_requirements=("python-multipart==0.0.32",),
+        external_dependencies=(),
+    )
+    site_packages = tmp_path / "site"
+    dist_info = site_packages / "python_multipart-0.0.32.dist-info"
+    license_dir = dist_info / "licenses"
+    license_dir.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.4\n"
+        "Name: python-multipart\n"
+        "Version: 0.0.32\n"
+        "License-File: LICENSE.txt\n",
+        encoding="utf-8",
+    )
+    (license_dir / "LICENSE.txt").write_text("third-party license\n", encoding="utf-8")
+
+    bundle_release._copy_vendored_license_files(  # noqa: SLF001
+        plan,
+        site_packages,
+        generated=tmp_path / "generated",
+        package_names=("python-multipart",),
+    )
+
+    copied = tmp_path / "generated/vercel/queue/_vendor/LICENSE.python-multipart.txt"
+    assert copied.read_text(encoding="utf-8") == "third-party license\n"
+
+
+def test_preserving_shared_vendored_licenses_keeps_existing_vendor_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    plan = bundle_release._shared_vendored_plan()  # noqa: SLF001
+    vendor_path = tmp_path / "vercel/internal/_vendor"
+    vendor_path.mkdir(parents=True)
+    version_file = vendor_path / "version.py"
+    version_file.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    (vendor_path / "anyio").mkdir()
+    (vendor_path / "anyio/LICENSE").write_text("license\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        bundle_release,
+        "_third_party_vendored_requirements",
+        lambda _plan: (),
+    )
+
+    bundle_release._preserve_vendored_licenses(plan, generated=tmp_path)  # noqa: SLF001
+
+    assert version_file.read_text(encoding="utf-8") == '__version__ = "0.7.0"\n'
+    assert (vendor_path / "anyio/LICENSE").read_text(encoding="utf-8") == "license\n"
+
+
+def test_bundle_pyproject_exposes_vendored_license_files(tmp_path: Path) -> None:
+    package_path = tmp_path / "pkg"
+    package_path.mkdir()
+    (package_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel-queue"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.vercel.release.dependencies]
+dependencies = []
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/queue/**/*.py",
+    "/LICENSE",
+]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["/vercel/queue"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (package_path / "vercel/queue/_vendor").mkdir(parents=True)
+    (package_path / "vercel/queue/_vendor/LICENSE.python-multipart.txt").write_text(
+        "third-party license\n",
+        encoding="utf-8",
+    )
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package(
+            "vercel-queue", package_path, package_path / "vercel/queue/version.py", ()
+        ),
+        variant_name="vercel-queue-bundle",
+        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        vendored_requirements=("python-multipart==0.0.32",),
+        external_dependencies=(),
+    )
+
+    bundle_release._rewrite_pyproject(plan, package_path)  # noqa: SLF001
+
+    pyproject = (package_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'name = "vercel-queue-bundle"' in pyproject
+    assert '"vercel/queue/_vendor/LICEN[CS]E*"' in pyproject
+    assert '"/vercel/queue/_vendor/LICEN[CS]E*"' in pyproject
 
 
 def test_generated_vendoring_substitutions_escape_newlines() -> None:
