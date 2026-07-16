@@ -1,6 +1,13 @@
 name: Publish PyPI
 
 on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and test publish candidates without publishing, tagging, or releasing.
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - main
@@ -25,7 +32,7 @@ jobs:
       - name: Detect changed packages
         id: packages
         env:
-          BASE_REF: ${{ github.event.before }}
+          BASE_REF: ${{ github.event.before || 'HEAD^' }}
         run: |
           packages_json=$(python - <<'PY'
           import os
@@ -48,6 +55,19 @@ jobs:
               ],
               text=True,
           ).splitlines()
+          shared = "vercel-internal-shared-vendored-deps"
+          shared_check = subprocess.run(
+              [
+                  "python",
+                  "scripts/bundle_release.py",
+                  "shared-version",
+                  "--needs-publish",
+              ],
+              check=False,
+              stdout=subprocess.DEVNULL,
+          )
+          if shared_check.returncode == 0:
+              packages = [shared, *packages]
           print(json.dumps(packages))
           PY
           )
@@ -75,35 +95,123 @@ jobs:
         id: publish
         env:
           PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           python - <<'PY' > /tmp/packages.txt
           import json
           import os
 
-          for package in json.loads(os.environ["PACKAGES_JSON"]):
+          packages = json.loads(os.environ["PACKAGES_JSON"])
+          if any(package != "vercel-internal-shared-vendored-deps" for package in packages):
+              packages = ["vercel-internal-shared-vendored-deps", *packages]
+          seen = set()
+          for package in packages:
+              if package in seen:
+                  continue
+              seen.add(package)
               print(package)
           PY
           : > /tmp/tags.txt
           mkdir -p /tmp/release-bodies
+          mkdir -p dist-bundle-publish
 
           while IFS= read -r package; do
-            version=$(python scripts/get-version.py "$package")
+            is_shared_vendored_deps=false
+            if [ "$package" = "vercel-internal-shared-vendored-deps" ]; then
+              is_shared_vendored_deps=true
+            fi
+            if [ "$is_shared_vendored_deps" = "true" ]; then
+              version=$(python scripts/bundle_release.py shared-version)
+              if python scripts/bundle_release.py shared-version --needs-publish >/dev/null; then
+                publish_shared_vendored_deps=true
+              else
+                publish_shared_vendored_deps=false
+              fi
+            else
+              version=$(python scripts/get-version.py "$package")
+              publish_shared_vendored_deps=false
+            fi
             tag="$package-v$version"
-            echo "$tag" >> /tmp/tags.txt
-            python scripts/release.py github-release-body "$package" > "/tmp/release-bodies/$tag.md"
+            if [ "$is_shared_vendored_deps" != "true" ] || [ "$publish_shared_vendored_deps" = "true" ]; then
+              echo "$tag" >> /tmp/tags.txt
+              if [ "$is_shared_vendored_deps" = "true" ]; then
+                python scripts/bundle_release.py shared-github-release-body > "/tmp/release-bodies/$tag.md"
+              else
+                python scripts/release.py github-release-body "$package" > "/tmp/release-bodies/$tag.md"
+              fi
+            fi
 
             http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${package}/${version}/json")
-            if [ "$http_status" = "200" ]; then
+            if [ "$is_shared_vendored_deps" = "true" ] && [ "$publish_shared_vendored_deps" != "true" ]; then
+              echo "$package dependency set already matches latest PyPI release, skipping publish"
+            elif [ "$http_status" = "200" ]; then
               echo "$package $version already exists on PyPI, skipping publish"
-              continue
             elif [ "$http_status" != "404" ]; then
               echo "Unexpected PyPI response for $package $version: $http_status"
               exit 1
             fi
 
             rm -rf dist-publish
-            uv build --package "$package" --no-sources --out-dir dist-publish
-            uv publish dist-publish/*
+            if [ "$http_status" = "404" ] && [ "$is_shared_vendored_deps" != "true" ]; then
+              uv build --package "$package" --no-sources --out-dir dist-publish
+            fi
+            if python scripts/bundle_release.py plan --package "$package" > /tmp/bundle-plan.txt 2>/dev/null; then
+              cat /tmp/bundle-plan.txt
+              python scripts/bundle_release.py build --package "$package" --out-dir dist-bundle-publish
+              python scripts/bundle_release.py test-wheel --package "$package" --dist-dir dist-bundle-publish
+
+              bundle_package=$(sed -n 's/^bundle-package: //p' /tmp/bundle-plan.txt)
+              if [ -z "$bundle_package" ]; then
+                echo "missing bundle-package in plan"
+                exit 1
+              fi
+              bundle_tag="${bundle_package}-v${version}"
+              if [ "$bundle_tag" != "$tag" ]; then
+                echo "$bundle_tag" >> /tmp/tags.txt
+                cp "/tmp/release-bodies/$tag.md" "/tmp/release-bodies/$bundle_tag.md"
+              fi
+
+              if [ "$is_shared_vendored_deps" = "true" ] && [ "$publish_shared_vendored_deps" != "true" ]; then
+                bundle_http_status=200
+              elif [ "$DRY_RUN" = "true" ]; then
+                echo "Dry run: would publish $bundle_package $version"
+                bundle_http_status=404
+              else
+                bundle_http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${bundle_package}/${version}/json")
+              fi
+              if [ "$is_shared_vendored_deps" = "true" ]; then
+                :
+              elif [ "$bundle_http_status" = "200" ]; then
+                echo "$bundle_package $version already exists on PyPI, skipping publish"
+              elif [ "$DRY_RUN" = "true" ]; then
+                :
+              elif [ "$bundle_http_status" != "404" ]; then
+                echo "Unexpected PyPI response for $bundle_package $version: $bundle_http_status"
+                exit 1
+              else
+                bundle_prefix=${bundle_package//-/_}
+                find dist-bundle-publish -maxdepth 1 -type f -name "${bundle_prefix}-${version}*" -print0 | xargs -0 uv publish
+              fi
+            else
+              echo "$package is not vendored-eligible"
+            fi
+
+            if [ "$is_shared_vendored_deps" = "true" ]; then
+              if [ "$publish_shared_vendored_deps" != "true" ]; then
+                :
+              elif [ "$DRY_RUN" = "true" ]; then
+                echo "Dry run: would publish $package $version"
+              else
+                bundle_prefix=${package//-/_}
+                find dist-bundle-publish -maxdepth 1 -type f -name "${bundle_prefix}-${version}*" -print0 | xargs -0 uv publish
+              fi
+            elif [ "$http_status" = "200" ]; then
+              :
+            elif [ "$DRY_RUN" = "true" ]; then
+              echo "Dry run: would publish $package $version"
+            else
+              uv publish dist-publish/*
+            fi
           done < /tmp/packages.txt
 
           {
@@ -113,7 +221,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create Git Tags
-        if: steps.publish.outputs.tags != ''
+        if: steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAGS: ${{ steps.publish.outputs.tags }}
@@ -151,7 +259,7 @@ jobs:
             }
 
       - name: Create GitHub Releases
-        if: steps.publish.outputs.tags != ''
+        if: steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAGS: ${{ steps.publish.outputs.tags }}

@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+dist_dir="dist"
+mkdir -p "$dist_dir"
+
 packages=()
 while IFS= read -r package; do
     packages+=("$package")
 done < <(python3 scripts/workspace.py list --names --topological)
 
 for package in "${packages[@]}"; do
-    uv build --package "$package" --no-sources
+    uv build --package "$package" --no-sources --out-dir "$dist_dir"
+done
+
+python3 scripts/bundle_release.py build \
+    --package vercel-internal-shared-vendored-deps \
+    --out-dir "$dist_dir"
+
+for package in "${packages[@]}"; do
+    if python3 scripts/bundle_release.py plan --package "$package" >/dev/null 2>&1; then
+        python3 scripts/bundle_release.py build --package "$package" --out-dir "$dist_dir"
+    fi
 done

@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from scripts import hatch_build, release, workspace
+from scripts import bundle_release, hatch_build, release, workspace
 
 
 def test_topological_names_orders_dependencies_before_dependents(tmp_path: Path) -> None:
@@ -537,3 +537,349 @@ def test_package_hatch_build_loader_uses_shared_hook() -> None:
     spec.loader.exec_module(module)
 
     assert module.get_metadata_hook().__name__ == "WorkspaceDependenciesMetadataHook"
+
+
+def test_vendored_eligibility_uses_generated_config(tmp_path: Path) -> None:
+    queue = workspace.Package(
+        "vercel-queue", tmp_path / "src/vercel-queue", tmp_path / "version.py", ()
+    )
+    integration = workspace.Package(
+        "vercel-celery", tmp_path / "integrations/vercel-celery", tmp_path / "version.py", ()
+    )
+    headers = workspace.Package(
+        "vercel-headers", tmp_path / "src/vercel-headers", tmp_path / "version.py", ()
+    )
+    for package in (queue, integration, headers):
+        package.path.mkdir(parents=True)
+
+    assert bundle_release.is_vendored_eligible(queue)
+    assert bundle_release.is_vendored_eligible(integration)
+    assert bundle_release.is_vendored_eligible(headers)
+
+
+def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_deps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.0")
+    data = {
+        "tool": {
+            "vercel": {
+                "release": {
+                    "dependencies": [
+                        "httpx>=0.27,<1",
+                        "celery>=5.3,<6",
+                        "vercel-cache>=0.6.0",
+                        "vercel-queue>=0.6.0",
+                    ]
+                }
+            }
+        }
+    }
+
+    assert bundle_release._external_dependencies(  # noqa: SLF001
+        "vercel-celery",
+        data,
+        (),
+    ) == (
+        "celery>=5.3,<6",
+        "vercel-cache-bundle>=0.7.0",
+        "vercel-queue-bundle>=0.7.0",
+        "vercel-internal-shared-vendored-deps>=0.7.0",
+    )
+
+
+def test_vendored_requirements_are_derived_from_release_deps_and_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bundle_release,
+        "_lock_versions",
+        lambda: {
+            "anyio": "4.13.0",
+            "certifi": "2026.4.22",
+            "h11": "0.16.0",
+            "h2": "4.3.0",
+            "hpack": "4.2.0",
+            "httpcore": "1.0.9",
+            "httpx": "0.28.1",
+            "hyperframe": "6.1.0",
+            "idna": "3.13",
+            "python-multipart": "0.0.32",
+            "typing-extensions": "4.15.0",
+        },
+    )
+    monkeypatch.setattr(
+        workspace,
+        "packages",
+        lambda: {
+            "vercel-headers": workspace.Package(
+                "vercel-headers", Path("/tmp/headers"), Path("/tmp/headers/version.py"), ()
+            ),
+            "vercel-oidc": workspace.Package(
+                "vercel-oidc", Path("/tmp/oidc"), Path("/tmp/oidc/version.py"), ()
+            ),
+            "vercel-queue": workspace.Package(
+                "vercel-queue", Path("/tmp/queue"), Path("/tmp/queue/version.py"), ()
+            ),
+        },
+    )
+
+    queue_data = {
+        "tool": {
+            "vercel": {
+                "release": {
+                    "dependencies": [
+                        "anyio>=4.0.0",
+                        "httpx[http2]>=0.27.0",
+                        "python-multipart>=0.0.20",
+                        "typing_extensions>=4.0.0",
+                        "vercel-headers>=0.6.0",
+                        "vercel-oidc>=0.6.0",
+                    ]
+                }
+            }
+        }
+    }
+    celery_data = {
+        "tool": {
+            "vercel": {
+                "release": {
+                    "dependencies": [
+                        "celery>=5.3,<6",
+                        "vercel-cache>=0.6.0",
+                        "vercel-queue>=0.6.0",
+                    ]
+                }
+            }
+        }
+    }
+
+    assert bundle_release._derive_vendor_requirements(  # noqa: SLF001
+        bundle_release.SHARED_VENDORED_PACKAGE, {}
+    ) == (
+        "anyio==4.13.0",
+        "certifi==2026.4.22",
+        "h11==0.16.0",
+        "h2==4.3.0",
+        "hpack==4.2.0",
+        "httpcore==1.0.9",
+        "httpx==0.28.1",
+        "hyperframe==6.1.0",
+        "idna==3.13",
+        "typing-extensions==4.15.0",
+    )
+    assert bundle_release._derive_vendor_requirements(  # noqa: SLF001
+        "vercel-queue", queue_data
+    ) == ("python-multipart==0.0.32",)
+    assert (
+        bundle_release._derive_vendor_requirements(  # noqa: SLF001
+            "vercel-celery", celery_data
+        )
+        == ()
+    )
+
+
+def test_shared_bundle_package_is_generated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.8.1")
+    monkeypatch.setattr(bundle_release, "_shared_deps_fingerprint", lambda: "abc123")
+    monkeypatch.setattr(
+        bundle_release,
+        "_derive_vendor_requirements",
+        lambda package, _data: (
+            ("httpx==0.28.1",) if package == bundle_release.SHARED_VENDORED_PACKAGE else ()
+        ),
+    )
+
+    bundle_release._generate_shared_package(tmp_path)  # noqa: SLF001
+
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    metadata = (tmp_path / "vercel/internal/_vendor/_shared_deps.json").read_text(encoding="utf-8")
+    assert 'name = "vercel-internal-shared-vendored-deps"' in pyproject
+    assert "[tool.vendoring]" not in pyproject
+    assert (tmp_path / "vercel/internal/_vendor/version.py").read_text(
+        encoding="utf-8"
+    ) == '__version__ = "0.8.1"\n'
+    assert '"fingerprint": "abc123"' in metadata
+    assert '"httpx==0.28.1"' in metadata
+
+
+def test_vendoring_config_is_generated_into_pyproject(tmp_path: Path) -> None:
+    package_path = tmp_path / "pkg"
+    package_path.mkdir()
+    (package_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel-queue"
+
+[tool.hatch.version]
+path = "vercel/queue/version.py"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package(
+            "vercel-queue", package_path, package_path / "vercel/queue/version.py", ()
+        ),
+        variant_name="vercel-queue-bundle",
+        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        vendored_requirements=("python-multipart==0.0.32",),
+        external_dependencies=(),
+    )
+
+    bundle_release._write_vendoring_config(plan, package_path)  # noqa: SLF001
+
+    pyproject = (package_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'destination = "vercel/queue/_vendor/"' in pyproject
+    assert 'requirements = "vercel/queue/_vendor/vendor.txt"' in pyproject
+    assert 'namespace = "vercel.queue._vendor"' in pyproject
+    assert "[tool.vendoring.transformations]" in pyproject
+    assert "import anyio\\\\.from_thread" in pyproject
+
+
+def test_generated_vendoring_substitutions_escape_newlines() -> None:
+    rendered = bundle_release._format_substitution(  # noqa: SLF001
+        r"import h2\.config",
+        "from vercel.internal._vendor import h2\nfrom vercel.internal._vendor.h2 import config",
+    )
+
+    assert "\\n" in rendered
+    assert "\nfrom vercel" not in rendered
+
+
+def test_bundle_readme_recommends_unbundled_package(tmp_path: Path) -> None:
+    package_path = tmp_path / "pkg"
+    package_path.mkdir()
+    (package_path / "README.md").write_text("# Original\n\nDetails.\n", encoding="utf-8")
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package(
+            "vercel-queue", package_path, package_path / "vercel/queue/version.py", ()
+        ),
+        variant_name="vercel-queue-bundle",
+        config=bundle_release.GENERATED_VENDORED_CONFIGS["vercel-queue"].config,
+        vendored_requirements=("python-multipart==0.0.32",),
+        external_dependencies=(),
+    )
+
+    bundle_release._rewrite_readme(plan, package_path)  # noqa: SLF001
+
+    readme = (package_path / "README.md").read_text(encoding="utf-8")
+    assert readme.startswith("# vercel-queue-bundle\n\n")
+    assert "with third-party dependencies bundled" in readme
+    assert "install the unbundled `vercel-queue` package instead" in readme
+    assert "https://pypi.org/project/vercel-queue/" in readme
+
+
+def test_shared_vendored_version_bumps_when_fingerprint_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(bundle_release.SHARED_VERSION_ENV, raising=False)
+    monkeypatch.setattr(bundle_release, "_latest_pypi_release", lambda _package: "0.8.1")
+    monkeypatch.setattr(bundle_release, "_pypi_shared_deps_fingerprint", lambda _version: "old")
+    monkeypatch.setattr(bundle_release, "_shared_deps_fingerprint", lambda: "new")
+
+    assert bundle_release.shared_vendored_version() == "0.8.2"
+    assert bundle_release.shared_vendored_needs_publish()
+
+
+def test_shared_vendored_version_reuses_previous_when_fingerprint_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(bundle_release.SHARED_VERSION_ENV, raising=False)
+    monkeypatch.setattr(bundle_release, "_latest_pypi_release", lambda _package: "0.8.1")
+    monkeypatch.setattr(bundle_release, "_pypi_shared_deps_fingerprint", lambda _version: "same")
+    monkeypatch.setattr(bundle_release, "_shared_deps_fingerprint", lambda: "same")
+
+    assert bundle_release.shared_vendored_version() == "0.8.1"
+    assert not bundle_release.shared_vendored_needs_publish()
+
+
+def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path) -> None:
+    from vendoring.tasks.vendor import rewrite_file_imports
+
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package("vercel-celery", Path("/tmp/pkg"), Path("/tmp/version.py"), ()),
+        variant_name="vercel-celery-bundle",
+        config=bundle_release.VendoringConfig(
+            destination=Path("vercel/integrations/celery/_vendor"),
+            requirements=Path("vercel/integrations/celery/_vendor/vendor.txt"),
+            namespace="vercel.integrations.celery._vendor",
+            protected_files=("__init__.py", "vendor.txt"),
+        ),
+        vendored_requirements=("anyio==4.13.0",),
+        external_dependencies=(
+            "celery>=5.3,<6",
+            "vercel-cache-bundle>=0.7.0",
+            "vercel-queue-bundle>=0.7.0",
+            "vercel-internal-shared-vendored-deps>=0.7.0",
+        ),
+    )
+    path = tmp_path / "module.py"
+    path.write_text(
+        "from vercel.cache import RuntimeCache\n"
+        "from vercel.headers import get_headers\n"
+        "from vercel.oidc.utils import find_project_info\n"
+        "from vercel.queue import sanitize_name\n"
+        "import httpx\n"
+        "import anyio.from_thread\n"
+        "from typing_extensions import override\n"
+        "import vercel.queue as vqs\n"
+        "import vercel.queue.sync as vqs_sync\n"
+        "from celery import Celery\n",
+        encoding="utf-8",
+    )
+
+    rewrite_file_imports(
+        path,
+        plan.config.namespace,
+        list(bundle_release._source_rewrite_libs(plan)),  # noqa: SLF001
+        list(bundle_release._source_rewrite_substitutions(plan)),  # noqa: SLF001
+    )
+    rewritten = path.read_text(encoding="utf-8")
+
+    assert "from vercel.cache import RuntimeCache" in rewritten
+    assert "from vercel.headers import get_headers" in rewritten
+    assert "from vercel.oidc.utils import find_project_info" in rewritten
+    assert "from vercel.queue import sanitize_name" in rewritten
+    assert "from vercel.internal._vendor import httpx" in rewritten
+    assert "from vercel.internal._vendor.anyio import from_thread" in rewritten
+    assert "from vercel.internal._vendor.typing_extensions import override" in rewritten
+    assert "import vercel.queue as vqs" in rewritten
+    assert "import vercel.queue.sync as vqs_sync" in rewritten
+    assert "from celery import Celery" in rewritten
+
+
+def test_shared_bundle_package_keeps_distribution_name() -> None:
+    assert (
+        bundle_release._variant_name(  # noqa: SLF001
+            "vercel-internal-shared-vendored-deps"
+        )
+        == "vercel-internal-shared-vendored-deps"
+    )
+    assert bundle_release._variant_name("vercel-queue") == "vercel-queue-bundle"  # noqa: SLF001
+
+
+def test_vendored_nested_namespace_rewrite_deduplicates_vendor_prefix(tmp_path: Path) -> None:
+    plan = bundle_release.VendoredPlan(
+        package=workspace.Package("vercel-queue", Path("/tmp/pkg"), Path("/tmp/version.py"), ()),
+        variant_name="vercel-queue-bundle",
+        config=bundle_release.VendoringConfig(
+            destination=Path("vercel/queue/_vendor"),
+            requirements=Path("vercel/queue/_vendor/vendor.txt"),
+            namespace="vercel.queue._vendor",
+            protected_files=("__init__.py", "vendor.txt"),
+        ),
+        vendored_requirements=("httpcore==1.0.9",),
+        external_dependencies=(),
+    )
+    path = tmp_path / "pkg/vercel/queue/_vendor/httpx/_transports/default.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "from vercel.queue._vendor.vercel.queue._vendor import httpcore\n",
+        encoding="utf-8",
+    )
+
+    bundle_release._rewrite_nested_vendor_namespace(plan, tmp_path / "pkg")  # noqa: SLF001
+
+    assert path.read_text(encoding="utf-8") == "from vercel.queue._vendor import httpcore\n"
