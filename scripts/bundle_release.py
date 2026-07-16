@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import email.parser
 import hashlib
 import io
 import json
@@ -39,6 +40,10 @@ SHARED_VENDORED_PACKAGE = "vercel-internal-shared-vendored-deps"
 SHARED_VENDOR_NAMESPACE = "vercel.internal._vendor"
 SHARED_VERSION_ENV = "VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION"
 SHARED_DEPS_METADATA = "_shared_deps.json"
+LICENSE_FILE_RE = re.compile(
+    r"(?:^|[-_.])(license|licence|copying|notice|copyright|authors?)(?:[-_.]|$)",
+    re.IGNORECASE,
+)
 SHARED_VENDORED_LIBS = {
     "anyio": "anyio",
     "certifi": "certifi",
@@ -251,9 +256,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
     return _pin_requirements(tuple(vendored_names), lock_versions)
 
 
-def _pin_requirements(
-    names: tuple[str, ...], lock_versions: dict[str, str]
-) -> tuple[str, ...]:
+def _pin_requirements(names: tuple[str, ...], lock_versions: dict[str, str]) -> tuple[str, ...]:
     pinned = []
     for name in names:
         normalized = _normalize_name(name)
@@ -436,6 +439,7 @@ def _wheel_shared_deps_fingerprint(url: str) -> str | None:
     value = data.get("fingerprint")
     return value if isinstance(value, str) else None
 
+
 def _read_json_url(url: str) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
         data = json.loads(response.read().decode("utf-8"))
@@ -477,10 +481,11 @@ def build_bundle_package(package_name: str, *, out_dir: Path, work_dir: Path) ->
 
     wheel_dir = work_dir / "workspace-wheels" / plan.package.name
     _rewrite_vendor_requirements(plan, generated=generated, wheel_dir=wheel_dir)
-    _rewrite_pyproject(plan, generated)
     _rewrite_readme(plan, generated)
     _write_vendoring_config(plan, generated)
     _run(["uvx", "--with=pip", "vendoring", "sync"], cwd=generated)
+    _preserve_vendored_licenses(plan, generated=generated)
+    _rewrite_pyproject(plan, generated)
     _rewrite_nested_vendor_namespace(plan, generated)
     _rewrite_source_imports(plan, generated)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -619,8 +624,7 @@ def _render_vendoring_config(plan: VendoredPlan) -> str:
     if transformations.substitutions:
         lines.append("substitute = [")
         lines.extend(
-            _format_substitution(match, replace)
-            for match, replace in transformations.substitutions
+            _format_substitution(match, replace) for match, replace in transformations.substitutions
         )
         lines.append("]")
     lines.append(f"drop = {_format_toml_string_array(transformations.drops)}")
@@ -731,7 +735,7 @@ def _rewrite_pyproject(plan: VendoredPlan, generated: Path) -> None:
     )
     deps = _format_toml_string_array(plan.external_dependencies)
     text = re.sub(
-        r'(?ms)^\[tool\.vercel\.release\.dependencies\]\ndependencies = \[.*?\]\n',
+        r"(?ms)^\[tool\.vercel\.release\.dependencies\]\ndependencies = \[.*?\]\n",
         f"[tool.vercel.release.dependencies]\ndependencies = {deps}\n",
         text,
         count=1,
@@ -741,7 +745,166 @@ def _rewrite_pyproject(plan: VendoredPlan, generated: Path) -> None:
         'force-include = { "_vercel_hatch_build.py" = "/_vercel_hatch_build.py" }',
         text,
     )
+    text = _rewrite_license_files(plan, text, generated=generated)
+    text = _ensure_sdist_license_include(plan, text, generated=generated)
     path.write_text(text, encoding="utf-8")
+
+
+def _preserve_vendored_licenses(plan: VendoredPlan, *, generated: Path) -> None:
+    requirements = _third_party_vendored_requirements(plan)
+    if not requirements:
+        return
+
+    with tempfile.TemporaryDirectory(prefix="vendored-licenses-") as temp_dir:
+        temp = Path(temp_dir)
+        requirements_path = temp / "requirements.txt"
+        requirements_path.write_text("\n".join(requirements) + "\n", encoding="utf-8")
+        site_packages = temp / "site"
+        _run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--target",
+                str(site_packages),
+                "--no-deps",
+                "--requirement",
+                str(requirements_path),
+            ],
+            cwd=ROOT,
+        )
+        _copy_vendored_license_files(
+            plan,
+            site_packages,
+            generated=generated,
+            package_names=tuple(_requirement_name(requirement) for requirement in requirements),
+        )
+
+
+def _third_party_vendored_requirements(plan: VendoredPlan) -> tuple[str, ...]:
+    requirements = []
+    for requirement in plan.vendored_requirements:
+        if requirement.startswith(WORKSPACE_REQUIREMENT_PREFIX):
+            continue
+        parsed = Requirement(requirement)
+        if parsed.marker is not None and not parsed.marker.evaluate():
+            continue
+        name = _normalize_name(parsed.name)
+        if name.startswith("vercel-"):
+            continue
+        requirements.append(requirement)
+    return tuple(requirements)
+
+
+def _copy_vendored_license_files(
+    plan: VendoredPlan, site_packages: Path, *, generated: Path, package_names: tuple[str, ...]
+) -> None:
+    destination = generated / _vendored_license_dir(plan)
+    required = {_normalize_name(name) for name in package_names}
+    copied = dict.fromkeys(required, 0)
+    dist_infos = sorted(site_packages.glob("*.dist-info"))
+    for dist_info in dist_infos:
+        name = _dist_info_name(dist_info)
+        if name not in required:
+            continue
+        for source, relative in _dist_info_license_files(dist_info):
+            target = destination / _vendored_license_filename(name, relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied[name] += 1
+
+    missing = sorted(name for name, count in copied.items() if count == 0)
+    if missing:
+        packages = ", ".join(missing)
+        raise SystemExit(f"missing vendored license files for: {packages}")
+
+
+def _dist_info_name(dist_info: Path) -> str:
+    metadata = dist_info / "METADATA"
+    if metadata.exists():
+        parsed = email.parser.Parser().parsestr(metadata.read_text(encoding="utf-8"))
+        name = parsed.get("Name")
+        if name:
+            return _normalize_name(name)
+    return _normalize_name(dist_info.name.rsplit("-", 2)[0])
+
+
+def _dist_info_license_files(dist_info: Path) -> list[tuple[Path, Path]]:
+    candidates: dict[Path, Path] = {}
+    metadata = dist_info / "METADATA"
+    if metadata.exists():
+        parsed = email.parser.Parser().parsestr(metadata.read_text(encoding="utf-8"))
+        for value in parsed.get_all("License-File", []):
+            relative = Path(value)
+            for source in (dist_info / "licenses" / relative, dist_info / relative):
+                if source.is_file():
+                    candidates[source] = _license_target_path(relative)
+
+    for source in sorted(path for path in dist_info.rglob("*") if path.is_file()):
+        relative = source.relative_to(dist_info)
+        if "licenses" in {part.lower() for part in relative.parts} or LICENSE_FILE_RE.search(
+            source.name
+        ):
+            candidates[source] = _license_target_path(relative)
+    return sorted(candidates.items(), key=lambda item: item[1].as_posix())
+
+
+def _license_target_path(relative: Path) -> Path:
+    parts = relative.parts
+    if parts[:1] and parts[0].lower() == "licenses":
+        parts = parts[1:]
+    if not parts:
+        return Path("LICENSE")
+    return Path(*parts)
+
+
+def _vendored_license_filename(package_name: str, relative: Path) -> Path:
+    name = relative.name
+    stem = Path(name).stem or name
+    suffix = Path(name).suffix
+    return Path(f"{stem}.{package_name}{suffix}")
+
+
+def _rewrite_license_files(plan: VendoredPlan, text: str, *, generated: Path) -> str:
+    patterns = ["LICENSE", "LICENSE.*"]
+    if _has_vendored_license_files(plan, generated):
+        patterns.append(_vendored_license_glob(plan))
+    value = _format_toml_string_array(tuple(patterns))
+    if re.search(r"(?m)^license-files\s*=", text):
+        return re.sub(
+            r"(?ms)^license-files\s*=\s*\[.*?\]\n",
+            f"license-files = {value}\n",
+            text,
+            count=1,
+        )
+    return re.sub(r"(?m)^(license\s*=.*\n)", rf"\1license-files = {value}\n", text, count=1)
+
+
+def _ensure_sdist_license_include(plan: VendoredPlan, text: str, *, generated: Path) -> str:
+    if not _has_vendored_license_files(plan, generated):
+        return text
+    include = f'    "/{_vendored_license_glob(plan)}",'
+    if include.strip().strip(",") in text:
+        return text
+    return re.sub(
+        r"(?ms)(^\[tool\.hatch\.build\.targets\.sdist\]\n.*?^include = \[\n)(.*?)(^\])",
+        rf"\1\2{include}\n\3",
+        text,
+        count=1,
+    )
+
+
+def _has_vendored_license_files(plan: VendoredPlan, generated: Path) -> bool:
+    path = generated / _vendored_license_dir(plan)
+    return path.is_dir() and any(child.is_file() for child in path.rglob("*"))
+
+
+def _vendored_license_dir(plan: VendoredPlan) -> Path:
+    return plan.config.destination
+
+
+def _vendored_license_glob(plan: VendoredPlan) -> str:
+    return f"{_toml_path(_vendored_license_dir(plan))}/LICEN[CS]E*"
 
 
 def _format_toml_string_array(values: tuple[str, ...]) -> str:
@@ -890,9 +1053,7 @@ def test_wheel(package_name: str, *, dist_dir: Path) -> None:
 
 def shared_github_release_body() -> str:
     derived_requirements = _derive_vendor_requirements(SHARED_VENDORED_PACKAGE, {})
-    requirements = "\n".join(
-        f"- `{requirement}`" for requirement in derived_requirements
-    )
+    requirements = "\n".join(f"- `{requirement}`" for requirement in derived_requirements)
     return (
         f"## {shared_vendored_version()} - generated\n\n"
         "### Internal\n\n"
