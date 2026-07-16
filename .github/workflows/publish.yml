@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      force:
+        description: Check every publish candidate, skipping versions that already exist.
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - main
@@ -33,11 +38,27 @@ jobs:
         id: packages
         env:
           BASE_REF: ${{ github.event.before || 'HEAD^' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
         run: |
           packages_json=$(python - <<'PY'
           import os
           import json
           import subprocess
+
+          shared = "vercel-internal-shared-vendored-deps"
+          if os.environ.get("FORCE") == "true":
+              packages = subprocess.check_output(
+                  [
+                      "python",
+                      "scripts/workspace.py",
+                      "list",
+                      "--names",
+                      "--topological",
+                  ],
+                  text=True,
+              ).splitlines()
+              print(json.dumps([shared, *packages]))
+              raise SystemExit
 
           base = os.environ["BASE_REF"]
           if base == "0000000000000000000000000000000000000000":
@@ -55,7 +76,6 @@ jobs:
               ],
               text=True,
           ).splitlines()
-          shared = "vercel-internal-shared-vendored-deps"
           shared_check = subprocess.run(
               [
                   "python",
@@ -96,6 +116,7 @@ jobs:
         env:
           PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
         run: |
           python - <<'PY' > /tmp/packages.txt
           import json
@@ -122,7 +143,9 @@ jobs:
             fi
             if [ "$is_shared_vendored_deps" = "true" ]; then
               version=$(python scripts/bundle_release.py shared-version)
-              if python scripts/bundle_release.py shared-version --needs-publish >/dev/null; then
+              if [ "$FORCE" = "true" ]; then
+                publish_shared_vendored_deps=true
+              elif python scripts/bundle_release.py shared-version --needs-publish >/dev/null; then
                 publish_shared_vendored_deps=true
               else
                 publish_shared_vendored_deps=false

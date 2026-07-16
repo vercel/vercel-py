@@ -14,12 +14,26 @@ if [ ! -f "$wheel_path" ]; then
     printf 'wheel does not exist: %s\n' "$wheel_path" >&2
     exit 1
 fi
+wheel_path=$(python - "$wheel_path" <<'PY'
+import sys
+from pathlib import Path
+
+print(Path(sys.argv[1]).resolve())
+PY
+)
 
 wheel_dir=$(dirname "$wheel_path")
 for dependency_wheel in "$wheel_dir"/vercel_*.whl; do
     if [ ! -f "$dependency_wheel" ] || [ "$dependency_wheel" = "$wheel_path" ]; then
         continue
     fi
+    dependency_wheel=$(python - "$dependency_wheel" <<'PY'
+import sys
+from pathlib import Path
+
+print(Path(sys.argv[1]).resolve())
+PY
+)
     extra_wheel_args="$extra_wheel_args --with $dependency_wheel"
 done
 

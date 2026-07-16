@@ -1048,7 +1048,7 @@ def test_wheel(package_name: str, *, dist_dir: Path) -> None:
     plan = load_plan(package_name)
     wheel = _single_wheel(dist_dir, plan.variant_name)
     script = ROOT / ".github" / "scripts" / "test_installed_wheel.sh"
-    _run(["sh", str(script), package_name, str(wheel)], cwd=ROOT)
+    _run(["sh", str(script), package_name, str(wheel.resolve())], cwd=ROOT)
 
 
 def shared_github_release_body() -> str:
