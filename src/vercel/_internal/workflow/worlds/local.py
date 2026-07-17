@@ -7,14 +7,18 @@ import pathlib
 import tempfile
 import threading
 import traceback
-from datetime import datetime
-from typing import Any, TypeVar
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
+from datetime import datetime, timezone
+from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 import cbor2
 import pydantic
 
+import vercel.queue as vqs
+import vercel.queue.embedded as vqs_embedded
 from vercel._internal.polyfills import UTC
-from vercel.workers import client as vqs_client
 
 from .. import world as w
 from ..ulid import monotonic_factory
@@ -22,10 +26,6 @@ from ..ulid import monotonic_factory
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
 )  # 23 hours - leave 1h buffer before 24h retention limit
-LOCAL_QUEUE_MAX_VISIBILITY = int(
-    os.environ.get("WORKFLOW_LOCAL_QUEUE_MAX_VISIBILITY", "0")
-) or float("inf")
-
 T = TypeVar("T", bound=w.BaseModel)
 
 
@@ -99,10 +99,63 @@ def write_exclusive(path: pathlib.Path, data: str) -> bool:
         return True
 
 
+def _json_string(value: str) -> bytes:
+    return json.dumps(value).encode("utf-8")
+
+
+async def _chain_async_bytes(*chunks: bytes | AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    for chunk in chunks:
+        if isinstance(chunk, bytes):
+            yield chunk
+        else:
+            async for part in chunk:
+                yield part
+
+
+def _local_queue_delivery(
+    request: w.HTTPRequest,
+    *,
+    queue_name: str,
+    topic: str,
+    consumer_group: str,
+) -> tuple[AsyncIterator[bytes], dict[str, str]]:
+    body = _chain_async_bytes(
+        b'{"payload":',
+        request.aiter_bytes(),
+        b',"queueName":',
+        _json_string(queue_name),
+        b',"deploymentId":"<local>"}',
+    )
+    return body, {
+        "ce-type": "com.vercel.queue.v2beta",
+        "ce-vqsqueuename": topic,
+        "ce-vqsconsumergroup": consumer_group,
+        "ce-vqsmessageid": request.headers.get("x-vqs-message-id") or f"msg_{uuid4()}",
+        "ce-vqsreceipthandle": "local",
+        "ce-vqsdeliverycount": request.headers.get("x-vqs-message-attempt") or "1",
+        "ce-vqscreatedat": datetime.now(timezone.utc).isoformat(),
+        "content-type": request.headers.get("content-type") or "application/json",
+    }
+
+
 class LocalWorld(w.World):
     def __init__(self) -> None:
         self.monotonic_ulid = monotonic_factory()
         self.data_dir = pathlib.Path(os.getenv("WORKFLOW_LOCAL_DATA_DIR", ".workflow-data"))
+        self._embedded_queue_service_cm: AbstractAsyncContextManager[Any] | None
+        self._embedded_queue_service: Any | None
+        self._queue_client: vqs.QueueClient | None
+        if os.getenv("VERCEL_QUEUE_BASE_URL"):
+            self._queue_mode = "external"
+            self._embedded_queue_service_cm = None
+            self._embedded_queue_service = None
+            self._queue_client = vqs.QueueClient(region="iad1", deployment=vqs.ALL_DEPLOYMENTS)
+        else:
+            self._queue_mode = "embedded"
+            self._embedded_queue_service_cm = vqs_embedded.embedded_queue_service()
+            self._embedded_queue_service = None
+            self._queue_client = None
+        self._queue_callbacks: list[Any] = []
         # Per-run mutex serializing events_create, which does some
         # read-modify-writes in some cases.
         #
@@ -132,6 +185,24 @@ class LocalWorld(w.World):
     async def get_deployment_id(self) -> str:
         return ""
 
+    async def _get_queue_client(self) -> vqs.QueueClient:
+        if self._queue_client is not None:
+            return self._queue_client
+
+        service_cm = cast(
+            "AbstractAsyncContextManager[Any]",
+            self._embedded_queue_service_cm,
+        )
+        self._embedded_queue_service = await service_cm.__aenter__()
+        self._queue_client = self._embedded_queue_service.get_async_client()
+        return self._queue_client
+
+    async def aclose(self) -> None:
+        if self._embedded_queue_service_cm is not None and self._embedded_queue_service is not None:
+            await self._embedded_queue_service_cm.__aexit__(None, None, None)
+            self._embedded_queue_service = None
+            self._queue_client = None
+
     async def queue(
         self,
         queue_name: str,
@@ -147,26 +218,23 @@ class LocalWorld(w.World):
             "queueName": queue_name,
             "deploymentId": "<local>",
         }
-        vqs_delay: int | None = None
-        if delay_seconds is not None:
-            vqs_delay = max(1, math.ceil(delay_seconds))
-        response = await vqs_client.send_async(
-            "".join(char if char.isalnum() or char in "-_" else "-" for char in queue_name),
+        client = await self._get_queue_client()
+        message_id = await client.send(
+            vqs.sanitize_name(queue_name),
             payload,
             idempotency_key=idempotency_key,
-            deployment_id="<local>",
-            delay_seconds=vqs_delay,
+            delay=max(1, math.ceil(delay_seconds)) if delay_seconds is not None else None,
         )
-        return response["messageId"]
+        return message_id or "msg_deferred"
 
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
-        @vqs_client.subscribe(
-            topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
-        )
-        async def async_handler(body: Any, meta: vqs_client.MessageMetadata) -> None:
+        consumer_group = f"local_{queue_name_prefix.rstrip('_')}"
+
+        async def async_handler(message: vqs.Message[Any]) -> None:
             try:
+                body = message.payload
                 if not isinstance(body, dict):
                     raise ValueError("Invalid message body: expected a JSON object")
                 if "payload" not in body:
@@ -178,8 +246,8 @@ class LocalWorld(w.World):
                 result = await handler(
                     payload,
                     queue_name=queue_name,
-                    attempt=meta["deliveryCount"],
-                    message_id=meta["messageId"],
+                    attempt=message.metadata.delivery_count,
+                    message_id=message.metadata.message_id,
                 )
                 if result is not None:
                     # Use delaySeconds approach: send new message with delay, then delete current
@@ -197,56 +265,43 @@ class LocalWorld(w.World):
                         delay_seconds=delay_seconds,
                         idempotency_key=result.idempotency_key,
                     )
-            except Exception:
-                traceback.print_exc()
+                if message.metadata.receipt_handle == "local":
+                    # Local HTTP deliveries use a synthetic receipt handle so
+                    # accept_and_handle can parse them like VQS pushes, but
+                    # there is no real queue lease to acknowledge.
+                    raise vqs.Handoff()
+            except Exception as e:
+                if not isinstance(e, vqs.QueueDirective):
+                    traceback.print_exc()
                 raise
 
+        topic_prefix = vqs.sanitize_name(queue_name_prefix)
+        vqs.subscribe(topic=f"{topic_prefix}*", consumer_group=consumer_group)(async_handler)
+        self._queue_callbacks.append(async_handler)
+
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
-            # Get request body
-            body = await request.get_body()
+            queue_name_raw = request.headers.get("x-vqs-queue-name")
 
-            if not body:
-                return w.HTTPResponse.json({"error": "Missing request body"}, status=400)
-
-            # Get required headers
-            queue_name = request.get_header("x-vqs-queue-name")
-            message_id = request.get_header("x-vqs-message-id")
-            attempt_str = request.get_header("x-vqs-message-attempt")
-
-            if not queue_name or not message_id or not attempt_str:
+            if not queue_name_raw:
                 return w.HTTPResponse.json({"error": "Missing required headers"}, status=400)
+
+            queue_name = queue_name_raw
+            topic = str(vqs.sanitize_name(queue_name))
 
             # Validate queue name prefix
             if not queue_name.startswith(queue_name_prefix):
                 return w.HTTPResponse.json({"error": "Unhandled queue"}, status=400)
 
-            # Validate attempt number
+            body, headers = _local_queue_delivery(
+                request,
+                queue_name=queue_name,
+                topic=topic,
+                consumer_group=consumer_group,
+            )
+
             try:
-                attempt = int(attempt_str)
-            except ValueError:
-                return w.HTTPResponse.json(
-                    {"error": "Invalid x-vqs-message-attempt header"}, status=400
-                )
-
-            # Deserialize the message body
-            try:
-                message = json.loads(body.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                return w.HTTPResponse.json({"error": f"Invalid JSON body: {e}"}, status=400)
-
-            # Call the handler
-            try:
-                result = await handler(
-                    message, attempt=attempt, queue_name=queue_name, message_id=message_id
-                )
-
-                # Handle timeout response
-                timeout_seconds: float | None = None
-                if result is not None:
-                    timeout_seconds = min(result.delay_seconds, LOCAL_QUEUE_MAX_VISIBILITY)
-                if timeout_seconds:
-                    return w.HTTPResponse.json({"timeoutSeconds": timeout_seconds}, status=503)
-
+                client = await self._get_queue_client()
+                await client.accept_and_handle(body, headers)
                 return w.HTTPResponse.json({"ok": True})
             except Exception as error:
                 return w.HTTPResponse.json({"error": str(error)}, status=500)
