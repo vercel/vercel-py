@@ -87,6 +87,7 @@ def create_sandbox(
     project_id: str | None = None,
     name: str | None = None,
     runtime: str | None = None,
+    image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -109,7 +110,9 @@ def create_sandbox(
         project_id: Project that owns the sandbox. Uses the active credentials
             when omitted.
         name: Requested sandbox name. The service generates one when omitted.
-        runtime: Runtime image or runtime identifier.
+        runtime: Runtime identifier. Mutually exclusive with ``image``.
+        image: Vercel Container Registry image to start the sandbox from.
+            Mutually exclusive with ``runtime``.
         source: Git, tarball, or snapshot source used to initialize the sandbox.
         ports: Ports to expose from the sandbox.
         execution_time_limit: Maximum session runtime in seconds or as a
@@ -137,6 +140,7 @@ def create_sandbox(
         project_id=project_id,
         name=name,
         runtime=runtime,
+        image=image,
         source=source,
         ports=ports,
         execution_time_limit=execution_time_limit,
