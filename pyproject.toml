@@ -179,7 +179,14 @@ cmd = "python scripts/release.py lint-towncrier"
 cmd = "python scripts/release.py status"
 
 [tool.poe.tasks.release]
-cmd = "python scripts/release.py release"
+shell = """
+set --
+if [ -n "${force_bump:-}" ]; then
+  set -- "$@" --force-bump "$force_bump"
+fi
+python scripts/release.py release "$@"
+"""
+args = [{ name = "force_bump", options = ["--force-bump"] }]
 
 [tool.poe.tasks.dist]
 cmd = "./scripts/build.sh"
