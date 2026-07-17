@@ -11,7 +11,6 @@ from functools import partial
 
 import anyio
 import anyio.lowlevel
-import httpx
 from anyio import to_thread
 
 from vercel.queue import (
@@ -22,6 +21,11 @@ from vercel.queue import (
     SanitizedName,
     Topic,
     subscribe,
+)
+from vercel.queue._internal import (
+    http as queue_http,
+    lease as queue_lease,
+    streams as queue_streams,
 )
 from vercel.queue._internal.constants import (
     CLOUD_EVENT_HEADER_TYPE,
@@ -62,7 +66,19 @@ class EmbeddedDelivery:
 
 
 def mock_response(*args: Any, **kwargs: Any) -> Any:
-    return httpx.Response(*args, **kwargs)
+    return queue_http.httpx.Response(*args, **kwargs)
+
+
+def queue_httpx_module() -> Any:
+    return queue_http.httpx
+
+
+def queue_lease_anyio_module() -> Any:
+    return queue_lease.anyio
+
+
+def queue_streams_anyio_module() -> Any:
+    return queue_streams.anyio
 
 
 def sync_delivery(

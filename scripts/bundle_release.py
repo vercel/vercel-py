@@ -60,12 +60,14 @@ SHARED_VENDORED_REQUIREMENTS = tuple(SHARED_VENDORED_LIBS.values())
 SHARED_VENDORED_CONSUMERS = {
     "vercel-cache",
     "vercel-celery",
+    "vercel-dramatiq",
     "vercel-internal-telemetry",
     "vercel-oidc",
     "vercel-queue",
 }
 PEER_DEPENDENCIES = {
     "vercel-celery": {"celery"},
+    "vercel-dramatiq": {"dramatiq"},
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
@@ -101,72 +103,9 @@ class VendoringTransformations:
     drops: tuple[str, ...] = COMMON_DROP_TRANSFORMATIONS
 
 
-@dataclass(frozen=True)
-class GeneratedVendoringConfig:
-    config: VendoringConfig
-    transformations: VendoringTransformations = VendoringTransformations()
-
-
-GENERATED_VENDORED_CONFIGS = {
-    "vercel-cache": GeneratedVendoringConfig(
-        config=VendoringConfig(
-            destination=Path("vercel/cache/_vendor"),
-            requirements=Path("vercel/cache/_vendor/vendor.txt"),
-            namespace="vercel.cache._vendor",
-            protected_files=("__init__.py", "vendor.txt"),
-        ),
-    ),
-    "vercel-celery": GeneratedVendoringConfig(
-        config=VendoringConfig(
-            destination=Path("vercel/integrations/celery/_vendor"),
-            requirements=Path("vercel/integrations/celery/_vendor/vendor.txt"),
-            namespace="vercel.integrations.celery._vendor",
-            protected_files=("__init__.py", "vendor.txt"),
-        ),
-        transformations=VendoringTransformations(
-            substitutions=(ANYIO_FROM_THREAD_SUBSTITUTION,),
-        ),
-    ),
-    "vercel-headers": GeneratedVendoringConfig(
-        config=VendoringConfig(
-            destination=Path("vercel/headers/_vendor"),
-            requirements=Path("vercel/headers/_vendor/vendor.txt"),
-            namespace="vercel.headers._vendor",
-            protected_files=("__init__.py", "vendor.txt"),
-        ),
-    ),
-    "vercel-internal-telemetry": GeneratedVendoringConfig(
-        config=VendoringConfig(
-            destination=Path("vercel/internal/telemetry/_vendor"),
-            requirements=Path("vercel/internal/telemetry/_vendor/vendor.txt"),
-            namespace="vercel.internal.telemetry._vendor",
-            protected_files=("__init__.py", "vendor.txt"),
-        ),
-    ),
-    "vercel-oidc": GeneratedVendoringConfig(
-        config=VendoringConfig(
-            destination=Path("vercel/oidc/_vendor"),
-            requirements=Path("vercel/oidc/_vendor/vendor.txt"),
-            namespace="vercel.oidc._vendor",
-            protected_files=("__init__.py", "vendor.txt"),
-        ),
-    ),
-    "vercel-queue": GeneratedVendoringConfig(
-        config=VendoringConfig(
-            destination=Path("vercel/queue/_vendor"),
-            requirements=Path("vercel/queue/_vendor/vendor.txt"),
-            namespace="vercel.queue._vendor",
-            protected_files=("__init__.py", "vendor.txt"),
-        ),
-        transformations=VendoringTransformations(
-            substitutions=(ANYIO_FROM_THREAD_SUBSTITUTION,),
-        ),
-    ),
-}
-
-
 def is_vendored_eligible(package: workspace.Package) -> bool:
-    return package.name in GENERATED_VENDORED_CONFIGS
+    data = _load_pyproject(package.path)
+    return _vendoring_config_for_package(package, data) is not None
 
 
 def load_plan(package_name: str) -> VendoredPlan:
@@ -182,7 +121,9 @@ def load_plan(package_name: str) -> VendoredPlan:
         raise SystemExit(f"package is not vendored-eligible: {package_name}")
 
     data = _load_pyproject(package.path)
-    config = GENERATED_VENDORED_CONFIGS[package.name].config
+    config = _vendoring_config_for_package(package, data)
+    if config is None:
+        raise SystemExit(f"package is not vendored-eligible: {package_name}")
     requirements = _derive_vendor_requirements(package.name, data)
     return VendoredPlan(
         package=package,
@@ -236,6 +177,49 @@ def _load_pyproject(path: Path) -> dict[str, Any]:
         return tomllib.load(fp)
 
 
+def _vendoring_config_for_package(
+    package: workspace.Package, data: dict[str, Any]
+) -> VendoringConfig | None:
+    package_root = _vendoring_package_root_from_wheel_include(data)
+    if package_root is None:
+        package_root = _vendoring_package_root_from_version_file(package)
+    if package_root is None:
+        return None
+    destination = package_root / "_vendor"
+    return VendoringConfig(
+        destination=destination,
+        requirements=destination / "vendor.txt",
+        namespace=".".join(package_root.parts + ("_vendor",)),
+        protected_files=("__init__.py", "vendor.txt"),
+    )
+
+
+def _vendoring_package_root_from_wheel_include(data: dict[str, Any]) -> Path | None:
+    wheel = (
+        data.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+    )
+    includes = wheel.get("only-include", [])
+    if not isinstance(includes, list) or len(includes) != 1:
+        return None
+    include = includes[0]
+    if not isinstance(include, str):
+        return None
+    package_root = Path(include.lstrip("/"))
+    if package_root.parts[:1] != ("vercel",):
+        return None
+    return package_root
+
+
+def _vendoring_package_root_from_version_file(package: workspace.Package) -> Path | None:
+    try:
+        relative = package.version_file.relative_to(package.path)
+    except ValueError:
+        return None
+    if relative.parts[:1] != ("vercel",):
+        return None
+    return relative.parent
+
+
 def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tuple[str, ...]:
     lock_versions = _lock_versions()
     if package_name == SHARED_VENDORED_PACKAGE:
@@ -283,10 +267,14 @@ def _lock_versions() -> dict[str, str]:
 
 def _release_dependencies(data: dict[str, Any]) -> list[str]:
     release = data.get("tool", {}).get("vercel", {}).get("release", {})
-    dependency_table = release.get("dependencies", {})
-    if isinstance(dependency_table, list):
-        return dependency_table
-    dependencies = dependency_table.get("dependencies", [])
+    if "dependencies" in release:
+        dependency_table = release.get("dependencies", {})
+        if isinstance(dependency_table, list):
+            return dependency_table
+        dependencies = dependency_table.get("dependencies", [])
+        if isinstance(dependencies, list):
+            return dependencies
+    dependencies = data.get("project", {}).get("dependencies", [])
     if isinstance(dependencies, list):
         return dependencies
     return []
@@ -611,7 +599,7 @@ def _strip_vendoring_config(text: str) -> str:
 
 
 def _render_vendoring_config(plan: VendoredPlan) -> str:
-    transformations = _vendoring_transformations(plan.package.name)
+    transformations = _vendoring_transformations(plan)
     lines = [
         "[tool.vendoring]",
         f'destination = "{_toml_path(plan.config.destination)}/"',
@@ -631,12 +619,14 @@ def _render_vendoring_config(plan: VendoredPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _vendoring_transformations(package_name: str) -> VendoringTransformations:
-    if package_name == SHARED_VENDORED_PACKAGE:
+def _vendoring_transformations(plan: VendoredPlan) -> VendoringTransformations:
+    if plan.package.name == SHARED_VENDORED_PACKAGE:
         return VendoringTransformations(
             substitutions=tuple(_shared_h2_substitution_pairs()),
         )
-    return GENERATED_VENDORED_CONFIGS[package_name].transformations
+    if any(_requirement_name(requirement) == "anyio" for requirement in plan.vendored_requirements):
+        return VendoringTransformations(substitutions=(ANYIO_FROM_THREAD_SUBSTITUTION,))
+    return VendoringTransformations()
 
 
 def _shared_h2_substitution_pairs() -> tuple[tuple[str, str], ...]:
@@ -734,12 +724,20 @@ def _rewrite_pyproject(plan: VendoredPlan, generated: Path) -> None:
         count=1,
     )
     deps = _format_toml_string_array(plan.external_dependencies)
-    text = re.sub(
-        r"(?ms)^\[tool\.vercel\.release\.dependencies\]\ndependencies = \[.*?\]\n",
-        f"[tool.vercel.release.dependencies]\ndependencies = {deps}\n",
-        text,
-        count=1,
-    )
+    if "[tool.vercel.release.dependencies]" in text:
+        text = re.sub(
+            r"(?ms)^\[tool\.vercel\.release\.dependencies\]\ndependencies = \[.*?\]\n",
+            f"[tool.vercel.release.dependencies]\ndependencies = {deps}\n",
+            text,
+            count=1,
+        )
+    else:
+        text = re.sub(
+            r"(?ms)(^\[project\]\n.*?^dependencies = )\[.*?\]",
+            rf"\1{deps}",
+            text,
+            count=1,
+        )
     text = re.sub(
         r'force-include = \{ "\.\./\.\./scripts/hatch_build\.py" = "/_vercel_hatch_build\.py" \}',
         'force-include = { "_vercel_hatch_build.py" = "/_vercel_hatch_build.py" }',
@@ -1048,7 +1046,7 @@ def test_wheel(package_name: str, *, dist_dir: Path) -> None:
     plan = load_plan(package_name)
     wheel = _single_wheel(dist_dir, plan.variant_name)
     script = ROOT / ".github" / "scripts" / "test_installed_wheel.sh"
-    _run(["sh", str(script), package_name, str(wheel)], cwd=ROOT)
+    _run(["sh", str(script), package_name, str(wheel.resolve())], cwd=ROOT)
 
 
 def shared_github_release_body() -> str:
