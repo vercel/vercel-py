@@ -53,6 +53,11 @@ exclude = [
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
 
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-internal-telemetry"
+explicit_package_bases = true
+packages = ["vercel.internal.telemetry"]
+
 [tool.poe.tasks.typecheck]
 cmd = "$MYPY"
 

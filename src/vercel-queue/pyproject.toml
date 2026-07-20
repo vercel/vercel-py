@@ -61,6 +61,7 @@ exclude = [
 
 [tool.ruff]
 extend = "../../pyproject.toml"
+cache-dir = "../../.ruff_cache"
 preview = true
 
 [tool.ruff.lint]
@@ -200,3 +201,8 @@ testpaths = ["tests"]
 [tool.poe]
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-queue"
+explicit_package_bases = true
+packages = ["vercel.queue"]

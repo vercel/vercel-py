@@ -5,6 +5,51 @@ task_name="$(basename "$0")"
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 workspace_root="$(cd "$script_dir/../../.." && pwd -P)"
 
+workspace_poe_parallel_enabled() {
+  case "${WORKSPACE_POE_PARALLEL:-}" in
+    0|false|no)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+workspace_poe_mypy_cache_package() {
+  if [[ -n "${WORKSPACE_POE_PACKAGE:-}" ]]; then
+    printf '%s\n' "$WORKSPACE_POE_PACKAGE"
+  elif [[ "$(pwd -P)" == "$workspace_root" ]]; then
+    printf 'root\n'
+  else
+    basename "$(pwd -P)"
+  fi
+}
+
+workspace_poe_drop_duplicate_extra_args() {
+  local start
+  local index
+  local matched
+
+  if ((${#extra_args[@]} == 0 || ${#scope_args[@]} < ${#extra_args[@]})); then
+    return
+  fi
+
+  for ((start = 0; start <= ${#scope_args[@]} - ${#extra_args[@]}; start++)); do
+    matched=1
+    for ((index = 0; index < ${#extra_args[@]}; index++)); do
+      if [[ "${scope_args[start + index]}" != "${extra_args[index]}" ]]; then
+        matched=0
+        break
+      fi
+    done
+    if ((matched)); then
+      extra_args=()
+      return
+    fi
+  done
+}
+
 case "$task_name" in
   pytest)
     command=(pytest)
@@ -42,26 +87,76 @@ if [[ "${extra_args[0]:-}" == -- ]]; then
 fi
 
 scope_args=("$@")
+if [[ "$task_name" == ruff-* && -z "${RUFF_CACHE_DIR:-}" ]]; then
+  export RUFF_CACHE_DIR="$workspace_root/.ruff_cache"
+fi
 if [[ "$task_name" == mypy ]]; then
+  cache_dir=""
   has_config_file=0
+  has_cache_dir=0
   option_value=0
-  for arg in "${scope_args[@]}" "${extra_args[@]}"; do
-    if ((option_value)); then
-      option_value=0
-      continue
-    fi
-    case "$arg" in
-      --config-file)
-        has_config_file=1
-        option_value=1
-        ;;
-      --config-file=*)
-        has_config_file=1
-        ;;
-    esac
-  done
+  if ((${#scope_args[@]})); then
+    for arg in "${scope_args[@]}"; do
+      if ((option_value)); then
+        option_value=0
+        continue
+      fi
+      case "$arg" in
+        --config-file)
+          has_config_file=1
+          option_value=1
+          ;;
+        --config-file=*)
+          has_config_file=1
+          ;;
+        --cache-dir)
+          has_cache_dir=1
+          option_value=1
+          ;;
+        --cache-dir=*)
+          has_cache_dir=1
+          ;;
+      esac
+    done
+  fi
+  if ((${#extra_args[@]})); then
+    for arg in "${extra_args[@]}"; do
+      if ((option_value)); then
+        option_value=0
+        continue
+      fi
+      case "$arg" in
+        --config-file)
+          has_config_file=1
+          option_value=1
+          ;;
+        --config-file=*)
+          has_config_file=1
+          ;;
+        --cache-dir)
+          has_cache_dir=1
+          option_value=1
+          ;;
+        --cache-dir=*)
+          has_cache_dir=1
+          ;;
+      esac
+    done
+  fi
   if ((has_config_file == 0)); then
-    scope_args=(--config-file "$workspace_root/pyproject.toml" "${scope_args[@]}")
+    if ((${#scope_args[@]})); then
+      scope_args=(--config-file "$workspace_root/pyproject.toml" "${scope_args[@]}")
+    else
+      scope_args=(--config-file "$workspace_root/pyproject.toml")
+    fi
+  fi
+  if ((has_cache_dir == 0)); then
+    cache_dir="$workspace_root/.mypy_cache/$(workspace_poe_mypy_cache_package)"
+    if ((${#scope_args[@]})); then
+      scope_args=(--cache-dir "$cache_dir" "${scope_args[@]}")
+    else
+      scope_args=(--cache-dir "$cache_dir")
+    fi
   fi
 fi
 if ((${#scope_args[@]} == 0)) && [[ -n "${WORKSPACE_POE_SCOPE_ARGS:-}" ]]; then
@@ -70,29 +165,76 @@ fi
 if [[ "$task_name" == mypy ]]; then
   has_target=0
   option_value=0
-  for arg in "${scope_args[@]}"; do
-    if ((option_value)); then
-      option_value=0
-      continue
-    fi
-    case "$arg" in
-      --config-file|--python-version)
-        option_value=1
-        ;;
-      --config-file=*|--python-version=*)
-        ;;
-      --*)
-        ;;
-      *)
-        has_target=1
-        ;;
-    esac
-  done
+  if ((${#scope_args[@]})); then
+    for arg in "${scope_args[@]}"; do
+      if ((option_value)); then
+        option_value=0
+        continue
+      fi
+      case "$arg" in
+        --cache-dir|--config-file|--python-version)
+          option_value=1
+          ;;
+        --cache-dir=*|--config-file=*|--python-version=*)
+          ;;
+        --*)
+          ;;
+        *)
+          has_target=1
+          ;;
+      esac
+    done
+  fi
   if ((has_target == 0)); then
     if [[ -n "${WORKSPACE_POE_SCOPE_ARGS:-}" ]]; then
       eval "scope_args+=( ${WORKSPACE_POE_SCOPE_ARGS} )"
     else
       scope_args+=(.)
+    fi
+  fi
+fi
+if [[ "$task_name" == pytest ]]; then
+  has_numprocesses=0
+  option_value=0
+  if ((${#scope_args[@]})); then
+    for arg in "${scope_args[@]}"; do
+      if ((option_value)); then
+        option_value=0
+        continue
+      fi
+      case "$arg" in
+        -n|--numprocesses)
+          has_numprocesses=1
+          option_value=1
+          ;;
+        -n*|--numprocesses=*)
+          has_numprocesses=1
+          ;;
+      esac
+    done
+  fi
+  if ((${#extra_args[@]})); then
+    for arg in "${extra_args[@]}"; do
+      if ((option_value)); then
+        option_value=0
+        continue
+      fi
+      case "$arg" in
+        -n|--numprocesses)
+          has_numprocesses=1
+          option_value=1
+          ;;
+        -n*|--numprocesses=*)
+          has_numprocesses=1
+          ;;
+      esac
+    done
+  fi
+  if ((has_numprocesses == 0)) && workspace_poe_parallel_enabled; then
+    if ((${#scope_args[@]})); then
+      scope_args=(-n auto "${scope_args[@]}")
+    else
+      scope_args=(-n auto)
     fi
   fi
 fi
@@ -104,6 +246,16 @@ if ((${#scope_args[@]} == 0)); then
   fi
 fi
 
-printf '%q ' "${command[@]}" "${scope_args[@]}" "${extra_args[@]}"
+workspace_poe_drop_duplicate_extra_args
+
+run_args=("${command[@]}")
+if ((${#scope_args[@]})); then
+  run_args+=("${scope_args[@]}")
+fi
+if ((${#extra_args[@]})); then
+  run_args+=("${extra_args[@]}")
+fi
+
+printf '%q ' "${run_args[@]}"
 printf '\n'
-exec "${command[@]}" "${scope_args[@]}" "${extra_args[@]}"
+exec "${run_args[@]}"

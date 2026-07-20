@@ -61,5 +61,10 @@ asyncio_mode = "auto"
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
 
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-cache"
+explicit_package_bases = true
+packages = ["vercel.cache"]
+
 [tool.poe.tasks.typecheck]
 cmd = "$MYPY"

@@ -45,15 +45,19 @@ verbosity = -1
 
 The shared include defines these Poe tasks:
 
-- `lint`: runs `$RUFF_CHECK`, then `$RUFF_FORMAT`.
+- `lint`: runs `$RUFF_CHECK` and `$RUFF_FORMAT` in parallel.
 - `fix`: runs `$RUFF_CHECK_FIX`, then `$RUFF_FORMAT_FIX`.
-- `typecheck`: runs `$POE typecheck-mypy`, then `$POE typecheck-ty`.
+- `typecheck`: runs `$POE typecheck-mypy` and `$POE typecheck-ty` in parallel.
 - `typecheck-mypy`: runs `$MYPY`.
 - `typecheck-ty`: runs `$TY`.
-- `test`: runs `$PYTEST`.
+- `test`: runs `$PYTEST` with pytest-xdist `-n auto` by default.
 
 Most packages should not redefine these tasks. Prefer tool configuration in
 `pyproject.toml` and inherit the shared tasks.
+
+Set `WORKSPACE_POE_PARALLEL=0` to run workspace and shared package checks
+sequentially. `false` and `no` are accepted as equivalent opt-outs. This also
+disables the default pytest-xdist worker flag.
 
 ## Tool Wrappers
 
@@ -76,7 +80,12 @@ The wrappers default to the current workspace scope:
 
 The `mypy` wrapper also adds `--config-file <workspace-root>/pyproject.toml`
 unless the caller provides a config file. This keeps package mypy commands
-portable regardless of current working directory.
+portable regardless of current working directory. Unless the caller provides
+`--cache-dir`, the wrapper uses `.mypy_cache/<package-name>` for workspace
+package checks and `.mypy_cache/root` for root checks.
+
+The `pytest` wrapper adds `-n auto` unless the caller provides `-n` or
+`--numprocesses`, or disables parallel mode with `WORKSPACE_POE_PARALLEL=0`.
 
 ## Local Overrides
 
