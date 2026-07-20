@@ -1,0 +1,14 @@
+{
+    "buildCommand": "uv run python -m vercel.integrations.apscheduler --entrypoint api.scheduler:scheduler",
+    "functions": {
+        "api/scheduler.py": {
+            "experimentalTriggers": [
+                {
+                    "type": "queue/v2beta",
+                    "topic": "__aps_cleanup",
+                    "maxConcurrency": 1
+                }
+            ]
+        }
+    }
+}
