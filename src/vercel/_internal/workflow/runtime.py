@@ -428,7 +428,11 @@ class WorkflowOrchestratorContext:
                     # The recorded step at this (positional) correlation ID must be
                     # the same call the body just issued; a mismatch means the body
                     # is non-deterministic.
-                    if sus.step.name != name or [sus.input] != recorded_input:
+                    if (
+                        name not in (sus.step.name, sus.step._legacy_name)
+                        # old name format is being phased out
+                        or [sus.input] != recorded_input
+                    ):
                         self._fail_suspension(
                             sus,
                             NondeterminismError(
