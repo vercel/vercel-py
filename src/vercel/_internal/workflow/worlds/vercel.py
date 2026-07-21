@@ -1,4 +1,6 @@
+import asyncio
 import datetime
+import json
 import math
 import os
 import platform
@@ -11,9 +13,9 @@ import cbor2
 import httpx
 import pydantic
 
-import vercel.queue as vqs
 from vercel._internal.polyfills import UTC
-from vercel.oidc.aio import get_vercel_oidc_token
+from vercel.workers import client as vqs_client
+from vercel.workers.exceptions import DuplicateIdempotencyKeyError
 
 from .. import world as w
 
@@ -79,7 +81,6 @@ class VercelWorld(w.World):
         team_id: str | None = None,
     ) -> None:
         self._token = token
-        self._queue_callbacks: list[Any] = []
 
         # utils.ts, getHttpUrl
         # Use proxy when we have project config (for authentication via Vercel API)
@@ -114,25 +115,6 @@ class VercelWorld(w.World):
         if WORKFLOW_SERVER_URL_OVERRIDE and self._using_proxy:
             self._headers["x-vercel-workflow-api-url"] = WORKFLOW_SERVER_URL_OVERRIDE
 
-        self._queue_clients: dict[object, vqs.QueueClient] = {}
-
-    def _queue_client(
-        self, *, deployment: vqs.DeploymentOption = vqs.CURRENT_DEPLOYMENT
-    ) -> vqs.QueueClient:
-        if deployment not in self._queue_clients:
-            base_url = f"{self._base_url}/queues-proxy" if self._using_proxy else None
-            self._queue_clients[deployment] = vqs.QueueClient(
-                token=self._token if self._using_proxy else None,
-                region=os.getenv("VERCEL_REGION", "iad1"),
-                base_url=base_url,
-                deployment=deployment,
-                headers=self._headers,
-            )
-        return self._queue_clients[deployment]
-
-    async def aclose(self) -> None:
-        self._queue_clients.clear()
-
     async def _cbor_request(
         self,
         method: str,
@@ -143,6 +125,8 @@ class VercelWorld(w.World):
     ) -> T:
         # utils.ts, getHttpConfig, makeRequest
         if self._token is None:
+            from vercel.oidc.aio import get_vercel_oidc_token
+
             token = await get_vercel_oidc_token()
         else:
             token = self._token
@@ -250,27 +234,43 @@ class VercelWorld(w.World):
             # Store deploymentId in the message so it can be preserved when re-enqueueing
             "deploymentId": deployment_id,
         }
-        delay = max(1, math.ceil(delay_seconds)) if delay_seconds is not None else None
-        client = self._queue_client(deployment=deployment_id)
+        headers = {}
+        if delay_seconds is not None:
+            headers["Vqs-Delay-Seconds"] = str(max(1, math.ceil(delay_seconds)))
         try:
-            message_id = await client.send(
-                vqs.sanitize_name(queue_name),
+            response = await vqs_client.send_async(
+                "".join(char if char.isalnum() or char in "-_" else "-" for char in queue_name),
                 payload,
                 idempotency_key=idempotency_key,
-                delay=delay,
+                deployment_id=deployment_id,
+                token=self._token if self._using_proxy else None,
+                base_url=self._base_url if self._using_proxy else None,
+                # The proxy will strip the `/queues-proxy` prefix before forwarding to VQS,
+                # so `/queues-proxy/api/v3/topic` arrives as `/api/v3/topic` at the queue server.
+                base_path="/queues-proxy/api/v3/topic" if self._using_proxy else None,
+                headers=self._headers | headers,
             )
-        except vqs.DuplicateIdempotencyKeyError:
+            return response["messageId"]
+        except DuplicateIdempotencyKeyError:
+            # Silently handle idempotency key conflicts - the message was already queued
+            # This matches the behavior of world-local and world-postgres
+            # Return a placeholder messageId since the original is not available from the error.
+            # Callers using idempotency keys shouldn't depend on the returned messageId.
             return f"msg_duplicate_{idempotency_key or 'unknown'}"
-        if message_id is None:
-            return "msg_deferred"
-        return message_id
 
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
-        async def async_handler(message: vqs.Message[Any]) -> None:
+        @vqs_client.subscribe(
+            topic=(f"{queue_name_prefix}*", lambda t: bool(t and t.startswith(queue_name_prefix)))
+        )
+        async def async_handler(body: Any, meta: vqs_client.MessageMetadata) -> None:
             try:
-                body = message.payload
+                if isinstance(body, (bytes, bytearray)):
+                    if body:
+                        body = json.loads(body)
+                    else:
+                        return  # empty body from delayed re-delivery; skip
                 if not isinstance(body, dict):
                     raise ValueError("Invalid message body: expected a JSON object")
                 if "payload" not in body:
@@ -282,19 +282,18 @@ class VercelWorld(w.World):
                 result = await handler(
                     payload,
                     queue_name=queue_name,
-                    attempt=message.metadata.delivery_count,
-                    message_id=message.metadata.message_id,
+                    attempt=meta["deliveryCount"],
+                    message_id=meta["messageId"],
                 )
                 if result is not None:
-                    # Use delaySeconds approach: send new message with delay, then allow the SDK
-                    # to acknowledge current message after this callback returns successfully.
+                    # Use delaySeconds approach: send new message with delay, then delete current
                     # Clamp to max delay (23h) - for longer sleeps, the workflow will chain
-                    # multiple delayed messages until the full sleep duration has elapsed.
+                    # multiple delayed messages until the full sleep duration has elapsed
                     delay_seconds = min(result.delay_seconds, MAX_DELAY_SECONDS)
 
-                    # Send new message with delay BEFORE acknowledging current message.
+                    # Send new message with delay BEFORE acknowledging current message
                     # This ensures crash safety: if process dies after send but before ack,
-                    # we may get a duplicate invocation but won't lose the scheduled wakeup.
+                    # we may get a duplicate invocation but won't lose the scheduled wakeup
                     await self.queue(
                         queue_name,
                         w.QueuePayloadAdaptor.validate_python(payload),
@@ -306,18 +305,39 @@ class VercelWorld(w.World):
                 traceback.print_exc()
                 raise
 
-        topic_prefix = vqs.sanitize_name(queue_name_prefix)
-        vqs.subscribe(topic=f"{topic_prefix}*")(async_handler)
-        self._queue_callbacks.append(async_handler)
-
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
-            try:
-                client = self._queue_client(deployment=vqs.ALL_DEPLOYMENTS)
-                await client.accept_and_handle(request)
-            except Exception:
-                traceback.print_exc()
-                raise
-            return w.HTTPResponse(204, b"", {})
+            content_type = request.get_header("content-type")
+            if not content_type or "application/cloudevents+json" not in content_type:
+                return w.HTTPResponse.json(
+                    {"error": 'Invalid content type: expected "application/cloudevents+json"'},
+                    status=400,
+                )
+            raw_body = await request.get_body()
+            # Build WSGI-style environ from request headers so that
+            # handle_queue_callback can detect v2beta callbacks correctly.
+            environ: dict[str, Any] = {"CONTENT_TYPE": content_type}
+            for hdr in (
+                "ce-type",
+                "ce-specversion",
+                "ce-source",
+                "ce-id",
+                "ce-time",
+                "ce-vqsmessageid",
+                "ce-vqsqueuename",
+                "ce-vqsconsumergroup",
+                "ce-vqsreceipthandle",
+                "ce-vqsdeliverycount",
+                "ce-vqscreatedat",
+                "ce-vqsexpiresat",
+                "ce-vqsregion",
+            ):
+                val = request.get_header(hdr)
+                if val is not None:
+                    environ["HTTP_" + hdr.upper().replace("-", "_")] = val
+            status_code, headers, body = await asyncio.to_thread(
+                vqs_client.handle_queue_callback, raw_body, environ
+            )
+            return w.HTTPResponse(status_code, body, dict(headers))
 
         return http_handler
 

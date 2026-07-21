@@ -2329,7 +2329,7 @@ dependencies = [
     { name = "vercel-headers" },
     { name = "vercel-internal-telemetry" },
     { name = "vercel-oidc" },
-    { name = "vercel-queue" },
+    { name = "vercel-workers", marker = "python_full_version >= '3.12'" },
     { name = "websockets" },
 ]
 
@@ -2345,7 +2345,7 @@ requires-dist = [
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
-    { name = "vercel-queue", editable = "src/vercel-queue" },
+    { name = "vercel-workers", marker = "python_full_version >= '3.12'", specifier = ">=0.0.16,<1" },
     { name = "websockets", specifier = ">=12.0,<17" },
 ]
 
@@ -2465,6 +2465,22 @@ requires-dist = [
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]
 provides-extras = ["devserver", "trio", "typed"]
+
+[[package]]
+name = "vercel-workers"
+version = "0.0.22"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio", marker = "python_full_version >= '3.12'" },
+    { name = "httpx", marker = "python_full_version >= '3.12'" },
+    { name = "pydantic", marker = "python_full_version >= '3.12'" },
+    { name = "python-dotenv", marker = "python_full_version >= '3.12'" },
+    { name = "vercel", marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0c/fb/994dee0f9d2d22dce84c861b62e388b93f19a88b9d5a0bcb2fe6acfe5f29/vercel_workers-0.0.22.tar.gz", hash = "sha256:e189fb0e3c4cabf89e4d38f21c8f13b9dfcd4b1deedd5dc8b43aadbdf145e3a4", size = 62536, upload-time = "2026-05-04T19:17:53.348Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c2/8c/fb781b58edcb6ced4a6f15392315f88d7021cc2c242638e77f98ee300638/vercel_workers-0.0.22-py3-none-any.whl", hash = "sha256:83cf099a3a3dceb1cd47f8575446fb75a1e7ccbfe1304dbbbc1de3287bd640d6", size = 61175, upload-time = "2026-05-04T19:17:52.332Z" },
+]
 
 [[package]]
 name = "vine"
