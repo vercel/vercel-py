@@ -47,3 +47,7 @@ def to_ms_int(td: timedelta) -> int:
 
 def to_seconds_float(td: timedelta) -> float:
     return td / SECOND
+
+
+def to_seconds_int(td: timedelta) -> int:
+    return td // SECOND

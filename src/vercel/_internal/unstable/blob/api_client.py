@@ -18,6 +18,7 @@ from vercel._internal.blob.core import map_blob_error
 from vercel._internal.blob.types import Access
 from vercel._internal.byte_stream import ReadableByteStream
 from vercel._internal.http import BaseTransport, JSONBody, ReadResponsePolicy
+from vercel._internal.time import to_seconds_int
 from vercel._internal.unstable.blob.errors import (
     BlobAlreadyExistsError,
     BlobCredentialsError,
@@ -53,7 +54,7 @@ _MAX_DELEGATION_AGE = timedelta(days=7)
 _MAX_PATHNAME_LENGTH = 950
 _MAX_CONTENT_TYPES = 100
 _MAX_CONTENT_TYPES_CSV_LENGTH = 16_384
-_MAX_CACHE_CONTROL_AGE = 31_536_000
+_MAX_CACHE_CONTROL_AGE = timedelta(seconds=31_536_000)
 _CONTENT_RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
 
 
@@ -65,6 +66,14 @@ def _milliseconds(value: datetime) -> int:
     if value.tzinfo is None:
         raise ValueError("expires_at must be timezone-aware")
     return int(value.timestamp() * 1000)
+
+
+def _datetime_from_milliseconds(value: int) -> datetime:
+    return datetime.fromtimestamp(value / 1000, timezone.utc)
+
+
+def _normalize_wire_datetime(value: datetime) -> datetime:
+    return _datetime_from_milliseconds(_milliseconds(value))
 
 
 def _valid_content_types(values: object, *, require_list: bool) -> bool:
@@ -362,15 +371,34 @@ def _validate_size(size: int) -> None:
         raise ValueError("size must not be negative")
 
 
+def _validate_presign_pathname(pathname: str) -> None:
+    if not pathname:
+        raise ValueError("pathname must be non-empty")
+    if len(pathname) > _MAX_PATHNAME_LENGTH:
+        raise ValueError("pathname exceeds 950 characters")
+    if (
+        pathname == "*"
+        or "*" in pathname
+        or "?" in pathname
+        or any(ord(character) < 32 or ord(character) == 127 for character in pathname)
+    ):
+        raise ValueError("pathname must identify a concrete object")
+
+
 def _cache_control_max_age_seconds(value: timedelta | None) -> int | None:
     if value is None:
         return None
-    if not isinstance(value, timedelta):
-        raise TypeError("cache_control_max_age must be a timedelta or None")
-    seconds = value.total_seconds()
-    if not seconds.is_integer() or not 0 <= seconds <= _MAX_CACHE_CONTROL_AGE:
+
+    is_valid_range = timedelta(seconds=0) <= value <= _MAX_CACHE_CONTROL_AGE
+    if not is_valid_range:
         raise ValueError("cache_control_max_age is invalid")
-    return int(seconds)
+
+    seconds = to_seconds_int(value)
+    is_integer_seconds = seconds == value.total_seconds()
+    if not is_integer_seconds:
+        raise ValueError("cache_control_max_age is invalid")
+
+    return seconds
 
 
 def _validate_presign(
@@ -456,8 +484,9 @@ def _assert_delegation_scope(
     credentials: BlobCredentials,
     pathname: str,
     operation: PresignedOperation,
-    outer_until: int,
-    requested_until: int,
+    signed_valid_until: int,
+    delegated_expires_at: datetime,
+    requested_expires_at: datetime,
 ) -> None:
     delegated_store = delegation.store_id.removeprefix("store_")
     if (
@@ -465,9 +494,9 @@ def _assert_delegation_scope(
         or delegated_store != credentials.store_id
         or delegation.pathname != pathname
         or delegation.operations != [operation.value]
-        or delegation.valid_until != outer_until
-        or outer_until <= int(_now().timestamp() * 1000)
-        or outer_until > requested_until
+        or delegation.valid_until != signed_valid_until
+        or delegated_expires_at <= _now()
+        or delegated_expires_at > requested_expires_at
     ):
         raise BlobCredentialsError("Signed-token delegation scope is invalid")
 
@@ -497,6 +526,91 @@ def _assert_concrete_constraints_within_delegation(
         raise BlobCredentialsError("Concrete content types widen their delegation")
 
 
+def _presign_issuance_body(
+    *,
+    pathname: str,
+    operation: PresignedOperation,
+    requested_expires_at: datetime,
+    maximum_size: int | None,
+    allowed_content_types: Sequence[str] | None,
+) -> dict[str, object]:
+    issuance: dict[str, object] = {
+        "pathname": pathname,
+        "operations": [operation.value],
+        "validUntil": _milliseconds(requested_expires_at),
+    }
+    if operation is PresignedOperation.PUT and maximum_size is not None:
+        issuance["maximumSizeInBytes"] = maximum_size
+    if operation is PresignedOperation.PUT and allowed_content_types is not None:
+        issuance["allowedContentTypes"] = list(allowed_content_types)
+    return issuance
+
+
+def _validate_signed_delegation(
+    signed_token: _SignedTokenPayload,
+    *,
+    credentials: BlobCredentials,
+    pathname: str,
+    operation: PresignedOperation,
+    requested_expires_at: datetime,
+    delegated_expires_at: datetime,
+    maximum_size: int | None,
+    allowed_content_types: Sequence[str] | None,
+) -> _DelegationPayload:
+    delegation = _delegation_payload(signed_token.delegation_token)
+    _assert_delegation_scope(
+        delegation,
+        credentials=credentials,
+        pathname=pathname,
+        operation=operation,
+        signed_valid_until=signed_token.valid_until,
+        delegated_expires_at=delegated_expires_at,
+        requested_expires_at=requested_expires_at,
+    )
+    _assert_concrete_constraints_within_delegation(
+        maximum_size=maximum_size,
+        allowed_content_types=allowed_content_types,
+        delegated_maximum=delegation.maximum_size_in_bytes,
+        delegated_types=delegation.allowed_content_types,
+    )
+    return delegation
+
+
+def _presigned_constraints(
+    *,
+    operation: PresignedOperation,
+    requested_expires_at: datetime,
+    delegated_expires_at: datetime,
+    maximum_size: int | None,
+    allowed_content_types: Sequence[str] | None,
+    allow_overwrite: bool | None,
+    cache_control_max_age: timedelta | None,
+    if_match: str | None,
+) -> dict[str, str]:
+    effective_expires_at = min(requested_expires_at, delegated_expires_at)
+    cache_control_max_age_seconds = _cache_control_max_age_seconds(cache_control_max_age)
+    constraints: dict[str, str] = {}
+    if effective_expires_at != delegated_expires_at:
+        constraints["vercel-blob-valid-until"] = str(_milliseconds(effective_expires_at))
+    if maximum_size is not None:
+        constraints["vercel-blob-maximum-size-in-bytes"] = str(maximum_size)
+    if allowed_content_types is not None:
+        allowed_content_types_csv = ",".join(sorted(allowed_content_types))
+        if len(allowed_content_types_csv) > _MAX_CONTENT_TYPES_CSV_LENGTH:
+            raise ValueError("allowed_content_types query value is too long")
+        constraints["vercel-blob-allowed-content-types"] = allowed_content_types_csv
+    effective_overwrite = allow_overwrite
+    if operation is PresignedOperation.PUT and if_match is not None and allow_overwrite is None:
+        effective_overwrite = True
+    if effective_overwrite is not None:
+        constraints["vercel-blob-allow-overwrite"] = str(effective_overwrite).lower()
+    if cache_control_max_age_seconds is not None:
+        constraints["vercel-blob-cache-control-max-age"] = str(cache_control_max_age_seconds)
+    if if_match is not None:
+        constraints["vercel-blob-if-match"] = if_match
+    return constraints
+
+
 def _canonical(
     *,
     operation: PresignedOperation,
@@ -523,6 +637,37 @@ def _sign(
         .rstrip(b"=")
         .decode()
     )
+
+
+def _presigned_url(
+    *,
+    base_url: str,
+    credentials: BlobCredentials,
+    access: Access,
+    operation: PresignedOperation,
+    pathname: str,
+    constraints: Mapping[str, str],
+    delegation: str,
+    signing_token: str,
+) -> str:
+    signature = _sign(
+        signing_token,
+        operation=operation,
+        pathname=pathname,
+        constraints=constraints,
+    )
+    query = {
+        **constraints,
+        "vercel-blob-delegation": delegation,
+        "vercel-blob-signature": signature,
+    }
+    if operation in (PresignedOperation.GET, PresignedOperation.HEAD):
+        delivery_host = f"https://{credentials.store_id}.{access}.blob.vercel-storage.com"
+        target = f"{delivery_host}/{quote(pathname, safe='/')}"
+    else:
+        target = f"{base_url}/?{urlencode({'pathname': pathname})}"
+    separator = "&" if "?" in target else "?"
+    return f"{target}{separator}{urlencode(query)}"
 
 
 class BlobApiClient:
@@ -591,6 +736,33 @@ class BlobApiClient:
                 "Blob publication succeeded but metadata provenance was lost"
             )
         return result
+
+    async def _request_signed_token(
+        self,
+        credentials: BlobCredentials,
+        issuance: Mapping[str, object],
+    ) -> _SignedTokenPayload:
+        try:
+            response = await self._transport.send(
+                "POST",
+                f"{self._base_url}/signed-token",
+                token=credentials.token,
+                body=JSONBody(issuance),
+                headers={
+                    **_headers(credentials),
+                    "x-vercel-blob-store-id": credentials.store_id,
+                },
+                read_response=ReadResponsePolicy.ALWAYS,
+            )
+        except httpx.HTTPError as exc:
+            raise BlobUnknownError() from exc
+        if not response.is_success:
+            _raise_control_error(response)
+        return _validate_response(
+            _SignedTokenPayload,
+            _json(response),
+            "Malformed signed-token response",
+        )
 
     async def stat(self, pathname: str) -> BlobStatResult:
         """Fetch metadata for one object from the Blob control API.
@@ -860,17 +1032,7 @@ class BlobApiClient:
         Returns:
             A presigned URL with the effective constraints encoded.
         """
-        if not pathname:
-            raise ValueError("pathname must be non-empty")
-        if len(pathname) > _MAX_PATHNAME_LENGTH:
-            raise ValueError("pathname exceeds 950 characters")
-        if (
-            pathname == "*"
-            or "*" in pathname
-            or "?" in pathname
-            or any(ord(character) < 32 or ord(character) == 127 for character in pathname)
-        ):
-            raise ValueError("pathname must identify a concrete object")
+        _validate_presign_pathname(pathname)
         _validate_presign(
             operation,
             expires_at,
@@ -881,101 +1043,51 @@ class BlobApiClient:
             if_match=if_match,
         )
         credentials = await self._credentials()
-        requested_until = _milliseconds(expires_at)
-        issuance: dict[str, object] = {
-            "pathname": pathname,
-            "operations": [operation.value],
-            "validUntil": requested_until,
-        }
-        if operation is PresignedOperation.PUT and maximum_size is not None:
-            issuance["maximumSizeInBytes"] = maximum_size
-        if operation is PresignedOperation.PUT and allowed_content_types is not None:
-            issuance["allowedContentTypes"] = list(allowed_content_types)
-        try:
-            response = await self._transport.send(
-                "POST",
-                f"{self._base_url}/signed-token",
-                token=credentials.token,
-                body=JSONBody(issuance),
-                headers={
-                    **_headers(credentials),
-                    "x-vercel-blob-store-id": credentials.store_id,
-                },
-                read_response=ReadResponsePolicy.ALWAYS,
-            )
-        except httpx.HTTPError as exc:
-            raise BlobUnknownError() from exc
-        if not response.is_success:
-            _raise_control_error(response)
-        signed_token = cast(
-            _SignedTokenPayload,
-            _validate_response(
-                _SignedTokenPayload,
-                _json(response),
-                "Malformed signed-token response",
-            ),
+        requested_expires_at = _normalize_wire_datetime(expires_at)
+        issuance = _presign_issuance_body(
+            pathname=pathname,
+            operation=operation,
+            requested_expires_at=requested_expires_at,
+            maximum_size=maximum_size,
+            allowed_content_types=allowed_content_types,
         )
-        delegation_payload = _delegation_payload(signed_token.delegation_token)
-        _assert_delegation_scope(
-            delegation_payload,
+        signed_token = await self._request_signed_token(credentials, issuance)
+        delegated_expires_at = _datetime_from_milliseconds(signed_token.valid_until)
+        _validate_signed_delegation(
+            signed_token,
             credentials=credentials,
             pathname=pathname,
             operation=operation,
-            outer_until=signed_token.valid_until,
-            requested_until=requested_until,
-        )
-        _assert_concrete_constraints_within_delegation(
+            requested_expires_at=requested_expires_at,
+            delegated_expires_at=delegated_expires_at,
             maximum_size=maximum_size,
             allowed_content_types=allowed_content_types,
-            delegated_maximum=delegation_payload.maximum_size_in_bytes,
-            delegated_types=delegation_payload.allowed_content_types,
         )
-        delegation = signed_token.delegation_token
-        signing_token = signed_token.client_signing_token
-        outer_until = signed_token.valid_until
-        concrete_until = min(requested_until, outer_until)
-        cache_control_max_age_seconds = _cache_control_max_age_seconds(cache_control_max_age)
-        constraints: dict[str, str] = {}
-        if concrete_until != outer_until:
-            constraints["vercel-blob-valid-until"] = str(concrete_until)
-        if maximum_size is not None:
-            constraints["vercel-blob-maximum-size-in-bytes"] = str(maximum_size)
-        if allowed_content_types is not None:
-            allowed_content_types_csv = ",".join(sorted(allowed_content_types))
-            if len(allowed_content_types_csv) > _MAX_CONTENT_TYPES_CSV_LENGTH:
-                raise ValueError("allowed_content_types query value is too long")
-            constraints["vercel-blob-allowed-content-types"] = allowed_content_types_csv
-        effective_overwrite = allow_overwrite
-        if operation is PresignedOperation.PUT and if_match is not None and allow_overwrite is None:
-            effective_overwrite = True
-        if effective_overwrite is not None:
-            constraints["vercel-blob-allow-overwrite"] = str(effective_overwrite).lower()
-        if cache_control_max_age_seconds is not None:
-            constraints["vercel-blob-cache-control-max-age"] = str(cache_control_max_age_seconds)
-        if if_match is not None:
-            constraints["vercel-blob-if-match"] = if_match
-        signature = _sign(
-            signing_token,
+        constraints = _presigned_constraints(
+            operation=operation,
+            requested_expires_at=requested_expires_at,
+            delegated_expires_at=delegated_expires_at,
+            maximum_size=maximum_size,
+            allowed_content_types=allowed_content_types,
+            allow_overwrite=allow_overwrite,
+            cache_control_max_age=cache_control_max_age,
+            if_match=if_match,
+        )
+        url = _presigned_url(
+            base_url=self._base_url,
+            credentials=credentials,
+            access=access,
             operation=operation,
             pathname=pathname,
             constraints=constraints,
+            delegation=signed_token.delegation_token,
+            signing_token=signed_token.client_signing_token,
         )
-        query = {
-            **constraints,
-            "vercel-blob-delegation": delegation,
-            "vercel-blob-signature": signature,
-        }
-        if operation in (PresignedOperation.GET, PresignedOperation.HEAD):
-            delivery_host = f"https://{credentials.store_id}.{access}.blob.vercel-storage.com"
-            target = f"{delivery_host}/{quote(pathname, safe='/')}"
-        else:
-            target = f"{self._base_url}/?{urlencode({'pathname': pathname})}"
-        separator = "&" if "?" in target else "?"
-        url = f"{target}{separator}{urlencode(query)}"
+        effective_expires_at = min(requested_expires_at, delegated_expires_at)
         return PresignedUrl(
             url=url,
             operation=operation,
-            expires_at=datetime.fromtimestamp(concrete_until / 1000, timezone.utc),
+            expires_at=effective_expires_at,
             required_headers={},
         )
 
