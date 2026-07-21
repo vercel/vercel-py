@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.2 - 2026-07-21
+
+### Bug Fixes
+
+- Fix workflows to work with current Vercel workflow-server, and prevent similar breakages in the future. (#190)
+
 ## 0.7.1 - 2026-07-16
 
 - No changes.
