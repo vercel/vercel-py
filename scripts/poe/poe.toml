@@ -9,49 +9,13 @@ TY = { default = "${POE_CONF_DIR}/tasks/ty" }
 MYPY = { default = "${POE_CONF_DIR}/tasks/mypy" }
 
 [tool.poe.tasks.fix]
-shell = """
-set -e
-$RUFF_CHECK_FIX
-$RUFF_FORMAT_FIX
-"""
+cmd = "$POE_CONF_DIR/workspace_poe.py tool-group fix"
 
 [tool.poe.tasks.lint]
-shell = """
-set -e
-if [ "${WORKSPACE_POE_PARALLEL:-}" = 0 ] || [ "${WORKSPACE_POE_PARALLEL:-}" = false ] || [ "${WORKSPACE_POE_PARALLEL:-}" = no ]; then
-  $RUFF_CHECK
-  $RUFF_FORMAT
-else
-  /usr/bin/env bash -c '
-    set -euo pipefail
-    . "$POE_CONF_DIR/workspace-poe.sh"
-    workspace_poe_reset_jobs
-    workspace_poe_start_job "ruff check" "$RUFF_CHECK"
-    workspace_poe_start_job "ruff format" "$RUFF_FORMAT"
-    workspace_poe_wait_jobs || true
-    workspace_poe_print_jobs
-  '
-fi
-"""
+cmd = "$POE_CONF_DIR/workspace_poe.py tool-group lint"
 
 [tool.poe.tasks.typecheck]
-shell = """
-set -e
-if [ "${WORKSPACE_POE_PARALLEL:-}" = 0 ] || [ "${WORKSPACE_POE_PARALLEL:-}" = false ] || [ "${WORKSPACE_POE_PARALLEL:-}" = no ]; then
-  $POE typecheck-mypy
-  $POE typecheck-ty
-else
-  /usr/bin/env bash -c '
-    set -euo pipefail
-    . "$POE_CONF_DIR/workspace-poe.sh"
-    workspace_poe_reset_jobs
-    workspace_poe_start_job mypy "$POE" typecheck-mypy
-    workspace_poe_start_job ty "$POE" typecheck-ty
-    workspace_poe_wait_jobs || true
-    workspace_poe_print_jobs
-  '
-fi
-"""
+cmd = "$POE_CONF_DIR/workspace_poe.py tool-group typecheck"
 
 [tool.poe.tasks.typecheck-mypy]
 cmd = "$MYPY"
