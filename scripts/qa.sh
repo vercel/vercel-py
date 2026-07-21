@@ -1,96 +1,18 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python
+from __future__ import annotations
 
-# shellcheck source=scripts/poe/workspace-poe.sh
-. "$(dirname "${BASH_SOURCE[0]}")/poe/workspace-poe.sh"
+import subprocess
+import sys
+from pathlib import Path
 
-workspace_poe_enter_tree
 
-qa_scopes=()
-qa_verbose=0
-qa_quiet=0
-qa_emit_task_header=1
+def main() -> int:
+    root = Path(__file__).resolve().parent.parent
+    runner = root / "scripts" / "poe" / "workspace_poe.py"
+    return subprocess.call(
+        ("uv", "run", "--project", str(root), "python", str(runner), "qa", *sys.argv[1:])
+    )
 
-if [[ -n "${POE_EXTRA_ARGS:-}" ]]; then
-  echo "qa does not accept tool-specific arguments after --" >&2
-  exit 2
-fi
 
-qa_usage() {
-  cat <<'EOF'
-Usage: ./scripts/qa.sh [-q|--quiet] [-v|--verbose] [scope ...]
-
-Runs lint, typecheck, and test for the selected workspace scopes.
-EOF
-}
-
-while (($#)); do
-  case "$1" in
-    -h|--help)
-      qa_usage
-      exit 0
-      ;;
-    -q|--quiet)
-      qa_quiet=$((qa_quiet + 1))
-      shift
-      ;;
-    -v|--verbose)
-      qa_verbose=$((qa_verbose + 1))
-      shift
-      ;;
-    --)
-      echo "qa does not accept tool-specific arguments after --" >&2
-      exit 2
-      ;;
-    -*)
-      echo "qa only accepts -q/--quiet and -v/--verbose options" >&2
-      exit 2
-      ;;
-    *)
-      qa_scopes+=("$1")
-      shift
-      ;;
-  esac
-done
-
-qa_poe_flags=()
-while ((qa_quiet > 0)); do
-  qa_poe_flags+=(-q)
-  qa_quiet=$((qa_quiet - 1))
-done
-while ((qa_verbose > 0)); do
-  qa_poe_flags+=(-v)
-  qa_verbose=$((qa_verbose - 1))
-done
-
-qa_run() {
-  local task="$1"
-  if ((qa_emit_task_header)); then
-    printf '==> %s\n' "$task"
-  fi
-  workspace_poe_subcommand_args=()
-  workspace_poe_poe_args=(-q)
-  if ((${#qa_poe_flags[@]})); then
-    workspace_poe_poe_args+=("${qa_poe_flags[@]}")
-  fi
-  POE_EXTRA_ARGS= WORKSPACE_POE_ROOT_TASK="${task}-root" \
-    workspace_poe_run_workspace_task "$task"
-}
-
-workspace_poe_scope_args=()
-if ((${#qa_scopes[@]})); then
-  workspace_poe_scope_args+=("${qa_scopes[@]}")
-fi
-if workspace_poe_parallel_enabled; then
-  qa_emit_task_header=0
-  workspace_poe_reset_jobs
-  workspace_poe_start_job lint qa_run lint
-  workspace_poe_start_job typecheck qa_run typecheck
-  workspace_poe_start_job test qa_run test
-  workspace_poe_wait_jobs || true
-  workspace_poe_print_jobs
-else
-  qa_run lint
-  qa_run typecheck
-  qa_run test
-fi
+if __name__ == "__main__":
+    raise SystemExit(main())

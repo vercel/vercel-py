@@ -592,13 +592,17 @@ async def test_run_interactive_loop_uses_session_surface(monkeypatch) -> None:
     stdout = SimpleNamespace(buffer=stdout_buffer)
     signal_calls: list[tuple] = []
 
-    monkeypatch.setattr("vercel.sandbox.pty.shell.sys.stdin", stdin)
-    monkeypatch.setattr("vercel.sandbox.pty.shell.sys.stdout", stdout)
-    monkeypatch.setattr("vercel.sandbox.pty.shell.os.get_terminal_size", lambda: (120, 40))
+    monkeypatch.setattr(
+        "vercel.sandbox.pty.shell.sys",
+        SimpleNamespace(stdin=stdin, stdout=stdout, stderr=SimpleNamespace(write=Mock())),
+    )
+    monkeypatch.setattr(
+        "vercel.sandbox.pty.shell.os",
+        SimpleNamespace(get_terminal_size=lambda: (120, 40), read=lambda fd, size: b""),
+    )
     monkeypatch.setattr("vercel.sandbox.pty.shell.termios.tcgetattr", lambda fd: "saved-settings")
     monkeypatch.setattr("vercel.sandbox.pty.shell.termios.tcsetattr", Mock())
     monkeypatch.setattr("vercel.sandbox.pty.shell.tty.setraw", Mock())
-    monkeypatch.setattr("vercel.sandbox.pty.shell.os.read", lambda fd, size: b"")
 
     def fake_signal(sig, handler):
         signal_calls.append((sig, handler))

@@ -12,6 +12,9 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
+[options.exclude-newer-package]
+lograil = "2026-07-22T00:00:00Z"
+
 [manifest]
 members = [
     "vercel",
@@ -30,6 +33,7 @@ dev = [
     { name = "fastapi", specifier = ">=0.115.0,<1" },
     { name = "hatchling", specifier = ">=1.27.0,<2" },
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
+    { name = "lograil", specifier = "~=0.5.0" },
     { name = "mypy", specifier = ">=1.20.2,<2" },
     { name = "poethepoet", specifier = ">=0.48.0" },
     { name = "pytest", specifier = ">=7.0.0,<10" },
@@ -916,6 +920,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/99/3a/9c635ac3e8a00383ff689161d3eac8a30b3b2ddc711b40471e6b8983ea29/librt-0.10.0-cp314-cp314t-win32.whl", hash = "sha256:657860fd877fba6a241ea088ef99f63ca819945d3c715265da670bad56c37ebe", size = 60147, upload-time = "2026-05-05T16:31:00.293Z" },
     { url = "https://files.pythonhosted.org/packages/dc/e8/6f65f3e565d4ac212cddddd552eacc8035ffdf941ca0ad6fe945a211d41f/librt-0.10.0-cp314-cp314t-win_amd64.whl", hash = "sha256:56ded2d66010203a0cb5af063b609e3f079531a0e5e576d618dece859fd2e1af", size = 68649, upload-time = "2026-05-05T16:31:01.778Z" },
     { url = "https://files.pythonhosted.org/packages/51/78/a0705a67cacd81e5fa01a5035b3adbdfbb43a7b8d4bd27e2b282ae61baf2/librt-0.10.0-cp314-cp314t-win_arm64.whl", hash = "sha256:1ee63f30abf18ed4830fdbaf87b2b6f4bba1e198d46085c314edde4045e56715", size = 58247, upload-time = "2026-05-05T16:31:03.191Z" },
+]
+
+[[package]]
+name = "lograil"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/15/e6/1bb3c4559a1f6d78e390e0442c257ec7713298defc4d145ddab1c8675adf/lograil-0.5.0.tar.gz", hash = "sha256:db770d550b2aa8c3ed2c49a9865f57edec466b7e93adb7d3dd7859e8fbfce893", size = 164015, upload-time = "2026-07-21T20:45:35.282Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/8b/77269ab41d2592cc1604d83bf13b247517eac4a9eabfb40ad2c46a0c438c/lograil-0.5.0-py3-none-any.whl", hash = "sha256:259a7f6bc1a1f15b082d9904898c8dd01a427f5cd95774aeb6d4d5bc56adf9db", size = 70553, upload-time = "2026-07-21T20:45:34.128Z" },
 ]
 
 [[package]]

@@ -1,19 +1,29 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python
+from __future__ import annotations
 
-# shellcheck source=scripts/poe/workspace-poe.sh
-. "$(dirname "${BASH_SOURCE[0]}")/poe/workspace-poe.sh"
+import subprocess
+import sys
+from pathlib import Path
 
-workspace_poe_enter_tree
-workspace_poe_split_args "$@"
-workspace_poe_task="$(basename "${BASH_SOURCE[0]}" .sh)"
-case "$workspace_poe_task" in
-  # These root Poe tasks are public aliases back to this runner. Root scopes must
-  # use the matching internal *-root task to avoid recursing indefinitely.
-  fix|lint|test|typecheck)
-    WORKSPACE_POE_ROOT_TASK="${workspace_poe_task}-root" workspace_poe_run_workspace_task "$workspace_poe_task"
-    ;;
-  *)
-    workspace_poe_run_workspace_task "$workspace_poe_task"
-    ;;
-esac
+
+def main() -> int:
+    task = Path(sys.argv[0]).stem
+    root = Path(__file__).resolve().parent.parent
+    runner = root / "scripts" / "poe" / "workspace_poe.py"
+    return subprocess.call(
+        (
+            "uv",
+            "run",
+            "--project",
+            str(root),
+            "python",
+            str(runner),
+            "workspace",
+            task,
+            *sys.argv[1:],
+        )
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

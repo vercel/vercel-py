@@ -10,14 +10,17 @@ its local configuration differences.
   `[tool.poe]`.
 - `tasks/` contains executable wrappers for common tools. The wrappers print the
   concrete command and append Poe extra args consistently.
-- `workspace-poe.sh` contains the workspace runner used by top-level scripts.
+- `workspace_poe.py` contains the Python workspace runner used by top-level
+  scripts and Poe tasks. It uses lograil for concurrent process dashboards and
+  plain-mode output capture.
 - `workspace_poe_resolve.py` attributes package names and paths to workspace
   packages for scoped runs.
 
 The top-level `scripts/fix.sh`, `scripts/lint.sh`, `scripts/test.sh`, and
 `scripts/typecheck.sh` are symlinks to `scripts/workspace-task.sh`. The symlink
-name selects the Poe task to run. The root `pyproject.toml` also exposes
-top-level Poe commands for `lint`, `typecheck`, `test`, and `qa`.
+name selects the Poe task to run, and the script delegates to the Python runner.
+The root `pyproject.toml` also exposes top-level Poe commands for `lint`,
+`typecheck`, `test`, and `qa`.
 
 ## Package Setup
 
@@ -146,9 +149,9 @@ Scopes can be workspace package names, `root`, or paths. Path scopes are mapped
 to owning packages and rewritten relative to the package task working directory.
 
 When a run targets exactly one whole package, the runner executes that package
-directly with no output prefixing. Multi-package and path-scoped runs prefix each
-output line with the package name. Package colors are enabled when stdin is a TTY
-and selected by a stable hash.
+directly. Multi-package and path-scoped runs are rendered by lograil.
+Interactive TTYs get the grouped dashboard; CI, pipes, and
+`LOGRAIL_OUTPUT=plain` get timestamped plain output with process labels.
 
 Root runs execute after package runs. Root tasks use `uv run --all-packages` so
 workspace packages remain importable for root tests. At the workspace root,
@@ -170,8 +173,8 @@ workspace task machinery from the snapshot while using the real project for
 `uv run`. This keeps pre-commit checks focused on staged files and avoids
 unrelated dirty worktree changes influencing hook results.
 
-The managed `pre-commit.checks` hook invokes `uv run poe pre-commit`, a Poe
-parallel task that runs lint and typecheck concurrently with buffered output.
+The managed `pre-commit.checks` hook invokes `uv run poe pre-commit`, which runs
+lint and typecheck concurrently through the Python/lograil runner.
 
 Set `WORKSPACE_POE_GIT_SCOPE=commit` to run a workspace task against a commit
 tree instead of the current working tree:
@@ -185,9 +188,9 @@ Commit mode materializes `git archive` for `WORKSPACE_POE_GIT_COMMIT`, or
 hooks use this mode and set `WORKSPACE_POE_GIT_COMMIT` from Git's pre-push
 input so checks run against the commit tree being pushed.
 
-The managed `pre-push.checks` hook invokes `uv run poe pre-push`, a Poe parallel
-task that runs news-fragment, lint, typecheck, and test checks concurrently with
-buffered output.
+The managed `pre-push.checks` hook invokes `uv run poe pre-push`, which runs
+news-fragment, lint, typecheck, and test checks concurrently through the
+Python/lograil runner.
 
 ## Maintenance
 
@@ -195,18 +198,17 @@ When changing this system, verify all shell code with system's default bash
 (helps catching new bash-isms on macOS).
 
 ```sh
-shellcheck -x scripts/workspace-task.sh scripts/poe/workspace-poe.sh scripts/build.sh scripts/fix.sh scripts/test-examples.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
-/bin/bash -n scripts/workspace-task.sh scripts/poe/workspace-poe.sh scripts/build.sh scripts/fix.sh scripts/test-examples.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
-python3 -m py_compile scripts/poe/workspace_poe_resolve.py
+shellcheck -x scripts/build.sh scripts/test-examples.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
+/bin/bash -n scripts/build.sh scripts/test-examples.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
+python3 -m py_compile scripts/poe/workspace_poe.py scripts/poe/workspace_poe_resolve.py scripts/workspace-task.sh scripts/qa.sh scripts/workspace-root-task.sh
 ```
 
-Run at least one symlinked runner through `/bin/bash`:
+Run at least one symlinked runner directly:
 
 ```sh
-/bin/bash scripts/lint.sh src/vercel-oidc/vercel/oidc/__init__.py
-/bin/bash scripts/typecheck.sh vercel-headers
+./scripts/lint.sh src/vercel-oidc/vercel/oidc/__init__.py
+./scripts/typecheck.sh vercel-headers
 ```
 
-Avoid Bash 4-only features in shell files. In particular, do not use associative
-arrays, `mapfile`, or `readarray`. Put structured workspace logic in
-`workspace_poe_resolve.py` instead.
+Avoid new shell orchestration. Put structured workspace logic in
+`workspace_poe.py` or `workspace_poe_resolve.py` instead.

@@ -195,6 +195,7 @@ if [[ "$task_name" == mypy ]]; then
 fi
 if [[ "$task_name" == pytest ]]; then
   has_numprocesses=0
+  has_verbosity=0
   option_value=0
   if ((${#scope_args[@]})); then
     for arg in "${scope_args[@]}"; do
@@ -209,6 +210,12 @@ if [[ "$task_name" == pytest ]]; then
           ;;
         -n*|--numprocesses=*)
           has_numprocesses=1
+          ;;
+        -q|--quiet|-v|--verbose)
+          has_verbosity=1
+          ;;
+        -q*|-v*)
+          has_verbosity=1
           ;;
       esac
     done
@@ -227,8 +234,21 @@ if [[ "$task_name" == pytest ]]; then
         -n*|--numprocesses=*)
           has_numprocesses=1
           ;;
+        -q|--quiet|-v|--verbose)
+          has_verbosity=1
+          ;;
+        -q*|-v*)
+          has_verbosity=1
+          ;;
       esac
     done
+  fi
+  if ((has_verbosity == 0)) && [[ "${WORKSPACE_POE_LOGRAIL_PROGRESS:-}" == 1 ]]; then
+    if ((${#scope_args[@]})); then
+      scope_args=(-v "${scope_args[@]}")
+    else
+      scope_args=(-v)
+    fi
   fi
   if ((has_numprocesses == 0)) && workspace_poe_parallel_enabled; then
     if ((${#scope_args[@]})); then

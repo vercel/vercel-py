@@ -27,12 +27,14 @@ dev = [
     "tox-uv-bare",
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
+    "lograil~=0.5.0",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = false
 exclude-newer = "2 days"
+exclude-newer-package = { lograil = "2026-07-22T00:00:00Z" }
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
@@ -129,64 +131,36 @@ sequence = ["sync-githooks"]
 cmd = "python scripts/sync-githooks.py"
 
 [tool.poe.tasks.check-news-fragments]
-cmd = "./scripts/workspace-root-task.sh check-news-fragments-root"
+cmd = "scripts/poe/workspace_poe.py root-task check-news-fragments-root"
 
 [tool.poe.tasks.check-news-fragments-root]
 cmd = "python scripts/release.py check-news-fragments"
 
 [tool.poe.tasks.fix]
-cmd = "./scripts/fix.sh ${scopes}"
-args = [{ name = "scopes", positional = true, multiple = true }]
+cmd = "scripts/poe/workspace_poe.py workspace fix --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
 
 [tool.poe.tasks.fix-root]
-shell = """
-set -e
-$RUFF_CHECK_FIX
-$RUFF_FORMAT_FIX
-"""
+cmd = "scripts/poe/workspace_poe.py root-task fix-root"
 
 [tool.poe.tasks.pre-commit]
-shell = """
-/usr/bin/env bash -c '
-  set -euo pipefail
-  . scripts/poe/workspace-poe.sh
-  workspace_poe_run_color_if_supported "$POE" pre-commit-buffered
-'
-"""
-
-[tool.poe.tasks.pre-commit-buffered]
-parallel = ["lint", "typecheck"]
-output_mode = "buffer"
-ignore_fail = "return_non_zero"
+cmd = "scripts/poe/workspace_poe.py hook pre-commit"
 
 [tool.poe.tasks.pre-push]
-shell = """
-/usr/bin/env bash -c '
-  set -euo pipefail
-  . scripts/poe/workspace-poe.sh
-  workspace_poe_run_color_if_supported "$POE" pre-push-buffered
-'
-"""
-
-[tool.poe.tasks.pre-push-buffered]
-parallel = ["check-news-fragments", "lint", "typecheck", "test"]
-output_mode = "buffer"
-ignore_fail = "return_non_zero"
+cmd = "scripts/poe/workspace_poe.py hook pre-push"
 
 [tool.poe.tasks.lint]
-cmd = "./scripts/lint.sh ${scopes}"
-args = [{ name = "scopes", positional = true, multiple = true }]
+cmd = "scripts/poe/workspace_poe.py workspace lint --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
 
 [tool.poe.tasks.lint-root]
-shell = """
-set -e
-$RUFF_CHECK
-$RUFF_FORMAT
-uv run poe lint-towncrier
-if [ -z "$WORKSPACE_POE_SCOPE_ARGS" ]; then
-  $POE lint-zizmor
-fi
-"""
+cmd = "scripts/poe/workspace_poe.py root-task lint-root"
 
 [tool.poe.tasks.lint-zizmor]
 cmd = "zizmor --offline ."
@@ -211,45 +185,30 @@ args = [{ name = "force_bump", options = ["--force-bump"] }]
 cmd = "./scripts/build.sh"
 
 [tool.poe.tasks.typecheck]
-cmd = "./scripts/typecheck.sh ${scopes}"
-args = [{ name = "scopes", positional = true, multiple = true }]
+cmd = "scripts/poe/workspace_poe.py workspace typecheck --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
 
 [tool.poe.tasks.typecheck-root]
-shell = """
-set -e
-$POE typecheck-mypy
-"""
+cmd = "scripts/poe/workspace_poe.py root-task typecheck-root"
 
 [tool.poe.tasks.typecheck-mypy]
 cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-tests}"
 
 [tool.poe.tasks.test]
-cmd = "./scripts/test.sh ${scopes}"
-args = [{ name = "scopes", positional = true, multiple = true }]
+cmd = "scripts/poe/workspace_poe.py workspace test --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
 
 [tool.poe.tasks.test-root]
-shell = """
-if [ -n "$WORKSPACE_POE_SCOPE_ARGS" ]; then
-  $PYTEST --ignore=tests/test_examples.py $WORKSPACE_POE_SCOPE_ARGS
-elif [ -n "$POE_EXTRA_ARGS" ]; then
-  $PYTEST --ignore=tests/test_examples.py
-else
-  $PYTEST --ignore=tests/test_examples.py tests
-fi
-"""
+cmd = "scripts/poe/workspace_poe.py root-task test-root"
 
 [tool.poe.tasks.qa]
-shell = """
-set --
-if [ "${quiet:-}" = "True" ]; then
-  set -- "$@" -q
-fi
-if [ "${verbose:-}" = "True" ]; then
-  set -- "$@" -v
-fi
-set -- "$@" ${scopes}
-./scripts/qa.sh "$@"
-"""
+cmd = "scripts/poe/workspace_poe.py qa --poe-quiet ${quiet} --poe-verbose ${verbose} ${scopes}"
 args = [
   { name = "quiet", options = ["-q", "--quiet"], type = "boolean" },
   { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
