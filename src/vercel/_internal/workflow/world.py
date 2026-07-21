@@ -65,7 +65,7 @@ def get_queue_name(
 
 
 class BaseModel(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(extra="forbid", serialize_by_alias=True)
+    model_config = pydantic.ConfigDict(serialize_by_alias=True)
 
 
 class WorkflowInvokePayload(BaseModel):
