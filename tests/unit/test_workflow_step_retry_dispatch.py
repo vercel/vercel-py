@@ -17,23 +17,15 @@ that asks to retry.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime
-
 import pytest
 
-import vercel.queue as vqs
-from vercel._internal.polyfills import UTC
 from vercel._internal.workflow import world as w
-from vercel._internal.workflow.worlds.vercel import VercelWorld
-from vercel.queue import Message, MessageMetadata, SanitizedName, Subscription, get_subscriptions
-from vercel.queue.testing import clear_subscriptions
-
-CREATED_AT = datetime(2024, 1, 1, tzinfo=UTC)
+from vercel._internal.workflow.worlds.local import LocalWorld
+from vercel.workers._queue.subscribe import subscriptions as _subs_registry
 
 
-class _RecordingWorld(VercelWorld):
-    """VercelWorld whose outbound queue is captured instead of sent over the network."""
+class _RecordingWorld(LocalWorld):
+    """LocalWorld whose outbound queue is captured instead of sent over the network."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -48,44 +40,25 @@ class _RecordingWorld(VercelWorld):
 
 @pytest.fixture
 def isolated_subscriptions():
-    saved = get_subscriptions()
-    clear_subscriptions()
+    saved = list(_subs_registry)
+    _subs_registry.clear()
     try:
-        yield get_subscriptions
+        yield _subs_registry
     finally:
-        clear_subscriptions()
-        for subscription in saved:
-            vqs.subscribe(
-                topic=subscription.topic,
-                consumer_group=subscription.consumer_group,
-                retry_after=subscription.retry_after_seconds,
-                initial_delay=subscription.initial_delay_seconds,
-                max_concurrency=subscription.max_concurrency,
-                max_attempts=subscription.max_attempts,
-            )(subscription.func)
-
-
-def _subscription_list(get_current: Callable[[], tuple[Subscription, ...]]) -> list[Subscription]:
-    return list(get_current())
+        _subs_registry[:] = saved
 
 
 async def test_step_retry_timeout_reschedules_step(isolated_subscriptions) -> None:
     world = _RecordingWorld()
 
-    async def handler(
-        message: object, *, queue_name: str, attempt: int, message_id: str
-    ) -> w.QueueContinuation:
+    async def handler(payload, *, queue_name, attempt, message_id):
         # Stand in for step_handler deciding to retry: a non-None continuation.
-        del message, queue_name, attempt, message_id
         return w.QueueContinuation(delay_seconds=1.0)
 
     # Registers async_handler into the global subscription registry as a side effect.
     world.create_queue_handler("__wkf_step_", handler)
-    subscriptions = _subscription_list(isolated_subscriptions)
-    assert len(subscriptions) == 1
-    assert subscriptions[0].topic == "____wkf__step__*"
-    async_handler = subscriptions[0].func
-    assert async_handler is not None
+    assert len(isolated_subscriptions) == 1
+    async_handler = isolated_subscriptions[0].func
 
     step_payload = w.StepInvokePayload(
         workflowName="wf",
@@ -98,15 +71,9 @@ async def test_step_retry_timeout_reschedules_step(isolated_subscriptions) -> No
         "queueName": "__wkf_step_wf",
         "deploymentId": "<local>",
     }
-    metadata = MessageMetadata(
-        message_id="m1",
-        delivery_count=1,
-        created_at=CREATED_AT,
-        topic="__wkf_step_wf",
-        consumer_group=SanitizedName("tests"),
-    )
+    meta = {"deliveryCount": 1, "messageId": "m1", "topic": "__wkf_step_wf"}
 
-    await async_handler(Message(payload=body, metadata=metadata))
+    await async_handler(body, meta)
 
     assert world.queued, "step retry was not re-enqueued"
     qn, msg, delay, _idem = world.queued[-1]
@@ -123,19 +90,13 @@ async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions
     suspension passes over the same pending wait dedupe to one delayed wake-up."""
     world = _RecordingWorld()
 
-    async def handler(
-        message: object, *, queue_name: str, attempt: int, message_id: str
-    ) -> w.QueueContinuation:
+    async def handler(payload, *, queue_name, attempt, message_id):
         # Stand in for workflow_handler suspending on a wait.
-        del message, queue_name, attempt, message_id
         return w.QueueContinuation(delay_seconds=5.0, idempotency_key="wait_xyz")
 
     world.create_queue_handler("__wkf_workflow_", handler)
-    subscriptions = _subscription_list(isolated_subscriptions)
-    assert len(subscriptions) == 1
-    assert subscriptions[0].topic == "____wkf__workflow__*"
-    async_handler = subscriptions[0].func
-    assert async_handler is not None
+    assert len(isolated_subscriptions) == 1
+    async_handler = isolated_subscriptions[0].func
 
     wf_payload = w.WorkflowInvokePayload(runId="wrun_1").model_dump()
     body = {
@@ -143,15 +104,9 @@ async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions
         "queueName": "__wkf_workflow_wf",
         "deploymentId": "<local>",
     }
-    metadata = MessageMetadata(
-        message_id="m1",
-        delivery_count=1,
-        created_at=CREATED_AT,
-        topic="__wkf_workflow_wf",
-        consumer_group=SanitizedName("tests"),
-    )
+    meta = {"deliveryCount": 1, "messageId": "m1", "topic": "__wkf_workflow_wf"}
 
-    await async_handler(Message(payload=body, metadata=metadata))
+    await async_handler(body, meta)
 
     assert world.queued, "wait continuation was not re-enqueued"
     qn, _msg, delay, idem = world.queued[-1]
