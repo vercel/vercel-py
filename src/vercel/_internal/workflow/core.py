@@ -37,9 +37,6 @@ class Workflow(Generic[P, T]):
         self.module = func.__module__
         self.qualname = func.__qualname__
         self.workflow_id = f"workflow//{self.module}//{self.qualname}"
-        self._legacy_workflow_id = f"workflow//{self.module}.{self.qualname}"
-        # old name format is being replaced with a ts-compatible one
-        # so workflow observability tab can correcly label traces
 
     def _resolve_queue_namespace(self) -> str | None:
         return self._registry.namespace
@@ -51,7 +48,6 @@ class Step(Generic[P, T]):
     ):
         self.func = func
         self.name = f"step//{func.__module__}//{func.__qualname__}"
-        self._legacy_name = f"step//{func.__module__}.{func.__qualname__}"
         self.max_retries = max_retries
         functools.update_wrapper(self, func)
 
@@ -217,12 +213,8 @@ class Workflows:
 
     def workflow(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
         rv = Workflow(func, registry=self)
-        workflow_ids = (rv.workflow_id, rv._legacy_workflow_id)
-        # check for both legacy and current workflow name
-        for workflow_id in workflow_ids:
-            assert workflow_id not in self._workflows, f"Duplicate workflow ID: {workflow_id}"
-        for workflow_id in workflow_ids:
-            self._workflows[workflow_id] = rv
+        assert rv.workflow_id not in self._workflows, f"Duplicate workflow ID: {rv.workflow_id}"
+        self._workflows[rv.workflow_id] = rv
         return rv
 
     def _get_workflow(self, workflow_id: str) -> Workflow[Any, Any]:
@@ -244,11 +236,8 @@ class Workflows:
     ) -> Step[P, T] | Callable[[Callable[P, Coroutine[Any, Any, T]]], Step[P, T]]:
         def register(f: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
             rv = Step(f, max_retries=max_retries)
-            step_names = (rv.name, rv._legacy_name)
-            for step_name in step_names:
-                assert step_name not in self._steps, f"Duplicate step name: {step_name}"
-            for step_name in step_names:
-                self._steps[step_name] = rv
+            assert rv.name not in self._steps, f"Duplicate step name: {rv.name}"
+            self._steps[rv.name] = rv
             return rv
 
         if func is None:

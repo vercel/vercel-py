@@ -74,25 +74,6 @@ async def test_matching_step_does_not_raise() -> None:
     assert sus.has_created_event
 
 
-async def test_legacy_step_name_does_not_raise() -> None:
-    """Runs recorded before the separator fix can still replay."""
-    step = core.Step(_greet)
-    cid = "step_1"
-    events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step._legacy_name, input=[b'json[["a"], {}]']).into_event(
-            cid
-        )
-    ]
-    ctx = _context(events)
-    sus = _suspension(cid, b'json[["a"], {}]')
-    ctx.suspensions[cid] = sus
-
-    ctx.resume()
-
-    assert not sus.future.done()
-    assert sus.has_created_event
-
-
 async def test_wait_step_swap_raises_nondeterminism() -> None:
     """Recorded a step at this positional slot, but the body now issues a wait
     with the same positional ULID -> NondeterminismError (not a silent stall).
