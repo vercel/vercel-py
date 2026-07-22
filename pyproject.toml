@@ -21,6 +21,7 @@ dev = [
     "zizmor>=1.24.1,<2",
     "hatchling>=1.27.0,<2",
     "time-machine>=2.16,<3",
+    "textual>=8.0.0,<9",
     "trio>=0.33.0,<1",
     "poethepoet>=0.48.0",
     "tox>=4",
@@ -180,6 +181,14 @@ fi
 python scripts/release.py release "$@"
 """
 args = [{ name = "force_bump", options = ["--force-bump"] }]
+
+[tool.poe.tasks.changelog]
+cmd = "python scripts/release.py changelog"
+use_exec = true
+
+[tool.poe.tasks.clog]
+cmd = "python scripts/release.py changelog"
+use_exec = true
 
 [tool.poe.tasks.dist]
 cmd = "./scripts/build.sh"
