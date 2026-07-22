@@ -89,6 +89,15 @@ exclude = [
 include = "../../scripts/poe/poe.toml"
 verbosity = -1
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+markers = [
+    "live: requires live API credentials (VERCEL_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",
+]
+
 [tool.mypy]
 cache_dir = "../../.mypy_cache/vercel"
 explicit_package_bases = true
@@ -109,4 +118,4 @@ cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-vercel}"
 cwd = ".."
 
 [tool.poe.tasks.test]
-cmd = "python -c \"pass\""
+cmd = "$PYTEST"

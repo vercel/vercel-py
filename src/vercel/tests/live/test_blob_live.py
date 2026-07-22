@@ -1,7 +1,7 @@
 """Live API tests for Vercel Blob storage.
 
 These tests make real API calls and require BLOB_READ_WRITE_TOKEN environment variable.
-Run with: pytest tests/live/test_blob_live.py -v
+Run with: pytest src/vercel/tests/live/test_blob_live.py -v
 """
 
 import pytest

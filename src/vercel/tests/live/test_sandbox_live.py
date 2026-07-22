@@ -2,7 +2,7 @@
 
 These tests make real API calls and require VERCEL_TOKEN or VERCEL_OIDC_TOKEN,
 VERCEL_TEAM_ID, and VERCEL_PROJECT_ID environment variables.
-Run with: pytest tests/live/test_sandbox_live.py -v
+Run with: pytest src/vercel/tests/live/test_sandbox_live.py -v
 """
 
 import os
