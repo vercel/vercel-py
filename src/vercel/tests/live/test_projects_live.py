@@ -4,7 +4,7 @@ Live API tests for Vercel Projects module.
 These tests make actual API calls to Vercel and validate the real responses.
 They require VERCEL_TOKEN or VERCEL_OIDC_TOKEN, plus VERCEL_TEAM_ID.
 
-Run with: pytest tests/live/test_projects_live.py -v
+Run with: pytest src/vercel/tests/live/test_projects_live.py -v
 """
 
 import time

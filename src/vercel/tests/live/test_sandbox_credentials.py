@@ -1,6 +1,6 @@
 """Credential gating tests for sandbox live tests."""
 
-from tests.live.conftest import has_sandbox_credentials
+from .conftest import has_sandbox_credentials
 
 
 def test_sandbox_credentials_accept_oidc_without_team_or_project(

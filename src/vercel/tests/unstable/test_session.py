@@ -49,7 +49,7 @@ class CountingAsyncClient(httpx.AsyncClient):
 
 
 def test_runtime_dependency_direction_and_removed_layers() -> None:
-    internal = Path(__file__).parents[2] / "src/vercel/_internal/unstable"
+    internal = Path(__file__).parents[2] / "_internal/unstable"
     sandbox_internal = internal / "sandbox"
 
     deleted_modules = (
