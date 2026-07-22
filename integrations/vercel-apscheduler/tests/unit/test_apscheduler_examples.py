@@ -24,10 +24,18 @@ def test_cleanup_example_uses_explicit_function_trigger_contract() -> None:
         "topic": TOPIC,
         "maxConcurrency": 1,
     }
-    assert "crons" not in config
-    assert config["buildCommand"] == (
-        "uv run python -m vercel.integrations.apscheduler --entrypoint api.scheduler:scheduler"
-    )
+    assert config["crons"] == [{"path": "/api/scheduler_watchdog", "schedule": "* * * * *"}]
+    assert config["buildCommand"] is None
+    assert config["framework"] is None
+    assert config["outputDirectory"] == "public"
+    assert config["regions"] == ["iad1"]
+    assert config["rewrites"] == [{"source": "/", "destination": "/api"}]
+    assert config["functions"]["api/index.py"] == {"maxDuration": 60}
+    assert config["functions"]["api/scheduler_watchdog.py"] == {"maxDuration": 60}
+    assert (EXAMPLE_ROOT / "api" / "index.py").is_file()
+    assert (EXAMPLE_ROOT / "api" / "scheduler_watchdog.py").is_file()
+    assert not (EXAMPLE_ROOT / "main.py").exists()
+    assert (EXAMPLE_ROOT / "public" / ".gitkeep").is_file()
 
     pyproject = (EXAMPLE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "[[tool.vercel.subscribers]]" not in pyproject

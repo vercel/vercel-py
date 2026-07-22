@@ -12,6 +12,7 @@ license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
     "APScheduler>=3.10.4,<4",
+    "anyio>=4,<5",
     "vercel-queue>=0.6.0",
 ]
 

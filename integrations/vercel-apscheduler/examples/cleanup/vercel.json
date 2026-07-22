@@ -1,6 +1,18 @@
 {
-    "buildCommand": "uv run python -m vercel.integrations.apscheduler --entrypoint api.scheduler:scheduler",
+    "framework": null,
+    "buildCommand": null,
+    "outputDirectory": "public",
+    "regions": ["iad1"],
+    "rewrites": [
+        {
+            "source": "/",
+            "destination": "/api"
+        }
+    ],
     "functions": {
+        "api/index.py": {
+            "maxDuration": 60
+        },
         "api/scheduler.py": {
             "experimentalTriggers": [
                 {
@@ -9,6 +21,15 @@
                     "maxConcurrency": 1
                 }
             ]
+        },
+        "api/scheduler_watchdog.py": {
+            "maxDuration": 60
         }
-    }
+    },
+    "crons": [
+        {
+            "path": "/api/scheduler_watchdog",
+            "schedule": "* * * * *"
+        }
+    ]
 }

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import os
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -25,6 +26,7 @@ from vercel.integrations.apscheduler import (
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter
 from vercel.integrations.apscheduler._payload import CursorEntry
 from vercel.integrations.apscheduler._seed import main as seed_main
+from vercel.integrations.apscheduler._watchdog import APSchedulerWatchdogAsgiApp
 from vercel.queue import DuplicateIdempotencyKeyError
 
 
@@ -627,6 +629,74 @@ class TestStockSchedulerAdapter:
             adapter.process_wakeup(tick_at, publish_next=False, now=tick_at)
 
 
+class TestWatchdog:
+    @pytest.mark.asyncio
+    @patch("vercel.integrations.apscheduler._adapter.vqs_sync.send")
+    async def test_get_seeds_current_scheduler_chain(self, mock_send: Any) -> None:
+        scheduler, adapter = _scheduler()
+        scheduler.add_job(
+            lambda: None,
+            "cron",
+            minute="*",
+            timezone=UTC,
+            id="cleanup",
+        )
+        responses: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            responses.append(message)
+
+        app = APSchedulerWatchdogAsgiApp(adapter)
+        await app(
+            {"type": "http", "method": "GET", "headers": []},
+            None,
+            send,
+        )
+
+        assert responses[0]["status"] == 204
+        assert mock_send.call_args.args[1]["kind"] == "watchdog"
+
+    @pytest.mark.asyncio
+    async def test_get_requires_cron_secret_when_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("CRON_SECRET", "secret")
+        adapter = Mock()
+        responses: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            responses.append(message)
+
+        app = APSchedulerWatchdogAsgiApp(adapter)
+        await app(
+            {"type": "http", "method": "GET", "headers": []},
+            None,
+            send,
+        )
+
+        assert responses[0]["status"] == 401
+        adapter.seed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_get_requests(self) -> None:
+        adapter = Mock()
+        responses: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            responses.append(message)
+
+        app = APSchedulerWatchdogAsgiApp(adapter)
+        await app(
+            {"type": "http", "method": "POST", "headers": []},
+            None,
+            send,
+        )
+
+        assert responses[0]["status"] == 405
+        adapter.seed.assert_not_called()
+
+
 class TestSeedCli:
     @patch("vercel.integrations.apscheduler._adapter.vqs_sync.send")
     def test_seed_cli_imports_scheduler_and_sends_first_wakeup(
@@ -664,11 +734,17 @@ scheduler.add_job(
         exit_code = seed_main([
             "--entrypoint",
             "schedule:scheduler",
+            "--deployment",
+            "dpl_test",
+            "--region",
+            "iad1",
             "--now",
             "2026-04-09T11:59:00+00:00",
         ])
 
         assert exit_code == 0
+        assert os.environ["VERCEL_DEPLOYMENT_ID"] == "dpl_test"
+        assert os.environ["VERCEL_REGION"] == "iad1"
         assert mock_send.call_args.args[0] == "__aps_schedule_scheduler"
         assert mock_send.call_args.kwargs["idempotency_key"] == (
             "aps:schedule_scheduler:2026-04-09T12:00:00+00:00"

@@ -1997,12 +1997,14 @@ requires-dist = [
 name = "vercel-apscheduler"
 source = { editable = "integrations/vercel-apscheduler" }
 dependencies = [
+    { name = "anyio" },
     { name = "apscheduler" },
     { name = "vercel-queue" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4,<5" },
     { name = "apscheduler", specifier = ">=3.10.4,<4" },
     { name = "vercel-queue", editable = "src/vercel-queue" },
 ]

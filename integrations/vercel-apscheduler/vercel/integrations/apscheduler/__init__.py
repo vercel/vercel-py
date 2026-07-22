@@ -12,6 +12,7 @@ from ._executor import VercelInlineExecutor
 from ._options import VercelAPSchedulerOptions
 from ._payload import MemoryCursor, WakeupPayload
 from ._subscriber import get_asgi_app, register_scheduler
+from ._watchdog import get_watchdog_asgi_app
 from .version import __version__
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "__version__",
     "adopt_scheduler",
     "get_asgi_app",
+    "get_watchdog_asgi_app",
     "install_vercel_apscheduler_integration",
     "register_scheduler",
     "seed_next_wakeup",

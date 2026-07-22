@@ -53,12 +53,14 @@ if __name__ == "__main__":
     scheduler.start()
 ```
 
-`vercel.json` routes the explicit topic to that Function. A temporary build
-command seeds the first wake for this test deployment path:
+`vercel.json` routes the explicit topic to that Function:
 
 ```json
 {
-    "buildCommand": "uv run python -m vercel.integrations.apscheduler --entrypoint api.scheduler:scheduler",
+    "framework": null,
+    "buildCommand": null,
+    "outputDirectory": "public",
+    "regions": ["iad1"],
     "functions": {
         "api/scheduler.py": {
             "experimentalTriggers": [
@@ -68,8 +70,14 @@ command seeds the first wake for this test deployment path:
                     "maxConcurrency": 1
                 }
             ]
+        },
+        "api/scheduler_watchdog.py": {
+            "maxDuration": 60
         }
-    }
+    },
+    "crons": [
+        { "path": "/api/scheduler_watchdog", "schedule": "* * * * *" }
+    ]
 }
 ```
 
@@ -318,38 +326,46 @@ new: id="cleanup", cron hour=5, fingerprint=B
 from the new trigger. Keeping the same ID is fine; changing the fingerprint is
 what invalidates stale timing.
 
-## Deployment Seed
+## Watchdog Seed
 
-The subscriber cannot receive anything until one initial wake exists. For the
-current test path, `vercel.json` runs the seed CLI as a temporary build command:
+The queue subscriber is private and receives only queue pushes. A separate
+public cron Function imports the same scheduler definition:
+
+```python
+from api.scheduler import OPTIONS, scheduler
+from vercel.integrations.apscheduler import get_watchdog_asgi_app
+
+app = get_watchdog_asgi_app(scheduler, options=OPTIONS)
+```
 
 ```text
-deployment build -> seed first wake -> queue subscriber -> successor chain
+Vercel Cron -> watchdog Function -> seed current deployment partition
+                                      |
+                                      v
+                         private queue subscriber -> successor chain
 ```
 
-The command imports the same scheduler entrypoint and publishes its earliest
-wake. It requires the build environment to expose the deployment ID, region,
-and queue credentials. The equivalent explicit command is:
+This solves two jobs with one idempotent operation:
+
+1. The first cron after activation bootstraps the deployment.
+2. Later crons recalculate the current frontier and repair it if necessary.
+
+A healthy chain and the watchdog publish the same logical-time key, so the
+watchdog does not create a second permanent chain. It is coarse control-plane
+maintenance; queue-delayed messages still provide the actual schedule timing.
+
+The watchdog is a separate Function because `queue/v2beta` consumers are
+air-gapped and have no public URL, while Vercel Cron invokes an HTTP GET path.
+If `CRON_SECRET` is configured, the watchdog validates its bearer token.
+
+The CLI remains available for diagnostics or an explicit one-off seed:
 
 ```bash
-VERCEL=1 \
-VERCEL_REGION=iad1 \
-VERCEL_DEPLOYMENT_ID=YOUR_DEPLOYMENT_ID \
-VERCEL_APSCHEDULER_SCHEDULER_ID=cleanup \
-VERCEL_APSCHEDULER_TOPIC=__aps_cleanup \
-VERCEL_APSCHEDULER_CONSUMER=api/scheduler.py \
-python -m vercel.integrations.apscheduler --entrypoint api.scheduler:scheduler
+vc env run -e production -- .venv/bin/python -m vercel.integrations.apscheduler \
+  --entrypoint api.scheduler:scheduler \
+  --deployment dpl_YOUR_DEPLOYMENT_ID \
+  --region iad1
 ```
-
-There is deliberately no API route, Vercel Cron, or second subscriber. Once
-seeded, each delivery publishes its successor before acknowledging itself.
-Future `[[tool.vercel.subscribers]]` support can replace only the temporary seed
-command; the queue subscriber and scheduling protocol stay the same.
-
-The seed is bootstrap for a deployment, not periodic repair. The example does
-not configure `maxDeliveries`, and the integration does not impose a finite
-attempt cap by default. There is no expected "dropped chain" state in the
-scheduler protocol and therefore no watchdog path.
 
 ## Durable Job Stores
 

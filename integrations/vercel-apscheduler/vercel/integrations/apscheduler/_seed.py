@@ -28,10 +28,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--now",
         help="optional timezone-aware ISO-8601 reference time for tests",
     )
+    parser.add_argument(
+        "--deployment",
+        help="target Vercel deployment ID, such as dpl_123",
+    )
+    parser.add_argument(
+        "--region",
+        help="target Vercel Queue region, such as iad1",
+    )
     args = parser.parse_args(argv)
 
     # Defuse unguarded scheduler.start() calls while importing user code.
     os.environ.setdefault("VERCEL", "1")
+    if args.deployment:
+        os.environ["VERCEL_DEPLOYMENT_ID"] = args.deployment
+    if args.region:
+        os.environ["VERCEL_REGION"] = args.region
     install_vercel_apscheduler_integration(options=VercelAPSchedulerOptions.from_env())
 
     try:
@@ -48,7 +60,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(
             "Scheduled APScheduler wakeup "
             f"{published.logical_time.isoformat()} "
-            f"with idempotency key {published.idempotency_key}.\n"
+            f"with idempotency key {published.idempotency_key} "
+            f"and message ID {published.message_id or 'duplicate'}.\n"
         )
     return 0
 

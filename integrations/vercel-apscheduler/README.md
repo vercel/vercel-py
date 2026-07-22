@@ -32,7 +32,10 @@ app = get_asgi_app(scheduler, options=options)
 
 ```json
 {
-    "buildCommand": "uv run python -m vercel.integrations.apscheduler --entrypoint api.scheduler:scheduler",
+    "framework": null,
+    "buildCommand": null,
+    "outputDirectory": "public",
+    "regions": ["iad1"],
     "functions": {
         "api/scheduler.py": {
             "experimentalTriggers": [
@@ -42,15 +45,30 @@ app = get_asgi_app(scheduler, options=options)
                     "maxConcurrency": 1
                 }
             ]
+        },
+        "api/scheduler_watchdog.py": {
+            "maxDuration": 60
         }
-    }
+    },
+    "crons": [
+        { "path": "/api/scheduler_watchdog", "schedule": "* * * * *" }
+    ]
 }
 ```
 
-The temporary build command seeds the first wake. After that, the Function is a
-single queue subscriber: queue delivery, acknowledgment, and successor
-publication are handled by `vercel.queue` inside the returned ASGI app. There
-is no HTTP seed route or watchdog cron.
+The queue consumer remains private. A separate cron Function imports the same
+scheduler and idempotently seeds the current deployment partition:
+
+```python
+from api.scheduler import OPTIONS, scheduler
+from vercel.integrations.apscheduler import get_watchdog_asgi_app
+
+app = get_watchdog_asgi_app(scheduler, options=OPTIONS)
+```
+
+The watchdog bootstraps a new deployment and repairs the chain if necessary.
+Between watchdog runs, the queue subscriber handles precise delayed wakes and
+publishes each successor before acknowledging the current message.
 
 The chain is durable: a wake is acknowledged only after its successor has been
 accepted by Vercel Queues. A publish failure fails the current delivery so Vercel
