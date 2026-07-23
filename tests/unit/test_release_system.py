@@ -61,6 +61,85 @@ def test_compute_releases_cascades_dependency_only_patch(
     ]
 
 
+def test_split_release_graph_propagates_in_publication_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    core_changes = changes / "vercel-internal-core"
+    core_changes.mkdir(parents=True)
+    (core_changes / "split.feature.md").write_text("Add shared runtime.\n", encoding="utf-8")
+
+    package_names = ("vercel-internal-core", "vercel-sandbox", "vercel")
+    package_paths = {name: tmp_path / name for name in package_names}
+    for path in package_paths.values():
+        path.mkdir()
+        (path / "version.py").write_text('__version__ = "0.1.0"\n', encoding="utf-8")
+    packages = {
+        "vercel-internal-core": workspace.Package(
+            "vercel-internal-core",
+            package_paths["vercel-internal-core"],
+            package_paths["vercel-internal-core"] / "version.py",
+            (),
+        ),
+        "vercel-sandbox": workspace.Package(
+            "vercel-sandbox",
+            package_paths["vercel-sandbox"],
+            package_paths["vercel-sandbox"] / "version.py",
+            ("vercel-internal-core",),
+        ),
+        "vercel": workspace.Package(
+            "vercel",
+            package_paths["vercel"],
+            package_paths["vercel"] / "version.py",
+            ("vercel-internal-core", "vercel-sandbox"),
+        ),
+    }
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+
+    releases = release.compute_releases()
+
+    assert [item.package for item in releases] == list(package_names)
+    assert [item.dependency_only for item in releases] == [False, True, True]
+    assert "vercel" not in packages["vercel-sandbox"].dependencies
+
+
+def test_sandbox_metadata_hook_updates_core_bound_and_keeps_upper_bound(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path
+    core_root = workspace_root / "src/vercel-internal-core"
+    sandbox_root = workspace_root / "src/vercel-sandbox"
+    core_root.mkdir(parents=True)
+    sandbox_root.mkdir(parents=True)
+    (workspace_root / "pyproject.toml").write_text(
+        "[tool.uv.workspace]\nmembers = ['src/*']\n", encoding="utf-8"
+    )
+    (core_root / "pyproject.toml").write_text(
+        '[project]\nname = "vercel-internal-core"\n\n[tool.hatch.version]\npath = "version.py"\n',
+        encoding="utf-8",
+    )
+    (core_root / "version.py").write_text('__version__ = "0.1.7"\n', encoding="utf-8")
+    (sandbox_root / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel-sandbox"
+
+[tool.uv.sources]
+vercel-internal-core = { workspace = true }
+
+[tool.vercel.release.dependencies]
+dependencies = ["vercel-internal-core>=0.1.0,<0.2.0"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    metadata: dict[str, object] = {}
+    hatch_build.WorkspaceDependenciesMetadataHook(str(sandbox_root), {}).update(metadata)
+
+    assert metadata["dependencies"] == ["vercel-internal-core>=0.1.7,<0.2.0"]
+
+
 def test_compute_releases_force_bumps_all_packages(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

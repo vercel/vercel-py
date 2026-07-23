@@ -23,8 +23,9 @@ from packaging.requirements import Requirement
 from packaging.version import Version
 
 try:
-    from scripts import workspace
+    from scripts import wheel_test, workspace
 except ImportError:  # pragma: no cover - script execution path
+    import wheel_test  # type: ignore[no-redef]
     import workspace  # type: ignore[no-redef]
 
 try:
@@ -61,13 +62,21 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-cache",
     "vercel-celery",
     "vercel-dramatiq",
+    "vercel-internal-core",
     "vercel-internal-telemetry",
     "vercel-oidc",
     "vercel-queue",
+    "vercel-sandbox",
 }
 PEER_DEPENDENCIES = {
     "vercel-celery": {"celery"},
     "vercel-dramatiq": {"dramatiq"},
+}
+EXTERNAL_DEPENDENCIES = {
+    # Pydantic's runtime graph includes the platform-specific pydantic-core
+    # extension. Keep the ordinary bounded dependency instead of producing a
+    # bundle that contains only Pydantic's Python sources.
+    "vercel-sandbox": {"pydantic"},
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
@@ -86,6 +95,7 @@ class VendoringConfig:
     requirements: Path
     namespace: str
     protected_files: tuple[str, ...]
+    source_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -180,6 +190,20 @@ def _load_pyproject(path: Path) -> dict[str, Any]:
 def _vendoring_config_for_package(
     package: workspace.Package, data: dict[str, Any]
 ) -> VendoringConfig | None:
+    if package.name == "vercel-internal-core":
+        core_package_root = Path("vercel/internal/core")
+        return VendoringConfig(
+            destination=core_package_root / "_vendor",
+            requirements=core_package_root / "_vendor/vendor.txt",
+            namespace="vercel.internal.core._vendor",
+            protected_files=("__init__.py", "vendor.txt"),
+            source_paths=(
+                Path("vercel/__init__.py"),
+                Path("vercel/py.typed"),
+                core_package_root,
+            ),
+        )
+
     package_root = _vendoring_package_root_from_wheel_include(data)
     if package_root is None:
         package_root = _vendoring_package_root_from_version_file(package)
@@ -191,6 +215,7 @@ def _vendoring_config_for_package(
         requirements=destination / "vendor.txt",
         namespace=".".join(package_root.parts + ("_vendor",)),
         protected_files=("__init__.py", "vendor.txt"),
+        source_paths=(package_root,),
     )
 
 
@@ -226,6 +251,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
         return _pin_requirements(SHARED_VENDORED_REQUIREMENTS, lock_versions)
 
     vendored_names = []
+    external_dependencies = EXTERNAL_DEPENDENCIES.get(package_name, set())
     peers = PEER_DEPENDENCIES.get(package_name, set())
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)
@@ -234,7 +260,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
             continue
         if normalized.startswith("vercel-"):
             continue
-        if normalized in peers:
+        if normalized in external_dependencies or normalized in peers:
             continue
         vendored_names.append(normalized)
     return _pin_requirements(tuple(vendored_names), lock_versions)
@@ -285,6 +311,7 @@ def _external_dependencies(
 ) -> tuple[str, ...]:
     packages = workspace.packages()
     vendored_names = {_requirement_name(requirement) for requirement in vendored_requirements}
+    external_dependencies = EXTERNAL_DEPENDENCIES.get(package_name, set())
     peers = PEER_DEPENDENCIES.get(package_name, set())
     external = []
     for dependency in _release_dependencies(data):
@@ -294,7 +321,11 @@ def _external_dependencies(
             continue
         if normalized.startswith("vercel-") and normalized in packages:
             external.append(_vendored_dependency(parsed))
-        elif normalized in peers or normalized not in vendored_names:
+        elif (
+            normalized in external_dependencies
+            or normalized in peers
+            or normalized not in vendored_names
+        ):
             external.append(dependency)
     if package_name != SHARED_VENDORED_PACKAGE and _uses_shared_vendored_deps(package_name, data):
         external.append(_vendored_dependency(Requirement(SHARED_VENDORED_PACKAGE)))
@@ -624,9 +655,9 @@ def _vendoring_transformations(plan: VendoredPlan) -> VendoringTransformations:
         return VendoringTransformations(
             substitutions=tuple(_shared_h2_substitution_pairs()),
         )
-    if any(_requirement_name(requirement) == "anyio" for requirement in plan.vendored_requirements):
-        return VendoringTransformations(substitutions=(ANYIO_FROM_THREAD_SUBSTITUTION,))
-    return VendoringTransformations()
+    vendored_names = {_requirement_name(requirement) for requirement in plan.vendored_requirements}
+    substitutions = (ANYIO_FROM_THREAD_SUBSTITUTION,) if "anyio" in vendored_names else ()
+    return VendoringTransformations(substitutions=substitutions)
 
 
 def _shared_h2_substitution_pairs() -> tuple[tuple[str, str], ...]:
@@ -915,12 +946,17 @@ def _format_toml_string_array(values: tuple[str, ...]) -> str:
 
 
 def _rewrite_source_imports(plan: VendoredPlan, generated: Path) -> None:
-    package_root = generated / _package_root_from_destination(plan.config.destination)
     files = []
-    for path in sorted(package_root.rglob("*.py")):
-        if plan.config.destination in path.relative_to(generated).parents:
-            continue
-        files.append(path)
+    for source_path in _source_paths(plan.config):
+        path = generated / source_path
+        if path.is_file():
+            candidates = [path] if path.suffix == ".py" else []
+        else:
+            candidates = sorted(path.rglob("*.py"))
+        for candidate in candidates:
+            if plan.config.destination in candidate.relative_to(generated).parents:
+                continue
+            files.append(candidate)
     if not files:
         return
 
@@ -969,6 +1005,12 @@ def _package_root_from_destination(destination: Path) -> Path:
     if parts[-1:] == ("_vendor",):
         return Path(*parts[:-1])
     raise SystemExit(f"vendoring destination must end with _vendor: {destination}")
+
+
+def _source_paths(config: VendoringConfig) -> tuple[Path, ...]:
+    if config.source_paths:
+        return config.source_paths
+    return (_package_root_from_destination(config.destination),)
 
 
 def _source_rewrite_libs(plan: VendoredPlan) -> tuple[str, ...]:
@@ -1045,8 +1087,79 @@ def _source_rewrite_substitutions(plan: VendoredPlan) -> tuple[dict[str, str], .
 def test_wheel(package_name: str, *, dist_dir: Path) -> None:
     plan = load_plan(package_name)
     wheel = _single_wheel(dist_dir, plan.variant_name)
+    if package_name == "vercel-sandbox":
+        _test_sandbox_bundle_runtime(wheel, dist_dir=dist_dir)
     script = ROOT / ".github" / "scripts" / "test_installed_wheel.sh"
     _run(["sh", str(script), package_name, str(wheel.resolve())], cwd=ROOT)
+
+
+def _test_sandbox_bundle_runtime(wheel: Path, *, dist_dir: Path) -> None:
+    target = wheel_test.WheelArtifact.load(wheel)
+    pydantic_requirements = [
+        requirement
+        for requirement in target.requirements
+        if _normalize_name(requirement.name) == "pydantic"
+        and (requirement.marker is None or requirement.marker.evaluate())
+    ]
+    if len(pydantic_requirements) != 1:
+        raise SystemExit(
+            "vercel-sandbox-bundle must declare exactly one active Pydantic dependency"
+        )
+    specifier = pydantic_requirements[0].specifier
+    has_lower_bound = any(item.operator in {">", ">="} for item in specifier)
+    has_upper_bound = any(item.operator in {"<", "<="} for item in specifier)
+    if not has_lower_bound or not has_upper_bound:
+        raise SystemExit("vercel-sandbox-bundle must declare bounded Pydantic metadata")
+    if any(path.startswith("vercel/sandbox/_vendor/pydantic/") for path in target.files):
+        raise SystemExit("vercel-sandbox-bundle must not vendor Pydantic")
+
+    available = wheel_test.discover_wheels(dist_dir)
+    installed = wheel_test.local_dependency_artifacts([target], available)
+    wheel_test.assert_unique_ownership(installed)
+    wheel_test.assert_unique_ownership(installed, split_paths_only=True)
+
+    smoke = """
+import inspect
+from importlib.metadata import requires, version
+from pathlib import Path
+
+import pydantic
+import vercel
+from vercel import sandbox
+from vercel.sandbox import sync
+
+assert version("vercel-sandbox-bundle")
+metadata = requires("vercel-sandbox-bundle") or []
+assert sum(item.lower().startswith("pydantic") for item in metadata) == 1
+assert "_vendor" not in Path(pydantic.__file__).parts
+assert issubclass(sandbox.SandboxError, vercel.VercelError)
+assert sync.SandboxError is sandbox.SandboxError
+assert sync.SandboxResources is sandbox.SandboxResources
+assert sandbox.SandboxResources(vcpus=1, memory=512).model_dump() == {
+    "vcpus": 1,
+    "memory": 512,
+}
+assert inspect.iscoroutinefunction(sandbox.get_sandbox)
+assert not inspect.iscoroutinefunction(sync.get_sandbox)
+for name in sandbox.__all__:
+    assert hasattr(sandbox, name), name
+for name in sync.__all__:
+    assert hasattr(sync, name), name
+""".strip()
+    with tempfile.TemporaryDirectory(prefix="vercel-sandbox-bundle-smoke-") as temp_dir:
+        command = [
+            "uv",
+            "run",
+            "--no-cache",
+            "--isolated",
+            "--no-project",
+            "--directory",
+            temp_dir,
+        ]
+        for artifact in installed:
+            command.extend(("--with", str(artifact.path)))
+        command.extend(("python", "-I", "-c", smoke))
+        _run(command, cwd=Path(temp_dir))
 
 
 def shared_github_release_body() -> str:

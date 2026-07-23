@@ -1,9 +1,5 @@
-"""HTTP configuration constants for Vercel API clients."""
+"""Transitional aliases for HTTP config now owned by internal core."""
 
-from datetime import timedelta
-
-DEFAULT_API_BASE_URL = "https://api.vercel.com"
-DEFAULT_TIMEOUT = timedelta(seconds=60)
-
+from vercel.internal.core.http.config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
 
 __all__ = ["DEFAULT_API_BASE_URL", "DEFAULT_TIMEOUT"]

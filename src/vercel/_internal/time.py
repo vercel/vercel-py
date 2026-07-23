@@ -1,49 +1,23 @@
-from __future__ import annotations
+"""Transitional aliases for time helpers now owned by internal core."""
 
-from datetime import timedelta
+from vercel.internal.core.time import (
+    MILLISECOND,
+    SECOND,
+    coerce_duration,
+    parse_duration,
+    parse_duration_seconds,
+    parse_required_duration_seconds,
+    to_ms_int,
+    to_seconds_float,
+)
 
-MILLISECOND = timedelta(milliseconds=1)
-SECOND = timedelta(seconds=1)
-
-
-def coerce_duration(value: int | float | timedelta, unit: timedelta) -> timedelta:
-    match value:
-        case bool():
-            raise TypeError("duration must be an int, float, or timedelta")
-        case timedelta():
-            return value
-        case int() | float():
-            return value * unit
-        case _:
-            raise TypeError("duration must be an int, float, or timedelta")
-
-
-def parse_duration(value: object, unit: timedelta) -> timedelta | None:
-    match value:
-        case None:
-            return None
-        case bool():
-            raise TypeError("duration must be an int, float, timedelta, or None")
-        case int() | float() | timedelta():
-            return coerce_duration(value, unit)
-        case _:
-            raise TypeError("duration must be an int, float, timedelta, or None")
-
-
-def parse_duration_seconds(value: object) -> timedelta | None:
-    return parse_duration(value, SECOND)
-
-
-def parse_required_duration_seconds(value: object) -> timedelta:
-    duration = parse_duration_seconds(value)
-    if duration is None:
-        raise TypeError("duration is required")
-    return duration
-
-
-def to_ms_int(td: timedelta) -> int:
-    return td // MILLISECOND
-
-
-def to_seconds_float(td: timedelta) -> float:
-    return td / SECOND
+__all__ = [
+    "MILLISECOND",
+    "SECOND",
+    "coerce_duration",
+    "parse_duration",
+    "parse_duration_seconds",
+    "parse_required_duration_seconds",
+    "to_ms_int",
+    "to_seconds_float",
+]

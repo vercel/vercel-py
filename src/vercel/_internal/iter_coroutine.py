@@ -1,20 +1,5 @@
-"""iter_coroutine - Run simple coroutines synchronously."""
+"""Transitional alias for coroutine support now owned by internal core."""
 
-import typing
-
-_T = typing.TypeVar("_T")
-
-
-def iter_coroutine(coro: typing.Coroutine[None, None, _T]) -> _T:
-    """Execute a non-suspending coroutine synchronously."""
-    try:
-        coro.send(None)
-    except StopIteration as ex:
-        return ex.value  # type: ignore [no-any-return]
-    else:
-        raise RuntimeError(f"coroutine {coro!r} did not stop after one iteration!")
-    finally:
-        coro.close()
-
+from vercel.internal.core.iter_coroutine import iter_coroutine
 
 __all__ = ["iter_coroutine"]

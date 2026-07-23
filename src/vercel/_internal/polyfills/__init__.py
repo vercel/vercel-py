@@ -1,9 +1,5 @@
-"""
-Polyfills for modern Python features used internally.
-"""
+"""Transitional aliases for polyfills now owned by internal core."""
 
-from ._datetime import UTC
-from ._strenum import StrEnum
-from ._typing import Self
+from vercel.internal.core.polyfills import UTC, Self, StrEnum
 
 __all__ = ("Self", "StrEnum", "UTC")
