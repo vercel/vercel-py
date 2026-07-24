@@ -23,9 +23,8 @@ from packaging.requirements import Requirement
 from packaging.version import Version
 
 try:
-    from scripts import wheel_test, workspace
+    from scripts import workspace
 except ImportError:  # pragma: no cover - script execution path
-    import wheel_test  # type: ignore[no-redef]
     import workspace  # type: ignore[no-redef]
 
 try:
@@ -1060,12 +1059,8 @@ def _source_rewrite_substitutions(plan: VendoredPlan) -> tuple[dict[str, str], .
 def test_wheel(package_name: str, *, dist_dir: Path) -> None:
     plan = load_plan(package_name)
     wheel = _single_wheel(dist_dir, plan.variant_name)
-    wheel_test.run_installed_tests(
-        package_name,
-        wheel=wheel,
-        dist_dir=dist_dir,
-        require_all_workspace_dependencies=False,
-    )
+    script = ROOT / ".github" / "scripts" / "test_installed_wheel.sh"
+    _run(["sh", str(script), package_name, str(wheel.resolve())], cwd=ROOT)
 
 
 def shared_github_release_body() -> str:
