@@ -27,6 +27,7 @@ dependencies = [
     "vercel-cache>=0.6.0",
     "vercel-headers>=0.6.0",
     "vercel-oidc>=0.6.0",
+    "vercel-proxy>=0.1.0",
     "vercel-internal-telemetry>=0.6.0",
 ]
 
@@ -40,6 +41,7 @@ vercel-cache = { workspace = true }
 vercel-headers = { workspace = true }
 vercel-internal-telemetry = { workspace = true }
 vercel-oidc = { workspace = true }
+vercel-proxy = { workspace = true }
 
 [tool.hatch.version]
 path = "version.py"

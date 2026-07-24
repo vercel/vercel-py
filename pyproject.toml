@@ -72,6 +72,7 @@ mypy_path = [
     "src/vercel-headers",
     "src/vercel-queue",
     "src/vercel-oidc",
+    "src/vercel-proxy",
     "src/vercel-internal-telemetry",
     "integrations/vercel-celery",
     "integrations/vercel-dramatiq",

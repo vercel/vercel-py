@@ -68,6 +68,10 @@ SHARED_VENDORED_CONSUMERS = {
 PEER_DEPENDENCIES = {
     "vercel-celery": {"celery"},
     "vercel-dramatiq": {"dramatiq"},
+    # Starlette classes are part of vercel.proxy's public interoperability
+    # contract. Vendoring them would make application Response objects fail
+    # identity checks against a second, private Starlette installation.
+    "vercel-proxy": {"starlette"},
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",

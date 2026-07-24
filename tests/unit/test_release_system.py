@@ -1104,6 +1104,31 @@ def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
     )
 
 
+def test_proxy_bundle_keeps_starlette_as_a_peer_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    data = {
+        "tool": {
+            "vercel": {
+                "release": {
+                    "dependencies": ["starlette>=0.46.0,<2"],
+                }
+            }
+        }
+    }
+
+    assert (
+        bundle_release._derive_vendor_requirements(  # noqa: SLF001
+            "vercel-proxy", data
+        )
+        == ()
+    )
+    assert bundle_release._external_dependencies(  # noqa: SLF001
+        "vercel-proxy", data, ()
+    ) == ("starlette>=0.46.0,<2",)
+
+
 def test_vendored_requirements_are_derived_from_release_deps_and_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

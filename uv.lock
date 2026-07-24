@@ -24,6 +24,7 @@ members = [
     "vercel-headers",
     "vercel-internal-telemetry",
     "vercel-oidc",
+    "vercel-proxy",
     "vercel-queue",
 ]
 
@@ -2402,6 +2403,7 @@ dependencies = [
     { name = "vercel-headers" },
     { name = "vercel-internal-telemetry" },
     { name = "vercel-oidc" },
+    { name = "vercel-proxy" },
     { name = "vercel-workers", marker = "python_full_version >= '3.12'" },
     { name = "websockets" },
 ]
@@ -2418,6 +2420,7 @@ requires-dist = [
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
+    { name = "vercel-proxy", editable = "src/vercel-proxy" },
     { name = "vercel-workers", marker = "python_full_version >= '3.12'", specifier = ">=0.0.16,<1" },
     { name = "websockets", specifier = ">=12.0,<17" },
 ]
@@ -2501,6 +2504,16 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0,<1" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
 ]
+
+[[package]]
+name = "vercel-proxy"
+source = { editable = "src/vercel-proxy" }
+dependencies = [
+    { name = "starlette" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "starlette", specifier = ">=0.46.0,<2" }]
 
 [[package]]
 name = "vercel-queue"
