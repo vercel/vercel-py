@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 
+from vercel.api import session
 from vercel.sandbox import sync as sandbox
 
 load_dotenv()
@@ -23,11 +24,14 @@ def run_script(input_text: str, script: str) -> str:
     #     box = sandbox.create_sandbox(...)
     #
     # and call `box.destroy()` once the longer-lived workflow is complete.
-    with sandbox.create_sandbox(
-        name=name,
-        runtime="python3.13",
-        execution_time_limit=timedelta(minutes=1),
-    ) as box:
+    with (
+        session(),
+        sandbox.create_sandbox(
+            name=name,
+            runtime="python3.13",
+            execution_time_limit=timedelta(minutes=1),
+        ) as box,
+    ):
         # `box` already points at the sandbox's current runtime session. Commands
         # live on the handle and workspace operations live on `box.fs`.
         box.fs.mkdir("workspace")

@@ -10,6 +10,7 @@ import anyio
 from dotenv import load_dotenv
 
 from vercel import sandbox
+from vercel.api import session
 
 load_dotenv()
 
@@ -18,6 +19,11 @@ CHUNK_SIZE = 64 * 1024
 
 
 async def main() -> None:
+    async with session():
+        await _main()
+
+
+async def _main() -> None:
     name = f"vercel-py-streaming-{uuid4().hex[:12]}"
     with TemporaryDirectory() as directory:
         source_path = anyio.Path(directory) / "source.bin"

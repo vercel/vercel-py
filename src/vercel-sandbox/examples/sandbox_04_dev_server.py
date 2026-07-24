@@ -12,6 +12,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 
 from vercel import sandbox
+from vercel.api import session
 from vercel.sandbox import (
     GitSource,
     Sandbox,
@@ -227,6 +228,11 @@ async def run_entrypoint(
 
 
 async def main() -> None:
+    async with session():
+        await _main()
+
+
+async def _main() -> None:
     args = parse_args()
     repo: str = args.repo
     ref: str | None = args.ref

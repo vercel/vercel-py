@@ -11,9 +11,9 @@ import pytest
 import respx
 from pydantic import BaseModel, ValidationError
 
-import vercel
 from vercel import sandbox
-from vercel.internal.core.errors import VercelSessionClosedError
+from vercel.api import session
+from vercel.errors import VercelSessionClosedError
 from vercel.internal.core.session import get_active_session
 from vercel.sandbox import (
     GitSource,
@@ -363,7 +363,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         side_effect=update_handler
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(
             project_id="prj_other",
             name="preview",
@@ -496,7 +496,7 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(
             name="preview",
             runtime="python3.13",
@@ -516,9 +516,9 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
         await handle.update(network_policy=authored)
         assert handle.network_policy == _parsed_network_policy_response()
 
-        session = await handle.update_network_policy(NetworkPolicy.deny_all())
-        assert session.network_policy == NetworkPolicy.deny_all()
-        assert handle.current_session is session
+        updated_session = await handle.update_network_policy(NetworkPolicy.deny_all())
+        assert updated_session.network_policy == NetworkPolicy.deny_all()
+        assert handle.current_session is updated_session
 
     assert json.loads(create_route.calls.last.request.content)["networkPolicy"] == {
         "mode": "allow-all"
@@ -586,7 +586,7 @@ def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
         )
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(
             name="preview",
             runtime="python3.13",
@@ -713,7 +713,7 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(TypeError, match="must be a NetworkPolicy"):
             await sandbox.create_sandbox(
                 name="preview",
@@ -774,7 +774,7 @@ async def test_public_create_sandbox_serializes_source_variants(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         await sandbox.create_sandbox(name="preview", runtime="python3.13", source=source)
 
     assert json.loads(route.calls.last.request.content)["source"] == expected
@@ -784,7 +784,7 @@ async def test_public_create_sandbox_serializes_source_variants(
 async def test_public_create_rejects_malformed_success_response(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(return_value=httpx.Response(200, json={}))
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(SandboxResponseError):
             await sandbox.create_sandbox(name="preview", runtime="python3.13")
 
@@ -809,7 +809,7 @@ async def test_public_snapshot_expiration_validation_happens_before_requests(
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(ValueError):
             sandbox.create_sandbox(snapshot_expiration=1)
         handle = await sandbox.get_sandbox(name="preview")
@@ -832,7 +832,7 @@ async def test_public_create_rejects_terminal_initial_state(mock_env_clear: None
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(SandboxTerminalStateError) as exc_info:
             await sandbox.create_sandbox(name="preview", runtime="python3.13")
 
@@ -850,7 +850,7 @@ def test_sync_create_terminal_error_contains_sync_handle(mock_env_clear: None) -
         )
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         with pytest.raises(SandboxTerminalStateError) as exc_info:
             sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
 
@@ -885,7 +885,7 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         service = get_sandbox_service(get_active_session())
         state = await service.get_sandbox(name="preview")
         assert isinstance(state, SandboxState)
@@ -913,9 +913,9 @@ async def test_service_returns_neutral_state_and_async_runtime_binds_handles(
         assert isinstance(handle, sandbox.Sandbox)
         assert isinstance(handle.current_session, sandbox.SandboxRuntimeSession)
         assert isinstance(await handle.create_process("python"), sandbox.Process)
-        session = await handle.extend_execution_time_limit(2.5)
-        assert isinstance(session, sandbox.SandboxRuntimeSession)
-        assert session.execution_time_limit == timedelta(minutes=5)
+        updated_session = await handle.extend_execution_time_limit(2.5)
+        assert isinstance(updated_session, sandbox.SandboxRuntimeSession)
+        assert updated_session.execution_time_limit == timedelta(minutes=5)
         assert isinstance(await handle.snapshot(expiration=86400.5), sandbox.Snapshot)
         page = [item async for item in sandbox.query_sandboxes()]
         assert isinstance(page[0], sandbox.Sandbox)
@@ -950,7 +950,7 @@ def test_sync_runtime_binds_only_sync_handles(mock_env_clear: None) -> None:
         )
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         handle = sandbox_sync.get_sandbox(name="preview")
         assert isinstance(handle, sandbox_sync.SyncSandbox)
         assert isinstance(handle.current_session, sandbox_sync.SyncSandboxRuntimeSession)
@@ -991,7 +991,7 @@ async def test_async_command_kill_after_encodes_seconds_and_timedelta(
         return_value=httpx.Response(200, json=_command_response(exit_code=0))
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         handle = await sandbox.get_sandbox(name="preview")
         await handle.run_process("sleep", ["60"], kill_after=2.5)
         await handle.create_process("sleep", ["60"], kill_after=timedelta(seconds=3.25))
@@ -1027,7 +1027,7 @@ def test_sync_command_kill_after_encodes_seconds_and_omits_none(mock_env_clear: 
         side_effect=command_handler
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         handle = sandbox_sync.get_sandbox(name="preview")
         handle.create_process("echo", ["hello"])
         assert handle.current_session is not None
@@ -1048,13 +1048,13 @@ async def test_session_closure_during_create_polling_is_rejected(mock_env_clear:
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
-        session = get_active_session()
+    async with session(service_options=_session_options()):
+        active_session = get_active_session()
         operation = asyncio.create_task(
-            get_sandbox_service(session).create_sandbox(name="preview", runtime="python3.13")
+            get_sandbox_service(active_session).create_sandbox(name="preview", runtime="python3.13")
         )
         await asyncio.sleep(0)
-        await session.aclose()
+        await active_session.aclose()
 
         with pytest.raises(VercelSessionClosedError):
             await operation
@@ -1084,7 +1084,7 @@ async def test_query_sandboxes_paginates_and_encodes_filters(mock_env_clear: Non
 
     respx.get("https://sandbox.test/v2/sandboxes").mock(side_effect=handler)
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         handles = [
             handle
             async for handle in sandbox.query_sandboxes(
@@ -1131,7 +1131,7 @@ async def test_query_sandboxes_without_query_omits_criteria(mock_env_clear: None
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         assert [item async for item in sandbox.query_sandboxes()] == []
 
     assert dict(route.calls[0].request.url.params) == {
@@ -1170,7 +1170,7 @@ async def test_query_sandboxes_encodes_supported_orderings(
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         assert [item async for item in sandbox.query_sandboxes(query=query)] == []
 
     params = dict(route.calls[0].request.url.params)
@@ -1209,7 +1209,7 @@ async def test_query_sandboxes_stops_when_consumer_breaks(mock_env_clear: None) 
     )
     handles = []
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         async for handle in sandbox.query_sandboxes(page_size=2):
             handles.append(handle)
             break
@@ -1219,7 +1219,7 @@ async def test_query_sandboxes_stops_when_consumer_breaks(mock_env_clear: None) 
 
 
 async def test_query_sandboxes_rejects_invalid_page_size(mock_env_clear: None) -> None:
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(ValueError, match="page_size"):
             [handle async for handle in sandbox.query_sandboxes(page_size=51)]
 
@@ -1229,7 +1229,7 @@ async def test_public_api_error_propagates_status_code_code_and_data(mock_env_cl
     data = {"error": {"code": "bad_request", "message": "unsupported filter"}}
     respx.get("https://sandbox.test/v2/sandboxes").mock(return_value=httpx.Response(400, json=data))
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(SandboxApiError) as exc_info:
             [item async for item in sandbox.query_sandboxes()]
 
@@ -1260,7 +1260,7 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         operation = sandbox.create_sandbox(name="preview", runtime="python3.13")
         created = await operation
         assert created.current_session is not None
@@ -1278,7 +1278,7 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
     assert not stop_route.called
     assert not destroy_route.called
 
-    async with vercel.session():
+    async with session():
         captured = sandbox.create_sandbox(name="preview", runtime="python3.13")
         captured_resume = sandbox.resume_sandbox(name="preview")
 
@@ -1314,7 +1314,7 @@ async def test_async_get_fetches_and_resume_ensures_active_session(
 
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=handler)
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         fetched = await sandbox.get_sandbox(
             name="preview",
             project_id="prj_other",
@@ -1374,7 +1374,7 @@ def test_sync_get_is_plain_handle_and_create_resume_are_managed(
         )
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         fetched = sandbox_sync.get_sandbox(name="preview")
         created = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         resumed = sandbox_sync.resume_sandbox(name="preview")
@@ -1405,7 +1405,7 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         service = get_sandbox_service(get_active_session())
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         resumed = await sandbox.resume_sandbox(name="preview")
@@ -1488,7 +1488,7 @@ async def test_async_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None
         return_value=httpx.Response(500)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         async with sandbox.create_sandbox(name="default", runtime="python3.13") as default:
             pass
         async with sandbox.create_sandbox(
@@ -1572,7 +1572,7 @@ def test_sync_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None:
         return_value=httpx.Response(500)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         with sandbox_sync.create_sandbox(name="default", runtime="python3.13") as default:
             pass
         with sandbox_sync.create_sandbox(
@@ -1619,7 +1619,7 @@ async def test_async_context_cleanup_wraps_api_failure(mock_env_clear: None) -> 
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
             async with sandbox.create_sandbox(name="preview", runtime="python3.13"):
                 pass
@@ -1650,7 +1650,7 @@ def test_sync_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
         )
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
             with sandbox_sync.create_sandbox(name="preview", runtime="python3.13"):
                 pass
@@ -1680,7 +1680,7 @@ async def test_create_cleanup_attempts_destroy_after_stop_failure(
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
             async with sandbox.create_sandbox(name="preview", runtime="python3.13"):
                 pass
@@ -1709,7 +1709,7 @@ def test_sync_create_cleanup_attempts_destroy_after_stop_failure(
         )
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
             with sandbox_sync.create_sandbox(name="preview", runtime="python3.13"):
                 pass
@@ -1733,7 +1733,7 @@ async def test_destroyed_async_handles_continue_issuing_requests(mock_env_clear:
         return_value=httpx.Response(200, json=_command_response())
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         assert await handle.destroy() is handle
         assert handle.status is SandboxStatus.STOPPED
@@ -1770,7 +1770,7 @@ async def test_stopped_async_sandbox_is_inspectable_and_backend_authoritative(
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         retained_session = handle.current_session
         assert retained_session is not None
@@ -1802,7 +1802,7 @@ def test_destroyed_sync_handles_continue_issuing_requests(mock_env_clear: None) 
         return_value=httpx.Response(200, json=_command_response())
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         assert handle.destroy() is handle
         assert handle.status is SandboxStatus.STOPPED
@@ -1839,7 +1839,7 @@ def test_stopped_sync_sandbox_is_inspectable_and_backend_authoritative(
         )
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         retained_session = handle.current_session
         assert retained_session is not None
@@ -1881,7 +1881,7 @@ async def test_mutating_handles_reject_mismatched_response_identity(mock_env_cle
         return_value=httpx.Response(200, json=_snapshot_response(snapshot_id="other"))
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(SandboxResponseError):
             await handle.update(runtime="node22")
@@ -1896,7 +1896,7 @@ async def test_mutating_handles_reject_mismatched_response_identity(mock_env_cle
 
 
 def test_sync_query_sandboxes_binds_session_at_iterator_creation(mock_env_clear: None) -> None:
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         handles = sandbox_sync.query_sandboxes()
 
     with pytest.raises(VercelSessionClosedError):
@@ -1929,7 +1929,7 @@ def test_sync_query_sandboxes_paginates_and_supports_early_consumers(
 
     respx.get("https://sandbox.test/v2/sandboxes").mock(side_effect=handler)
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         handles = list(
             islice(
                 sandbox_sync.query_sandboxes(

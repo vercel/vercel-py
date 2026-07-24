@@ -26,7 +26,8 @@ def main() -> int:
             file=sys.stderr,
         )
         print(
-            "  from vercel import sandbox, session",
+            "  from vercel import sandbox",
+            "  from vercel.api import session",
             file=sys.stderr,
         )
         print(

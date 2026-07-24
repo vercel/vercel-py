@@ -10,7 +10,8 @@ def test_missing_npx_reports_install_help(monkeypatch, capsys) -> None:  # type:
     assert __main__.main() == 1
     stderr = capsys.readouterr().err
     assert "'npx' is not available" in stderr
-    assert "from vercel import sandbox, session" in stderr
+    assert "from vercel import sandbox" in stderr
+    assert "from vercel.api import session" in stderr
 
 
 def test_cli_delegates_all_arguments(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -51,6 +51,12 @@ force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
 include = [
     "/**/*.py",
     "/**/*.md",
+    "/blob/py.typed",
+    "/cron/py.typed",
+    "/deployments/py.typed",
+    "/functions/py.typed",
+    "/projects/py.typed",
+    "/workflow/py.typed",
     "/pyproject.toml",
     "/hatch_build.py",
     "/LICENSE",

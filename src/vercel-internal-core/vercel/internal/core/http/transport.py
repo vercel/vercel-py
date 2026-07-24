@@ -14,8 +14,8 @@ from types import TracebackType
 from typing import Any, TypeAlias
 
 import anyio
-import anyio.abc
 import httpx
+from anyio.abc import ObjectReceiveStream, ObjectSendStream
 from httpx import USE_CLIENT_DEFAULT
 
 from vercel.internal.core.polyfills import StrEnum
@@ -415,7 +415,7 @@ class _SyncStreamingResponse(StreamingResponse):
 
 
 class _AsyncRequestBody:
-    def __init__(self, receive: anyio.abc.ObjectReceiveStream[bytes]) -> None:
+    def __init__(self, receive: ObjectReceiveStream[bytes]) -> None:
         self._receive = receive
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
@@ -430,8 +430,8 @@ class _AsyncStreamingRequest(StreamingRequest):
         *,
         client: httpx.AsyncClient,
         request: httpx.Request,
-        send: anyio.abc.ObjectSendStream[bytes],
-        receive: anyio.abc.ObjectReceiveStream[bytes],
+        send: ObjectSendStream[bytes],
+        receive: ObjectReceiveStream[bytes],
         follow_redirects: bool | None,
         read_response: ReadResponsePolicy,
         chunk_size: int | None,

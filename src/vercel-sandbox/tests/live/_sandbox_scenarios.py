@@ -12,8 +12,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-import vercel
 from vercel import sandbox
+from vercel.api import session
 from vercel.sandbox import (
     NetworkPolicy,
     NetworkPolicyRule,
@@ -219,7 +219,7 @@ class _ScenarioDriver:
 class AsyncDriver(_ScenarioDriver):
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
-        async with vercel.session():
+        async with session():
             yield
 
     @asynccontextmanager
@@ -417,7 +417,7 @@ class AsyncDriver(_ScenarioDriver):
 class SyncDriver(_ScenarioDriver):
     @asynccontextmanager
     async def session(self) -> AsyncIterator[None]:
-        with vercel.session():
+        with session():
             yield
 
     @asynccontextmanager

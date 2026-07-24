@@ -334,7 +334,7 @@ def reset_active_session(token: Token[SdkSession | SyncSdkSession | None]) -> No
 
 
 class SessionContext:
-    """Context object returned by `vercel.session(...)`."""
+    """Context object returned by `vercel.api.session(...)`."""
 
     def __init__(
         self,
@@ -349,7 +349,7 @@ class SessionContext:
 
     def __enter__(self) -> Self:
         if self._token is not None:
-            raise RuntimeError("vercel.session(...) contexts cannot be re-entered")
+            raise RuntimeError("vercel.api.session(...) contexts cannot be re-entered")
 
         session = SyncSdkSession.scoped(
             parent=get_active_sync_session(),
@@ -380,7 +380,7 @@ class SessionContext:
 
     async def __aenter__(self) -> Self:
         if self._token is not None:
-            raise RuntimeError("vercel.session(...) contexts cannot be re-entered")
+            raise RuntimeError("vercel.api.session(...) contexts cannot be re-entered")
 
         session = SdkSession.scoped(
             parent=get_active_session(),

@@ -3,7 +3,8 @@
 Create and manage Vercel Sandboxes with synchronous and asynchronous APIs.
 
 ```python
-from vercel import sandbox, session
+from vercel import sandbox
+from vercel.api import session
 
 async with session():
     async with sandbox.create_sandbox() as instance:
@@ -16,7 +17,7 @@ The package can be installed independently with `pip install vercel-sandbox`.
 The same promoted API is available synchronously:
 
 ```python
-from vercel import session
+from vercel.api import session
 from vercel.sandbox import sync as sandbox
 
 with session():

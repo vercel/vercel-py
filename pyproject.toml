@@ -43,7 +43,7 @@ members = ["src/*", "integrations/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--no-header --capture=tee-sys -m 'not live'"
+addopts = "--no-header --capture=tee-sys"
 asyncio_mode = "auto"
 markers = [
     "live: requires live API credentials (VERCEL_TOKEN, BLOB_READ_WRITE_TOKEN, etc.)",

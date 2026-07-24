@@ -10,8 +10,8 @@ import pytest
 import respx
 from hypothesis import HealthCheck, given, settings, strategies as st
 
-import vercel
 from vercel import sandbox
+from vercel.api import session
 from vercel.sandbox import (
     DirectoryEntry,
     SandboxApiError,
@@ -148,7 +148,7 @@ async def test_filesystem_open_rejects_invalid_options(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(error_type):
             box.fs.open("data.bin", mode, **options)  # type: ignore[call-overload]
@@ -171,7 +171,7 @@ async def test_async_filesystem_native_operations_and_write_composition(
         return_value=httpx.Response(204)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         assert isinstance(box.fs, sandbox.SandboxFilesystem)
         assert box.current_session is not None
@@ -217,7 +217,7 @@ async def test_async_unknown_size_writer_publishes_temporary_spool(
         return_value=httpx.Response(204)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         async with box.fs.open("spooled.bin", "wb") as writer:
             await writer.write(b"spooled")
@@ -241,7 +241,7 @@ async def test_async_binary_writer_rejects_incomplete_declared_size(
         return_value=httpx.Response(204)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
             async with box.fs.open("data.bin", "wb", size=4) as writer:
@@ -267,7 +267,7 @@ async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(SandboxFilesystemWriteError) as exc_info:
             async with box.fs.batch(cwd=PurePosixPath("workspace")) as batch:
@@ -309,7 +309,7 @@ async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
         return_value=httpx.Response(200, content=b"current")
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         retained_box_fs = box.fs
         assert box.current_session is not None
@@ -345,7 +345,7 @@ async def test_async_filesystem_batch_stages_one_request_and_skips_aborted_or_em
         return_value=httpx.Response(204)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         staged = box.fs.batch(cwd="workspace")
         with pytest.raises(RuntimeError):
@@ -403,7 +403,7 @@ async def test_command_backed_filesystem_operations_parse_output_and_pass_paths_
         )
 
     unsafe_path = "-a; printf injected"
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         assert await box.fs.exists(unsafe_path)
         assert not await box.fs.is_file("missing")
@@ -444,7 +444,7 @@ async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear:
         return_value=_logs_response("partial", "cannot list")
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(SandboxPathNotFoundError) as missing:
             await box.fs.read_bytes("missing")
@@ -478,7 +478,7 @@ def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> 
         return_value=_logs_response()
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         assert isinstance(box.fs, sandbox_sync.SyncSandboxFilesystem)
         assert box.current_session is not None
@@ -498,7 +498,7 @@ def test_sync_unknown_size_writer_publishes_temporary_spool(mock_env_clear: None
         return_value=httpx.Response(204)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         with box.fs.open("spooled.bin", "wb") as writer:
             writer.write(b"spooled")
@@ -522,7 +522,7 @@ def test_sync_binary_writer_rejects_incomplete_declared_size(
         return_value=httpx.Response(204)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
             with box.fs.open("data.bin", "wb", size=4) as writer:
@@ -546,7 +546,7 @@ def test_sync_filesystem_batch_stages_one_request(mock_env_clear: None) -> None:
         return_value=httpx.Response(204)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         staged = box.fs.batch(cwd="/tmp")
         with staged as batch:
@@ -633,7 +633,7 @@ async def test_text_reader_preserves_crlf_split_across_chunks(
             return_value=httpx.Response(200, stream=_TrackedAsyncStream(chunks))
         )
 
-        async with vercel.session(service_options=_session_options()):
+        async with session(service_options=_session_options()):
             box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
             async with box.fs.open("data.txt", "r", newline="") as reader:
                 assert await reader.readline() == f"{prefix}\r\n"
@@ -650,7 +650,7 @@ async def test_read_bytes_response_closed_after_streaming_read(mock_env_clear: N
         return_value=httpx.Response(200, stream=stream)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         result = await box.fs.read_bytes(PurePosixPath("data.bin"))
         assert result == b"bytes"
@@ -668,7 +668,7 @@ def test_sync_read_bytes_uses_and_closes_unread_stream(mock_env_clear: None) -> 
         return_value=httpx.Response(200, stream=stream)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         assert box.fs.read_bytes("data.bin") == b"abcdef"
 
@@ -686,7 +686,7 @@ def test_sync_read_bytes_closes_response_after_stream_failure(mock_env_clear: No
         return_value=httpx.Response(200, stream=stream)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(RuntimeError) as exc_info:
             box.fs.read_bytes("data.bin")
@@ -704,7 +704,7 @@ async def test_read_bytes_multiple_chunks(mock_env_clear: None) -> None:
         return_value=httpx.Response(200, stream=_TrackedAsyncStream([b"abc", b"def", b"ghi"]))
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         result = await box.fs.read_bytes(PurePosixPath("data.bin"))
         assert result == b"abcdefghi"
@@ -719,7 +719,7 @@ async def test_read_bytes_empty_file(mock_env_clear: None) -> None:
         return_value=httpx.Response(200, stream=_TrackedAsyncStream([]))
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         result = await box.fs.read_bytes(PurePosixPath("empty.txt"))
         assert result == b""
@@ -736,7 +736,7 @@ async def test_read_bytes_missing_path(mock_env_clear: None) -> None:
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(SandboxPathNotFoundError) as exc_info:
             await box.fs.read_bytes(PurePosixPath("missing.txt"))
@@ -761,7 +761,7 @@ async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None
         side_effect=stream_response
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
 
         raw = await box.fs.read_bytes(PurePosixPath("data.bin"))

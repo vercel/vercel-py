@@ -7,12 +7,18 @@ from uuid import uuid4
 from dotenv import load_dotenv
 
 from vercel import sandbox
+from vercel.api import session
 from vercel.sandbox import SnapshotSource
 
 load_dotenv()
 
 
 async def main() -> None:
+    async with session():
+        await _main()
+
+
+async def _main() -> None:
     suffix = uuid4().hex[:12]
     base_name = f"vercel-py-snapshot-base-{suffix}"
     restored_name = f"vercel-py-snapshot-restored-{suffix}"

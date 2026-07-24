@@ -8,8 +8,8 @@ import httpx
 import pytest
 import respx
 
-import vercel
 from vercel import sandbox
+from vercel.api import session
 from vercel.sandbox import SandboxServiceOptions, sync as sandbox_sync
 from vercel.sandbox._internal.options import SandboxCredentials
 
@@ -196,7 +196,7 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         side_effect=signal_handler
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         process = await box.create_process("python")
         assert process.name == "python"
@@ -251,7 +251,7 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
         side_effect=signal_handler
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         process = box.create_process("python")
         assert process.communicate() == ("out-1\nout-2", "err\n")
@@ -279,7 +279,7 @@ async def test_async_create_process_merges_stderr_into_stdout_reader(
         side_effect=lambda _request: _logs_response()
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         process = await box.create_process("python", stderr=subprocess.STDOUT)
         assert process.stderr is None
@@ -305,7 +305,7 @@ async def test_async_create_process_devnull_drops_reader(mock_env_clear: None) -
         side_effect=lambda _request: _logs_response()
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         process = await box.create_process("python", stderr=subprocess.DEVNULL)
         assert process.stderr is None
@@ -328,7 +328,7 @@ async def test_async_create_process_with_no_readers_never_requests_logs(
     )
     logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         process = await box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
         assert process.stdout is None
@@ -360,7 +360,7 @@ async def test_create_process_rejects_output_options_before_request(
     )
     create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises((TypeError, ValueError)):
             await box.create_process("python", **kwargs)  # type: ignore[arg-type]
@@ -383,7 +383,7 @@ def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: No
         side_effect=lambda _request: _logs_response()
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         process = box.create_process("python", stderr=subprocess.STDOUT)
         assert process.stderr is None
@@ -410,7 +410,7 @@ def test_sync_create_process_with_no_readers_never_requests_logs(
     )
     logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs")
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         process = box.create_process("python", stdout=subprocess.DEVNULL, stderr=stderr)
         assert process.stdout is None
@@ -430,7 +430,7 @@ def test_sync_create_process_rejects_output_options_before_request(
     )
     create = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(ValueError, match="STDOUT is only supported for stderr"):
             box.create_process("python", stdout=subprocess.STDOUT)
@@ -455,7 +455,7 @@ async def test_run_process_routes_output_checks_and_uses_one_request(
         ]
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         result = await box.run_process("python", ("-c", "print('out')"))
         assert isinstance(result, sandbox.CompletedProcess)
@@ -506,7 +506,7 @@ async def test_async_run_process_explicit_and_discarded_destinations(
     )
     sink = _RecordingTextIO()
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         result = await box.run_process("python", stdout=sink, stderr=subprocess.STDOUT)
         assert result.stdout is None
@@ -545,7 +545,7 @@ def test_sync_run_process_routes_and_captures(
         side_effect=[_completed_response(), _interleaved_completed_response()]
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         inherited = box.run_process("python")
         assert inherited.stdout is None
@@ -576,7 +576,7 @@ async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> N
         return_value=httpx.Response(200, stream=stream)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         result = await box.run_process("python", capture_output=True)
 
@@ -602,7 +602,7 @@ def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
         return_value=httpx.Response(200, stream=stream)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         result = box.run_process("python", capture_output=True)
 
@@ -632,7 +632,7 @@ async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -
         return_value=httpx.Response(200, stream=stream)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         process = await box.create_process("python")
         output = await process.communicate()
@@ -662,7 +662,7 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
         return_value=httpx.Response(200, stream=stream)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         process = box.create_process("python")
         output = process.communicate()
@@ -692,7 +692,7 @@ async def test_run_process_rejects_output_options_before_request(
     )
     run = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd")
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises((TypeError, ValueError)):
             await box.run_process("python", **kwargs)  # type: ignore[arg-type]
@@ -712,7 +712,7 @@ async def test_async_run_process_closes_response_when_sink_write_fails(
         return_value=httpx.Response(200, stream=stream)
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(OSError, match="sink write failed"):
             await box.run_process("python", stdout=_FailingTextIO(fail_on="write"))
@@ -732,7 +732,7 @@ def test_sync_run_process_closes_response_when_sink_flush_fails(
         return_value=httpx.Response(200, stream=stream)
     )
 
-    with vercel.session(service_options=_session_options()):
+    with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(OSError, match="sink flush failed"):
             box.run_process("python", stdout=_FailingTextIO(fail_on="flush"))
@@ -780,7 +780,7 @@ async def test_run_process_rejects_invalid_streams(
         )
     )
 
-    async with vercel.session(service_options=_session_options()):
+    async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(error, match=match):
             await box.run_process("python")

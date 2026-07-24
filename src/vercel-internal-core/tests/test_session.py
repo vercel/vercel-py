@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
-from vercel import session
+from vercel.api import session
 from vercel.internal.core.errors import VercelSessionClosedError, VercelSessionError
 from vercel.internal.core.http import AsyncTransport, SyncTransport
 from vercel.internal.core.options import ServiceOptions

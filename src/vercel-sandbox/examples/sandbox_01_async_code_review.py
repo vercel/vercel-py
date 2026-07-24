@@ -8,6 +8,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 
 from vercel import sandbox
+from vercel.api import session
 from vercel.sandbox import (
     NetworkPolicy,
     NetworkPolicyRule,
@@ -77,6 +78,11 @@ async def review_code(
 
 
 async def main() -> None:
+    async with session():
+        await _main()
+
+
+async def _main() -> None:
     # The runner data lives below the reusable workflow so the example first
     # shows the SDK shape, then the concrete files used for this demo.
     report = await review_code(
