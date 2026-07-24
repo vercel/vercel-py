@@ -183,29 +183,6 @@ class TestBlobClientClassParity:
         )
 
 
-class TestSandboxClassParity:
-    """Test Sandbox and AsyncSandbox method parity."""
-
-    def test_sandbox_methods_exist(self):
-        """Test that both sandbox classes have equivalent methods."""
-        from vercel.sandbox import AsyncSandbox, Sandbox
-
-        # Get public methods (excluding dunder methods)
-        sync_methods = {
-            m for m in dir(Sandbox) if not m.startswith("_") and callable(getattr(Sandbox, m))
-        }
-        async_methods = {
-            m
-            for m in dir(AsyncSandbox)
-            if not m.startswith("_") and callable(getattr(AsyncSandbox, m))
-        }
-
-        # AsyncSandbox has 'shell' method that Sandbox doesn't have (interactive only)
-        # So we check that all sync methods exist in async
-        missing_in_async = sync_methods - async_methods
-        assert not missing_in_async, f"Methods missing in AsyncSandbox: {missing_in_async}"
-
-
 class TestCacheClassParity:
     """Test RuntimeCache and AsyncRuntimeCache method parity."""
 

@@ -27,15 +27,6 @@ def has_blob_credentials() -> bool:
     return bool(os.getenv("BLOB_READ_WRITE_TOKEN"))
 
 
-def has_sandbox_credentials() -> bool:
-    """Check if Sandbox credentials are available."""
-    if os.getenv("VERCEL_OIDC_TOKEN"):
-        return True
-    return bool(
-        os.getenv("VERCEL_TOKEN") and os.getenv("VERCEL_TEAM_ID") and os.getenv("VERCEL_PROJECT_ID")
-    )
-
-
 # Skip markers for live tests
 requires_vercel_credentials = pytest.mark.skipif(
     not has_vercel_credentials(),
@@ -45,14 +36,6 @@ requires_vercel_credentials = pytest.mark.skipif(
 requires_blob_credentials = pytest.mark.skipif(
     not has_blob_credentials(),
     reason="Requires BLOB_READ_WRITE_TOKEN environment variable",
-)
-
-requires_sandbox_credentials = pytest.mark.skipif(
-    not has_sandbox_credentials(),
-    reason=(
-        "Requires VERCEL_OIDC_TOKEN, or VERCEL_TOKEN plus VERCEL_TEAM_ID "
-        "and VERCEL_PROJECT_ID for sandbox"
-    ),
 )
 
 
@@ -72,15 +55,6 @@ def vercel_team_id() -> str:
     if not team_id and os.getenv("VERCEL_TOKEN"):
         pytest.skip("VERCEL_TEAM_ID environment variable not set")
     return team_id or ""
-
-
-@pytest.fixture
-def vercel_project_id() -> str:
-    """Get Vercel project ID from environment when provided."""
-    project_id = os.getenv("VERCEL_PROJECT_ID")
-    if not project_id and os.getenv("VERCEL_TOKEN"):
-        pytest.skip("VERCEL_PROJECT_ID environment variable not set")
-    return project_id or ""
 
 
 @pytest.fixture
@@ -120,7 +94,7 @@ class CleanupRegistry:
         """Register a resource for cleanup.
 
         Args:
-            resource_type: Type of resource (e.g., "blob", "project", "sandbox")
+            resource_type: Type of resource (e.g., "blob" or "project")
             resource_id: Identifier for the resource
         """
         self._cleanups.append((resource_type, resource_id))
@@ -176,26 +150,6 @@ def cleanup_registry() -> Generator[CleanupRegistry, None, None]:
                 for project_id in project_ids:
                     try:
                         delete_project(project_id, token=vercel_token, team_id=team_id)
-                    except Exception:
-                        pass  # Best effort cleanup
-        except ImportError:
-            pass
-
-    # Cleanup sandbox resources
-    sandbox_ids = registry.get_resources("sandbox")
-    if sandbox_ids:
-        try:
-            from vercel.sandbox import Sandbox
-
-            vercel_token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
-            if vercel_token:
-                for sandbox_id in sandbox_ids:
-                    try:
-                        sandbox = Sandbox.get(
-                            sandbox_id=sandbox_id,
-                            token=vercel_token,
-                        )
-                        sandbox.stop()
                     except Exception:
                         pass  # Best effort cleanup
         except ImportError:

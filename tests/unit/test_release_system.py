@@ -61,6 +61,85 @@ def test_compute_releases_cascades_dependency_only_patch(
     ]
 
 
+def test_split_release_graph_propagates_in_publication_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    core_changes = changes / "vercel-internal-core"
+    core_changes.mkdir(parents=True)
+    (core_changes / "split.feature.md").write_text("Add shared runtime.\n", encoding="utf-8")
+
+    package_names = ("vercel-internal-core", "vercel-sandbox", "vercel")
+    package_paths = {name: tmp_path / name for name in package_names}
+    for path in package_paths.values():
+        path.mkdir()
+        (path / "version.py").write_text('__version__ = "0.1.0"\n', encoding="utf-8")
+    packages = {
+        "vercel-internal-core": workspace.Package(
+            "vercel-internal-core",
+            package_paths["vercel-internal-core"],
+            package_paths["vercel-internal-core"] / "version.py",
+            (),
+        ),
+        "vercel-sandbox": workspace.Package(
+            "vercel-sandbox",
+            package_paths["vercel-sandbox"],
+            package_paths["vercel-sandbox"] / "version.py",
+            ("vercel-internal-core",),
+        ),
+        "vercel": workspace.Package(
+            "vercel",
+            package_paths["vercel"],
+            package_paths["vercel"] / "version.py",
+            ("vercel-internal-core", "vercel-sandbox"),
+        ),
+    }
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+
+    releases = release.compute_releases()
+
+    assert [item.package for item in releases] == list(package_names)
+    assert [item.dependency_only for item in releases] == [False, True, True]
+    assert "vercel" not in packages["vercel-sandbox"].dependencies
+
+
+def test_sandbox_metadata_hook_updates_core_bound_and_keeps_upper_bound(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path
+    core_root = workspace_root / "src/vercel-internal-core"
+    sandbox_root = workspace_root / "src/vercel-sandbox"
+    core_root.mkdir(parents=True)
+    sandbox_root.mkdir(parents=True)
+    (workspace_root / "pyproject.toml").write_text(
+        "[tool.uv.workspace]\nmembers = ['src/*']\n", encoding="utf-8"
+    )
+    (core_root / "pyproject.toml").write_text(
+        '[project]\nname = "vercel-internal-core"\n\n[tool.hatch.version]\npath = "version.py"\n',
+        encoding="utf-8",
+    )
+    (core_root / "version.py").write_text('__version__ = "0.1.7"\n', encoding="utf-8")
+    (sandbox_root / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel-sandbox"
+
+[tool.uv.sources]
+vercel-internal-core = { workspace = true }
+
+[tool.vercel.release.dependencies]
+dependencies = ["vercel-internal-core>=0.1.0,<0.2.0"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    metadata: dict[str, object] = {}
+    hatch_build.WorkspaceDependenciesMetadataHook(str(sandbox_root), {}).update(metadata)
+
+    assert metadata["dependencies"] == ["vercel-internal-core>=0.1.7,<0.2.0"]
+
+
 def test_compute_releases_force_bumps_all_packages(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1104,6 +1183,48 @@ def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
     )
 
 
+def test_sandbox_bundle_keeps_bounded_pydantic_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packages = {
+        name: workspace.Package(name, path, path / version_file, ())
+        for name, path, version_file in (
+            (
+                "vercel-internal-core",
+                bundle_release.ROOT / "src/vercel-internal-core",
+                "vercel/internal/core/version.py",
+            ),
+            (
+                "vercel-oidc",
+                bundle_release.ROOT / "src/vercel-oidc",
+                "vercel/oidc/version.py",
+            ),
+        )
+    }
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.1")
+    data = bundle_release._load_pyproject(  # noqa: SLF001
+        bundle_release.ROOT / "src/vercel-sandbox"
+    )
+
+    vendored_requirements = bundle_release._derive_vendor_requirements(  # noqa: SLF001
+        "vercel-sandbox", data
+    )
+
+    assert all(
+        bundle_release._requirement_name(requirement) != "pydantic"  # noqa: SLF001
+        for requirement in vendored_requirements
+    )
+    assert bundle_release._external_dependencies(  # noqa: SLF001
+        "vercel-sandbox", data, vendored_requirements
+    ) == (
+        "vercel-internal-core-bundle>=0.1.0,<0.2.0",
+        "vercel-oidc-bundle>=0.7.1",
+        "pydantic>=2.7.0,<3",
+        "vercel-internal-shared-vendored-deps>=0.7.1",
+    )
+
+
 def test_vendored_requirements_are_derived_from_release_deps_and_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1516,16 +1637,19 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
     )
     path = tmp_path / "module.py"
     path.write_text(
+        "import abc\n"
         "from vercel.cache import RuntimeCache\n"
         "from vercel.headers import get_headers\n"
         "from vercel.oidc.utils import find_project_info\n"
         "from vercel.queue import sanitize_name\n"
         "import httpx\n"
+        "from anyio.abc import ObjectReceiveStream\n"
         "import anyio.from_thread\n"
         "from typing_extensions import override\n"
         "import vercel.queue as vqs\n"
         "import vercel.queue.sync as vqs_sync\n"
-        "from celery import Celery\n",
+        "from celery import Celery\n"
+        "class Example(abc.ABC): ...\n",
         encoding="utf-8",
     )
 
@@ -1537,16 +1661,19 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
     )
     rewritten = path.read_text(encoding="utf-8")
 
+    assert "import abc" in rewritten
     assert "from vercel.cache import RuntimeCache" in rewritten
     assert "from vercel.headers import get_headers" in rewritten
     assert "from vercel.oidc.utils import find_project_info" in rewritten
     assert "from vercel.queue import sanitize_name" in rewritten
     assert "from vercel.internal._vendor import httpx" in rewritten
+    assert "from vercel.internal._vendor.anyio.abc import ObjectReceiveStream" in rewritten
     assert "from vercel.internal._vendor.anyio import from_thread" in rewritten
     assert "from vercel.internal._vendor.typing_extensions import override" in rewritten
     assert "import vercel.queue as vqs" in rewritten
     assert "import vercel.queue.sync as vqs_sync" in rewritten
     assert "from celery import Celery" in rewritten
+    assert "class Example(abc.ABC): ..." in rewritten
 
 
 def test_shared_bundle_package_keeps_distribution_name() -> None:
