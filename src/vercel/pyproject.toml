@@ -29,7 +29,7 @@ dependencies = [
     "vercel-internal-core>=0.1.0,<0.2.0",
     "vercel-internal-telemetry>=0.6.0",
     "vercel-oidc>=0.6.0",
-    "vercel-sandbox>=0.1.0,<0.2.0",
+    "vercel-sandbox>=0.2.0,<0.3.0",
 ]
 
 [project.scripts]
