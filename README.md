@@ -71,9 +71,9 @@ asyncio.run(main())
 ## Public API Vs Internals
 
 Import from public modules under `vercel.*`, such as `vercel.blob`,
-`vercel.cache`, `vercel.headers`, `vercel.oidc`, `vercel.projects`, and
-`vercel.sandbox`. Modules under `vercel._internal.*` are implementation details
-and may change without public API guarantees.
+`vercel.cache`, `vercel.headers`, `vercel.oidc`, `vercel.projects`,
+`vercel.proxy`, and `vercel.sandbox`. Modules under `vercel._internal.*` are
+implementation details and may change without public API guarantees.
 
 Sync counterparts are available for the main client classes and module-level
 helpers when you are not running an async application.

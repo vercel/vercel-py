@@ -12,6 +12,7 @@ helpers.
 - `vercel.functions` - convenience exports for function code
 - `vercel.oidc` - OIDC token lookup, refresh, credentials, and payload decoding
 - `vercel.projects` - project list, create, update, and delete helpers
+- `vercel.proxy` - pre-cache Python routing middleware, rewrites, and redirects
 - `vercel.sandbox` - Sandbox creation, commands, files, snapshots, and PTY support
 - `vercel.workflow` - Workflows, steps, sleeps, hooks, and run startup
 - `vercel.client` - `AsyncVercel` and `Vercel` grouped clients
