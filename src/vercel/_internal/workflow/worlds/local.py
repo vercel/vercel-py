@@ -13,7 +13,7 @@ from typing import Any, TypeVar
 import cbor2
 import pydantic
 
-from vercel._internal.polyfills import UTC
+from vercel._internal.core.polyfills import UTC
 from vercel.workers import client as vqs_client
 
 from .. import world as w

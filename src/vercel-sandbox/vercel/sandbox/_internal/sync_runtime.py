@@ -7,10 +7,10 @@ from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
 
-from vercel.internal.core.byte_stream import SyncByteStreamRuntime
-from vercel.internal.core.iter_coroutine import iter_coroutine
-from vercel.internal.core.polyfills import Self
-from vercel.internal.core.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel._internal.core.byte_stream import SyncByteStreamRuntime
+from vercel._internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.polyfills import Self
+from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.errors import (
     SandboxCleanupError,
     SandboxResponseError,

@@ -1192,7 +1192,7 @@ def test_sandbox_bundle_keeps_bounded_pydantic_external(
             (
                 "vercel-internal-core",
                 bundle_release.ROOT / "src/vercel-internal-core",
-                "vercel/internal/core/version.py",
+                "vercel/_internal/core/version.py",
             ),
             (
                 "vercel-oidc",

@@ -6,8 +6,8 @@ import tarfile
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from vercel.internal.core.byte_stream import AsyncByteStreamRuntime, SyncByteStreamRuntime
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.byte_stream import AsyncByteStreamRuntime, SyncByteStreamRuntime
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.sandbox._internal.errors import SandboxUploadSizeMismatchError
 from vercel.sandbox._internal.runtime_common import _UploadFileEntry
 from vercel.sandbox._internal.service import SandboxArchiveUpload

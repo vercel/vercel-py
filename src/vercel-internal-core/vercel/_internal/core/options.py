@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 
-from vercel.internal.core.errors import VercelServiceOptionsError
+from vercel._internal.core.errors import VercelServiceOptionsError
 
 
 class ServiceOptions:

@@ -6,7 +6,7 @@ import pytest
 import respx
 from httpx import Response
 
-from vercel.internal.core.http import (
+from vercel._internal.core.http import (
     AsyncTransport,
     RawBody,
     SyncTransport,
@@ -14,7 +14,7 @@ from vercel.internal.core.http import (
     create_base_async_client,
     create_base_client,
 )
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 
 
 class TestRawBodySupport:

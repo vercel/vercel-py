@@ -4,12 +4,12 @@ import threading
 import anyio
 import pytest
 
-from vercel.internal.core.byte_stream import (
+from vercel._internal.core.byte_stream import (
     AsyncByteStreamRuntime,
     StagingFileRuntime,
     SyncByteStreamRuntime,
 )
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 
 
 class _SyncReader:

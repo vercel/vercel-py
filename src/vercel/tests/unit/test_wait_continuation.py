@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from vercel._internal.polyfills import UTC
+from vercel._internal.core.polyfills import UTC
 from vercel._internal.workflow.runtime import (
     NEAR_ELAPSED_WAIT_THRESHOLD_SECONDS,
     WAIT_CONTINUATION_MAX_DELAY_SECONDS,

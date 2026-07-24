@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
 
 import pydantic
 
-from vercel._internal.polyfills import Self
+from vercel._internal.core.polyfills import Self
 
 from . import py_sandbox
 from .world import validate_queue_namespace

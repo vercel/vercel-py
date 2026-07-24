@@ -5,13 +5,13 @@ import anyio
 import httpx
 import pytest
 
-from vercel.internal.core.http import (
+from vercel._internal.core.http import (
     AsyncTransport,
     ReadResponsePolicy,
     StreamingResponse,
     SyncTransport,
 )
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 
 
 class _SyncChunks(httpx.SyncByteStream):

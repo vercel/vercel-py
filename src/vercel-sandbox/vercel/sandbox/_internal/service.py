@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, cast
 
-from vercel.internal.core.byte_stream import (
+from vercel._internal.core.byte_stream import (
     StagingFileRuntime,
 )
-from vercel.internal.core.http import StreamingResponse
+from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal.api_client import SandboxApiClient
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
@@ -57,7 +57,7 @@ from vercel.sandbox._internal.state import (
 from vercel.sandbox._internal.streaming_archive import ArchiveRequestWriter
 
 if TYPE_CHECKING:
-    from vercel.internal.core.session import SdkSession, SyncSdkSession
+    from vercel._internal.core.session import SdkSession, SyncSdkSession
 
 _READY_SANDBOX_STATUSES = frozenset({SandboxStatus.RUNNING})
 _TERMINAL_SANDBOX_STATUSES = frozenset(

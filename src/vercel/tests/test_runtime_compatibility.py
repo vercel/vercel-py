@@ -1,7 +1,7 @@
 from datetime import timezone
 
 import vercel.workflow
-from vercel._internal.polyfills import UTC, Self, StrEnum
+from vercel._internal.core.polyfills import UTC, Self, StrEnum
 
 
 def test_public_modules_import_under_supported_floor() -> None:

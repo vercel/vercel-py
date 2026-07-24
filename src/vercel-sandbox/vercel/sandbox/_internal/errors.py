@@ -2,7 +2,7 @@
 
 import httpx
 
-from vercel.internal.core.errors import VercelError
+from vercel._internal.core.errors import VercelError
 from vercel.sandbox._internal.models import SandboxStatus
 
 

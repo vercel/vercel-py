@@ -3,10 +3,10 @@
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
-from vercel.internal.core.byte_stream import (
+from vercel._internal.core.byte_stream import (
     StagingFileRuntime,
 )
-from vercel.internal.core.http import StreamingResponse
+from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal.filesystem_handle_common import (
     _HandleInfo,
     _TextEncoder,

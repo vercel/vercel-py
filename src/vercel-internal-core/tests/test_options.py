@@ -2,8 +2,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from vercel.internal.core.errors import VercelServiceOptionsError
-from vercel.internal.core.options import (
+from vercel._internal.core.errors import VercelServiceOptionsError
+from vercel._internal.core.options import (
     ServiceOptions,
     collect_service_options,
 )

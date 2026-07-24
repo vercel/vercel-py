@@ -11,8 +11,8 @@ from typing import Protocol, TypeAlias
 
 import anyio
 
-from vercel.internal.core.http import StreamingResponse
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.http import StreamingResponse
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.sandbox._internal.log_stream import _parse_command_log_record
 from vercel.sandbox._internal.models import ProcessLogStream
 

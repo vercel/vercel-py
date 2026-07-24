@@ -68,7 +68,11 @@ exclude = [
 [tool.hatch.build.targets.wheel]
 dev-mode-dirs = [".."]
 only-include = [
-    "/_internal",
+    "/_internal/auth.py",
+    "/_internal/blob",
+    "/_internal/fs.py",
+    "/_internal/pagination.py",
+    "/_internal/workflow",
     "/blob",
     "/cron",
     "/deployments",

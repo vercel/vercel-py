@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Protocol
 
-from vercel.internal.core.byte_stream import (
+from vercel._internal.core.byte_stream import (
     ReadableByteStream,
     StagingByteFile,
 )

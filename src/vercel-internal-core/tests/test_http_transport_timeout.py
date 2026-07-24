@@ -9,8 +9,8 @@ import pytest
 import respx
 from httpx import Response
 
-from vercel.internal.core.http import AsyncTransport, SyncTransport
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.http import AsyncTransport, SyncTransport
+from vercel._internal.core.iter_coroutine import iter_coroutine
 
 CLIENT_TIMEOUT = {
     "connect": 1.0,

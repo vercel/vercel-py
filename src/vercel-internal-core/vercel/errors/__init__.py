@@ -1,6 +1,6 @@
 """Public shared error types."""
 
-from vercel.internal.core.errors import (
+from vercel._internal.core.errors import (
     VercelError,
     VercelServiceOptionsError,
     VercelSessionClosedError,

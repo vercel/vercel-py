@@ -12,9 +12,9 @@ import respx
 from pydantic import BaseModel, ValidationError
 
 from vercel import sandbox
+from vercel._internal.core.session import get_active_session
 from vercel.api import session
 from vercel.errors import VercelSessionClosedError
-from vercel.internal.core.session import get_active_session
 from vercel.sandbox import (
     GitSource,
     NetworkPolicy,

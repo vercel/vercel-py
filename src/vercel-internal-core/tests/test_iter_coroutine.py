@@ -1,6 +1,6 @@
 import pytest
 
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 
 
 class _SuspendingAwaitable:

@@ -8,13 +8,13 @@ from typing import TypeVar
 
 import pytest
 
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.fs import (
     AsyncFileHandle,
     AsyncFilesystemClient,
     SyncFileHandle,
     SyncFilesystemClient,
 )
-from vercel._internal.iter_coroutine import iter_coroutine
 
 _T = TypeVar("_T")
 

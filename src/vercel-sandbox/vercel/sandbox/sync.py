@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator, Mapping
 
-from vercel.internal.core.session import get_active_sync_session
+from vercel._internal.core.session import get_active_sync_session
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxCleanupError,

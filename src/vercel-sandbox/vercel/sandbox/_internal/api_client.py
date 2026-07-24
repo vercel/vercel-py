@@ -21,7 +21,7 @@ from pydantic import (
     field_validator,
 )
 
-from vercel.internal.core.http import (
+from vercel._internal.core.http import (
     BaseTransport,
     JSONBody,
     ReadResponsePolicy,
@@ -30,8 +30,8 @@ from vercel.internal.core.http import (
     StreamingResponse,
     extract_structured_error,
 )
-from vercel.internal.core.time import MILLISECOND, parse_duration, to_ms_int
-from vercel.internal.core.url import format_url_path
+from vercel._internal.core.time import MILLISECOND, parse_duration, to_ms_int
+from vercel._internal.core.url import format_url_path
 from vercel.sandbox._internal.errors import (
     SandboxApiError,
     SandboxResponseError,

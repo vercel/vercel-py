@@ -10,17 +10,17 @@ from typing import TYPE_CHECKING, ClassVar, TypeVar, cast, overload
 import anyio
 import httpx
 
-from vercel.internal.core.errors import VercelSessionClosedError, VercelSessionError
-from vercel.internal.core.options import ServiceOptions, merge_service_options
-from vercel.internal.core.polyfills import Self
+from vercel._internal.core.errors import VercelSessionClosedError, VercelSessionError
+from vercel._internal.core.options import ServiceOptions, merge_service_options
+from vercel._internal.core.polyfills import Self
 
 if TYPE_CHECKING:
-    from vercel.internal.core.byte_stream import (
+    from vercel._internal.core.byte_stream import (
         AsyncByteStreamRuntime,
         StagingFileRuntime,
         SyncByteStreamRuntime,
     )
-    from vercel.internal.core.http import AsyncTransport, BaseTransport, SyncTransport
+    from vercel._internal.core.http import AsyncTransport, BaseTransport, SyncTransport
 
 ServiceOptionsT = TypeVar("ServiceOptionsT", bound=ServiceOptions)
 ServiceT = TypeVar("ServiceT")
@@ -132,7 +132,7 @@ class SdkSession(_BaseSdkSession):
         )
 
     def get_transport(self) -> "AsyncTransport":
-        from vercel.internal.core.http import (
+        from vercel._internal.core.http import (
             DEFAULT_TIMEOUT,
             AsyncTransport,
             TransportOptions,
@@ -168,7 +168,7 @@ class SdkSession(_BaseSdkSession):
         return self._transport
 
     def get_staging_file_runtime(self) -> "AsyncByteStreamRuntime":
-        from vercel.internal.core.byte_stream import AsyncByteStreamRuntime
+        from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
 
         self.check_open()
         if self._staging_file_runtime is None:
@@ -246,7 +246,7 @@ class SyncSdkSession(_BaseSdkSession):
             loop.create_task(client.aclose())
 
     def get_transport(self) -> "SyncTransport":
-        from vercel.internal.core.http import (
+        from vercel._internal.core.http import (
             DEFAULT_TIMEOUT,
             SyncTransport,
             TransportOptions,
@@ -279,7 +279,7 @@ class SyncSdkSession(_BaseSdkSession):
         return self._transport
 
     def get_staging_file_runtime(self) -> "SyncByteStreamRuntime":
-        from vercel.internal.core.byte_stream import SyncByteStreamRuntime
+        from vercel._internal.core.byte_stream import SyncByteStreamRuntime
 
         self.check_open()
         if self._staging_file_runtime is None:

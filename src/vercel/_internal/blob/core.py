@@ -69,7 +69,7 @@ from vercel._internal.blob.types import (
     PutBlobResult as PutBlobResultType,
     UploadProgressEvent,
 )
-from vercel._internal.http import (
+from vercel._internal.core.http import (
     BaseTransport,
     JSONBody,
     RawBody,
@@ -78,9 +78,9 @@ from vercel._internal.http import (
     TransportOptions,
     create_base_client,
 )
-from vercel._internal.http.retry import RetryPolicy, SleepFn
-from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.polyfills import UTC
+from vercel._internal.core.http.retry import RetryPolicy, SleepFn
+from vercel._internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.polyfills import UTC
 from vercel.internal.telemetry import track
 
 BlobProgressCallback = (
@@ -462,13 +462,13 @@ class BlobRequestClient:
         return self._await_progress_callback
 
     def close(self) -> None:
-        from vercel._internal.http.transport import SyncTransport
+        from vercel._internal.core.http.transport import SyncTransport
 
         if isinstance(self._transport, SyncTransport):
             self._transport.close()
 
     async def aclose(self) -> None:
-        from vercel._internal.http.transport import AsyncTransport
+        from vercel._internal.core.http.transport import AsyncTransport
 
         if isinstance(self._transport, AsyncTransport):
             await self._transport.aclose()
@@ -674,8 +674,8 @@ def create_async_request_client(
 ) -> BlobRequestClient:
     import asyncio
 
-    from vercel._internal.http.httpx import create_base_async_client
-    from vercel._internal.http.transport import AsyncTransport
+    from vercel._internal.core.http.httpx import create_base_async_client
+    from vercel._internal.core.http.transport import AsyncTransport
 
     retry_policy = RetryPolicy(
         retries=get_retries(),

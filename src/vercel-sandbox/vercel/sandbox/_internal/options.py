@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol
 
-from vercel.internal.core.options import ServiceOptions
+from vercel._internal.core.options import ServiceOptions
 from vercel.sandbox._internal.errors import SandboxCredentialsError
 
 DEFAULT_SANDBOX_API_BASE_URL = "https://vercel.com/api"

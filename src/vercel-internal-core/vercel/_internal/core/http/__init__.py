@@ -1,8 +1,15 @@
-"""Transitional aliases for HTTP infrastructure now owned by internal core."""
+"""Shared HTTP infrastructure for Vercel API clients."""
 
-from vercel.internal.core.http import (
-    DEFAULT_API_BASE_URL,
-    DEFAULT_TIMEOUT,
+from vercel._internal.core.http.config import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
+from vercel._internal.core.http.httpx import (
+    create_base_async_client,
+    create_base_client,
+)
+from vercel._internal.core.http.retry import (
+    RetryPolicy,
+    SleepFn,
+)
+from vercel._internal.core.http.transport import (
     AsyncTransport,
     BaseTransport,
     BytesBody,
@@ -10,14 +17,10 @@ from vercel.internal.core.http import (
     RawBody,
     ReadResponsePolicy,
     RequestBody,
-    RetryPolicy,
-    SleepFn,
     StreamingRequest,
     StreamingResponse,
     SyncTransport,
     TransportOptions,
-    create_base_async_client,
-    create_base_client,
     extract_structured_error,
 )
 

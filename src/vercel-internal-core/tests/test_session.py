@@ -3,16 +3,16 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
-from vercel.api import session
-from vercel.internal.core.errors import VercelSessionClosedError, VercelSessionError
-from vercel.internal.core.http import AsyncTransport, SyncTransport
-from vercel.internal.core.options import ServiceOptions
-from vercel.internal.core.session import (
+from vercel._internal.core.errors import VercelSessionClosedError, VercelSessionError
+from vercel._internal.core.http import AsyncTransport, SyncTransport
+from vercel._internal.core.options import ServiceOptions
+from vercel._internal.core.session import (
     SdkSession,
     SyncSdkSession,
     get_active_session,
     get_active_sync_session,
 )
+from vercel.api import session
 
 
 @dataclass(frozen=True, slots=True)

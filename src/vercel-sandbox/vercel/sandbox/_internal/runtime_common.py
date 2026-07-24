@@ -10,7 +10,7 @@ from enum import Enum, auto
 from pathlib import PurePosixPath
 from typing import Generic, Literal, TypeAlias, TypeVar
 
-from vercel.internal.core.byte_stream import ReadableByteStream
+from vercel._internal.core.byte_stream import ReadableByteStream
 from vercel.sandbox._internal.errors import SandboxResponseError
 from vercel.sandbox._internal.models import (
     JSONObject,

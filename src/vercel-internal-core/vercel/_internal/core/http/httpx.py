@@ -6,8 +6,8 @@ from typing import TypedDict
 
 import httpx
 
-from vercel.internal.core.http.transport import TransportOptions
-from vercel.internal.core.time import to_seconds_float
+from vercel._internal.core.http.transport import TransportOptions
+from vercel._internal.core.time import to_seconds_float
 
 
 def _normalize_base_url(base_url: str) -> str:

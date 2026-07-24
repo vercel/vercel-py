@@ -1,5 +1,5 @@
 """Public shared API helpers."""
 
-from vercel.internal.core.session import session
+from vercel._internal.core.session import session
 
 __all__ = ["session"]

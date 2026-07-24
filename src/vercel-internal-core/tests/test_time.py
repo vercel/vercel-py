@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from hypothesis import given, strategies as st
 
-from vercel.internal.core.time import (
+from vercel._internal.core.time import (
     MILLISECOND,
     SECOND,
     coerce_duration,

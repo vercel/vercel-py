@@ -4,13 +4,13 @@ import httpx
 import pytest
 
 from vercel import sandbox
+from vercel._internal.core.options import ServiceOptions
+from vercel._internal.core.session import get_active_sync_session
 from vercel.api import session
 from vercel.errors import (
     VercelSessionClosedError,
     VercelSessionError,
 )
-from vercel.internal.core.options import ServiceOptions
-from vercel.internal.core.session import get_active_sync_session
 from vercel.sandbox import SandboxServiceOptions, sync as sync_sandbox
 from vercel.sandbox._internal.service import get_sandbox_service
 

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from vercel.internal.core.polyfills import Self
+from vercel._internal.core.polyfills import Self
 
 MAX_QUERY_SANDBOXES_PAGE_SIZE = 50
 MAX_QUERY_SESSIONS_PAGE_SIZE = 50

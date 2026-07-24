@@ -15,8 +15,8 @@ from pydantic import (
     field_validator,
 )
 
-from vercel.internal.core.polyfills import StrEnum
-from vercel.internal.core.time import SECOND, coerce_duration, to_ms_int
+from vercel._internal.core.polyfills import StrEnum
+from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
 
 JSONValue: TypeAlias = PydanticJsonValue
 JSONObject: TypeAlias = dict[str, JSONValue]

@@ -16,7 +16,7 @@ import httpx
 import pytest
 import respx
 
-from vercel._internal.polyfills import UTC
+from vercel._internal.core.polyfills import UTC
 from vercel._internal.workflow import core, runtime, world as w
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)

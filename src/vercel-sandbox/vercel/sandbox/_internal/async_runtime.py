@@ -9,9 +9,9 @@ from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
 
-from vercel.internal.core.byte_stream import AsyncByteStreamRuntime
-from vercel.internal.core.polyfills import Self
-from vercel.internal.core.time import parse_duration_seconds, parse_required_duration_seconds
+from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
+from vercel._internal.core.polyfills import Self
+from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
     SandboxBinaryWriter,

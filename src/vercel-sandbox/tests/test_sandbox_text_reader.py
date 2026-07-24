@@ -6,7 +6,7 @@ import anyio
 import httpx
 import pytest
 
-from vercel.internal.core.http import StreamingResponse
+from vercel._internal.core.http import StreamingResponse
 from vercel.sandbox._internal.errors import SandboxStreamError
 from vercel.sandbox._internal.text_reader import _sync_text_readers, _text_readers
 

@@ -4,14 +4,14 @@ import httpx
 import pytest
 from httpx._types import HeaderTypes, QueryParamTypes
 
-from vercel.internal.core.http import (
+from vercel._internal.core.http import (
     BaseTransport,
     ReadResponsePolicy,
     RequestBody,
     StreamingRequest,
     StreamingResponse,
 )
-from vercel.internal.core.url import format_url_path
+from vercel._internal.core.url import format_url_path
 from vercel.sandbox._internal.api_client import SandboxApiClient, _WriteFilesUpload
 from vercel.sandbox._internal.errors import SandboxApiError, SandboxResponseError
 from vercel.sandbox._internal.options import SandboxCredentials

@@ -18,8 +18,8 @@ import httpx
 from anyio.abc import ObjectReceiveStream, ObjectSendStream
 from httpx import USE_CLIENT_DEFAULT
 
-from vercel.internal.core.polyfills import StrEnum
-from vercel.internal.core.time import to_seconds_float
+from vercel._internal.core.polyfills import StrEnum
+from vercel._internal.core.time import to_seconds_float
 
 PrimitiveData: TypeAlias = str | int | float | bool | None
 HeaderTypes: TypeAlias = (

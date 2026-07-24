@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator, Mapping
 
-from vercel.internal.core.session import get_active_session
+from vercel._internal.core.session import get_active_session
 from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxBinaryReader,
     SandboxBinaryWriter,

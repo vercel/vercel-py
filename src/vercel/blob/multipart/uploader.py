@@ -16,7 +16,7 @@ from vercel._internal.blob.multipart import (
     shape_complete_upload_result,
     validate_part_size,
 )
-from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.blob.types import Access, UploadProgressEvent
 
 

@@ -4,7 +4,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import AbstractAsyncContextManager
 from types import TracebackType
 
-from vercel.internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.sandbox._internal.filesystem_handle_core import (
     BinaryReaderCore,
     BinaryWriterCore,
