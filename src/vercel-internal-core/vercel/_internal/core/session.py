@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, ClassVar, TypeVar, cast, overload
 import anyio
 import httpx
 
-from vercel._internal.core.errors import VercelSessionClosedError, VercelSessionError
+from vercel._internal.core.errors import (
+    VercelServiceOptionsError,
+    VercelSessionClosedError,
+    VercelSessionError,
+)
 from vercel._internal.core.options import ServiceOptions, merge_service_options
 from vercel._internal.core.polyfills import Self
 
@@ -58,10 +62,15 @@ class _BaseSdkSession:
 
     def get_service_option(self, option_type: type[ServiceOptionsT]) -> ServiceOptionsT | None:
         self.check_open()
-        option = self._service_options.get(option_type)
+        option = self._service_options.get(option_type.service_options_key())
         if option is None:
             return None
-        return cast(ServiceOptionsT, option)
+        if not isinstance(option, option_type):
+            raise VercelServiceOptionsError(
+                f"{type(option).__name__} cannot configure this session mode; "
+                f"use {option_type.__name__}"
+            )
+        return option
 
     def get_or_create_service(
         self, service_type: type[ServiceT], factory: Callable[[], ServiceT]

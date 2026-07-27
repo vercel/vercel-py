@@ -45,8 +45,18 @@ async def _default_sandbox_credentials_factory() -> SandboxCredentials:
     return _resolve_default_sandbox_credentials()
 
 
+class _SandboxServiceOptionsKey(ServiceOptions):
+    """Shared registry key for sync and async Sandbox service options."""
+
+    __slots__ = ()
+
+    @classmethod
+    def service_options_key(cls) -> type[ServiceOptions]:
+        return _SandboxServiceOptionsKey
+
+
 @dataclass(frozen=True, slots=True, init=False)
-class SandboxServiceOptions(ServiceOptions):
+class SandboxServiceOptions(_SandboxServiceOptionsKey):
     """Configuration for `vercel.sandbox` calls in an SDK session.
 
     A session that does not receive this option still constructs one with the
@@ -85,7 +95,7 @@ class SandboxServiceOptions(ServiceOptions):
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class SyncSandboxServiceOptions(ServiceOptions):
+class SyncSandboxServiceOptions(_SandboxServiceOptionsKey):
     """Configuration for synchronous `vercel.sandbox` calls in an SDK session."""
 
     base_url: str
