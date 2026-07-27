@@ -1,5 +1,7 @@
 """Shared helpers for Sandbox tests."""
 
+import asyncio
+
 from vercel._internal.core.options import ServiceOptions
 from vercel.sandbox import SandboxCredentials, SandboxServiceOptions, sync as sandbox_sync
 
@@ -11,22 +13,29 @@ def sandbox_service_options(
     team_id: str = "team_123",
     project_id: str = "prj_123",
 ) -> list[ServiceOptions]:
-    """Build matching async and sync Sandbox options for one test session."""
+    """Build Sandbox options for the test's current session mode."""
     credentials = SandboxCredentials(credential_value, team_id, project_id)
 
-    async def credentials_factory() -> SandboxCredentials:
-        return credentials
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
 
-    def sync_credentials_factory() -> SandboxCredentials:
+        def sync_credentials_factory() -> SandboxCredentials:
+            return credentials
+
+        return [
+            sandbox_sync.SandboxServiceOptions(
+                base_url=base_url,
+                credentials_factory=sync_credentials_factory,
+            )
+        ]
+
+    async def async_credentials_factory() -> SandboxCredentials:
         return credentials
 
     return [
         SandboxServiceOptions(
             base_url=base_url,
-            credentials_factory=credentials_factory,
-        ),
-        sandbox_sync.SandboxServiceOptions(
-            base_url=base_url,
-            credentials_factory=sync_credentials_factory,
-        ),
+            credentials_factory=async_credentials_factory,
+        )
     ]
