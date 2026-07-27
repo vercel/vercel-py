@@ -23,7 +23,7 @@ else:
 
 import pydantic
 
-from vercel._internal.polyfills import Self
+from vercel._internal.core.polyfills import Self
 
 T = TypeVar("T")
 QueueKind: TypeAlias = Literal["workflow", "step"]

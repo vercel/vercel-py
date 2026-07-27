@@ -27,6 +27,10 @@ for dependency_wheel in "$wheel_dir"/vercel_*.whl; do
     if [ ! -f "$dependency_wheel" ] || [ "$dependency_wheel" = "$wheel_path" ]; then
         continue
     fi
+    case "$(basename "$dependency_wheel")" in
+        *_bundle-*.whl|vercel_internal_shared_vendored_deps-*.whl) ;;
+        *) continue ;;
+    esac
     dependency_wheel=$(python - "$dependency_wheel" <<'PY'
 import sys
 from pathlib import Path
@@ -87,24 +91,43 @@ with zipfile.ZipFile(wheel) as archive:
 PY
 
 python - "$test_root" <<'PY'
+import re
 import sys
 from pathlib import Path
 
 test_root = Path(sys.argv[1])
-uses_vendored_httpx = any(
-    "from vercel.internal._vendor import httpx" in path.read_text(encoding="utf-8")
-    for path in (test_root / "vercel").rglob("*.py")
+vendored_libraries = tuple(
+    library
+    for library in ("anyio", "httpx")
+    if any(
+        f"vercel.internal._vendor.{library}" in path.read_text(encoding="utf-8")
+        or f"from vercel.internal._vendor import {library}" in path.read_text(encoding="utf-8")
+        for path in (test_root / "vercel").rglob("*.py")
+    )
 )
-(test_root / ".uses-vendored-httpx").write_text(
-    "1\n" if uses_vendored_httpx else "0\n",
+(test_root / ".vendored-libraries").write_text(
+    "\n".join(vendored_libraries) + "\n",
     encoding="utf-8",
 )
-if not uses_vendored_httpx:
-    raise SystemExit
 
 for path in (test_root / "tests").rglob("*.py"):
     text = path.read_text(encoding="utf-8")
-    rewritten = text.replace("import httpx\n", "from vercel.internal._vendor import httpx\n")
+    rewritten = text
+    for library in vendored_libraries:
+        rewritten = re.sub(
+            rf"^(?P<indent>[ \t]*)from {library}(?P<submodule>(?:\.[A-Za-z_]\w*)*) import ",
+            rf"\g<indent>from vercel.internal._vendor.{library}\g<submodule> import ",
+            rewritten,
+            flags=re.MULTILINE,
+        )
+        rewritten = re.sub(
+            rf"^(?P<indent>[ \t]*)import {library}(?: as (?P<alias>[A-Za-z_]\w*))?(?P<comment>[ \t]*(?:#.*)?)$",
+            lambda match: f"{match.group('indent')}from vercel.internal._vendor import {library}"
+            f"{(' as ' + match.group('alias')) if match.group('alias') else ''}"
+            f"{match.group('comment')}",
+            rewritten,
+            flags=re.MULTILINE,
+        )
     if rewritten != text:
         path.write_text(rewritten, encoding="utf-8")
 PY
@@ -135,9 +158,10 @@ tests_root = test_root / "tests"
 requirements_path = test_root / "requirements.txt"
 pytest_extra_args_path = test_root / "pytest-extra-args.txt"
 pytest_filter_path = test_root / "pytest-filter.txt"
-uses_vendored_httpx = test_root.joinpath(".uses-vendored-httpx").read_text(
-    encoding="utf-8"
-).strip() == "1"
+vendored_libraries = set(
+    test_root.joinpath(".vendored-libraries").read_text(encoding="utf-8").splitlines()
+)
+uses_vendored_httpx = "httpx" in vendored_libraries
 
 
 def load_pyproject(path: Path) -> dict[str, Any]:
@@ -252,7 +276,7 @@ def ignored_test_files() -> list[Path]:
 
 
 def pytest_filter_for_tests(paths: list[Path], texts: str) -> str:
-    if not uses_vendored_httpx or "respx_mock" not in texts or "httpx.Response" not in texts:
+    if not uses_vendored_httpx or "respx" not in texts:
         return ""
 
     excluded_names = []
@@ -263,7 +287,7 @@ def pytest_filter_for_tests(paths: list[Path], texts: str) -> str:
             if not isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
             source = ast.get_source_segment(text, node) or ""
-            if "respx_mock" in source and "httpx.Response" in source:
+            if "respx" in source:
                 excluded_names.append(node.name)
     return " and ".join(f"not {name}" for name in excluded_names)
 
@@ -304,9 +328,8 @@ for name in imported_workspace_packages(imports):
             continue
         add_requirement(root_dev.get(normalized, dependency))
 
-pytest_filter = pytest_filter_for_tests(test_files, texts)
-
 requirements_path.write_text("\n".join(sorted(requirements.values())) + "\n", encoding="utf-8")
+pytest_filter = pytest_filter_for_tests(test_files, texts)
 pytest_extra_args_path.write_text(
     "\n".join(f"--ignore={path}" for path in ignored_files) + "\n",
     encoding="utf-8",

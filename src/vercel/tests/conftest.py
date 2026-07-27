@@ -90,13 +90,6 @@ def has_blob_credentials() -> bool:
     return bool(os.getenv("BLOB_READ_WRITE_TOKEN"))
 
 
-def has_sandbox_credentials() -> bool:
-    """Check if Sandbox credentials are available."""
-    return bool(
-        os.getenv("VERCEL_TOKEN") and os.getenv("VERCEL_TEAM_ID") and os.getenv("VERCEL_PROJECT_ID")
-    )
-
-
 # Skip markers for live tests
 requires_vercel_credentials = pytest.mark.skipif(
     not has_vercel_credentials(),
@@ -107,12 +100,6 @@ requires_blob_credentials = pytest.mark.skipif(
     not has_blob_credentials(),
     reason="Requires BLOB_READ_WRITE_TOKEN environment variable",
 )
-
-requires_sandbox_credentials = pytest.mark.skipif(
-    not has_sandbox_credentials(),
-    reason="Requires VERCEL_TOKEN, VERCEL_TEAM_ID, and VERCEL_PROJECT_ID for sandbox",
-)
-
 
 # Workflow tests import the workflow worlds, which depend on vercel-workers
 # (installed only on Python >= 3.12; see pyproject). Skip collecting them when the

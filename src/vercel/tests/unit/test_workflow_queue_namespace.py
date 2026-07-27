@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from vercel._internal.polyfills import UTC
+from vercel._internal.core.polyfills import UTC
 from vercel._internal.workflow import core, runtime, world as w
 from vercel.workflow import Workflows
 

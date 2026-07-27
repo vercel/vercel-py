@@ -18,7 +18,7 @@ from typing import Any, Generic, Literal, ParamSpec, TypeVar
 import anyio
 import pydantic
 
-from vercel._internal.polyfills import UTC, Self
+from vercel._internal.core.polyfills import UTC, Self
 
 from . import core, nanoid, ulid, world as w
 from .py_sandbox import workflow_sandbox

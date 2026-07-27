@@ -11,8 +11,8 @@ from vercel._internal.blob.core import (
     normalize_delete_urls,
 )
 from vercel._internal.blob.multipart import MultipartClient
-from vercel._internal.iter_coroutine import iter_coroutine
-from vercel._internal.time import SECOND, coerce_duration
+from vercel._internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.time import SECOND, coerce_duration
 from vercel.blob.errors import BlobError
 from vercel.blob.multipart.api import (
     AsyncMultipartUploader,

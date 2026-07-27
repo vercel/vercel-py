@@ -61,13 +61,21 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-cache",
     "vercel-celery",
     "vercel-dramatiq",
+    "vercel-internal-core",
     "vercel-internal-telemetry",
     "vercel-oidc",
     "vercel-queue",
+    "vercel-sandbox",
 }
 PEER_DEPENDENCIES = {
     "vercel-celery": {"celery"},
     "vercel-dramatiq": {"dramatiq"},
+}
+EXTERNAL_DEPENDENCIES = {
+    # Pydantic's runtime graph includes the platform-specific pydantic-core
+    # extension. Keep the ordinary bounded dependency instead of producing a
+    # bundle that contains only Pydantic's Python sources.
+    "vercel-sandbox": {"pydantic"},
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
@@ -226,6 +234,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
         return _pin_requirements(SHARED_VENDORED_REQUIREMENTS, lock_versions)
 
     vendored_names = []
+    external_dependencies = EXTERNAL_DEPENDENCIES.get(package_name, set())
     peers = PEER_DEPENDENCIES.get(package_name, set())
     for dependency in _release_dependencies(data):
         parsed = Requirement(dependency)
@@ -234,7 +243,7 @@ def _derive_vendor_requirements(package_name: str, data: dict[str, Any]) -> tupl
             continue
         if normalized.startswith("vercel-"):
             continue
-        if normalized in peers:
+        if normalized in external_dependencies or normalized in peers:
             continue
         vendored_names.append(normalized)
     return _pin_requirements(tuple(vendored_names), lock_versions)
@@ -285,6 +294,7 @@ def _external_dependencies(
 ) -> tuple[str, ...]:
     packages = workspace.packages()
     vendored_names = {_requirement_name(requirement) for requirement in vendored_requirements}
+    external_dependencies = EXTERNAL_DEPENDENCIES.get(package_name, set())
     peers = PEER_DEPENDENCIES.get(package_name, set())
     external = []
     for dependency in _release_dependencies(data):
@@ -294,7 +304,11 @@ def _external_dependencies(
             continue
         if normalized.startswith("vercel-") and normalized in packages:
             external.append(_vendored_dependency(parsed))
-        elif normalized in peers or normalized not in vendored_names:
+        elif (
+            normalized in external_dependencies
+            or normalized in peers
+            or normalized not in vendored_names
+        ):
             external.append(dependency)
     if package_name != SHARED_VENDORED_PACKAGE and _uses_shared_vendored_deps(package_name, data):
         external.append(_vendored_dependency(Requirement(SHARED_VENDORED_PACKAGE)))
@@ -624,9 +638,9 @@ def _vendoring_transformations(plan: VendoredPlan) -> VendoringTransformations:
         return VendoringTransformations(
             substitutions=tuple(_shared_h2_substitution_pairs()),
         )
-    if any(_requirement_name(requirement) == "anyio" for requirement in plan.vendored_requirements):
-        return VendoringTransformations(substitutions=(ANYIO_FROM_THREAD_SUBSTITUTION,))
-    return VendoringTransformations()
+    vendored_names = {_requirement_name(requirement) for requirement in plan.vendored_requirements}
+    substitutions = (ANYIO_FROM_THREAD_SUBSTITUTION,) if "anyio" in vendored_names else ()
+    return VendoringTransformations(substitutions=substitutions)
 
 
 def _shared_h2_substitution_pairs() -> tuple[tuple[str, str], ...]:

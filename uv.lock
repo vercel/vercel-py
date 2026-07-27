@@ -22,9 +22,11 @@ members = [
     "vercel-celery",
     "vercel-dramatiq",
     "vercel-headers",
+    "vercel-internal-core",
     "vercel-internal-telemetry",
     "vercel-oidc",
     "vercel-queue",
+    "vercel-sandbox",
 ]
 
 [manifest.dependency-groups]
@@ -2400,8 +2402,10 @@ dependencies = [
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
     { name = "vercel-cache" },
     { name = "vercel-headers" },
+    { name = "vercel-internal-core" },
     { name = "vercel-internal-telemetry" },
     { name = "vercel-oidc" },
+    { name = "vercel-sandbox" },
     { name = "vercel-workers", marker = "python_full_version >= '3.12'" },
     { name = "websockets" },
 ]
@@ -2416,8 +2420,10 @@ requires-dist = [
     { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
+    { name = "vercel-sandbox", editable = "src/vercel-sandbox" },
     { name = "vercel-workers", marker = "python_full_version >= '3.12'", specifier = ">=0.0.16,<1" },
     { name = "websockets", specifier = ">=12.0,<17" },
 ]
@@ -2475,6 +2481,22 @@ name = "vercel-headers"
 source = { editable = "src/vercel-headers" }
 
 [[package]]
+name = "vercel-internal-core"
+source = { editable = "src/vercel-internal-core" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
+]
+
+[[package]]
 name = "vercel-internal-telemetry"
 source = { editable = "src/vercel-internal-telemetry" }
 dependencies = [
@@ -2500,6 +2522,26 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0,<1" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
+]
+
+[[package]]
+name = "vercel-sandbox"
+source = { editable = "src/vercel-sandbox" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "vercel-internal-core" },
+    { name = "vercel-oidc" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
+    { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]
 
 [[package]]
