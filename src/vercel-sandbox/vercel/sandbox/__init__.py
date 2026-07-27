@@ -71,7 +71,11 @@ from vercel.sandbox._internal.models import (
     TagFilter,
     TarballSource,
 )
-from vercel.sandbox._internal.options import SandboxServiceOptions
+from vercel.sandbox._internal.options import (
+    SandboxCredentials,
+    SandboxCredentialsFactory,
+    SandboxServiceOptions,
+)
 from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.text_reader import TextReader
@@ -374,7 +378,9 @@ __all__ = [
     "ProcessStatus",
     "Process",
     "CompletedProcess",
+    "SandboxCredentials",
     "SandboxCredentialsError",
+    "SandboxCredentialsFactory",
     "SandboxError",
     "SandboxFilesystem",
     "SandboxFilesystemBatch",

@@ -10,6 +10,7 @@ import httpx
 import pytest
 import respx
 from pydantic import BaseModel, ValidationError
+from sandbox_fixtures import sandbox_service_options as _session_options
 
 from vercel import sandbox
 from vercel._internal.core.session import get_active_session
@@ -33,7 +34,6 @@ from vercel.sandbox import (
     SandboxQueryByStatusUpdatedAt,
     SandboxResources,
     SandboxResponseError,
-    SandboxServiceOptions,
     SandboxSource,
     SandboxStatus,
     SandboxTerminalStateError,
@@ -45,7 +45,6 @@ from vercel.sandbox import (
     TarballSource,
     sync as sandbox_sync,
 )
-from vercel.sandbox._internal.options import SandboxCredentials
 from vercel.sandbox._internal.service import get_sandbox_service
 from vercel.sandbox._internal.state import SandboxRuntimeSessionState, SandboxState
 
@@ -134,22 +133,6 @@ def _snapshot_response(
             "updatedAt": 2,
         }
     }
-
-
-def _session_options(*, base_url: str = "https://sandbox.test") -> list[SandboxServiceOptions]:
-    async def credentials_factory() -> SandboxCredentials:
-        return SandboxCredentials(
-            token="token",
-            team_id="team_123",
-            project_id="prj_123",
-        )
-
-    return [
-        SandboxServiceOptions(
-            base_url=base_url,
-            credentials_factory=credentials_factory,
-        )
-    ]
 
 
 def _logs_response(*records: object) -> httpx.Response:

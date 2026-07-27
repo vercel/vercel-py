@@ -47,8 +47,12 @@ from vercel.sandbox._internal.models import (
     TagFilter,
     TarballSource,
 )
-from vercel.sandbox._internal.options import SandboxServiceOptions
-from vercel.sandbox._internal.service import SandboxService, get_sandbox_service
+from vercel.sandbox._internal.options import (
+    SandboxCredentials,
+    SyncSandboxCredentialsFactory,
+    SyncSandboxServiceOptions as SandboxServiceOptions,
+)
+from vercel.sandbox._internal.service import SandboxService, get_sync_sandbox_service
 from vercel.sandbox._internal.state import SnapshotRetentionState
 from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxBinaryReader,
@@ -77,7 +81,7 @@ from vercel.sandbox._internal.text_reader import SyncTextReader
 
 
 def _service() -> SandboxService:
-    return get_sandbox_service(get_active_sync_session())
+    return get_sync_sandbox_service(get_active_sync_session())
 
 
 def create_sandbox(
@@ -363,7 +367,9 @@ __all__ = [
     "SandboxCleanupError",
     "ProcessStatus",
     "CompletedProcess",
+    "SandboxCredentials",
     "SandboxCredentialsError",
+    "SyncSandboxCredentialsFactory",
     "SandboxError",
     "SandboxFilesystemCommandError",
     "SandboxFilesystemError",
