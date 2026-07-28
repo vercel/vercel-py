@@ -9,12 +9,12 @@ from vercel.sandbox import SandboxCredentials, SandboxServiceOptions, sync as sa
 def sandbox_service_options(
     *,
     base_url: str = "https://sandbox.test",
-    credential_value: str = "token",
+    token: str = "token",
     team_id: str = "team_123",
     project_id: str = "prj_123",
 ) -> list[ServiceOptions]:
     """Build Sandbox options for the test's current session mode."""
-    credentials = SandboxCredentials(credential_value, team_id, project_id)
+    credentials = SandboxCredentials(token=token, team_id=team_id, project_id=project_id)
 
     try:
         asyncio.get_running_loop()
