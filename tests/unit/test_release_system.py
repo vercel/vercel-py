@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1334,6 +1335,7 @@ def test_shared_bundle_package_is_generated(
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     metadata = (tmp_path / "vercel/internal/_vendor/_shared_deps.json").read_text(encoding="utf-8")
     assert 'name = "vercel-internal-shared-vendored-deps"' in pyproject
+    assert '"/vercel/internal/_vendor/certifi/cacert.pem",' in pyproject
     assert "[tool.vendoring]" not in pyproject
     assert (tmp_path / "vercel/internal/_vendor/version.py").read_text(
         encoding="utf-8"
@@ -1400,6 +1402,39 @@ path = "vercel/pkg/version.py"
 
     pyproject = (package_path / "pyproject.toml").read_text(encoding="utf-8")
     assert "import anyio\\\\.from_thread" in pyproject
+
+
+def test_shared_vendoring_config_rewrites_certifi_resource_anchors(tmp_path: Path) -> None:
+    plan = bundle_release._shared_vendored_plan()  # noqa: SLF001
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "vercel-internal-shared-vendored-deps"\n',
+        encoding="utf-8",
+    )
+
+    bundle_release._write_vendoring_config(plan, tmp_path)  # noqa: SLF001
+
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    match, replace = bundle_release.CERTIFI_RESOURCE_SUBSTITUTION
+    assert json.dumps(match) in pyproject
+    assert json.dumps(replace) in pyproject
+    assert "vercel.internal._vendor.certifi" in replace
+
+
+def test_shared_deps_fingerprint_includes_recipe_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bundle_release,
+        "_derive_vendor_requirements",
+        lambda _package, _data: ("httpx==0.28.1",),
+    )
+    before = bundle_release._shared_deps_fingerprint()  # noqa: SLF001
+    monkeypatch.setattr(
+        bundle_release,
+        "SHARED_VENDOR_RECIPE_REVISION",
+        bundle_release.SHARED_VENDOR_RECIPE_REVISION + 1,
+    )
+    assert bundle_release._shared_deps_fingerprint() != before  # noqa: SLF001
 
 
 def test_vendored_license_files_are_copied_from_dist_info(tmp_path: Path) -> None:

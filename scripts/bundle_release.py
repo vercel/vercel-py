@@ -86,6 +86,16 @@ ANYIO_FROM_THREAD_SUBSTITUTION = (
     r"import anyio\.from_thread",
     "from anyio import from_thread",
 )
+# certifi locates cacert.pem with importlib.resources anchored at the literal
+# top-level "certifi" distribution, which does not exist in a bundle install.
+# Rewrite the anchors so the vendored copy resolves its own cacert.pem.
+CERTIFI_RESOURCE_SUBSTITUTION = (
+    r'(files|get_path|read_text)\("certifi"',
+    rf'\1("{SHARED_VENDOR_NAMESPACE}.certifi"',
+)
+# Bump to force a republish of the shared vendored package when the vendoring
+# recipe changes without any change to the pinned requirements.
+SHARED_VENDOR_RECIPE_REVISION = 2
 
 
 @dataclass(frozen=True)
@@ -451,7 +461,11 @@ def _read_json_url(url: str) -> dict[str, Any]:
 
 
 def _shared_deps_fingerprint() -> str:
-    payload = "\n".join(_derive_vendor_requirements(SHARED_VENDORED_PACKAGE, {})) + "\n"
+    lines = (
+        f"recipe-revision={SHARED_VENDOR_RECIPE_REVISION}",
+        *_derive_vendor_requirements(SHARED_VENDORED_PACKAGE, {}),
+    )
+    payload = "\n".join(lines) + "\n"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -560,6 +574,7 @@ path = "vercel/internal/_vendor/version.py"
 [tool.hatch.build.targets.sdist]
 include = [
     "/vercel/internal/_vendor/**/*.py",
+    "/vercel/internal/_vendor/certifi/cacert.pem",
     "/vercel/internal/_vendor/{SHARED_DEPS_METADATA}",
     "/vercel/internal/_vendor/py.typed",
     "/README.md",
@@ -636,7 +651,7 @@ def _render_vendoring_config(plan: VendoredPlan) -> str:
 def _vendoring_transformations(plan: VendoredPlan) -> VendoringTransformations:
     if plan.package.name == SHARED_VENDORED_PACKAGE:
         return VendoringTransformations(
-            substitutions=tuple(_shared_h2_substitution_pairs()),
+            substitutions=(*_shared_h2_substitution_pairs(), CERTIFI_RESOURCE_SUBSTITUTION),
         )
     vendored_names = {_requirement_name(requirement) for requirement in plan.vendored_requirements}
     substitutions = (ANYIO_FROM_THREAD_SUBSTITUTION,) if "anyio" in vendored_names else ()
