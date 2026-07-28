@@ -254,7 +254,7 @@ class VercelWorld(w.World):
         client = self._queue_client(deployment=deployment_id)
         try:
             message_id = await client.send(
-                vqs.sanitize_name(queue_name),
+                w.get_physical_topic(queue_name),
                 payload,
                 idempotency_key=idempotency_key,
                 delay=delay,
@@ -306,12 +306,18 @@ class VercelWorld(w.World):
                 traceback.print_exc()
                 raise
 
-        topic_prefix = vqs.sanitize_name(queue_name_prefix)
-        vqs.subscribe(topic=f"{topic_prefix}*")(async_handler)
+        topic_prefix = w.get_physical_topic(queue_name_prefix)
+        vqs.subscribe(
+            topic=f"{topic_prefix}*",
+            consumer_group=w.QUEUE_CONSUMER_GROUP,
+        )(async_handler)
         self._queue_callbacks.append(async_handler)
 
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
             try:
+                # Route follow-up calls (ack, lease renewal) through the same
+                # client the sends use, so they inherit the proxy base URL and
+                # token instead of falling back to an unconfigured default.
                 client = self._queue_client(deployment=vqs.ALL_DEPLOYMENTS)
                 await client.accept_and_handle(request)
             except Exception:

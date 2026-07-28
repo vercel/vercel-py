@@ -9,7 +9,7 @@ import threading
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
@@ -99,6 +99,11 @@ def write_exclusive(path: pathlib.Path, data: str) -> bool:
         return True
 
 
+# Receipt handle marking a delivery that did not come off a real queue lease,
+# so the subscriber knows there is nothing to acknowledge afterwards.
+_LOCAL_RECEIPT_HANDLE = "local"
+
+
 def _json_string(value: str) -> bytes:
     return json.dumps(value).encode("utf-8")
 
@@ -119,6 +124,12 @@ def _local_queue_delivery(
     topic: str,
     consumer_group: str,
 ) -> tuple[AsyncIterator[bytes], dict[str, str]]:
+    """Wrap a `vercel dev` HTTP delivery as if it came off the queue.
+
+    The request body is the bare payload, while subscribers expect the
+    `{payload, queueName, deploymentId}` envelope `queue()` sends, so the
+    envelope is streamed back around it along with synthetic push headers.
+    """
     body = _chain_async_bytes(
         b'{"payload":',
         request.aiter_bytes(),
@@ -131,9 +142,9 @@ def _local_queue_delivery(
         "ce-vqsqueuename": topic,
         "ce-vqsconsumergroup": consumer_group,
         "ce-vqsmessageid": request.headers.get("x-vqs-message-id") or f"msg_{uuid4()}",
-        "ce-vqsreceipthandle": "local",
+        "ce-vqsreceipthandle": _LOCAL_RECEIPT_HANDLE,
         "ce-vqsdeliverycount": request.headers.get("x-vqs-message-attempt") or "1",
-        "ce-vqscreatedat": datetime.now(timezone.utc).isoformat(),
+        "ce-vqscreatedat": datetime.now(UTC).isoformat(),
         "content-type": request.headers.get("content-type") or "application/json",
     }
 
@@ -220,7 +231,7 @@ class LocalWorld(w.World):
         }
         client = await self._get_queue_client()
         message_id = await client.send(
-            vqs.sanitize_name(queue_name),
+            w.get_physical_topic(queue_name),
             payload,
             idempotency_key=idempotency_key,
             delay=max(1, math.ceil(delay_seconds)) if delay_seconds is not None else None,
@@ -230,8 +241,6 @@ class LocalWorld(w.World):
     def create_queue_handler(
         self, queue_name_prefix: w.QueuePrefix, handler: w.QueueHandler
     ) -> w.HTTPHandler:
-        consumer_group = f"local_{queue_name_prefix.rstrip('_')}"
-
         async def async_handler(message: vqs.Message[Any]) -> None:
             try:
                 body = message.payload
@@ -265,7 +274,7 @@ class LocalWorld(w.World):
                         delay_seconds=delay_seconds,
                         idempotency_key=result.idempotency_key,
                     )
-                if message.metadata.receipt_handle == "local":
+                if message.metadata.receipt_handle == _LOCAL_RECEIPT_HANDLE:
                     # Local HTTP deliveries use a synthetic receipt handle so
                     # accept_and_handle can parse them like VQS pushes, but
                     # there is no real queue lease to acknowledge.
@@ -275,18 +284,18 @@ class LocalWorld(w.World):
                     traceback.print_exc()
                 raise
 
-        topic_prefix = vqs.sanitize_name(queue_name_prefix)
-        vqs.subscribe(topic=f"{topic_prefix}*", consumer_group=consumer_group)(async_handler)
+        topic_prefix = w.get_physical_topic(queue_name_prefix)
+        vqs.subscribe(
+            topic=f"{topic_prefix}*",
+            consumer_group=w.QUEUE_CONSUMER_GROUP,
+        )(async_handler)
         self._queue_callbacks.append(async_handler)
 
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
-            queue_name_raw = request.headers.get("x-vqs-queue-name")
+            queue_name = request.headers.get("x-vqs-queue-name")
 
-            if not queue_name_raw:
+            if not queue_name:
                 return w.HTTPResponse.json({"error": "Missing required headers"}, status=400)
-
-            queue_name = queue_name_raw
-            topic = str(vqs.sanitize_name(queue_name))
 
             # Validate queue name prefix
             if not queue_name.startswith(queue_name_prefix):
@@ -295,8 +304,8 @@ class LocalWorld(w.World):
             body, headers = _local_queue_delivery(
                 request,
                 queue_name=queue_name,
-                topic=topic,
-                consumer_group=consumer_group,
+                topic=str(w.get_physical_topic(queue_name)),
+                consumer_group=str(w.QUEUE_CONSUMER_GROUP),
             )
 
             try:

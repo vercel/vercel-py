@@ -17,17 +17,12 @@ that asks to retry.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import datetime
 
-import pytest
-
-import vercel.queue as vqs
 from vercel._internal.core.polyfills import UTC
 from vercel._internal.workflow import world as w
 from vercel._internal.workflow.worlds.vercel import VercelWorld
-from vercel.queue import Message, MessageMetadata, SanitizedName, Subscription, get_subscriptions
-from vercel.queue.testing import clear_subscriptions
+from vercel.queue import Message, MessageMetadata, SanitizedName, get_subscriptions
 
 CREATED_AT = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -46,30 +41,7 @@ class _RecordingWorld(VercelWorld):
         return "msg_test"
 
 
-@pytest.fixture
-def isolated_subscriptions():
-    saved = get_subscriptions()
-    clear_subscriptions()
-    try:
-        yield get_subscriptions
-    finally:
-        clear_subscriptions()
-        for subscription in saved:
-            vqs.subscribe(
-                topic=subscription.topic,
-                consumer_group=subscription.consumer_group,
-                retry_after=subscription.retry_after_seconds,
-                initial_delay=subscription.initial_delay_seconds,
-                max_concurrency=subscription.max_concurrency,
-                max_attempts=subscription.max_attempts,
-            )(subscription.func)
-
-
-def _subscription_list(get_current: Callable[[], tuple[Subscription, ...]]) -> list[Subscription]:
-    return list(get_current())
-
-
-async def test_step_retry_timeout_reschedules_step(isolated_subscriptions) -> None:
+async def test_step_retry_timeout_reschedules_step(isolated_subscriptions: None) -> None:
     world = _RecordingWorld()
 
     async def handler(
@@ -81,9 +53,10 @@ async def test_step_retry_timeout_reschedules_step(isolated_subscriptions) -> No
 
     # Registers async_handler into the global subscription registry as a side effect.
     world.create_queue_handler("__wkf_step_", handler)
-    subscriptions = _subscription_list(isolated_subscriptions)
+    subscriptions = list(get_subscriptions())
     assert len(subscriptions) == 1
-    assert subscriptions[0].topic == "____wkf__step__*"
+    assert subscriptions[0].topic == "__wkf_step_*"
+    assert subscriptions[0].consumer_group == "default"
     async_handler = subscriptions[0].func
     assert async_handler is not None
 
@@ -118,7 +91,7 @@ async def test_step_retry_timeout_reschedules_step(isolated_subscriptions) -> No
     assert delay == 1.0
 
 
-async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions) -> None:
+async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions: None) -> None:
     """A QueueContinuation return re-enqueues with its idempotency key, so repeated
     suspension passes over the same pending wait dedupe to one delayed wake-up."""
     world = _RecordingWorld()
@@ -131,9 +104,10 @@ async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions
         return w.QueueContinuation(delay_seconds=5.0, idempotency_key="wait_xyz")
 
     world.create_queue_handler("__wkf_workflow_", handler)
-    subscriptions = _subscription_list(isolated_subscriptions)
+    subscriptions = list(get_subscriptions())
     assert len(subscriptions) == 1
-    assert subscriptions[0].topic == "____wkf__workflow__*"
+    assert subscriptions[0].topic == "__wkf_workflow_*"
+    assert subscriptions[0].consumer_group == "default"
     async_handler = subscriptions[0].func
     assert async_handler is not None
 
