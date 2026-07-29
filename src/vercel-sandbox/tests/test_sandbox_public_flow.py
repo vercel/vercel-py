@@ -1298,6 +1298,184 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
 
 
 @respx.mock
+async def test_async_get_or_create_returns_existing_or_created_sandbox(
+    mock_env_clear: None,
+) -> None:
+    existing_get = respx.get("https://sandbox.test/v2/sandboxes/existing").mock(
+        return_value=httpx.Response(
+            200,
+            json={**_sandbox_response(name="existing", session_id="sbx_existing"), "resumed": True},
+        )
+    )
+    missing_get = respx.get("https://sandbox.test/v2/sandboxes/missing").mock(
+        return_value=httpx.Response(
+            404,
+            json={"error": {"code": "not_found", "message": "not found"}},
+        )
+    )
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body == {
+            "projectId": "prj_other",
+            "name": "missing",
+            "runtime": "python3.13",
+            "persistent": True,
+            "tags": {"purpose": "test"},
+        }
+        return httpx.Response(
+            200,
+            json=_sandbox_response(name="missing", session_id="sbx_missing"),
+        )
+
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
+
+    async with session(service_options=_session_options()):
+        existing, existing_created = await sandbox.get_or_create_sandbox(
+            name="existing",
+            project_id="prj_other",
+        )
+        created, was_created = await sandbox.get_or_create_sandbox(
+            name="missing",
+            project_id="prj_other",
+            runtime="python3.13",
+            persistent=True,
+            tags={"purpose": "test"},
+        )
+
+    assert existing.name == "existing"
+    assert existing_created is False
+    assert created.name == "missing"
+    assert was_created is True
+    assert existing_get.calls.last.request.url.params["resume"] == "true"
+    assert missing_get.calls.last.request.url.params["resume"] == "true"
+    assert create_route.call_count == 1
+
+
+@respx.mock
+async def test_async_get_or_create_honors_resume_false(mock_env_clear: None) -> None:
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/existing").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(
+                name="existing",
+                session_id="sbx_existing",
+                status="stopped",
+                session_status="stopped",
+            ),
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        existing, created = await sandbox.get_or_create_sandbox(
+            name="existing",
+            resume=False,
+        )
+
+    assert existing.name == "existing"
+    assert created is False
+    assert get_route.calls.last.request.url.params["resume"] == "false"
+
+
+@respx.mock
+async def test_async_get_or_create_recreates_stale_snapshot(mock_env_clear: None) -> None:
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/stale").mock(
+        return_value=httpx.Response(
+            410,
+            json={
+                "error": {
+                    "code": "snapshot_not_found",
+                    "message": "Cannot resume sandbox: no snapshot available.",
+                }
+            },
+        )
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/stale").mock(
+        return_value=httpx.Response(
+            404,
+            json={"error": {"code": "not_found", "message": "already deleted"}},
+        )
+    )
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(name="stale", session_id="sbx_recreated"),
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        recreated, created = await sandbox.get_or_create_sandbox(name="stale")
+
+    assert recreated.name == "stale"
+    assert created is True
+    assert get_route.calls.last.request.url.params["resume"] == "true"
+    assert delete_route.call_count == 1
+    assert create_route.call_count == 1
+
+
+@respx.mock
+async def test_async_get_or_create_propagates_other_get_errors(mock_env_clear: None) -> None:
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/forbidden").mock(
+        return_value=httpx.Response(
+            403,
+            json={"error": {"code": "forbidden", "message": "nope"}},
+        )
+    )
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(500)
+    )
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(SandboxApiError) as exc_info:
+            await sandbox.get_or_create_sandbox(name="forbidden")
+
+    assert exc_info.value.status_code == 403
+    assert get_route.call_count == 1
+    assert create_route.call_count == 0
+
+
+@respx.mock
+def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
+    mock_env_clear: None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def get_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/existing"):
+            return httpx.Response(
+                200,
+                json=_sandbox_response(name="existing", session_id="sbx_existing"),
+            )
+        return httpx.Response(
+            404,
+            json={"error": {"code": "not_found", "message": "not found"}},
+        )
+
+    respx.get("https://sandbox.test/v2/sandboxes/existing").mock(side_effect=get_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/missing").mock(side_effect=get_handler)
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(name="missing", session_id="sbx_missing"),
+        )
+    )
+
+    with session(service_options=_session_options()):
+        existing, existing_created = sandbox_sync.get_or_create_sandbox(name="existing")
+        created, was_created = sandbox_sync.get_or_create_sandbox(name="missing")
+
+    assert existing.name == "existing"
+    assert existing_created is False
+    assert created.name == "missing"
+    assert was_created is True
+    assert not hasattr(existing, "__enter__")
+    assert not hasattr(created, "__enter__")
+    assert [request.url.params["resume"] for request in requests] == ["true", "true"]
+    assert create_route.call_count == 1
+
+
+@respx.mock
 async def test_async_get_fetches_and_resume_ensures_active_session(
     mock_env_clear: None,
 ) -> None:

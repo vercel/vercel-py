@@ -1227,6 +1227,50 @@ def get_sandbox(service: SandboxService, **kwargs: Any) -> SyncSandbox:
     return SyncSandbox(payload=iter_coroutine(service.get_sandbox(**kwargs)), service=service)
 
 
+def get_or_create_sandbox(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    resume: bool = True,
+    include_system_routes: bool | None = None,
+    runtime: str | None = None,
+    source: SandboxSource | None = None,
+    ports: list[int] | None = None,
+    execution_time_limit: DurationInput = None,
+    resources: SandboxResources | None = None,
+    persistent: bool | None = None,
+    network_policy: NetworkPolicy | None = None,
+    env: Mapping[str, str] | None = None,
+    tags: Mapping[str, str] | None = None,
+    snapshot_expiration: SnapshotExpirationInput = None,
+    snapshot_retention: SnapshotRetention | None = None,
+) -> tuple[SyncSandbox, bool]:
+    try:
+        state, created = iter_coroutine(
+            service.get_or_create_sandbox(
+                name=name,
+                project_id=project_id,
+                resume=resume,
+                include_system_routes=include_system_routes,
+                runtime=runtime,
+                source=source,
+                ports=ports,
+                execution_time_limit=parse_duration_seconds(execution_time_limit),
+                resources=resources,
+                persistent=persistent,
+                network_policy=network_policy,
+                env=env,
+                tags=tags,
+                snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
+                snapshot_retention=snapshot_retention,
+            )
+        )
+        return SyncSandbox(payload=state, service=service), created
+    except _SandboxTerminalState as error:
+        raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
+
+
 def resume_sandbox(service: SandboxService, **kwargs: Any) -> _ManagedSyncSandbox:
     return _ManagedSyncSandbox(
         payload=iter_coroutine(service.resume_sandbox(**kwargs)),
