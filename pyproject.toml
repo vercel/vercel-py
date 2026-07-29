@@ -69,6 +69,7 @@ explicit_package_bases = true
 mypy_path = [
     "src",
     "src/vercel-cache",
+    "src/vercel-connect",
     "src/vercel-headers",
     "src/vercel-queue",
     "src/vercel-oidc",
