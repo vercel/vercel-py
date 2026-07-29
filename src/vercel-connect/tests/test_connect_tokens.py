@@ -393,3 +393,14 @@ async def test_revoke_token_falls_back_to_resolved_identity(mock_env_clear: None
         await revoke_token("slack/my-bot", subject=ConnectAppTokenSubject())
 
     assert route.calls.last.request.headers["authorization"] == "Bearer from-factory"
+
+
+@respx.mock
+async def test_wildcard_scopes_are_omitted_from_the_body(mock_env_clear: None) -> None:
+    """`["*"]` is normalized away, so the wire form matches an omitted scopes list."""
+    route = token_route()
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=ConnectAppTokenSubject(), scopes=["*"])
+
+    assert json.loads(route.calls.last.request.content) == {"subject": {"type": "app"}}

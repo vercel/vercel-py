@@ -46,13 +46,17 @@ class ConnectApiError(ConnectError):
         self.data = data
 
     def __str__(self) -> str:
-        parts = [super().__str__()]
+        # This is the only layer that formats code and status, so callers never
+        # see them twice.
+        details = []
         if self.code:
-            parts.append(f"code={self.code}")
-        parts.append(f"status={self.status_code}")
+            details.append(f"code={self.code}")
+        details.append(f"status={self.status_code}")
         if self.request_id:
-            parts.append(f"request_id={self.request_id}")
-        return " ".join([parts[0], f"({', '.join(parts[1:])})"])
+            details.append(f"request_id={self.request_id}")
+        message = super().__str__()
+        rendered_details = f"({', '.join(details)})"
+        return f"{message} {rendered_details}" if message else rendered_details
 
 
 class NoValidTokenError(ConnectApiError):

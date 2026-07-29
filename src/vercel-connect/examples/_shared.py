@@ -35,20 +35,17 @@ def mask(token: str) -> str:
 
 
 def describe_error(error: BaseException) -> str:
-    """Summarize a Connect failure, including the fields worth reporting."""
-    if isinstance(error, ConnectApiError):
-        parts = [f"{type(error).__name__}: {error}"]
-        if error.code:
-            parts.append(f"  code:       {error.code}")
-        parts.append(f"  status:     {error.status_code} {error.status_text}")
-        if error.request_id:
-            parts.append(f"  request id: {error.request_id}")
-        if error.vendor:
-            parts.append(f"  vendor:     {error.vendor}")
-        return "\n".join(parts)
+    """Summarize a Connect failure, including the fields worth reporting.
+
+    `ConnectApiError.__str__` already renders the code, status, and request id, so
+    only the upstream provider's own payload needs adding.
+    """
+    summary = f"{type(error).__name__}: {error}"
+    if isinstance(error, ConnectApiError) and error.vendor:
+        return f"{summary}\n  vendor: {error.vendor}"
     if isinstance(error, ConnectError):
-        return f"{type(error).__name__}: {error}"
-    return f"{type(error).__name__}: {error}"
+        return summary
+    return summary
 
 
 HINTS = """

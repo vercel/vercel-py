@@ -11,6 +11,7 @@ any of these calls succeed.
 """
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any
 
 from vercel._internal.core.session import get_active_session
 from vercel.connect._internal.async_runtime import (
@@ -280,7 +281,7 @@ async def get_connector_metadata(
 
 
 async def verify_connect_webhook(
-    headers: Mapping[str, str],
+    headers: Mapping[str, str] | Any,
     *,
     project_id: str | None = None,
     environment: str | None = None,
@@ -303,7 +304,9 @@ async def verify_connect_webhook(
     arguments or the environment, every request is rejected.
 
     Args:
-        headers: Inbound request headers. Only `Authorization` is read.
+        headers: Inbound request headers, or any request object exposing a
+            `headers` mapping (httpx, Starlette, FastAPI, Django). Only
+            `Authorization` is read.
         project_id: Expected project. Defaults to `VERCEL_PROJECT_ID`.
         environment: Expected environment. Defaults to `VERCEL_TARGET_ENV`, then
             `VERCEL_ENV`.

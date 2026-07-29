@@ -214,17 +214,16 @@ def _serialize_authorization_detail(detail: ConnectAuthorizationDetail) -> JSONO
 
 
 def _raise_api_error(response: Response) -> None:
-    message, data = extract_structured_error(response)
-    # The shared extractor only understands the `error` envelope, but Connect also
-    # answers with `err`, so recover that message rather than losing it.
-    envelope_message = _error_message(data)
-    if envelope_message and envelope_message not in message:
-        message = f"{message}: {envelope_message}"
+    # `extract_structured_error` returns a message that already embeds the status
+    # and code. `ConnectApiError.__str__` renders those itself, so only the bare
+    # provider message is passed through and the shared text is used purely as a
+    # fallback for bodies the envelope parser cannot read.
+    fallback, data = extract_structured_error(response)
     code = _error_code(data)
     error_class = _ERROR_CLASSES.get(code or "", ConnectApiError)
     raise error_class(
         response,
-        message,
+        _error_message(data) or fallback,
         code=code,
         vendor=_error_vendor(data),
         data=data,

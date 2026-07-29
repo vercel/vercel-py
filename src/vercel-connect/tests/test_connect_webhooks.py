@@ -183,3 +183,52 @@ async def test_trust_boundary_is_documented() -> None:
     assert verify_connect_webhook.__doc__ is not None
     assert "Trust boundary" in verify_connect_webhook.__doc__
     assert "fails closed" in verify_connect_webhook.__doc__.lower()
+
+
+async def test_accepts_a_request_object_exposing_headers(
+    mock_env_clear: None,
+    fake_verifier: list[dict[str, Any]],
+) -> None:
+    """A request object is the natural thing to reach for, so accept one."""
+    import httpx
+
+    request = httpx.Request(
+        "POST", "https://myapp.com/hook", headers={"Authorization": "Bearer from-request"}
+    )
+
+    async with session(service_options=session_options()):
+        claims = await verify_connect_webhook(request)
+
+    assert fake_verifier[0]["token"] == "from-request"
+    assert claims.project_id == "prj_123"
+
+
+def test_accepts_a_request_object_exposing_headers_sync(
+    mock_env_clear: None,
+    fake_verifier: list[dict[str, Any]],
+) -> None:
+    import httpx
+
+    request = httpx.Request(
+        "POST", "https://myapp.com/hook", headers={"Authorization": "Bearer from-request"}
+    )
+
+    with session(service_options=session_options()):
+        connect_sync.verify_connect_webhook(request)
+
+    assert fake_verifier[0]["token"] == "from-request"
+
+
+@pytest.mark.parametrize("headers", [None, 42, "Bearer abc", ["Authorization", "Bearer abc"]])
+async def test_rejects_input_that_is_not_headers(
+    mock_env_clear: None,
+    fake_verifier: list[dict[str, Any]],
+    headers: Any,
+) -> None:
+    from vercel.connect import ConnectValidationError
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectValidationError, match="must be a mapping"):
+            await verify_connect_webhook(headers)
+
+    assert fake_verifier == []

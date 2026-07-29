@@ -258,3 +258,58 @@ async def test_installation_error_is_not_a_user_authorization_error(mock_env_cle
             await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
 
     assert not isinstance(exc_info.value, UserAuthorizationRequiredError)
+
+
+@respx.mock
+async def test_error_message_is_not_double_formatted(mock_env_clear: None) -> None:
+    """Only `__str__` renders code and status, so neither appears twice."""
+    respx.post(TOKEN_URL).mock(
+        return_value=error_response(
+            404,
+            {"error": {"code": "not_found", "message": "Connector not found: slack/nope"}},
+            **{"x-vercel-id": "sfo1::abc"},
+        )
+    )
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    rendered = str(exc_info.value)
+    assert rendered == (
+        "Connector not found: slack/nope (code=not_found, status=404, request_id=sfo1::abc)"
+    )
+    assert rendered.count("code=") == 1
+    assert rendered.count("not_found") == 1
+    assert rendered.count("404") == 1
+    assert "HTTP 404" not in rendered
+
+
+@respx.mock
+async def test_error_message_omits_absent_details(mock_env_clear: None) -> None:
+    respx.post(TOKEN_URL).mock(
+        return_value=error_response(500, {"error": {"message": "internal failure"}})
+    )
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    rendered = str(exc_info.value)
+    assert rendered == "internal failure (status=500)"
+    assert "code=" not in rendered
+    assert "request_id=" not in rendered
+
+
+@respx.mock
+async def test_unreadable_body_still_renders_once(mock_env_clear: None) -> None:
+    respx.post(TOKEN_URL).mock(return_value=error_response(502, b"<html>Bad Gateway</html>"))
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    rendered = str(exc_info.value)
+    assert "Bad Gateway" in rendered
+    assert rendered.count("status=502") == 1
+    assert rendered.endswith("(status=502)")

@@ -57,9 +57,11 @@ ConnectUserTokenSubject(id="u_123", issuer="https://idp.example.com")
 ConnectJwtBearerTokenSubject(sub="u_123", additional_claims={"tenant": "acme"})
 ```
 
-Being frozen also makes them hashable, which matters because the subject is part
-of the token cache key, and `match`/`case` narrows them exactly. The cost is the
-empty `()` on the app subject, which is the common case.
+Frozen dataclasses specifically, matching `SandboxSource` and `SandboxQuery` in
+`vercel-sandbox`: you get runtime validation, autocompletion on construction,
+exact `match`/`case` narrowing, and immutability, so a subject cannot be mutated
+after a credential has been cached against it. The cost is the empty `()` on the
+app subject, which is the common case.
 
 ## Examples
 

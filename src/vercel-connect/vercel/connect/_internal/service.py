@@ -9,7 +9,7 @@ import os
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 from vercel._internal.core.time import coerce_duration
@@ -49,6 +49,21 @@ if TYPE_CHECKING:
 _SECOND = coerce_duration(1, __import__("datetime").timedelta(seconds=1))
 _DETACHED_ENV = "VERCEL_CONNECT_INTERACTIVE_AUTH_MODE"
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
+_DEFAULT_SCOPES_SENTINEL = "*"
+
+
+def _normalize_scopes(scopes: Sequence[str] | None) -> Sequence[str] | None:
+    """Collapse the two spellings of "the connector's defaults" into one.
+
+    `None` and `["*"]` request the same credential, so they must serialize the
+    same way and share one cache entry.
+    """
+    if scopes is None:
+        return None
+    resolved = list(scopes)
+    if resolved == [_DEFAULT_SCOPES_SENTINEL]:
+        return None
+    return resolved
 
 
 def _is_local_host(host: str) -> bool:
@@ -191,6 +206,7 @@ class ConnectService:
     ) -> ConnectTokenResponse:
         self._ensure_open()
         identity = await self._identity(options)
+        scopes = _normalize_scopes(scopes)
         no_cache = options.no_cache if options is not None else False
         force_refresh = options.force_refresh if options is not None else False
         buffer_seconds = self._validity_buffer_seconds(options)
@@ -291,7 +307,7 @@ class ConnectService:
             connector,
             subject=subject,
             vercel_token=identity,
-            scopes=scopes,
+            scopes=_normalize_scopes(scopes),
             installation_id=installation_id,
             return_url=return_url,
             webhook=webhook,
@@ -311,9 +327,20 @@ class ConnectService:
         state = await self._api_client.get_connector(connector, vercel_token=identity)
         return _connector_metadata(state)
 
+    @staticmethod
+    def _resolve_headers(headers: object) -> Mapping[str, str]:
+        """Accept a header mapping, or any request object that exposes one."""
+        candidate = getattr(headers, "headers", headers)
+        if not hasattr(candidate, "items"):
+            raise ConnectValidationError(
+                "headers must be a mapping of header names to values, or a request "
+                f"object exposing one; got {type(headers).__name__}"
+            )
+        return cast("Mapping[str, str]", candidate)
+
     async def verify_webhook(
         self,
-        headers: Mapping[str, str],
+        headers: object,
         *,
         project_id: str | None = None,
         environment: str | None = None,
@@ -322,8 +349,9 @@ class ConnectService:
     ) -> ConnectWebhookClaims:
         from vercel.oidc import verify as oidc_verify
 
+        resolved_headers = self._resolve_headers(headers)
         try:
-            token = oidc_verify.extract_bearer_token(headers)
+            token = oidc_verify.extract_bearer_token(resolved_headers)
         except oidc_verify.VercelOidcVerificationError as exc:
             raise ConnectWebhookVerificationError(str(exc)) from exc
 

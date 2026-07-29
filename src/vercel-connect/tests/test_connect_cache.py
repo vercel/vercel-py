@@ -568,3 +568,43 @@ async def test_cached_response_envelope_is_reused(mock_env_clear: None) -> None:
     assert first == second
     assert first.token_id == second.token_id == "stk_t1"
     assert route.call_count == 1
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_default_scopes_spellings_share_one_entry(mock_env_clear: None) -> None:
+    """`None` and `["*"]` both mean the connector's defaults, so they must not
+    fragment the cache."""
+    route = counting_route()
+
+    async with session(service_options=session_options()):
+        first = await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+        second = await get_token("slack/my-bot", subject=ConnectAppTokenSubject(), scopes=["*"])
+        third = await get_token("slack/my-bot", subject=ConnectAppTokenSubject(), scopes=None)
+
+    assert first == second == third == "t1"
+    assert route.call_count == 1
+
+
+async def test_default_scopes_spellings_build_one_cache_key(mock_env_clear: None) -> None:
+    from vercel.connect._internal.service import _normalize_scopes
+
+    common: dict[str, Any] = {
+        "subject": ConnectAppTokenSubject(),
+        "vercel_token": "oidc-token",
+    }
+    assert build_cache_key(
+        "slack/my-bot", scopes=_normalize_scopes(None), **common
+    ) == build_cache_key("slack/my-bot", scopes=_normalize_scopes(["*"]), **common)
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_explicit_scopes_still_key_separately_from_defaults(mock_env_clear: None) -> None:
+    route = counting_route()
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=ConnectAppTokenSubject(), scopes=["*"])
+        await get_token("slack/my-bot", subject=ConnectAppTokenSubject(), scopes=["chat:write"])
+
+    assert route.call_count == 2

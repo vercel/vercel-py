@@ -1,6 +1,16 @@
-"""Sync mirror for the Vercel Connect SDK surface."""
+"""Sync mirror for the Vercel Connect SDK surface.
+
+Every name here matches `vercel.connect`, with no `await`.
+
+These functions are safe to call from inside a running event loop: the sync
+transport never suspends, so nothing deadlocks. They do block the loop for the
+duration of the request, so prefer the async surface in async code. Calling them
+inside an `async with vercel.api.session(...)` block is rejected outright, since
+mixing modes in one session is a bug.
+"""
 
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from vercel._internal.core.session import get_active_sync_session
 from vercel.connect._internal.errors import (
@@ -268,7 +278,7 @@ def get_connector_metadata(
 
 
 def verify_connect_webhook(
-    headers: Mapping[str, str],
+    headers: Mapping[str, str] | Any,
     *,
     project_id: str | None = None,
     environment: str | None = None,
@@ -291,7 +301,9 @@ def verify_connect_webhook(
     arguments or the environment, every request is rejected.
 
     Args:
-        headers: Inbound request headers. Only `Authorization` is read.
+        headers: Inbound request headers, or any request object exposing a
+            `headers` mapping (httpx, Starlette, FastAPI, Django). Only
+            `Authorization` is read.
         project_id: Expected project. Defaults to `VERCEL_PROJECT_ID`.
         environment: Expected environment. Defaults to `VERCEL_TARGET_ENV`, then
             `VERCEL_ENV`.
