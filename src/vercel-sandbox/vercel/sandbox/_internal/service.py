@@ -292,6 +292,64 @@ class SandboxService:
             include_system_routes=include_system_routes,
         )
 
+    async def get_or_create_sandbox(
+        self,
+        *,
+        name: str,
+        project_id: str | None = None,
+        resume: bool = True,
+        include_system_routes: bool | None = None,
+        runtime: str | None = None,
+        source: SandboxSource | None = None,
+        ports: list[int] | None = None,
+        execution_time_limit: timedelta | None = None,
+        resources: SandboxResources | None = None,
+        persistent: bool | None = None,
+        network_policy: NetworkPolicy | None = None,
+        env: Mapping[str, str] | None = None,
+        tags: Mapping[str, str] | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
+        snapshot_retention: SnapshotRetention | None = None,
+    ) -> tuple[SandboxState, bool]:
+        """Return a named sandbox and whether it had to be created."""
+        try:
+            sandbox = await self.get_sandbox(
+                name=name,
+                project_id=project_id,
+                resume=resume,
+                include_system_routes=include_system_routes,
+            )
+        except SandboxApiError as error:
+            if error.status_code == 404:
+                pass
+            elif error.status_code == 410 and error.code == "snapshot_not_found":
+                try:
+                    await self.destroy_sandbox(name=name, project_id=project_id)
+                except SandboxApiError as destroy_error:
+                    if destroy_error.status_code != 404:
+                        raise
+            else:
+                raise
+        else:
+            return sandbox, False
+
+        sandbox = await self.create_sandbox(
+            name=name,
+            project_id=project_id,
+            runtime=runtime,
+            source=source,
+            ports=ports,
+            execution_time_limit=execution_time_limit,
+            resources=resources,
+            persistent=persistent,
+            network_policy=network_policy,
+            env=env,
+            tags=tags,
+            snapshot_expiration=snapshot_expiration,
+            snapshot_retention=snapshot_retention,
+        )
+        return sandbox, True
+
     async def query_sandboxes_page(
         self,
         *,
