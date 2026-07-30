@@ -94,8 +94,14 @@ class _ControlBackend(Protocol):
         """Record that a subscriber's start message was accepted."""
         ...
 
-    def can_seed(self, deployment: str, epoch: int, subscriber: str) -> bool:
-        """Return whether a start message may seed this subscriber."""
+    def claim_seed(
+        self,
+        deployment: str,
+        epoch: int,
+        subscriber: str,
+        activation_time: datetime,
+    ) -> datetime | None:
+        """Claim and return this generation's immutable activation time."""
         ...
 
     def mark_seed_active(self, deployment: str, epoch: int, subscriber: str) -> None:
@@ -204,8 +210,19 @@ class Control:
             )
         return _validate_subscribers(tuple(parsed))
 
-    def _can_seed(self, deployment: str, epoch: int, subscriber: str) -> bool:
-        return self.backend.can_seed(deployment, epoch, subscriber)
+    def _claim_seed(
+        self,
+        deployment: str,
+        epoch: int,
+        subscriber: str,
+        activation_time: datetime,
+    ) -> datetime | None:
+        return self.backend.claim_seed(
+            deployment,
+            epoch,
+            subscriber,
+            activation_time,
+        )
 
     def _mark_seed_active(self, deployment: str, epoch: int, subscriber: str) -> None:
         self.backend.mark_seed_active(deployment, epoch, subscriber)
@@ -288,6 +305,7 @@ for index = 2, #KEYS do
       "reference_time", reference_time,
       "updated_at", ARGV[1]
     )
+    redis.call("HDEL", seed, "activation_time")
   end
 end
 
@@ -313,21 +331,31 @@ end
 return 1
 """
 
-_CAN_SEED_SCRIPT = """
--- vercel-apscheduler:can-seed
+_CLAIM_SEED_SCRIPT = """
+-- vercel-apscheduler:claim-seed
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
-  return 0
+  return false
 end
 if tonumber(redis.call("HGET", KEYS[1], "epoch") or "-1") ~= tonumber(ARGV[1]) then
-  return 0
+  return false
 end
 if tonumber(redis.call("HGET", KEYS[2], "epoch") or "-1") ~= tonumber(ARGV[1]) then
-  return 0
+  return false
 end
 if redis.call("HGET", KEYS[2], "status") == "active" then
-  return 0
+  return false
 end
-return 1
+local activation_time = redis.call("HGET", KEYS[2], "activation_time")
+if not activation_time then
+  activation_time = ARGV[2]
+  redis.call(
+    "HSET",
+    KEYS[2],
+    "activation_time", activation_time,
+    "updated_at", activation_time
+  )
+end
+return activation_time
 """
 
 _MARK_SEED_ACTIVE_SCRIPT = """
@@ -442,14 +470,27 @@ class RedisControlBackend:
             datetime.now(UTC).isoformat(),
         )
 
-    def can_seed(self, deployment: str, epoch: int, subscriber: str) -> bool:
-        """Return whether this seed belongs to the live generation."""
+    def claim_seed(
+        self,
+        deployment: str,
+        epoch: int,
+        subscriber: str,
+        activation_time: datetime,
+    ) -> datetime | None:
+        """Claim one stable activation time for this subscriber generation."""
+        activation_time_utc = as_utc(activation_time, name="activation_time")
         result = self._eval(
-            _CAN_SEED_SCRIPT,
+            _CLAIM_SEED_SCRIPT,
             [self._control_key(deployment), self._seed_key(deployment, subscriber)],
             str(epoch),
+            activation_time_utc.isoformat(),
         )
-        return bool(int(result))
+        if result is None or result is False:
+            return None
+        return as_utc(
+            datetime.fromisoformat(_as_text(result)),
+            name="stored activation_time",
+        )
 
     def mark_seed_active(self, deployment: str, epoch: int, subscriber: str) -> None:
         """Mark a subscriber active without changing a newer generation."""

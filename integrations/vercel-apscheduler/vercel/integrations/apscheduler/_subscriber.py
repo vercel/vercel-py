@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import logging
+from datetime import datetime, timezone
 from os import environ
 from weakref import WeakKeyDictionary
 
@@ -19,6 +20,7 @@ from .control import (
 )
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
+UTC = timezone.utc
 
 _registered_schedulers: WeakKeyDictionary[BaseScheduler, SchedulerAdapter] = WeakKeyDictionary()
 _registered_callbacks: list[Any] = []
@@ -63,14 +65,16 @@ def register_scheduler(
             )
             return
         deployment = _current_deployment()
-        if not control._can_seed(  # noqa: SLF001
+        activation_time = control._claim_seed(  # noqa: SLF001
             deployment,
             payload.epoch,
             adapter.identity.scheduler_id,
-        ):
+            max(payload.reference_time, datetime.now(UTC)),
+        )
+        if activation_time is None:
             return
         adapter.seed(
-            now=payload.reference_time,
+            now=activation_time,
             kind="start",
             epoch=payload.epoch,
         )

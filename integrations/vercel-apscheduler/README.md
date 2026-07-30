@@ -82,7 +82,10 @@ Redis atomically assigns each start a monotonically increasing internal epoch.
 Concurrent or repeated starts use the same Queue idempotency key and cannot
 create separate logical chains. Every wake checks the durable epoch before
 running and again immediately before publishing its successor. Stopping fences
-the old epoch; starting again creates a new one.
+the old epoch; starting again creates a new one. A restart skips occurrences
+whose scheduled times fell inside the stopped interval. It does not replay them
+as an immediate catch-up burst, even when the subscriber Function stays warm
+or the internal start message is delayed.
 
 The queue remains at-least-once. A delivery may run a job more than once after
 a crash, and a job already executing when `stop()` commits may finish. Scheduled

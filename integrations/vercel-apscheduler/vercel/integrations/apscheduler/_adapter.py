@@ -227,6 +227,7 @@ class SchedulerAdapter:
         self._pending_cursor: MemoryCursor = MemoryCursor.empty()
         self._job_definitions: dict[str, _JobDefinition] = {}
         self._memory_nominal_run_times: dict[str, datetime] = {}
+        self._active_epoch: int | None = None
         self._suppress_wakeup = False
         self._adopt_instance_methods()
 
@@ -291,6 +292,8 @@ class SchedulerAdapter:
         pending_jobs_reference_time: datetime | None = None,
         cursor: MemoryCursor | None = None,
     ) -> None:
+        if cursor is not None and pending_jobs_reference_time is None:
+            raise ValueError("cursor requires pending_jobs_reference_time")
         reference = (
             require_aware_datetime(
                 pending_jobs_reference_time,
@@ -303,9 +306,7 @@ class SchedulerAdapter:
         self._pending_cursor = cursor or MemoryCursor.empty()
         self._suppress_wakeup = True
         try:
-            if self.scheduler.state == STATE_STOPPED:
-                self._inject_default_executor()
-                BaseScheduler.start(self.scheduler, paused=False)
+            self._start_or_restore(reference, cursor)
             self._validate_started_configuration()
         except BaseException:
             if self.scheduler.state != STATE_STOPPED:
@@ -315,6 +316,83 @@ class SchedulerAdapter:
             self._pending_jobs_reference_time = None
             self._pending_cursor = MemoryCursor.empty()
             self._suppress_wakeup = False
+
+    def _start_or_restore(
+        self,
+        reference_time: datetime | None,
+        cursor: MemoryCursor | None,
+    ) -> None:
+        if self.scheduler.state == STATE_STOPPED:
+            self._inject_default_executor()
+            BaseScheduler.start(self.scheduler, paused=False)
+        elif cursor is not None:
+            self._restore_memory_cursor(cursor, cast("datetime", reference_time))
+
+    def _restore_memory_cursor(
+        self,
+        cursor: MemoryCursor,
+        reference_time: datetime,
+    ) -> None:
+        """Restore message-carried state into an already-warm scheduler."""
+        with self.scheduler._jobstores_lock:
+            for jobstore in self.scheduler._jobstores.values():
+                if not isinstance(jobstore, MemoryJobStore):
+                    continue
+                for job in jobstore.get_all_jobs():
+                    self._restore_memory_job(job, cursor, reference_time)
+                    jobstore.update_job(job)
+
+    def _rebase_for_new_generation(self, reference_time: datetime) -> None:
+        """Skip occurrences from an earlier stopped generation."""
+        with self.scheduler._jobstores_lock:
+            for jobstore in self.scheduler._jobstores.values():
+                memory_backed = isinstance(jobstore, MemoryJobStore)
+                for job in jobstore.get_all_jobs():
+                    next_run_time = getattr(job, "next_run_time", None)
+                    if next_run_time is None or next_run_time >= reference_time:
+                        continue
+
+                    if memory_backed:
+                        nominal_run_time, next_run_time = self._get_initial_memory_fire_time(
+                            job, reference_time
+                        )
+                        if nominal_run_time is None:
+                            self._memory_nominal_run_times.pop(str(job.id), None)
+                        else:
+                            self._memory_nominal_run_times[str(job.id)] = nominal_run_time
+                    else:
+                        next_run_time = self._get_first_durable_fire_time(
+                            job,
+                            reference_time,
+                        )
+
+                    job._modify(next_run_time=next_run_time)
+                    jobstore.update_job(job)
+
+    def _get_first_durable_fire_time(
+        self,
+        job: Any,
+        reference_time: datetime,
+    ) -> datetime | None:
+        next_run_time = job.trigger.get_next_fire_time(None, reference_time)
+        for _ in range(MAX_JITTER_LOOKBACK_OCCURRENCES):
+            if next_run_time is None or next_run_time >= reference_time:
+                return next_run_time
+            previous_run_time = next_run_time
+            next_run_time = job.trigger.get_next_fire_time(
+                previous_run_time,
+                reference_time,
+            )
+            if next_run_time is not None and next_run_time <= previous_run_time:
+                raise RuntimeError(
+                    f'APScheduler trigger for job "{job.id}" did not advance while '
+                    "rebasing a new control epoch"
+                )
+        raise RuntimeError(
+            f'APScheduler job "{job.id}" has more than '
+            f"{MAX_JITTER_LOOKBACK_OCCURRENCES} occurrences before the new "
+            "control epoch"
+        )
 
     def _inject_default_executor(self) -> None:
         executors = self.scheduler._executors
@@ -483,8 +561,19 @@ class SchedulerAdapter:
                 self._memory_nominal_run_times[str(job.id)] = job.next_run_time
             return
 
+        if memory_backed:
+            self._restore_memory_job(job, self._pending_cursor, reference)
+        else:
+            job._modify(next_run_time=job.trigger.get_next_fire_time(None, reference))
+
+    def _restore_memory_job(
+        self,
+        job: Any,
+        cursor: MemoryCursor,
+        reference_time: datetime,
+    ) -> None:
         definition = self.definition_for_job(job)
-        cursor_entry = self._pending_cursor.jobs.get(definition.schedule_key)
+        cursor_entry = cursor.jobs.get(definition.schedule_key)
         if cursor_entry is not None and cursor_entry.fingerprint == definition.fingerprint:
             if cursor_entry.state == "scheduled":
                 cursor_next_run_time = cast("datetime", cursor_entry.next_run_time)
@@ -497,16 +586,15 @@ class SchedulerAdapter:
                 self._memory_nominal_run_times.pop(str(job.id), None)
             return
 
-        if memory_backed:
-            nominal_run_time, next_run_time = self._get_initial_memory_fire_time(
-                job,
-                reference,
-            )
-            if nominal_run_time is not None:
-                self._memory_nominal_run_times[str(job.id)] = nominal_run_time
-            job._modify(next_run_time=next_run_time)
+        nominal_run_time, next_run_time = self._get_initial_memory_fire_time(
+            job,
+            reference_time,
+        )
+        job._modify(next_run_time=next_run_time)
+        if nominal_run_time is None:
+            self._memory_nominal_run_times.pop(str(job.id), None)
         else:
-            job._modify(next_run_time=job.trigger.get_next_fire_time(None, reference))
+            self._memory_nominal_run_times[str(job.id)] = nominal_run_time
 
     def _memory_cursor(self) -> MemoryCursor:
         jobs: dict[str, CursorEntry] = {}
@@ -583,6 +671,11 @@ class SchedulerAdapter:
     ) -> PublishedWakeup | None:
         now_utc = as_utc(now or datetime.now(UTC), name="now")
         self.ensure_started(pending_jobs_reference_time=now_utc)
+        if epoch is not None and epoch != self._active_epoch:
+            self._rebase_for_new_generation(
+                now_utc.astimezone(self.scheduler.timezone),
+            )
+            self._active_epoch = epoch
         if self.scheduler.state not in {STATE_RUNNING, STATE_PAUSED}:
             return None
 
@@ -695,6 +788,8 @@ class SchedulerAdapter:
             pending_jobs_reference_time=effective_logical_time,
             cursor=cursor,
         )
+        if epoch is not None:
+            self._active_epoch = epoch
         if self.scheduler.state != STATE_RUNNING:
             return WakeupProcessingResult(
                 logical_time=effective_logical_time,

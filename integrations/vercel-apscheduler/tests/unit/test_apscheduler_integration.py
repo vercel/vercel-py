@@ -73,6 +73,46 @@ class DurableLikeJobStore(BaseJobStore):
         return None
 
 
+class RetainedJobStore(BaseJobStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.jobs: dict[str, Any] = {}
+
+    def lookup_job(self, job_id: str) -> Any:
+        return self.jobs.get(job_id)
+
+    def get_due_jobs(self, now: datetime) -> list[Any]:
+        return [
+            job
+            for job in self.jobs.values()
+            if job.next_run_time is not None and job.next_run_time <= now
+        ]
+
+    def get_next_run_time(self) -> datetime | None:
+        return min(
+            (job.next_run_time for job in self.jobs.values() if job.next_run_time is not None),
+            default=None,
+        )
+
+    def get_all_jobs(self) -> list[Any]:
+        return list(self.jobs.values())
+
+    def add_job(self, job: Any) -> None:
+        self.jobs[job.id] = job
+
+    def update_job(self, job: Any) -> None:
+        self.jobs[job.id] = job
+
+    def remove_job(self, job_id: str) -> None:
+        del self.jobs[job_id]
+
+    def remove_all_jobs(self) -> None:
+        self.jobs.clear()
+
+    def shutdown(self) -> None:
+        return None
+
+
 def _options() -> VercelAPSchedulerOptions:
     return VercelAPSchedulerOptions(
         max_delay_seconds=23 * 60 * 60,
@@ -338,6 +378,107 @@ class TestControlPublishGuard:
         assert result.next_wakeup_time == tick_at + timedelta(seconds=30)
         assert result.published_wakeup is None
         mock_send.assert_not_called()
+        adapter.shutdown(wait=True)
+
+
+class TestWarmSchedulerState:
+    @patch("vercel.integrations.apscheduler._adapter.vqs_sync.send")
+    def test_new_epoch_rebases_without_catching_up(
+        self,
+        mock_send: Any,
+    ) -> None:
+        anchor = datetime(2026, 4, 9, 12, 0, tzinfo=UTC)
+        first_start = anchor + timedelta(seconds=1)
+        restart = anchor + timedelta(minutes=5, seconds=5)
+        scheduler, adapter = _scheduler()
+        scheduler.add_job(
+            lambda: None,
+            "interval",
+            seconds=30,
+            start_date=anchor,
+            id="heartbeat",
+        )
+
+        first = adapter.seed(now=first_start, epoch=1)
+        restarted = adapter.seed(now=restart, epoch=2)
+
+        assert first is not None
+        assert first.logical_time == anchor + timedelta(seconds=30)
+        assert restarted is not None
+        assert restarted.logical_time == anchor + timedelta(minutes=5, seconds=30)
+        assert restarted.delay_seconds == 25
+        assert mock_send.call_count == 2
+        assert mock_send.call_args.kwargs["idempotency_key"] == (
+            "aps:scheduler-a:2:2026-04-09T12:05:30+00:00"
+        )
+        adapter.shutdown(wait=True)
+
+    @patch("vercel.integrations.apscheduler._adapter.vqs_sync.send")
+    def test_new_epoch_skips_expired_durable_date_job(
+        self,
+        mock_send: Any,
+    ) -> None:
+        run_at = datetime(2026, 4, 9, 12, 0, tzinfo=UTC)
+        restart = run_at + timedelta(minutes=5)
+        scheduler, adapter = _scheduler()
+        jobstore = RetainedJobStore()
+        scheduler.add_jobstore(jobstore, alias="durable")
+        scheduler.add_job(
+            lambda: None,
+            trigger=DateTrigger(run_date=run_at, timezone=UTC),
+            id="once",
+            jobstore="durable",
+        )
+
+        first = adapter.seed(now=run_at - timedelta(minutes=1), epoch=1)
+        restarted = adapter.seed(now=restart, epoch=2)
+
+        assert first is not None
+        assert first.logical_time == run_at
+        assert jobstore.lookup_job("once").next_run_time is None
+        assert restarted is not None
+        assert restarted.logical_time == restart + timedelta(seconds=60)
+        assert mock_send.call_count == 2
+        adapter.shutdown(wait=True)
+
+    def test_message_cursor_is_restored_before_running_jobs(self) -> None:
+        anchor = datetime(2026, 4, 9, 12, 0, tzinfo=UTC)
+        handoff_time = anchor + timedelta(minutes=5)
+        calls: list[str] = []
+        scheduler, adapter = _scheduler()
+        scheduler.add_job(
+            lambda: calls.append("ran"),
+            "interval",
+            seconds=30,
+            start_date=anchor,
+            id="heartbeat",
+            coalesce=False,
+        )
+        adapter.ensure_started(pending_jobs_reference_time=anchor)
+        initial_entry = adapter._memory_cursor().jobs["id:heartbeat"]
+        cursor = MemoryCursor(
+            jobs={
+                "id:heartbeat": CursorEntry(
+                    job_id="heartbeat",
+                    fingerprint=initial_entry.fingerprint,
+                    state="scheduled",
+                    next_run_time=handoff_time,
+                    nominal_run_time=handoff_time,
+                )
+            }
+        )
+
+        result = adapter.process_wakeup(
+            handoff_time,
+            cursor=cursor,
+            publish_next=False,
+            now=handoff_time,
+            epoch=2,
+        )
+
+        assert calls == ["ran"]
+        assert result.due_job_ids == ("heartbeat",)
+        assert result.next_wakeup_time == handoff_time + timedelta(seconds=30)
         adapter.shutdown(wait=True)
 
 

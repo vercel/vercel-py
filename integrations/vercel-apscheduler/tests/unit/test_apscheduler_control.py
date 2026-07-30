@@ -5,7 +5,7 @@ from typing import Any
 import sys
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Barrier, Lock
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -46,6 +46,7 @@ class FakeControlBackend:
         self.epoch = 0
         self.reference_time: datetime | None = None
         self.seeds: dict[str, tuple[int, str]] = {}
+        self.activation_times: dict[str, tuple[int, datetime]] = {}
 
     def begin_start(
         self,
@@ -65,6 +66,7 @@ class FakeControlBackend:
                 seed_epoch, _ = self.seeds.get(subscriber, (-1, ""))
                 if seed_epoch != self.epoch:
                     self.seeds[subscriber] = (self.epoch, "pending")
+                    self.activation_times.pop(subscriber, None)
             pending = tuple(
                 subscriber
                 for subscriber in subscribers
@@ -86,17 +88,30 @@ class FakeControlBackend:
             ):
                 self.seeds[subscriber] = (epoch, "published")
 
-    def can_seed(self, deployment: str, epoch: int, subscriber: str) -> bool:
+    def claim_seed(
+        self,
+        deployment: str,
+        epoch: int,
+        subscriber: str,
+        activation_time: datetime,
+    ) -> datetime | None:
         del deployment
         with self._lock:
             seed = self.seeds.get(subscriber)
-            return (
+            can_seed = (
                 self.state == "running"
                 and self.epoch == epoch
                 and seed is not None
                 and seed[0] == epoch
                 and seed[1] != "active"
             )
+            if not can_seed:
+                return None
+            claimed_epoch, claimed_time = self.activation_times.setdefault(
+                subscriber,
+                (epoch, activation_time),
+            )
+            return claimed_time if claimed_epoch == epoch else None
 
     def mark_seed_active(self, deployment: str, epoch: int, subscriber: str) -> None:
         del deployment
@@ -250,7 +265,7 @@ def test_start_can_target_an_explicit_deployment() -> None:
     assert send.call_args.kwargs["idempotency_key"].startswith("aps:start:dpl_target:")
 
 
-def test_controlled_start_uses_durable_reference_time_and_marks_seed_active(
+def test_controlled_start_claims_activation_time_and_marks_seed_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = FakeControlBackend()
@@ -280,11 +295,44 @@ def test_controlled_start_uses_durable_reference_time_and_marks_seed_active(
         ),
     )
 
-    with patch.object(adapter, "seed") as seed:
+    activation_time = reference_time.replace(hour=18, minute=1)
+    with (
+        patch("vercel.integrations.apscheduler._subscriber.datetime") as subscriber_datetime,
+        patch.object(adapter, "seed") as seed,
+    ):
+        subscriber_datetime.now.return_value = activation_time
         start_subscription.func(message)
 
-    seed.assert_called_once_with(now=reference_time, kind="start", epoch=1)
+    seed.assert_called_once_with(now=activation_time, kind="start", epoch=1)
     assert backend.seeds["scheduler-a"] == (1, "active")
+
+
+def test_seed_activation_time_is_stable_across_delivery_retries() -> None:
+    backend = FakeControlBackend()
+    reference_time = datetime(2026, 7, 29, 17, 0, tzinfo=UTC)
+    first_delivery = reference_time + timedelta(minutes=5)
+    retry_delivery = first_delivery + timedelta(minutes=1)
+    decision = backend.begin_start(
+        "dpl_current",
+        ("scheduler-a",),
+        reference_time,
+    )
+
+    first_claim = backend.claim_seed(
+        "dpl_current",
+        decision.epoch,
+        "scheduler-a",
+        first_delivery,
+    )
+    retry_claim = backend.claim_seed(
+        "dpl_current",
+        decision.epoch,
+        "scheduler-a",
+        retry_delivery,
+    )
+
+    assert first_claim == first_delivery
+    assert retry_claim == first_delivery
 
 
 def test_controlled_wakeup_is_fenced_again_before_successor_publish() -> None:

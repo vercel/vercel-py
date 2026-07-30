@@ -279,6 +279,7 @@ Each subscriber also has a seed state for that epoch:
 
 ```text
 pending -> published -> active
+activation_time = immutable first-delivery timestamp
 ```
 
 `start()` atomically creates an epoch only when the deployment is stopped.
@@ -287,9 +288,12 @@ They may race to send, but all use the same `K_start`; Queue accepts one. If a
 caller crashes before or during publication, the seed stays pending and a
 later `start()` retries the same payload and idempotency key.
 
-The start handler checks Redis, derives the first wake from the stored immutable
-reference time, and carries the epoch into every successor. Duplicate start
-deliveries therefore calculate the same first wake key.
+The start handler checks Redis and atomically claims a per-subscriber activation
+time on its first delivery. It derives the first wake from that timestamp and
+carries the epoch into every successor. Redis returns the same activation time
+to every retry, so duplicate start deliveries calculate the same first wake
+key. Using first delivery rather than API-call time also prevents Queue latency
+from creating historical catch-up wakes.
 
 Every wake performs two durable checks:
 
@@ -303,6 +307,14 @@ becomes a no-op. A wake already executing may finish its current jobs, but the
 second check prevents it from extending the old chain. If `start()` follows,
 Redis increments the epoch, so every remaining old start or wake message is
 permanently stale.
+
+The new epoch is a fresh scheduling generation. On a warm Function, the adapter
+rebases any in-memory or durable `next_run_time` left by the previous epoch to
+the first occurrence at or after its activation time. Occurrences inside the
+stopped interval are skipped instead of being replayed as immediate wake
+messages. A wake also restores its message-carried MemoryJobStore cursor into a
+warm scheduler before selecting due jobs, so sequential deliveries may safely
+land on different warm instances.
 
 Control keys intentionally have no TTL. Expiring a stopped record could make a
 deployment appear startable under an old generation and violate the promise
