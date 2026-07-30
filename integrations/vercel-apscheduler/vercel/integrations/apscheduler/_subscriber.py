@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import logging
+from os import environ
 from weakref import WeakKeyDictionary
 
 import vercel.queue as vqs
@@ -10,7 +11,12 @@ import vercel.queue as vqs
 from ._adapter import SchedulerAdapter, adopt_scheduler
 from ._imports import BaseScheduler
 from ._options import VercelAPSchedulerOptions
-from ._payload import WakeupPayload
+from ._payload import StartPayload, WakeupPayload
+from .control import (
+    CURRENT_DEPLOYMENT_ENV,
+    ControlConfigurationError,
+    _get_configured_control,
+)
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
@@ -42,7 +48,37 @@ def register_scheduler(
         max_attempts=adapter.options.max_attempts,
     )
     def _handle_start(message: vqs.Message[dict[str, Any]]) -> None:
-        adapter.seed(now=message.metadata.created_at, kind="start")
+        control = _get_configured_control()
+        if control is None:
+            adapter.seed(now=message.metadata.created_at, kind="start")
+            return
+
+        try:
+            payload = StartPayload.from_payload(message.payload)
+        except ValueError as exc:
+            LOGGER.warning(
+                "Ignoring invalid controlled APScheduler start message %s: %s",
+                message.metadata.message_id,
+                exc,
+            )
+            return
+        deployment = _current_deployment()
+        if not control._can_seed(  # noqa: SLF001
+            deployment,
+            payload.epoch,
+            adapter.identity.scheduler_id,
+        ):
+            return
+        adapter.seed(
+            now=payload.reference_time,
+            kind="start",
+            epoch=payload.epoch,
+        )
+        control._mark_seed_active(  # noqa: SLF001
+            deployment,
+            payload.epoch,
+            adapter.identity.scheduler_id,
+        )
 
     @vqs.subscribe(
         topic=adapter.identity.wakeup_topic,
@@ -73,7 +109,35 @@ def register_scheduler(
             )
             return
 
-        adapter.process_payload(payload)
+        control = _get_configured_control()
+        if control is None:
+            adapter.process_payload(payload)
+            return
+        if payload.epoch is None:
+            LOGGER.warning(
+                "Ignoring uncontrolled APScheduler wakeup message %s while durable "
+                "control is configured",
+                message.metadata.message_id,
+            )
+            return
+        epoch = payload.epoch
+        deployment = _current_deployment()
+        if not control._is_running(deployment, epoch):  # noqa: SLF001
+            return
+        control._mark_seed_active(  # noqa: SLF001
+            deployment,
+            epoch,
+            adapter.identity.scheduler_id,
+        )
+        adapter.process_wakeup(
+            payload.logical_time,
+            cursor=payload.cursor,
+            epoch=epoch,
+            publish_guard=lambda: control._is_running(  # noqa: SLF001
+                deployment,
+                epoch,
+            ),
+        )
 
     _registered_callbacks.extend((_handle_start, _handle_wakeup))
     _registered_schedulers[scheduler] = adapter
@@ -87,3 +151,12 @@ def get_asgi_app(
 ) -> Any:
     register_scheduler(scheduler, options=options)
     return vqs.asgi_app()
+
+
+def _current_deployment() -> str:
+    deployment = environ.get(CURRENT_DEPLOYMENT_ENV)
+    if not deployment:
+        raise ControlConfigurationError(
+            f"{CURRENT_DEPLOYMENT_ENV} must be set in controlled subscriber processes"
+        )
+    return deployment

@@ -32,12 +32,16 @@ def test_cleanup_example_uses_pyproject_subscriber_contract() -> None:
     pyproject = (EXAMPLE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "[[tool.vercel.subscribers]]" in pyproject
     assert 'entrypoint = "scheduler:scheduler"' in pyproject
+    assert "[tool.vercel.apscheduler.control]" in pyproject
+    assert 'entrypoint = "scheduler:control"' in pyproject
     assert "topics =" not in pyproject
     assert '"vercel-apscheduler>=0.1.0"' in pyproject
+    assert '"redis>=5,<7"' in pyproject
 
     scheduler_source = (EXAMPLE_ROOT / SCHEDULER_PATH).read_text(encoding="utf-8")
     assert "VercelAPSchedulerOptions" not in scheduler_source
     assert "install_vercel_apscheduler_integration" not in scheduler_source
+    assert "RedisControlBackend()" in scheduler_source
 
 
 def test_cleanup_scheduler_registers_introspectable_queue_subscriptions(

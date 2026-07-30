@@ -12,11 +12,25 @@ from ._options import VercelAPSchedulerOptions
 from ._payload import MemoryCursor, WakeupPayload
 from ._subscriber import get_asgi_app, register_scheduler
 from ._watchdog import get_watchdog_asgi_app
+from .control import (
+    Control,
+    ControlBackendConfigurationError,
+    ControlConfigurationError,
+    ControlResult,
+    ControlStatus,
+    RedisControlBackend,
+)
 from .version import __version__
 
 __all__ = [
+    "Control",
+    "ControlBackendConfigurationError",
+    "ControlConfigurationError",
+    "ControlResult",
+    "ControlStatus",
     "MemoryCursor",
     "PublishedWakeup",
+    "RedisControlBackend",
     "SchedulerAdapter",
     "VercelAPSchedulerOptions",
     "VercelInlineExecutor",

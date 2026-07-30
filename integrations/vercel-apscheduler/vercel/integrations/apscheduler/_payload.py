@@ -9,6 +9,8 @@ from ._time import as_utc
 
 WAKEUP_KIND = "apscheduler.wakeup"
 WAKEUP_VERSION = 2
+START_KIND = "apscheduler.start"
+START_VERSION = 1
 
 CursorState = Literal["scheduled", "paused", "finished"]
 
@@ -17,6 +19,7 @@ __all__ = [
     "WAKEUP_VERSION",
     "CursorEntry",
     "MemoryCursor",
+    "StartPayload",
     "WakeupPayload",
 ]
 
@@ -145,20 +148,26 @@ class WakeupPayload:
     logical_time: datetime
     cursor: MemoryCursor = field(default_factory=MemoryCursor.empty)
     kind: str = "tick"
+    epoch: int | None = None
 
     def __post_init__(self) -> None:
         if not self.scheduler_id:
             raise ValueError("scheduler_id must be non-empty")
+        if self.epoch is not None and self.epoch < 1:
+            raise ValueError("epoch must be greater than or equal to 1")
         object.__setattr__(self, "logical_time", as_utc(self.logical_time, name="logical_time"))
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "vercel": {"kind": WAKEUP_KIND, "version": WAKEUP_VERSION},
             "scheduler_id": self.scheduler_id,
             "logical_time": self.logical_time.isoformat(),
             "kind": self.kind,
             "cursor": self.cursor.to_payload(),
         }
+        if self.epoch is not None:
+            payload["epoch"] = self.epoch
+        return payload
 
     @classmethod
     def from_payload(cls, payload: Any) -> WakeupPayload:
@@ -189,9 +198,59 @@ class WakeupPayload:
         if not isinstance(kind, str) or not kind:
             raise ValueError("Invalid wakeup payload: missing kind")
 
+        epoch = payload.get("epoch")
+        if epoch is not None and (
+            not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1
+        ):
+            raise ValueError("Invalid wakeup payload: epoch must be a positive integer")
+
         return cls(
             scheduler_id=scheduler_id,
             logical_time=logical_time,
             kind=kind,
             cursor=MemoryCursor.from_payload(payload.get("cursor")),
+            epoch=epoch,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class StartPayload:
+    epoch: int
+    reference_time: datetime
+
+    def __post_init__(self) -> None:
+        if self.epoch < 1:
+            raise ValueError("epoch must be greater than or equal to 1")
+        object.__setattr__(
+            self,
+            "reference_time",
+            as_utc(self.reference_time, name="reference_time"),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "vercel": {"kind": START_KIND, "version": START_VERSION},
+            "epoch": self.epoch,
+            "reference_time": self.reference_time.isoformat(),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> StartPayload:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid start payload: expected object")
+        vercel_info = payload.get("vercel")
+        if not isinstance(vercel_info, dict) or vercel_info.get("kind") != START_KIND:
+            raise ValueError("Invalid start payload: not an APScheduler start envelope")
+        if int(vercel_info.get("version", 0)) != START_VERSION:
+            raise ValueError("Invalid start payload: unsupported version")
+        epoch = payload.get("epoch")
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
+            raise ValueError("Invalid start payload: epoch must be a positive integer")
+        reference_time_raw = payload.get("reference_time")
+        if not isinstance(reference_time_raw, str) or not reference_time_raw:
+            raise ValueError("Invalid start payload: missing reference_time")
+        try:
+            reference_time = datetime.fromisoformat(reference_time_raw)
+        except ValueError as exc:
+            raise ValueError("Invalid start payload: reference_time must be ISO-8601") from exc
+        return cls(epoch=epoch, reference_time=reference_time)

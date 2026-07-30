@@ -211,6 +211,24 @@ class TestQueueRegistration:
 
         assert get_subscriptions() == ()
 
+    def test_publish_only_activation_defers_control_entrypoint_import(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("VERCEL_DEV_QUEUE_SERVING", raising=False)
+        monkeypatch.delenv("VERCEL_SERVICE_TYPE", raising=False)
+        monkeypatch.delenv("VERCEL_SERVICE_TRIGGER", raising=False)
+        monkeypatch.setattr(adapter_module._PATCH_STATE, "register_queues", False)
+
+        with patch(
+            "vercel.integrations.apscheduler.control._load_control_from_env"
+        ) as load_control:
+            install_vercel_apscheduler_integration(register_queues=False)
+            load_control.assert_not_called()
+
+            install_vercel_apscheduler_integration(register_queues=True)
+            load_control.assert_called_once_with()
+
     def test_dev_queue_sidecar_registers_after_publish_only_activation(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -292,6 +310,35 @@ class TestQueueRegistration:
 
         seed.assert_called_once_with(now=created_at, kind="start")
         clear_subscriptions()
+
+
+class TestControlPublishGuard:
+    @patch("vercel.integrations.apscheduler._adapter.vqs_sync.send")
+    def test_publish_guard_fences_successor_after_jobs_run(self, mock_send: Any) -> None:
+        tick_at = datetime(2026, 4, 9, 12, 0, tzinfo=UTC)
+        calls: list[str] = []
+        scheduler, adapter = _scheduler()
+        scheduler.add_job(
+            lambda: calls.append("ran"),
+            "interval",
+            seconds=30,
+            start_date=tick_at,
+            id="job-1",
+        )
+
+        result = adapter.process_wakeup(
+            tick_at,
+            publish_next=True,
+            now=tick_at,
+            epoch=7,
+            publish_guard=lambda: False,
+        )
+
+        assert calls == ["ran"]
+        assert result.next_wakeup_time == tick_at + timedelta(seconds=30)
+        assert result.published_wakeup is None
+        mock_send.assert_not_called()
+        adapter.shutdown(wait=True)
 
 
 class TestStockSchedulerAdapter:

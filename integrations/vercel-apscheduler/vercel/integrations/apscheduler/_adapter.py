@@ -267,9 +267,18 @@ class SchedulerAdapter:
         self._job_definitions[str(job.id)] = fallback
         return fallback
 
-    def build_wakeup_idempotency_key(self, logical_time: datetime) -> str:
+    def build_wakeup_idempotency_key(
+        self,
+        logical_time: datetime,
+        *,
+        epoch: int | None = None,
+    ) -> str:
         logical_time_utc = as_utc(logical_time, name="logical_time")
-        return f"{WAKEUP_KEY_PREFIX}:{self.identity.scheduler_id}:{logical_time_utc.isoformat()}"
+        epoch_part = "" if epoch is None else f":{epoch}"
+        return (
+            f"{WAKEUP_KEY_PREFIX}:{self.identity.scheduler_id}{epoch_part}:"
+            f"{logical_time_utc.isoformat()}"
+        )
 
     def wakeup(self) -> None:
         if self._suppress_wakeup or self.scheduler.state != STATE_RUNNING:
@@ -570,6 +579,7 @@ class SchedulerAdapter:
         *,
         now: datetime | None = None,
         kind: str = "seed",
+        epoch: int | None = None,
     ) -> PublishedWakeup | None:
         now_utc = as_utc(now or datetime.now(UTC), name="now")
         self.ensure_started(pending_jobs_reference_time=now_utc)
@@ -595,6 +605,7 @@ class SchedulerAdapter:
             cursor=self._memory_cursor(),
             now=now_utc,
             kind=kind,
+            epoch=epoch,
         )
 
     def publish_wakeup(
@@ -604,6 +615,7 @@ class SchedulerAdapter:
         cursor: MemoryCursor,
         now: datetime | None = None,
         kind: str = "tick",
+        epoch: int | None = None,
     ) -> PublishedWakeup:
         now_utc = as_utc(now or datetime.now(UTC), name="now")
         scheduled_logical_time = canonical_scheduled_logical_time(
@@ -612,12 +624,16 @@ class SchedulerAdapter:
             max_delay_seconds=self.options.max_delay_seconds,
         )
         delay_seconds = max(0, math.ceil((scheduled_logical_time - now_utc).total_seconds()))
-        idempotency_key = self.build_wakeup_idempotency_key(scheduled_logical_time)
+        idempotency_key = self.build_wakeup_idempotency_key(
+            scheduled_logical_time,
+            epoch=epoch,
+        )
         payload = WakeupPayload(
             scheduler_id=self.identity.scheduler_id,
             logical_time=scheduled_logical_time,
             cursor=cursor,
             kind=kind,
+            epoch=epoch,
         ).to_payload()
         try:
             message_id = vqs_sync.send(
@@ -658,6 +674,7 @@ class SchedulerAdapter:
             cursor=payload.cursor,
             publish_next=publish_next,
             now=now,
+            epoch=payload.epoch,
         )
 
     def process_wakeup(
@@ -667,6 +684,8 @@ class SchedulerAdapter:
         cursor: MemoryCursor | None = None,
         publish_next: bool = True,
         now: datetime | None = None,
+        epoch: int | None = None,
+        publish_guard: Callable[[], bool] | None = None,
     ) -> WakeupProcessingResult:
         effective_logical_time = require_aware_datetime(
             logical_time,
@@ -701,8 +720,13 @@ class SchedulerAdapter:
                 cursor=self._memory_cursor(),
                 now=now,
                 kind="tick",
+                epoch=epoch,
             )
-            if publish_next and next_wakeup_time is not None
+            if (
+                publish_next
+                and next_wakeup_time is not None
+                and (publish_guard is None or publish_guard())
+            )
             else None
         )
         return WakeupProcessingResult(
@@ -997,3 +1021,8 @@ def install_vercel_apscheduler_integration(
         BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
         _patch_scheduler_start_methods()
         _PATCH_STATE.installed = True
+
+    if register_queues or is_queue_serving_runtime():
+        from .control import _load_control_from_env
+
+        _load_control_from_env()

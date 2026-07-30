@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "APScheduler>=3.10.4,<4",
     "vercel-apscheduler>=0.1.0",
+    "redis>=5,<7",
     "fastapi>=0.115.6,<0.116",
 ]
 
@@ -13,6 +14,9 @@ package = false
 
 [[tool.vercel.subscribers]]
 entrypoint = "scheduler:scheduler"
+
+[tool.vercel.apscheduler.control]
+entrypoint = "scheduler:control"
 
 [tool.uv.sources]
 vercel-apscheduler = { git = "https://github.com/vercel/vercel-py.git", branch = "ricardo/vqs-apscheduler", subdirectory = "integrations/vercel-apscheduler" }

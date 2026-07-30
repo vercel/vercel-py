@@ -55,6 +55,9 @@ extend = "../ruff.toml"
 "vercel/integrations/apscheduler/_payload.py" = [
     "TRY004",  # payload parse failures are reported uniformly as ValueError.
 ]
+"vercel/integrations/apscheduler/control.py" = [
+    "PLC0415",  # redis is an optional dependency and is imported lazily.
+]
 "vercel/integrations/apscheduler/version.py" = [
     "D100",
 ]

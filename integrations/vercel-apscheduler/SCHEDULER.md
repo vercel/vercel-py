@@ -21,6 +21,9 @@ Declare the stock scheduler object as a subscriber in `pyproject.toml`:
 ```toml
 [[tool.vercel.subscribers]]
 entrypoint = "scheduler:scheduler"
+
+[tool.vercel.apscheduler.control]
+entrypoint = "scheduler:control"
 ```
 
 `scheduler.py` is ordinary APScheduler code:
@@ -29,8 +32,10 @@ entrypoint = "scheduler:scheduler"
 from datetime import timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
+from vercel.integrations.apscheduler.control import Control, RedisControlBackend
 
 scheduler = BlockingScheduler(timezone=timezone.utc)
+control = Control(backend=RedisControlBackend())
 
 
 @scheduler.scheduled_job("cron", hour=4, jitter=120, id="cleanup")
@@ -52,7 +57,7 @@ Scheduler construction then registers both topics in the process-wide
 
 | Topic | Purpose |
 | --- | --- |
-| `__aps_scheduler_scheduler_start` | Turn one manually enqueued message into the first delayed wake |
+| `__aps_scheduler_scheduler_start` | Turn one epoch-fenced control message into the first delayed wake |
 | `__aps_scheduler_scheduler_wakeup` | Evaluate due jobs and publish the successor wake |
 
 `vercel.queue.get_subscriptions()` supplies the builder with both topics, the
@@ -61,9 +66,11 @@ then generates the queue handler and `queue/v2beta` triggers. `vercel.json`
 does not duplicate any of these values.
 
 The derived identity is used in payloads, topics, consumer groups, and
-idempotency keys. Keeping the same pyproject entrypoint preserves the chain
-across deployments; changing the entrypoint intentionally creates a new
-scheduler identity that must be started separately.
+idempotency keys. The builder also injects the exact discovered APScheduler
+subscriber names and the control entrypoint into web Functions and scheduler
+subscriber Functions. Unrelated queue subscribers do not import the control
+module. Users do not configure internal topic names, consumer groups, scheduler
+IDs, or epochs.
 
 The adapter patches scheduler construction and `add_job()` before the module is
 imported. That lets it remember whether an ID and interval anchor were explicit
@@ -112,8 +119,9 @@ success because it proves another attempt already persisted the same successor.
 Therefore, once seeded, normal queue processing cannot acknowledge the last
 copy of a wake without first creating the next one.
 
-When the scheduler has no future jobs, omitting a successor is intentional: the
-schedule is terminal until another start message evaluates a changed definition.
+When the scheduler has no future jobs, omitting a successor is intentional. A
+controlled deployment remains logically running; call `stop()` followed by
+`start()` to create a new epoch if a changed definition needs to be evaluated.
 
 Jobs run through an inline executor. A thread or process executor could let the
 request return and freeze while work is still running, so custom executors are
@@ -192,137 +200,157 @@ deterministically delayed to `12:00:20`, that pending occurrence is retained.
 
 ## Wake Identity
 
-A wake for scheduler `S` at logical time `T` uses:
+A wake for scheduler `S`, control epoch `E`, and logical time `T` uses:
 
 ```text
-K(S, T) = aps:<scheduler-id>:<UTC logical time>
+K_wake(S, E, T) = aps:<scheduler-id>:<epoch>:<UTC logical time>
 ```
 
 Example:
 
 ```text
-aps:cleanup:2026-04-09T04:00:47.120000+00:00
+aps:scheduler_scheduler:7:2026-04-09T04:00:47.120000+00:00
 ```
 
-Vercel Queue idempotency is scoped to a physical deployment queue. Therefore,
-the same key in deployment A and deployment B can both exist. Idempotency does
-not prevent a temporary fork during deployment.
-
-It does collapse successors after both paths publish into the current physical
-queue. That is convergence, not global deduplication.
-
-## Convergence Argument
-
-Fix the current deployment's schedule definitions. Let `E` be the ordered set
-of their deterministic logical occurrences, including deterministic jitter.
-Define the transition:
+A start message uses:
 
 ```text
-F(t) = the first occurrence in E strictly after t
+K_start(D, E, S) = aps:start:<deployment>:<epoch>:<subscriber>
 ```
 
-A delivery at `t` runs everything due through `t` and publishes `F(t)`. Two
-chains can begin at different times `a <= b`:
+Queue idempotency is scoped to a deployment. Including the epoch deliberately
+separates a new run from every stale message left by an older run.
+
+## Durable Control Plane
+
+Configure one durable control object:
+
+```toml
+[tool.vercel.apscheduler.control]
+entrypoint = "scheduler:control"
+```
+
+```python
+from vercel.integrations.apscheduler.control import Control, RedisControlBackend
+
+control = Control(backend=RedisControlBackend())
+```
+
+`RedisControlBackend()` reads `REDIS_URL` lazily. An explicit host or URL wins:
+
+```python
+RedisControlBackend(host="redis://user:password@example:6379/0")
+RedisControlBackend(host="redis.internal", port=6379, ssl=True)
+```
+
+Install the Redis client alongside the integration:
+
+```toml
+dependencies = ["vercel-apscheduler", "redis>=5,<7"]
+```
+
+Call it from an authenticated administrative API route or command:
+
+```python
+control.start()
+control.stop()
+control.status()
+
+control.start(deployment="dpl_abc")
+control.stop(deployment="dpl_abc")
+control.status(deployment="dpl_abc")
+```
+
+With no explicit deployment, `VERCEL_DEPLOYMENT_ID` selects the deployment
+executing the call. An explicit target uses the caller deployment's injected
+scheduler registry. If two deployments declare different scheduler
+entrypoints, invoke the control route on the target deployment itself so its
+own registry is used.
+
+Redis stores one control hash per deployment:
 
 ```text
-chain A: a -> F(a) -> F(F(a)) -> ...
-chain B: b -> F(b) -> F(F(b)) -> ...
+state = running | stopped
+epoch = monotonically increasing integer
+reference_time = immutable timestamp for the current epoch
 ```
 
-Because `E` is ordered, chain A eventually reaches the first current occurrence
-after `b`, which is exactly `F(b)`. Both then publish the same key
-`K(S, F(b))` into the current queue. The queue retains one message for that
-key, and deterministic transitions keep the paths together afterward.
-
-An old wake time does not need to be a member of `E`. It still maps through
-`F(old_time)` to the current schedule. The proof relies on these conditions:
-
-1. Both handlers execute current code.
-2. Old cursor entries apply only to unchanged fingerprints.
-3. Memory schedule transitions are deterministic.
-4. Successors are sent to the currently routed deployment queue.
-5. Equal `(scheduler ID, logical time)` values use equal keys.
-
-The result is eventual one-chain convergence. It does not promise exactly-once
-job execution during the overlap.
-
-### Traceable deployment example
+Each subscriber also has a seed state for that epoch:
 
 ```text
-old chain already contains:       wake(11:00) in queue A
-new deployment is manually started: wake(10:05) in queue B
-queue B processes 10:05:          publishes wake(11:00), key K(cleanup, 11:00)
-old 11:00 routes to current code: publishes wake(12:00), key K(cleanup, 12:00)
-new 11:00 processes current code: publishes wake(12:00), same key
-queue B after both sends:         one wake(12:00)
+pending -> published -> active
 ```
 
-The `11:00` jobs may run twice. The `12:00` successor is one message.
+`start()` atomically creates an epoch only when the deployment is stopped.
+Every concurrent caller sees the same epoch, timestamp, and pending seeds.
+They may race to send, but all use the same `K_start`; Queue accepts one. If a
+caller crashes before or during publication, the seed stays pending and a
+later `start()` retries the same payload and idempotency key.
+
+The start handler checks Redis, derives the first wake from the stored immutable
+reference time, and carries the epoch into every successor. Duplicate start
+deliveries therefore calculate the same first wake key.
+
+Every wake performs two durable checks:
+
+1. Before running jobs, its epoch must be the deployment's current running
+   epoch.
+2. Immediately before publishing a successor, that same condition must still
+   hold.
+
+`stop()` atomically changes the state to stopped. A wake that has not begun
+becomes a no-op. A wake already executing may finish its current jobs, but the
+second check prevents it from extending the old chain. If `start()` follows,
+Redis increments the epoch, so every remaining old start or wake message is
+permanently stale.
+
+Control keys intentionally have no TTL. Expiring a stopped record could make a
+deployment appear startable under an old generation and violate the promise
+that schedules never resume spontaneously. Redis failures also fail closed:
+control calls raise, and subscriber deliveries fail for Queue retry rather than
+running without a fence.
+
+These rules guarantee one current logical chain per deployment. They do not
+make job execution exactly once. Queue can redeliver a wake after a crash, so
+scheduled side effects must remain idempotent.
 
 ## Changes Across Deployments
 
-### Add a job
+Every Vercel deployment has its own Queue partition and Redis control record.
+Creating or aliasing a new production deployment does not move an existing
+chain and does not start the new one.
 
-```text
-old code: cleanup at 11:00
-new code: cleanup at 11:00 + sync at 10:05
-deploy:   10:00
-```
+After promoting a deployment, call `control.start()` through that deployment
+to start its schedules. Stop an older deployment explicitly with
+`control.stop(deployment="dpl_old")` when it should no longer schedule work.
+Targeted calls publish into the named deployment's Queue partition.
 
-The new start sees `sync` and schedules `10:05`. If the old `11:00` wake also
-arrives, it imports the new registry and sees both jobs. The chains converge at
-a later shared occurrence.
+This separation is what makes rollback behavior explicit: the old deployment
+can be started again under a new epoch without reviving any stale messages from
+its earlier run. Deleting a deployment prevents its Functions from receiving
+more work, but the Redis control keys deliberately remain until an operator
+cleans them up.
 
-If the new job is later than the existing next wake, no special message is
-needed. At the existing wake, current code includes the new job and selects it
-when it becomes the earliest successor.
+Changing a job definition creates a new deployment with a new chain. Its first
+seed calculates timing from that deployment's code. Stable IDs are still
+required for MemoryJobStore cursor reconciliation within a run.
 
-### Delete a job
-
-An old message may carry that job's cursor entry, but current code has no
-matching job. The entry is discarded. A wake is an evaluation request, not a
-serialized call to the deleted function, so the deleted function cannot run.
-
-### Change a schedule
-
-```text
-old: id="cleanup", cron hour=4, fingerprint=A
-new: id="cleanup", cron hour=5, fingerprint=B
-```
-
-`A != B`, so timing from the old schedule is ignored. Every handler calculates
-from the new trigger. Keeping the same ID is fine; changing the fingerprint is
-what invalidates stale timing.
-
-## Manual Start
-
-```text
-manual send -> __aps_scheduler_scheduler_start -> first delayed wakeup
-                                             |
-                                             v
-                                  recurring successor chain
-```
+## Starting After Deployment
 
 Builds cannot enqueue into the deployment's queue consumer registry, so the
-integration does not try to seed during the build. After the deployment is
-ready, enqueue an empty JSON object on the start topic:
+integration does not seed during the build. Expose an authenticated route or
+run an administrative command that imports the configured object and calls:
 
-```bash
-uv run python -m vercel.queue send \
-  --topic __aps_scheduler_scheduler_start \
-  --region iad1 \
-  --json '{}'
+```python
+from scheduler import control
+
+result = control.start()
 ```
 
-The start callback uses the message's immutable creation timestamp as the
-reference time. A redelivery of the same start message therefore attempts the
-same first wake and converges through the ordinary wake idempotency key. Once
-that first wake exists, the recurring subscriber maintains the chain.
-
-This is intentionally a manual bootstrap for now. Automatic activation seeding
-needs a platform hook that runs only after the deployment's queue consumers are
-registered and routable; this example also deliberately leaves watchdog healing
-out of scope.
+The SDK publishes the private start envelope only after Redis has durably
+created the epoch. Applications should not publish directly to the internal
+start topic: doing so bypasses the durable state transition and the subscriber
+will ignore the message.
 
 ## Durable Job Stores
 

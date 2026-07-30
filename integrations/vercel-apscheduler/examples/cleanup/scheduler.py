@@ -4,9 +4,12 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from vercel.integrations.apscheduler.control import Control, RedisControlBackend
+
 UTC = timezone.utc
 
 scheduler = BlockingScheduler(timezone=UTC)
+control = Control(backend=RedisControlBackend())
 
 
 @scheduler.scheduled_job(
