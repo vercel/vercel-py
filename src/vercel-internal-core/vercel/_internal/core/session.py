@@ -1,6 +1,7 @@
 """Mode-specific sessions shared by Vercel Python services."""
 
 import asyncio
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
@@ -102,6 +103,11 @@ class SdkSession(_BaseSdkSession):
         )
         self._transport: AsyncTransport | None = None
         self._staging_file_runtime: AsyncByteStreamRuntime | None = None
+        # Keyed by loop, with `None` for a client built outside one. The default
+        # session is process-wide, so it outlives any loop its sockets belong to.
+        self._clients: dict[asyncio.AbstractEventLoop | None, httpx.AsyncClient] = {}
+        # One session can be reached from threads running loops of their own.
+        self._clients_lock = threading.Lock()
 
     @classmethod
     def default(cls) -> Self:
@@ -131,17 +137,46 @@ class SdkSession(_BaseSdkSession):
             ),
         )
 
-    def get_transport(self) -> "AsyncTransport":
+    @staticmethod
+    def _running_loop() -> "asyncio.AbstractEventLoop | None":
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    def _client_for_running_loop(self) -> httpx.AsyncClient:
+        """Return the client owned by the loop making this request.
+
+        Reusing a keep-alive socket from a closed loop does not fail early: the
+        request is sent and the response is read, and only then does closing the
+        connection call into the dead loop and raise `RuntimeError: Event loop is
+        closed`. The caller sees an error for work the server already did, so the
+        client is chosen per loop up front rather than repaired afterwards.
+        """
+        loop = self._running_loop()
+        with self._clients_lock:
+            # Under the lock, so a request holding this transport cannot build a
+            # client that outlives the session it belongs to.
+            self.check_open()
+            client = self._clients.get(loop)
+            if client is not None:
+                return client
+            for known in [
+                known for known in self._clients if known is not None and known.is_closed()
+            ]:
+                # Dropped, not closed: `aclose` needs the loop that owns the
+                # sockets, and that loop is gone.
+                del self._clients[known]
+            client = self._create_client()
+            self._clients[loop] = client
+            return client
+
+    def _create_client(self) -> httpx.AsyncClient:
         from vercel._internal.core.http import (
             DEFAULT_TIMEOUT,
-            AsyncTransport,
             TransportOptions,
             create_base_async_client,
         )
-
-        self.check_open()
-        if self._transport is not None:
-            return self._transport
 
         if self._httpx_client_factory is None:
             client = create_base_async_client(
@@ -164,7 +199,14 @@ class SdkSession(_BaseSdkSession):
                     "Async SDK sessions require httpx_client_factory to return httpx.AsyncClient"
                 )
             client = candidate
-        self._transport = AsyncTransport(client)
+        return client
+
+    def get_transport(self) -> "AsyncTransport":
+        from vercel._internal.core.http import AsyncTransport
+
+        self.check_open()
+        if self._transport is None:
+            self._transport = AsyncTransport(self._client_for_running_loop)
         return self._transport
 
     def get_staging_file_runtime(self) -> "AsyncByteStreamRuntime":
@@ -181,11 +223,20 @@ class SdkSession(_BaseSdkSession):
     async def aclose(self) -> None:
         if self._closed:
             return
-        self._closed = True
         self._clear_services()
-        if self._transport is not None:
-            await self._transport.aclose()
-            self._transport = None
+        self._transport = None
+        loop = self._running_loop()
+        with self._clients_lock:
+            # Closing and the flag that stops new clients have to be one step, or
+            # a resolver already past the check registers a client nothing closes.
+            self._closed = True
+            clients = list(self._clients.items())
+            self._clients.clear()
+        for owner, client in clients:
+            # Another loop's client is dropped: closing it here would fail the
+            # same way reusing it does.
+            if owner is None or owner is loop:
+                await client.aclose()
 
 
 class SyncSdkSession(_BaseSdkSession):

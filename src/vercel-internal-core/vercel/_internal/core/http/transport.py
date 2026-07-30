@@ -6,7 +6,7 @@ import abc
 import json
 import queue
 import threading
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -79,8 +79,6 @@ class TransportOptions:
 
 
 class BaseTransport(abc.ABC):
-    _client: httpx.Client | httpx.AsyncClient
-
     @abc.abstractmethod
     async def send(
         self,
@@ -131,8 +129,9 @@ class BaseTransport(abc.ABC):
         """Open a response whose body is consumed incrementally."""
         raise NotImplementedError()
 
+    @staticmethod
     def _build_request(
-        self,
+        client: httpx.Client | httpx.AsyncClient,
         method: str,
         path: str,
         *,
@@ -158,7 +157,7 @@ class BaseTransport(abc.ABC):
                 content = body.data
 
         if timeout is not None:
-            return self._client.build_request(
+            return client.build_request(
                 method,
                 _normalize_path(path),
                 params=params,
@@ -168,7 +167,7 @@ class BaseTransport(abc.ABC):
                 content=content,
             )
 
-        return self._client.build_request(
+        return client.build_request(
             method,
             _normalize_path(path),
             params=params,
@@ -611,7 +610,14 @@ class SyncTransport(BaseTransport):
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         request = self._build_request(
-            method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
+            self._client,
+            method,
+            path,
+            token=token,
+            params=params,
+            body=body,
+            headers=headers,
+            timeout=timeout,
         )
         response = self._client.send(
             request,
@@ -639,6 +645,7 @@ class SyncTransport(BaseTransport):
     ) -> AsyncIterator[StreamingRequest]:
         chunks: queue.Queue[bytes | object] = queue.Queue(maxsize=1)
         request = self._build_request(
+            self._client,
             method,
             path,
             token=token,
@@ -711,10 +718,19 @@ class SyncTransport(BaseTransport):
 
 
 class AsyncTransport(BaseTransport):
-    _client: httpx.AsyncClient
+    def __init__(self, client: httpx.AsyncClient | Callable[[], httpx.AsyncClient]) -> None:
+        """Take a client, or a callable consulted before every request.
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
-        self._client = client
+        Keep-alive sockets belong to the event loop that opened them, so an owner
+        that outlives a loop passes a callable and gets a client per loop. The
+        transport object itself is memoized by callers and cannot be swapped out.
+        """
+        self._resolve_client: Callable[[], httpx.AsyncClient] = (
+            (lambda: client) if isinstance(client, httpx.AsyncClient) else client
+        )
+        # Resolved once here so a factory that yields the wrong kind of client
+        # fails when the transport is built, as it did before.
+        self._resolve_client()
 
     async def send(
         self,
@@ -730,10 +746,18 @@ class AsyncTransport(BaseTransport):
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
+        client = self._resolve_client()
         request = self._build_request(
-            method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
+            client,
+            method,
+            path,
+            token=token,
+            params=params,
+            body=body,
+            headers=headers,
+            timeout=timeout,
         )
-        response = await self._client.send(
+        response = await client.send(
             request,
             stream=stream,
             follow_redirects=follow_redirects
@@ -757,8 +781,10 @@ class AsyncTransport(BaseTransport):
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         response_chunk_size: int | None = None,
     ) -> AsyncIterator[StreamingRequest]:
+        client = self._resolve_client()
         send, receive = anyio.create_memory_object_stream[bytes](1)
         request = self._build_request(
+            client,
             method,
             path,
             token=token,
@@ -768,7 +794,7 @@ class AsyncTransport(BaseTransport):
             timeout=timeout,
         )
         streaming_request = _AsyncStreamingRequest(
-            client=self._client,
+            client=client,
             request=request,
             send=send,
             receive=receive,
@@ -832,7 +858,7 @@ class AsyncTransport(BaseTransport):
         return _AsyncStreamingResponse(response, chunk_size)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await self._resolve_client().aclose()
 
     async def __aenter__(self) -> AsyncTransport:
         return self
