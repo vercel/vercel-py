@@ -6,6 +6,21 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, TypeAlias
 
 from vercel._internal.core.polyfills import StrEnum
+from vercel.connect._internal.errors import ConnectValidationError
+
+
+def _validate_string_sequence(name: str, value: object) -> None:
+    """Reject a bare string where a sequence of strings is required.
+
+    `str` satisfies `Sequence[str]`, so `permissions="contents:read"` type-checks
+    and then serializes as one entry per character.
+    """
+    if isinstance(value, str):
+        raise ConnectValidationError(
+            f"{name} must be a sequence of strings, not a single string; "
+            f"pass [{value!r}] for one value"
+        )
+
 
 DurationInput: TypeAlias = int | float | timedelta
 """A duration accepted at the public boundary: seconds as a number, or a timedelta."""
@@ -87,6 +102,10 @@ class ConnectGitHubAppInstallationAuthorizationDetail:
     permissions: Sequence[str] | None = None
     repositories: Sequence[str] | None = None
     type: str = "github_app_installation"
+
+    def __post_init__(self) -> None:
+        _validate_string_sequence("permissions", self.permissions)
+        _validate_string_sequence("repositories", self.repositories)
 
 
 @dataclass(frozen=True, slots=True)

@@ -970,3 +970,76 @@ async def test_equivalent_detail_requests_share_one_request(mock_env_clear: None
             )
 
     assert route.call_count == 1
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_revoking_by_uid_evicts_entries_cached_by_id(mock_env_clear: None) -> None:
+    """A connector has two names; a revoke naming either must evict the entry.
+
+    The cached response carries both, so no round trip is needed to match them.
+    """
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        body = token_body(token=f"t{calls['n']}")
+        body["connector"] = {"id": "scl_123", "uid": "slack/my-bot", "type": "slack"}
+        return httpx.Response(200, json=body)
+
+    respx.post(f"{TEST_BASE_URL}/v1/connect/token/scl_123").mock(side_effect=handler)
+    respx.delete(f"{TEST_BASE_URL}/v1/connect/connectors/slack%2Fmy-bot/tokens").mock(
+        return_value=httpx.Response(204, content=b"")
+    )
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        first = await get_token("scl_123", subject=subject)
+        # Revoked through the readable UID, cached under the opaque id.
+        await revoke_token("slack/my-bot", subject=subject)
+        second = await get_token("scl_123", subject=subject)
+
+    assert first != second
+    assert calls["n"] == 2
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_deleting_by_id_evicts_entries_cached_by_uid(mock_env_clear: None) -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        body = token_body(token=f"t{calls['n']}")
+        body["connector"] = {"id": "scl_123", "uid": "slack/my-bot", "type": "slack"}
+        return httpx.Response(200, json=body)
+
+    respx.post(TOKEN_URL).mock(side_effect=handler)
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=subject)
+        delete_token_cache_entry("scl_123", subject=subject)
+        await get_token("slack/my-bot", subject=subject)
+
+    assert calls["n"] == 2
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_revoking_a_different_connector_still_spares_the_entry(
+    mock_env_clear: None,
+) -> None:
+    """Name matching must not become a way to evict unrelated connectors."""
+    route = counting_route()
+    respx.delete(f"{TEST_BASE_URL}/v1/connect/connectors/github%2Fother/tokens").mock(
+        return_value=httpx.Response(204, content=b"")
+    )
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=subject)
+        await revoke_token("github/other", subject=subject)
+        await get_token("slack/my-bot", subject=subject)
+
+    assert route.call_count == 1

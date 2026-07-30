@@ -264,22 +264,22 @@ class TokenCache:
     ) -> int:
         """Drop every entry for a connector and subject.
 
-        `installation_id=None` means every installation, matching the server's
-        revocation semantics, rather than only entries that were cached without
-        an installation. Scoped invalidation: unlike the TypeScript SDK this
-        never clears unrelated connectors or subjects.
+                `installation_id=None` means every installation, matching the server's
+                revocation semantics, rather than only entries that were cached without
+                an installation. Scoped invalidation: unlike the TypeScript SDK this
+                never clears unrelated connectors or subjects.
 
-        Known limitation: a connector is matched by the string used at call time,
-        so entries cached under an opaque id (`scl_...`) are not evicted by a call
-        naming the readable UID (`slack/my-bot`), and vice versa. Resolving
-        aliases would require a network round trip.
+        A connector has two names, an opaque id (`scl_...`) and a readable UID
+                (`slack/my-bot`). Cached responses carry both, so an entry stored under one
+                name is still evicted by a call naming the other. An in-flight load has no
+                response yet, so it is matched on the name used at call time only.
         """
         subject_key = _subject_key(subject)
         with self._lock:
             doomed = [
                 key
-                for key in self._entries
-                if key.connector == connector
+                for key, state in self._entries.items()
+                if self._names_match(key, state, connector)
                 and key.subject_key == subject_key
                 and (installation_id is None or key.installation_id == installation_id)
             ]
@@ -295,6 +295,11 @@ class TokenCache:
                 ):
                     pending.epoch += 1
             return len(doomed)
+
+    @staticmethod
+    def _names_match(key: TokenCacheKey, state: ConnectTokenState, connector: str) -> bool:
+        """Whether `connector` names the same connector as this entry."""
+        return connector in (key.connector, state.connector.id, state.connector.uid)
 
     def clear(self) -> None:
         """Drop every entry."""

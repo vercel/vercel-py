@@ -622,7 +622,7 @@ def test_throttled_unknown_kid_fails_fast(signing_key: rsa.RSAPrivateKey) -> Non
         verify_vercel_oidc_token(sign(signing_key, kid="forged-2"), **EXPECTATIONS)
     elapsed = time_module.monotonic() - started
 
-    assert elapsed < FETCH_WAIT_TIMEOUT.total_seconds(), (
+    assert elapsed < FETCH_WAIT_TIMEOUT, (
         "a throttled miss must not wait for a fetch that is not running"
     )
 
@@ -669,3 +669,121 @@ def test_sync_waits_for_an_async_rotation_refresh(
 
     assert "error" not in outcome, outcome.get("error")
     assert outcome["claims"]  # type: ignore[truthy-bool]
+
+
+@respx.mock
+def test_waiter_survives_a_fetch_slower_than_the_old_wait_cap(
+    signing_key: rsa.RSAPrivateKey,
+    other_signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """A cold TLS handshake routinely takes longer than half a second.
+
+    The waiting mode cannot fetch for itself, so giving up early rejected a valid
+    token. The wait now ends when the owner finishes, bounded by the fetch timeout.
+    """
+    import asyncio
+    import threading
+
+    clear_jwks_cache()
+    route = jwks_route(signing_key, kid="k-old")
+    verify_vercel_oidc_token(sign(signing_key, kid="k-old"), **EXPECTATIONS)
+
+    fetch_started = threading.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        fetch_started.set()
+        await asyncio.sleep(0.7)
+        return httpx.Response(200, json=jwks_for(other_signing_key, kid="k-new"))
+
+    route.mock(side_effect=slow)
+    token = sign(other_signing_key, kid="k-new")
+    outcome: dict[str, object] = {}
+
+    def sync_side() -> None:
+        fetch_started.wait(3.0)
+        try:
+            outcome["claims"] = verify_vercel_oidc_token(token, **EXPECTATIONS)
+        except VercelOidcVerificationError as error:
+            outcome["error"] = str(error)
+
+    async def drive() -> None:
+        thread = threading.Thread(target=sync_side)
+        thread.start()
+        await verify_vercel_oidc_token_async(token, **EXPECTATIONS)
+        thread.join(10.0)
+
+    asyncio.run(drive())
+
+    assert "error" not in outcome, outcome.get("error")
+    assert FETCH_WAIT_TIMEOUT > 0.7
+
+
+@respx.mock
+def test_only_one_caller_fetches_across_both_modes(signing_key: rsa.RSAPrivateKey) -> None:
+    """The claim is atomic, so a sync and an async caller cannot both fetch."""
+    import asyncio
+    import threading
+
+    clear_jwks_cache()
+    fetch_count = {"n": 0}
+    barrier = threading.Event()
+
+    async def counting(request: httpx.Request) -> httpx.Response:
+        fetch_count["n"] += 1
+        await asyncio.sleep(0.2)
+        return httpx.Response(200, json=jwks_for(signing_key))
+
+    respx.get(JWKS_URL).mock(side_effect=counting)
+    token = sign(signing_key)
+    results: list[object] = []
+
+    def sync_side() -> None:
+        barrier.wait(3.0)
+        try:
+            results.append(verify_vercel_oidc_token(token, **EXPECTATIONS))
+        except VercelOidcVerificationError as error:  # pragma: no cover - diagnostic
+            results.append(error)
+
+    async def drive() -> None:
+        thread = threading.Thread(target=sync_side)
+        thread.start()
+        barrier.set()
+        results.append(await verify_vercel_oidc_token_async(token, **EXPECTATIONS))
+        thread.join(10.0)
+
+    asyncio.run(drive())
+
+    assert len(results) == 2
+    assert all(isinstance(r, dict) for r in results), results
+    assert fetch_count["n"] == 1
+
+
+@respx.mock
+def test_document_is_visible_before_the_fetch_marker_clears(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """A waiter observing the fetch finish must always see its document.
+
+    Clearing the marker first left a window where the loop exited with nothing
+    cached, rejecting a token whose key was about to be stored.
+    """
+    import vercel.oidc.verify as verify_module
+
+    clear_jwks_cache()
+    jwks_route(signing_key)
+    observed: list[bool] = []
+
+    original_store = verify_module._store_jwks
+
+    def observing_store(url: str, document: dict[str, Any]) -> None:
+        # While storing, the fetch must still be marked in progress.
+        observed.append(verify_module._fetch_is_in_progress(url))
+        original_store(url, document)
+
+    verify_module._store_jwks = observing_store  # type: ignore[assignment]
+    try:
+        verify_vercel_oidc_token(sign(signing_key), **EXPECTATIONS)
+    finally:
+        verify_module._store_jwks = original_store  # type: ignore[assignment]
+
+    assert observed == [True]

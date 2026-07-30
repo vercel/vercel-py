@@ -1,9 +1,11 @@
 """Connect errors for the SDK surface."""
 
+from collections.abc import Mapping
+from typing import Any
+
 import httpx
 
 from vercel._internal.core.errors import VercelError
-from vercel.connect._internal.models import JSONObject
 
 
 class ConnectError(VercelError):
@@ -33,7 +35,7 @@ class ConnectApiError(ConnectError):
         message: str,
         *,
         code: str | None = None,
-        vendor: JSONObject | None = None,
+        vendor: Mapping[str, Any] | None = None,
         data: object | None = None,
     ) -> None:
         super().__init__(message)

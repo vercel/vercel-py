@@ -39,7 +39,8 @@ ALLOWED_ALGORITHMS = ("RS256",)
 DEFAULT_LEEWAY = timedelta(seconds=60)
 DEFAULT_JWKS_CACHE_TTL = timedelta(minutes=10)
 DEFAULT_JWKS_MIN_REFETCH_INTERVAL = timedelta(seconds=30)
-_JWKS_TIMEOUT = httpx.Timeout(10.0)
+_JWKS_TIMEOUT_SECONDS = 10.0
+_JWKS_TIMEOUT = httpx.Timeout(_JWKS_TIMEOUT_SECONDS)
 _WILDCARD = "*"
 
 _jwks_lock = threading.Lock()
@@ -50,15 +51,14 @@ _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 # unknown `kid` values, or a JWKS outage, is still limited to one request per
 # interval.
 _jwks_throttled_until: dict[str, float] = {}
-_jwks_fetch_locks: dict[str, threading.Lock] = {}
-# Keyed by (url, async backend): an anyio lock binds to the backend it is first
-# used on, so a lock created under asyncio cannot be reused under trio.
-_jwks_async_fetch_locks: dict[tuple[str, str], Any] = {}
-# URLs with a fetch in flight, so a caller that loses the reservation waits for
-# that result instead of rejecting a token the winner is about to validate.
+# URLs with a fetch in flight, so a caller that does not win the claim waits for
+# that result instead of rejecting a token the winner is about to make verifiable.
 _jwks_fetch_in_progress: set[str] = set()
-FETCH_WAIT_TIMEOUT = timedelta(milliseconds=500)
-_FETCH_WAIT_INTERVAL = timedelta(milliseconds=20)
+# Long enough to outlast the fetch itself: a waiter should give up only if the
+# owner has neither succeeded nor failed, which the HTTP timeout already bounds.
+# In practice the wait ends as soon as the owner clears the marker.
+FETCH_WAIT_TIMEOUT = _JWKS_TIMEOUT_SECONDS + 1.0
+_FETCH_WAIT_INTERVAL = 0.02
 
 _MISSING_EXTRA_MESSAGE = (
     "OIDC token verification requires the 'verify' extra: pip install \"vercel-oidc[verify]\""
@@ -111,13 +111,6 @@ def _store_jwks(url: str, document: dict[str, Any]) -> None:
         _jwks_cache[url] = (time.monotonic(), document)
 
 
-def _fetch_allowed(url: str) -> bool:
-    """Whether a network fetch for this JWKS URL is currently permitted."""
-    with _jwks_lock:
-        until = _jwks_throttled_until.get(url)
-        return until is None or time.monotonic() >= until
-
-
 def _throttle_fetches(url: str) -> None:
     """Suppress fetches for the rate-limit interval after an unproductive one."""
     with _jwks_lock:
@@ -138,9 +131,21 @@ def _parse_jwks(payload: object) -> dict[str, Any]:
     return payload
 
 
-def _begin_fetch(url: str) -> None:
+def _claim_fetch(url: str) -> bool:
+    """Atomically claim the right to fetch this JWKS URL.
+
+    Checking the in-flight marker and setting it must be one critical section, or
+    a sync and an async caller can both decide to fetch. This single claim also
+    replaces the per-mode locks that previously coordinated only within a mode.
+    """
     with _jwks_lock:
+        if url in _jwks_fetch_in_progress:
+            return False
+        until = _jwks_throttled_until.get(url)
+        if until is not None and time.monotonic() < until:
+            return False
         _jwks_fetch_in_progress.add(url)
+        return True
 
 
 def _end_fetch(url: str) -> None:
@@ -151,15 +156,6 @@ def _end_fetch(url: str) -> None:
 def _fetch_is_in_progress(url: str) -> bool:
     with _jwks_lock:
         return url in _jwks_fetch_in_progress
-
-
-def _fetch_lock(url: str) -> threading.Lock:
-    with _jwks_lock:
-        lock = _jwks_fetch_locks.get(url)
-        if lock is None:
-            lock = threading.Lock()
-            _jwks_fetch_locks[url] = lock
-        return lock
 
 
 def _select_and_record(url: str, kid: str, document: dict[str, Any]) -> Any:
@@ -201,23 +197,17 @@ def _resolve_key_sync(url: str, kid: str) -> Any:
     if key is not None:
         return key
 
-    # Single-flight across threads: concurrent cold verifications, and concurrent
-    # misses after a key rotation, would otherwise each issue their own request.
-    with _fetch_lock(url):
-        key = _cached_key(url, kid)
-        if key is not None:
-            # Refreshed by whoever held the lock first.
-            return key
-        # Prefer waiting on a fetch already running in the other execution mode
-        # over starting a second one.
-        if not _fetch_is_in_progress(url) and _fetch_allowed(url):
-            return _record_fetch_outcome(url, kid, _fetch_jwks_sync_uncached)
+    # One fetch per URL across every thread and both execution modes.
+    if _claim_fetch(url):
+        return _record_fetch_outcome(url, kid, _fetch_jwks_sync_uncached)
 
-    # Someone else is fetching, or fetches are throttled. Wait for a result rather
-    # than rejecting a token that is about to become verifiable.
-    deadline = time.monotonic() + FETCH_WAIT_TIMEOUT.total_seconds()
+    # Someone else owns the fetch, or fetches are throttled. Wait for their result
+    # rather than rejecting a token that is about to become verifiable. The loop
+    # ends as soon as the owner clears the marker, so this waits for the fetch,
+    # not for the deadline.
+    deadline = time.monotonic() + FETCH_WAIT_TIMEOUT
     while _fetch_is_in_progress(url) and time.monotonic() < deadline:
-        time.sleep(_FETCH_WAIT_INTERVAL.total_seconds())
+        time.sleep(_FETCH_WAIT_INTERVAL)
         key = _cached_key(url, kid)
         if key is not None:
             return key
@@ -225,49 +215,30 @@ def _resolve_key_sync(url: str, kid: str) -> Any:
 
 
 def _fetch_jwks_sync_uncached(url: str) -> dict[str, Any]:
-    _begin_fetch(url)
+    # The in-flight marker is set by _claim_fetch; this only has to clear it.
     try:
         with httpx.Client(timeout=_JWKS_TIMEOUT) as client:
             response = client.get(url)
             response.raise_for_status()
             document = _parse_jwks(response.json())
+        # Stored before the marker is cleared, so a waiter that observes the fetch
+        # finishing always sees the document it produced.
+        _store_jwks(url, document)
+        return document
     except VercelOidcVerificationError:
         raise
     except Exception as exc:
         raise VercelOidcVerificationError(f"could not fetch JWKS from {url}", exc) from exc
     finally:
         _end_fetch(url)
-    _store_jwks(url, document)
-    return document
-
-
-def _current_async_backend() -> str:
-    try:
-        import sniffio
-
-        return sniffio.current_async_library()
-    except Exception:  # pragma: no cover - no async context, or detection failed
-        return "unknown"
-
-
-def _async_fetch_lock(url: str) -> Any:
-    import anyio
-
-    cache_key = (url, _current_async_backend())
-    with _jwks_lock:
-        lock = _jwks_async_fetch_locks.get(cache_key)
-        if lock is None:
-            lock = anyio.Lock()
-            _jwks_async_fetch_locks[cache_key] = lock
-        return lock
 
 
 async def _resolve_key_async(url: str, kid: str) -> Any:
     """Async twin of `_resolve_key_sync`.
 
-    Uses an anyio lock rather than an asyncio one so the single-flight works on
-    both asyncio and trio, and so a task waiting for a rotation refresh is not
-    rejected while the winner is still fetching.
+    Coordination is through the shared atomic claim rather than an async lock, so
+    it holds across threads, tasks, and both execution modes without binding to an
+    async backend.
     """
     import anyio
 
@@ -275,18 +246,13 @@ async def _resolve_key_async(url: str, kid: str) -> Any:
     if key is not None:
         return key
 
-    async with _async_fetch_lock(url):
-        key = _cached_key(url, kid)
-        if key is not None:
-            return key
-        if not _fetch_is_in_progress(url) and _fetch_allowed(url):
-            document = await _fetch_or_throttle_async(url)
-            return _select_and_record(url, kid, document)
+    if _claim_fetch(url):
+        document = await _fetch_or_throttle_async(url)
+        return _select_and_record(url, kid, document)
 
-    # Someone else is fetching, or fetches are throttled.
-    deadline = time.monotonic() + FETCH_WAIT_TIMEOUT.total_seconds()
+    deadline = time.monotonic() + FETCH_WAIT_TIMEOUT
     while _fetch_is_in_progress(url) and time.monotonic() < deadline:
-        await anyio.sleep(_FETCH_WAIT_INTERVAL.total_seconds())
+        await anyio.sleep(_FETCH_WAIT_INTERVAL)
         key = _cached_key(url, kid)
         if key is not None:
             return key
@@ -294,20 +260,21 @@ async def _resolve_key_async(url: str, kid: str) -> Any:
 
 
 async def _fetch_jwks_async(url: str) -> dict[str, Any]:
-    _begin_fetch(url)
+    # The in-flight marker is set by _claim_fetch; this only has to clear it.
     try:
         async with httpx.AsyncClient(timeout=_JWKS_TIMEOUT) as client:
             response = await client.get(url)
             response.raise_for_status()
             document = _parse_jwks(response.json())
+        # Stored before the marker is cleared; see the sync twin.
+        _store_jwks(url, document)
+        return document
     except VercelOidcVerificationError:
         raise
     except Exception as exc:
         raise VercelOidcVerificationError(f"could not fetch JWKS from {url}", exc) from exc
     finally:
         _end_fetch(url)
-    _store_jwks(url, document)
-    return document
 
 
 def _unverified_kid(token: str) -> str:
@@ -573,8 +540,6 @@ def clear_jwks_cache() -> None:
     with _jwks_lock:
         _jwks_cache.clear()
         _jwks_throttled_until.clear()
-        _jwks_fetch_locks.clear()
-        _jwks_async_fetch_locks.clear()
         _jwks_fetch_in_progress.clear()
 
 

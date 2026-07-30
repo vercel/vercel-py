@@ -426,3 +426,35 @@ async def test_custom_detail_cannot_override_its_declared_type(mock_env_clear: N
     detail = json.loads(route.calls.last.request.content)["authorizationDetails"][0]
     assert detail["type"] == "payment_initiation"
     assert detail["amount"] == "1.00"
+
+
+def test_bare_string_permissions_are_rejected() -> None:
+    """`str` satisfies `Sequence[str]`, so this would serialize per character."""
+    from vercel.connect import ConnectValidationError
+
+    with pytest.raises(ConnectValidationError, match="permissions must be a sequence"):
+        ConnectGitHubAppInstallationAuthorizationDetail(
+            org="acme",
+            permissions="contents:read",  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(ConnectValidationError, match="repositories must be a sequence"):
+        ConnectGitHubAppInstallationAuthorizationDetail(
+            org="acme",
+            repositories="web",  # type: ignore[arg-type]
+        )
+
+
+def test_sequence_permissions_are_accepted() -> None:
+    from vercel.connect._internal.wire import serialize_authorization_detail
+
+    detail = ConnectGitHubAppInstallationAuthorizationDetail(
+        org="acme", permissions=["contents:read"], repositories=("web",)
+    )
+
+    assert serialize_authorization_detail(detail) == {
+        "type": "github_app_installation",
+        "org": "acme",
+        "permissions": ["contents:read"],
+        "repositories": ["web"],
+    }
