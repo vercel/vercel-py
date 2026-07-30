@@ -20,7 +20,7 @@ import time_machine
 from conftest import TEST_BASE_URL, session_options
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
-from vercel._internal.core.session import get_active_sync_session
+from vercel._internal.core.session import get_active_session, get_active_sync_session
 from vercel.api import session
 from vercel.connect import (
     ConnectAppTokenSubject,
@@ -513,6 +513,87 @@ async def test_concurrent_cold_calls_issue_one_request(mock_env_clear: None) -> 
         results = await asyncio.gather(*pending)
 
     assert set(results) == {"t1"}
+    assert route.call_count == 1
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_cancelling_the_first_caller_does_not_cancel_the_others(
+    mock_env_clear: None,
+) -> None:
+    """Coalesced callers must not inherit the first caller's cancellation.
+
+    A server cancels a request task when its client disconnects or its deadline
+    passes. If that caller happens to be the one that owns the in-flight fetch,
+    the unrelated requests waiting on it must still be served.
+    """
+    route, first_request, release = gated_route()
+
+    async with session(service_options=session_options()):
+        holder = asyncio.ensure_future(get_token("slack/my-bot", subject=ConnectAppTokenSubject()))
+        await first_request.wait()
+        waiters = [
+            asyncio.ensure_future(get_token("slack/my-bot", subject=ConnectAppTokenSubject()))
+            for _ in range(3)
+        ]
+        await _yield_to_peers()
+
+        holder.cancel()
+        release.set()
+        results = await asyncio.gather(*waiters)
+
+        with pytest.raises(asyncio.CancelledError):
+            await holder
+
+    # A replacement fetch served all three, and they share its result: the
+    # cancelled caller's own request was already aborted, so `t1` is never issued.
+    assert results == ["t2", "t2", "t2"]
+    # respx records only the fetch that completed, so the handover cost one call.
+    assert route.call_count == 1
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_cancelling_the_only_caller_abandons_the_fetch(mock_env_clear: None) -> None:
+    """With nobody left waiting, the fetch is dropped rather than left running."""
+    _, first_request, release = gated_route()
+
+    async with session(service_options=session_options()):
+        service = get_connect_service(get_active_session())
+        only = asyncio.ensure_future(get_token("slack/my-bot", subject=ConnectAppTokenSubject()))
+        await first_request.wait()
+        only.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await only
+        await _yield_to_peers()
+
+        assert len(service._single_flight) == 0
+        # Nothing was cached, so the next caller fetches for itself.
+        assert await get_token("slack/my-bot", subject=ConnectAppTokenSubject()) == "t2"
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_cancelling_a_waiter_leaves_the_fetch_alone(mock_env_clear: None) -> None:
+    route, first_request, release = gated_route()
+
+    async with session(service_options=session_options()):
+        holder = asyncio.ensure_future(get_token("slack/my-bot", subject=ConnectAppTokenSubject()))
+        await first_request.wait()
+        waiters = [
+            asyncio.ensure_future(get_token("slack/my-bot", subject=ConnectAppTokenSubject()))
+            for _ in range(2)
+        ]
+        await _yield_to_peers()
+
+        waiters[0].cancel()
+        release.set()
+        assert await holder == "t1"
+        assert await waiters[1] == "t1"
+        with pytest.raises(asyncio.CancelledError):
+            await waiters[0]
+
     assert route.call_count == 1
 
 

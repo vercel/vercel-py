@@ -29,6 +29,10 @@ class SingleFlight(Protocol):
         load: Loader,
     ) -> ConnectTokenState: ...
 
+    def __len__(self) -> int:
+        """Number of keys currently being resolved. Intended for tests."""
+        ...
+
 
 class SyncSingleFlight:
     """Thread-based de-duplication.
@@ -83,8 +87,19 @@ class SyncSingleFlight:
             return len(self._locks)
 
 
+class _HolderCancelled(Exception):
+    """Internal signal that the caller running a fetch went away."""
+
+
 class AsyncSingleFlight:
-    """Task-based de-duplication over a per-key future."""
+    """Task-based de-duplication over a per-key future.
+
+    The caller that runs the fetch holds no privilege over the rest. A server
+    cancels request tasks on client disconnect and on deadline, and the callers
+    coalesced onto one fetch are unrelated to each other, so a cancellation must
+    reach only the caller that was cancelled. When that caller was the one
+    fetching, a waiter takes over.
+    """
 
     def __init__(self) -> None:
         self._pending: dict[TokenCacheKey, asyncio.Future[ConnectTokenState]] = {}
@@ -96,16 +111,29 @@ class AsyncSingleFlight:
         read: Reader,
         load: Loader,
     ) -> ConnectTokenState:
-        pending = self._pending.get(key)
-        if pending is not None:
-            return await asyncio.shield(pending)
+        while True:
+            pending = self._pending.get(key)
+            if pending is None:
+                return await self._fetch(key, load)
+            try:
+                return await asyncio.shield(pending)
+            except _HolderCancelled:
+                # The fetch may still have completed and cached before its caller
+                # was cancelled.
+                cached = read()
+                if cached is not None:
+                    return cached
 
+    async def _fetch(self, key: TokenCacheKey, load: Loader) -> ConnectTokenState:
         future: asyncio.Future[ConnectTokenState] = asyncio.get_running_loop().create_future()
         self._pending[key] = future
         try:
             state = await load()
         except BaseException as exc:
-            future.set_exception(exc)
+            # Cancellation is reported to waiters as a handover, not as a failure:
+            # they did not ask to be cancelled, and one of them can fetch instead.
+            outcome = _HolderCancelled() if isinstance(exc, asyncio.CancelledError) else exc
+            future.set_exception(outcome)
             # Nobody may be awaiting this future; retrieving the exception keeps
             # asyncio from reporting it as never-retrieved.
             future.exception()
@@ -115,6 +143,10 @@ class AsyncSingleFlight:
             return state
         finally:
             self._pending.pop(key, None)
+
+    def __len__(self) -> int:
+        """Number of keys currently being resolved. Intended for tests."""
+        return len(self._pending)
 
 
 __all__ = ["AsyncSingleFlight", "SingleFlight", "SyncSingleFlight"]
