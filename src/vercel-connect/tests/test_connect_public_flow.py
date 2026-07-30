@@ -268,3 +268,77 @@ async def test_empty_vercel_token_is_rejected(mock_env_clear: None) -> None:
 
 def test_unset_credentials_factory_defers_to_the_session_mode() -> None:
     assert ConnectServiceOptions().credentials_factory is None
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_default_resolver_surfaces_a_failure_as_a_credentials_error(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """A broken OIDC lookup must not leak the underlying exception type."""
+    from vercel.connect import ConnectCredentialsError
+    from vercel.connect._internal.options import (
+        _default_async_credentials_factory,
+        _default_sync_credentials_factory,
+    )
+
+    def boom() -> str:
+        raise RuntimeError("no .vercel directory")
+
+    async def boom_async() -> str:
+        raise RuntimeError("no .vercel directory")
+
+    monkeypatch.setattr("vercel.oidc.get_vercel_oidc_token", boom)
+    monkeypatch.setattr("vercel.oidc.aio.get_vercel_oidc_token", boom_async)
+
+    factory = (
+        _default_sync_credentials_factory
+        if mode == "sync"
+        else (_default_async_credentials_factory)
+    )
+    with pytest.raises(ConnectCredentialsError, match="no .vercel directory"):
+        await factory()
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_default_resolver_rejects_an_empty_token(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    from vercel.connect import ConnectCredentialsError
+    from vercel.connect._internal.options import (
+        _default_async_credentials_factory,
+        _default_sync_credentials_factory,
+    )
+
+    monkeypatch.setattr("vercel.oidc.get_vercel_oidc_token", lambda: "")
+
+    async def empty() -> str:
+        return ""
+
+    monkeypatch.setattr("vercel.oidc.aio.get_vercel_oidc_token", empty)
+
+    factory = (
+        _default_sync_credentials_factory
+        if mode == "sync"
+        else (_default_async_credentials_factory)
+    )
+    with pytest.raises(ConnectCredentialsError, match="vercel env pull"):
+        await factory()
+
+
+@respx.mock
+async def test_callable_token_returning_nothing_is_rejected(mock_env_clear: None) -> None:
+    from vercel.connect import ConnectCredentialsError, ConnectOptions
+
+    token_route()
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectCredentialsError, match="returned no token"):
+            await get_token(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                options=ConnectOptions(vercel_token=lambda: ""),
+            )

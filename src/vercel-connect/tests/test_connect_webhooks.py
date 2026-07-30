@@ -232,3 +232,51 @@ async def test_rejects_input_that_is_not_headers(
             await verify_connect_webhook(headers)
 
     assert fake_verifier == []
+
+
+@pytest.mark.parametrize(
+    ("aud", "expected"),
+    [
+        ("https://vercel.com/acme", ["https://vercel.com/acme"]),
+        (["https://a.example", "https://b.example"], ["https://a.example", "https://b.example"]),
+        (None, []),
+    ],
+)
+async def test_audience_claim_is_normalised_to_a_list(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    aud: Any,
+    expected: list[str],
+) -> None:
+    """`aud` is a string, a list, or absent depending on the token."""
+    claims = {name: value for name, value in VERIFIED_CLAIMS.items() if name != "aud"}
+    if aud is not None:
+        claims["aud"] = aud
+
+    async def fake_verify(token: str, **kwargs: Any) -> dict[str, Any]:
+        return dict(claims)
+
+    monkeypatch.setattr("vercel.oidc.verify.verify_vercel_oidc_token_async", fake_verify)
+
+    async with session(service_options=session_options()):
+        verified = await verify_connect_webhook({"Authorization": "Bearer abc"})
+
+    assert list(verified.audience) == expected
+
+
+async def test_non_numeric_time_claims_are_ignored(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed `iat`/`exp` must not raise while mapping verified claims."""
+
+    async def fake_verify(token: str, **kwargs: Any) -> dict[str, Any]:
+        return {**VERIFIED_CLAIMS, "iat": "not-a-number", "exp": None}
+
+    monkeypatch.setattr("vercel.oidc.verify.verify_vercel_oidc_token_async", fake_verify)
+
+    async with session(service_options=session_options()):
+        verified = await verify_connect_webhook({"Authorization": "Bearer abc"})
+
+    assert verified.issued_at is None
+    assert verified.expires_at is None

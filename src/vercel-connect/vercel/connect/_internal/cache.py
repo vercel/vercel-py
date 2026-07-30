@@ -13,7 +13,6 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from vercel.connect._internal.models import (
@@ -97,8 +96,7 @@ class TokenCacheKey:
 
 
 def _canonical(value: Any) -> Any:
-    if is_dataclass(value) and not isinstance(value, type):
-        return _canonical(asdict(value))
+    """Recursively order a JSON-shaped value so equal inputs hash equally."""
     if isinstance(value, dict):
         return {name: _canonical(value[name]) for name in sorted(value)}
     if isinstance(value, (list, tuple)):

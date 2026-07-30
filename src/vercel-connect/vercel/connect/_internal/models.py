@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal, TypeAlias
 
-from vercel._internal.core.polyfills import StrEnum
 from vercel.connect._internal.errors import ConnectValidationError
 
 
@@ -27,15 +26,6 @@ DurationInput: TypeAlias = int | float | timedelta
 
 JSONValue: TypeAlias = Any
 JSONObject: TypeAlias = Mapping[str, JSONValue]
-
-
-class ConnectSubjectType(StrEnum):
-    """Discriminator values for the four Connect subject kinds."""
-
-    APP = "app"
-    USER = "user"
-    JWT_BEARER = "jwt-bearer"
-    TOKEN = "token"
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +200,6 @@ __all__ = [
     "ConnectCustomAuthorizationDetail",
     "ConnectGitHubAppInstallationAuthorizationDetail",
     "ConnectJwtBearerTokenSubject",
-    "ConnectSubjectType",
     "ConnectTokenExchangeSubject",
     "ConnectTokenResponse",
     "ConnectTokenSubject",

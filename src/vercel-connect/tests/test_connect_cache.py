@@ -8,6 +8,7 @@ no in-flight de-duplication.
 
 import asyncio
 import contextvars
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -57,6 +58,36 @@ def counting_route(*, expires_in: timedelta = timedelta(hours=1)) -> respx.Route
 
     route = respx.post(TOKEN_URL).mock(side_effect=handler)
     return route
+
+
+def gated_route() -> tuple[respx.Route, asyncio.Event, asyncio.Event]:
+    """A route that blocks until released, so concurrent callers really overlap.
+
+    An instantly-resolving mock lets the first caller finish before the next one
+    starts, which silently turns a single-flight assertion into a cache-hit
+    assertion. A gate is used rather than a sleep because these tests run under a
+    frozen clock, where `asyncio.sleep` would never return.
+    """
+    counter = {"n": 0}
+    first_request = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        counter["n"] += 1
+        # Captured before suspending: reading it afterwards would give every
+        # concurrent handler the final count, and identical tokens.
+        index = counter["n"]
+        first_request.set()
+        await release.wait()
+        return httpx.Response(200, json=token_body(token=f"t{index}"))
+
+    return respx.post(TOKEN_URL).mock(side_effect=handler), first_request, release
+
+
+async def _yield_to_peers(times: int = 5) -> None:
+    """Let sibling tasks reach the single-flight. `sleep(0)` ignores the clock."""
+    for _ in range(times):
+        await asyncio.sleep(0)
 
 
 @time_machine.travel(NOW, tick=False)
@@ -464,13 +495,22 @@ async def test_force_refresh_surfaces_a_revoked_grant(mock_env_clear: None) -> N
 @time_machine.travel(NOW, tick=False)
 @respx.mock
 async def test_concurrent_cold_calls_issue_one_request(mock_env_clear: None) -> None:
-    """Single-flight: the TypeScript cache fires N POSTs for N concurrent calls."""
-    route = counting_route()
+    """Single-flight: the TypeScript cache fires N POSTs for N concurrent calls.
+
+    The route blocks so the calls really are in flight together; otherwise the
+    first would finish and the rest would be plain cache hits.
+    """
+    route, first_request, release = gated_route()
 
     async with session(service_options=session_options()):
-        results = await asyncio.gather(
-            *(get_token("slack/my-bot", subject=ConnectAppTokenSubject()) for _ in range(8))
-        )
+        pending = [
+            asyncio.ensure_future(get_token("slack/my-bot", subject=ConnectAppTokenSubject()))
+            for _ in range(8)
+        ]
+        await first_request.wait()
+        await _yield_to_peers()
+        release.set()
+        results = await asyncio.gather(*pending)
 
     assert set(results) == {"t1"}
     assert route.call_count == 1
@@ -481,15 +521,19 @@ async def test_concurrent_cold_calls_issue_one_request(mock_env_clear: None) -> 
 async def test_concurrent_cold_calls_for_distinct_keys_are_not_serialized(
     mock_env_clear: None,
 ) -> None:
-    route = counting_route()
+    route, first_request, release = gated_route()
 
     async with session(service_options=session_options()):
-        results = await asyncio.gather(
-            *(
+        pending = [
+            asyncio.ensure_future(
                 get_token("slack/my-bot", subject=ConnectUserTokenSubject(id=f"u_{index}"))
-                for index in range(4)
             )
-        )
+            for index in range(4)
+        ]
+        await first_request.wait()
+        await _yield_to_peers()
+        release.set()
+        results = await asyncio.gather(*pending)
 
     assert len(set(results)) == 4
     assert route.call_count == 4
@@ -498,7 +542,16 @@ async def test_concurrent_cold_calls_for_distinct_keys_are_not_serialized(
 @time_machine.travel(NOW, tick=False)
 @respx.mock
 def test_cache_is_thread_safe(mock_env_clear: None) -> None:
-    route = counting_route()
+    counter = {"n": 0}
+
+    def blocking(request: httpx.Request) -> httpx.Response:
+        counter["n"] += 1
+        # Hold the connection so the other threads pile up on the per-key lock
+        # instead of finding a populated cache.
+        time.sleep(0.05)
+        return httpx.Response(200, json=token_body(token=f"t{counter['n']}"))
+
+    route = respx.post(TOKEN_URL).mock(side_effect=blocking)
 
     with session(service_options=session_options()):
 
@@ -1043,3 +1096,39 @@ async def test_revoking_a_different_connector_still_spares_the_entry(
         await get_token("slack/my-bot", subject=subject)
 
     assert route.call_count == 1
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+def test_sync_surface_manages_the_cache(mock_env_clear: None) -> None:
+    """The sync mirrors of the cache helpers were never exercised."""
+    route = counting_route()
+    subject = ConnectAppTokenSubject()
+
+    with session(service_options=session_options()):
+        first = connect_sync.get_token("slack/my-bot", subject=subject)
+        assert connect_sync.get_token("slack/my-bot", subject=subject) == first
+        assert route.call_count == 1
+
+        connect_sync.delete_token_cache_entry("slack/my-bot", subject=subject)
+        second = connect_sync.get_token("slack/my-bot", subject=subject)
+        assert second != first
+        assert route.call_count == 2
+
+        connect_sync.clear_token_cache()
+        connect_sync.get_token("slack/my-bot", subject=subject)
+
+    assert route.call_count == 3
+
+
+def test_finish_load_without_a_matching_begin_is_a_no_op() -> None:
+    """`finish_load` runs in a `finally`, so it must tolerate an absent record."""
+    from vercel.connect._internal.cache import TokenCache
+
+    cache = TokenCache(max_size=4)
+    key = build_cache_key(
+        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
+    )
+
+    cache.finish_load(key)  # must not raise
+    assert len(cache) == 0
