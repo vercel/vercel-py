@@ -83,11 +83,27 @@ def resolve_base_url(base_url: BaseUrl | None = None, *, region: str | None = No
     return f"https://{resolved_region}.vercel-queue.com"
 
 
+def _deployment_pinning_disabled_for_dev() -> bool:
+    """Whether the current process talks to a `vercel dev` queue broker.
+
+    `vercel dev` hands its services this token and routes them at its own
+    in-process broker, which serves a single working copy and has no
+    deployment to pin against. Matches the TypeScript SDK and
+    `vercel.workers`: deployment IDs are never resolved in development.
+    """
+    return os.environ.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token"
+
+
 def resolve_deployment(deployment: DeploymentOption = CURRENT_DEPLOYMENT) -> str | None:
     if deployment is ALL_DEPLOYMENTS:
         return None
+    # Unlike `vercel.workers`, an explicitly requested deployment is honored in
+    # development too — callers that name one have already opted out of the
+    # ambient resolution this guard covers.
     if isinstance(deployment, str):
         return deployment
+    if _deployment_pinning_disabled_for_dev():
+        return None
     env_deployment = os.environ.get("VERCEL_DEPLOYMENT_ID")
     if env_deployment:
         return env_deployment
