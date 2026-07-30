@@ -7,7 +7,7 @@ import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from types import MethodType
 
@@ -29,11 +29,17 @@ from ._imports import (
     MaxInstancesReachedError,
     MemoryJobStore,
 )
-from ._options import VercelAPSchedulerOptions, is_vercel_runtime
+from ._options import (
+    VercelAPSchedulerOptions,
+    _SchedulerIdentity,
+    is_queue_serving_runtime,
+    is_vercel_runtime,
+)
 from ._payload import CursorEntry, MemoryCursor, WakeupPayload
 from ._time import as_utc, canonical_scheduled_logical_time, earliest, require_aware_datetime
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
+UTC = timezone.utc
 ADAPTER_ATTR = "_vercel_apscheduler_adapter"
 WAKEUP_KEY_PREFIX = "aps"
 MAX_JITTER_LOOKBACK_OCCURRENCES = 10_000
@@ -46,7 +52,6 @@ __all__ = [
     "adopt_scheduler",
     "get_adapter",
     "install_vercel_apscheduler_integration",
-    "seed_next_wakeup",
 ]
 
 
@@ -100,6 +105,7 @@ class _JobDefinition:
 @dataclass(slots=True)
 class _PatchState:
     installed: bool = False
+    register_queues: bool = False
     default_options: VercelAPSchedulerOptions | None = None
     original_init: Callable[..., Any] | None = None
     original_add_job: Callable[..., Any] | None = None
@@ -215,7 +221,8 @@ class SchedulerAdapter:
     ) -> None:
         self.scheduler = scheduler
         self.options = options
-        self._logger = logging.getLogger(f"{LOGGER.name}.{options.scheduler_id}")
+        self.identity = _SchedulerIdentity.from_env()
+        self._logger = logging.getLogger(f"{LOGGER.name}.{self.identity.scheduler_id}")
         self._pending_jobs_reference_time: datetime | None = None
         self._pending_cursor: MemoryCursor = MemoryCursor.empty()
         self._job_definitions: dict[str, _JobDefinition] = {}
@@ -224,7 +231,7 @@ class SchedulerAdapter:
         self._adopt_instance_methods()
 
     def _adopt_instance_methods(self) -> None:
-        self.scheduler.wakeup = MethodType(  # type: ignore[method-assign]
+        self.scheduler.wakeup = MethodType(  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
             lambda sched: self.wakeup(),
             self.scheduler,
         )
@@ -262,7 +269,7 @@ class SchedulerAdapter:
 
     def build_wakeup_idempotency_key(self, logical_time: datetime) -> str:
         logical_time_utc = as_utc(logical_time, name="logical_time")
-        return f"{WAKEUP_KEY_PREFIX}:{self.options.scheduler_id}:{logical_time_utc.isoformat()}"
+        return f"{WAKEUP_KEY_PREFIX}:{self.identity.scheduler_id}:{logical_time_utc.isoformat()}"
 
     def wakeup(self) -> None:
         if self._suppress_wakeup or self.scheduler.state != STATE_RUNNING:
@@ -383,7 +390,7 @@ class SchedulerAdapter:
 
         definition = self.definition_for_job(job)
         identity = "\0".join((
-            self.options.scheduler_id,
+            self.identity.scheduler_id,
             definition.schedule_key,
             definition.fingerprint,
             as_utc(nominal_run_time, name="nominal_run_time").isoformat(),
@@ -471,9 +478,10 @@ class SchedulerAdapter:
         cursor_entry = self._pending_cursor.jobs.get(definition.schedule_key)
         if cursor_entry is not None and cursor_entry.fingerprint == definition.fingerprint:
             if cursor_entry.state == "scheduled":
-                job._modify(next_run_time=cursor_entry.next_run_time)
+                cursor_next_run_time = cast("datetime", cursor_entry.next_run_time)
+                job._modify(next_run_time=cursor_next_run_time)
                 self._memory_nominal_run_times[str(job.id)] = (
-                    cursor_entry.nominal_run_time or cursor_entry.next_run_time
+                    cursor_entry.nominal_run_time or cursor_next_run_time
                 )
             else:
                 job._modify(next_run_time=None)
@@ -583,7 +591,7 @@ class SchedulerAdapter:
                     reference_time=now_utc.astimezone(self.scheduler.timezone),
                 )
         return self.publish_wakeup(
-            next_wakeup_time,
+            cast("datetime", next_wakeup_time),
             cursor=self._memory_cursor(),
             now=now_utc,
             kind=kind,
@@ -606,14 +614,14 @@ class SchedulerAdapter:
         delay_seconds = max(0, math.ceil((scheduled_logical_time - now_utc).total_seconds()))
         idempotency_key = self.build_wakeup_idempotency_key(scheduled_logical_time)
         payload = WakeupPayload(
-            scheduler_id=self.options.scheduler_id,
+            scheduler_id=self.identity.scheduler_id,
             logical_time=scheduled_logical_time,
             cursor=cursor,
             kind=kind,
         ).to_payload()
         try:
             message_id = vqs_sync.send(
-                self.options.wakeup_topic,
+                self.identity.wakeup_topic,
                 payload,
                 idempotency_key=idempotency_key,
                 retention=self.options.retention_seconds,
@@ -640,10 +648,10 @@ class SchedulerAdapter:
         publish_next: bool = True,
         now: datetime | None = None,
     ) -> WakeupProcessingResult:
-        if payload.scheduler_id != self.options.scheduler_id:
+        if payload.scheduler_id != self.identity.scheduler_id:
             raise ValueError(
                 f"Wakeup payload targeted scheduler {payload.scheduler_id!r}, "
-                f"expected {self.options.scheduler_id!r}"
+                f"expected {self.identity.scheduler_id!r}"
             )
         return self.process_wakeup(
             payload.logical_time,
@@ -865,27 +873,14 @@ def adopt_scheduler(
     scheduler: BaseScheduler,
     options: VercelAPSchedulerOptions | dict[str, Any] | None = None,
 ) -> SchedulerAdapter:
-    install_vercel_apscheduler_integration(options=options)
     existing = get_adapter(scheduler)
     if existing is not None:
         return existing
+    install_vercel_apscheduler_integration(options=options)
     resolved_options = VercelAPSchedulerOptions.from_value(options or _PATCH_STATE.default_options)
     adapter = SchedulerAdapter(scheduler, resolved_options)
     setattr(scheduler, ADAPTER_ATTR, adapter)
     return adapter
-
-
-def seed_next_wakeup(
-    scheduler: BaseScheduler,
-    *,
-    now: datetime | None = None,
-    options: VercelAPSchedulerOptions | dict[str, Any] | None = None,
-) -> PublishedWakeup | None:
-    adapter = adopt_scheduler(scheduler, options)
-    try:
-        return adapter.seed(now=now)
-    finally:
-        adapter.shutdown(wait=True)
 
 
 def _patched_init(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
@@ -894,8 +889,16 @@ def _patched_init(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("APScheduler integration patch is not initialized")
     result = original_init(self, *args, **kwargs)
     if get_adapter(self) is None:
-        options = _PATCH_STATE.default_options or VercelAPSchedulerOptions.from_env()
+        options = VercelAPSchedulerOptions.from_value(_PATCH_STATE.default_options)
         setattr(self, ADAPTER_ATTR, SchedulerAdapter(self, options))
+        if is_vercel_runtime() and (_PATCH_STATE.register_queues or is_queue_serving_runtime()):
+            # The Python builder imports pyproject subscriber modules with
+            # VERCEL=1 and introspects vercel.queue's process-wide registry.
+            # Register here so a stock scheduler entrypoint is discoverable
+            # without requiring a user-authored ASGI app.
+            from ._subscriber import register_scheduler
+
+            register_scheduler(self, options=options)
     return result
 
 
@@ -952,7 +955,7 @@ def _patch_scheduler_start_methods() -> None:
             BlockingScheduler,  # type: ignore[import-untyped]
         )
     except ImportError:
-        BlockingScheduler = None  # type: ignore[assignment]
+        BlockingScheduler = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     if BlockingScheduler is not None and _PATCH_STATE.original_blocking_start is None:
         _PATCH_STATE.original_blocking_start = BlockingScheduler.start
         BlockingScheduler.start = _defused_start  # type: ignore[method-assign]
@@ -962,7 +965,7 @@ def _patch_scheduler_start_methods() -> None:
             BackgroundScheduler,  # type: ignore[import-untyped]
         )
     except ImportError:
-        BackgroundScheduler = None  # type: ignore[assignment]
+        BackgroundScheduler = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     if BackgroundScheduler is not None and _PATCH_STATE.original_background_start is None:
         _PATCH_STATE.original_background_start = BackgroundScheduler.start
         BackgroundScheduler.start = _defused_start  # type: ignore[method-assign]
@@ -970,7 +973,7 @@ def _patch_scheduler_start_methods() -> None:
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
     except ImportError:
-        AsyncIOScheduler = None  # type: ignore[assignment]
+        AsyncIOScheduler = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     if AsyncIOScheduler is not None and _PATCH_STATE.original_asyncio_start is None:
         _PATCH_STATE.original_asyncio_start = AsyncIOScheduler.start
         AsyncIOScheduler.start = _defused_start  # type: ignore[method-assign]
@@ -979,18 +982,18 @@ def _patch_scheduler_start_methods() -> None:
 def install_vercel_apscheduler_integration(
     *,
     options: VercelAPSchedulerOptions | dict[str, Any] | None = None,
+    register_queues: bool = True,
 ) -> None:
-    if options is not None or _PATCH_STATE.default_options is None:
+    if options is not None:
         _PATCH_STATE.default_options = VercelAPSchedulerOptions.from_value(options)
-    if _PATCH_STATE.installed:
-        return
+    _PATCH_STATE.register_queues = _PATCH_STATE.register_queues or register_queues
+    if not _PATCH_STATE.installed:
+        _PATCH_STATE.original_init = BaseScheduler.__init__
+        _PATCH_STATE.original_add_job = BaseScheduler.add_job
+        _PATCH_STATE.original_real_add_job = BaseScheduler._real_add_job
 
-    _PATCH_STATE.original_init = BaseScheduler.__init__
-    _PATCH_STATE.original_add_job = BaseScheduler.add_job
-    _PATCH_STATE.original_real_add_job = BaseScheduler._real_add_job
-
-    BaseScheduler.__init__ = _patched_init  # type: ignore[method-assign]
-    BaseScheduler.add_job = _patched_add_job  # type: ignore[method-assign]
-    BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
-    _patch_scheduler_start_methods()
-    _PATCH_STATE.installed = True
+        BaseScheduler.__init__ = _patched_init  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+        BaseScheduler.add_job = _patched_add_job  # type: ignore[method-assign]
+        BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
+        _patch_scheduler_start_methods()
+        _PATCH_STATE.installed = True

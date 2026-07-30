@@ -2,18 +2,23 @@ from __future__ import annotations
 
 from typing import Any
 
+import re
 from dataclasses import dataclass
 from os import environ
 
 DEFAULT_MAX_DELAY_SECONDS = 23 * 60 * 60
 DEFAULT_RETRY_AFTER_SECONDS = 30
 DEFAULT_DURABLE_POLL_INTERVAL_SECONDS = 60
+DEFAULT_SUBSCRIBER_ID = "default"
+SUBSCRIBER_ID_ENV = "VERCEL_PYTHON_SUBSCRIBER_ID"
+_SUBSCRIBER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 __all__ = [
     "DEFAULT_DURABLE_POLL_INTERVAL_SECONDS",
     "DEFAULT_MAX_DELAY_SECONDS",
     "DEFAULT_RETRY_AFTER_SECONDS",
     "VercelAPSchedulerOptions",
+    "is_queue_serving_runtime",
     "is_vercel_runtime",
 ]
 
@@ -39,11 +44,41 @@ def is_vercel_runtime() -> bool:
     return _truthy(environ.get("VERCEL"))
 
 
+def is_queue_serving_runtime() -> bool:
+    if _truthy(environ.get("VERCEL_DEV_QUEUE_SERVING")):
+        return True
+    service_type = (environ.get("VERCEL_SERVICE_TYPE") or "").strip().casefold()
+    if service_type == "worker":
+        return True
+    service_trigger = (environ.get("VERCEL_SERVICE_TRIGGER") or "").strip().casefold()
+    return service_type == "job" and service_trigger in {"queue", "workflow"}
+
+
+@dataclass(frozen=True, slots=True)
+class _SchedulerIdentity:
+    scheduler_id: str
+    wakeup_topic: str
+    start_topic: str
+    consumer_group: str
+
+    @classmethod
+    def from_env(cls) -> _SchedulerIdentity:
+        subscriber_id = environ.get(SUBSCRIBER_ID_ENV) or DEFAULT_SUBSCRIBER_ID
+        if not _SUBSCRIBER_ID_PATTERN.fullmatch(subscriber_id):
+            raise ValueError(
+                f"{SUBSCRIBER_ID_ENV} must contain only ASCII letters, digits, "
+                "underscores, and hyphens"
+            )
+        return cls(
+            scheduler_id=subscriber_id,
+            wakeup_topic=f"__aps_{subscriber_id}_wakeup",
+            start_topic=f"__aps_{subscriber_id}_start",
+            consumer_group=f"apscheduler-{subscriber_id}",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class VercelAPSchedulerOptions:
-    scheduler_id: str = "default"
-    wakeup_topic: str = "__aps_default"
-    consumer_group: str = "apscheduler"
     max_delay_seconds: int = DEFAULT_MAX_DELAY_SECONDS
     retention_seconds: int | None = DEFAULT_MAX_DELAY_SECONDS + 3600
     retry_after_seconds: int = DEFAULT_RETRY_AFTER_SECONDS
@@ -53,17 +88,11 @@ class VercelAPSchedulerOptions:
 
     @classmethod
     def from_env(cls) -> VercelAPSchedulerOptions:
-        scheduler_id = environ.get("VERCEL_APSCHEDULER_SCHEDULER_ID") or "default"
-        topic = environ.get("VERCEL_APSCHEDULER_TOPIC") or f"__aps_{scheduler_id}"
-        consumer = environ.get("VERCEL_APSCHEDULER_CONSUMER") or "apscheduler"
         max_attempts_raw = environ.get("VERCEL_APSCHEDULER_MAX_ATTEMPTS")
         max_attempts = int(max_attempts_raw) if max_attempts_raw else None
         retention_raw = environ.get("VERCEL_APSCHEDULER_RETENTION_SECONDS")
         retention = int(retention_raw) if retention_raw else DEFAULT_MAX_DELAY_SECONDS + 3600
         return cls(
-            scheduler_id=scheduler_id,
-            wakeup_topic=topic,
-            consumer_group=consumer,
             max_delay_seconds=_int_env(
                 "VERCEL_APSCHEDULER_MAX_DELAY_SECONDS",
                 DEFAULT_MAX_DELAY_SECONDS,
@@ -88,7 +117,7 @@ class VercelAPSchedulerOptions:
     ) -> VercelAPSchedulerOptions:
         if value is None:
             return cls.from_env()
-        if isinstance(value, cls):
+        if isinstance(value, VercelAPSchedulerOptions):
             return value
         allowed = set(cls.__dataclass_fields__)
         unknown = sorted(set(value) - allowed)

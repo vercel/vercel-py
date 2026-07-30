@@ -1,23 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from vercel.integrations.apscheduler import (
-    VercelAPSchedulerOptions,
-    get_asgi_app,
-    install_vercel_apscheduler_integration,
-)
+UTC = timezone.utc
 
-OPTIONS = VercelAPSchedulerOptions(
-    scheduler_id="cleanup",
-    wakeup_topic="__aps_cleanup",
-    consumer_group="api/scheduler.py",
-)
-
-# Install before constructing the scheduler so job definitions are captured.
-install_vercel_apscheduler_integration(options=OPTIONS)
 scheduler = BlockingScheduler(timezone=UTC)
 
 
@@ -40,9 +28,6 @@ def cleanup_expired_sessions() -> None:
 )
 def heartbeat() -> None:
     print("running every 30 seconds")
-
-
-app = get_asgi_app(scheduler, options=OPTIONS)
 
 
 if __name__ == "__main__":

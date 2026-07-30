@@ -14,95 +14,62 @@ Each delivery imports the current deployment's code, restores the small amount
 of timing state that MemoryJobStore loses on a cold start, runs due jobs, and
 publishes one successor before acknowledging the current message.
 
-## Current Deployment Contract
+## Subscriber Contract
 
-The testing path uses the same explicit Function contract as the Celery
-integration. It does not require `[[tool.vercel.subscribers]]` or builder topic
-extraction.
+Declare the stock scheduler object as a subscriber in `pyproject.toml`:
 
-`api/scheduler.py` owns the scheduler and its ASGI adapter:
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "scheduler:scheduler"
+```
+
+`scheduler.py` is ordinary APScheduler code:
 
 ```python
-from datetime import UTC
+from datetime import timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
-from vercel.integrations.apscheduler import (
-    VercelAPSchedulerOptions,
-    get_asgi_app,
-    install_vercel_apscheduler_integration,
-)
 
-options = VercelAPSchedulerOptions(
-    scheduler_id="cleanup",
-    wakeup_topic="__aps_cleanup",
-    consumer_group="api/scheduler.py",
-)
-install_vercel_apscheduler_integration(options=options)
-
-scheduler = BlockingScheduler(timezone=UTC)
+scheduler = BlockingScheduler(timezone=timezone.utc)
 
 
 @scheduler.scheduled_job("cron", hour=4, jitter=120, id="cleanup")
-def cleanup(): ...
-
-
-app = get_asgi_app(scheduler, options=options)
+def cleanup() -> None: ...
 
 
 if __name__ == "__main__":
     scheduler.start()
 ```
 
-`vercel.json` routes the explicit topic to that Function:
+The builder detects the APScheduler dependency and activates the adapter before
+importing `scheduler`. It derives the internal scheduler identity from the
+canonical subscriber name—the stable `module:object` pair already declared in
+`pyproject.toml`. For `scheduler:scheduler`, that identity is
+`scheduler_scheduler`.
 
-```json
-{
-    "framework": null,
-    "buildCommand": null,
-    "outputDirectory": "public",
-    "regions": ["iad1"],
-    "functions": {
-        "api/scheduler.py": {
-            "experimentalTriggers": [
-                {
-                    "type": "queue/v2beta",
-                    "topic": "__aps_cleanup",
-                    "maxConcurrency": 1
-                }
-            ]
-        },
-        "api/scheduler_watchdog.py": {
-            "maxDuration": 60
-        }
-    },
-    "crons": [
-        { "path": "/api/scheduler_watchdog", "schedule": "* * * * *" }
-    ]
-}
-```
+Scheduler construction then registers both topics in the process-wide
+`vercel.queue` registry:
 
-These values are one protocol and must agree:
+| Topic | Purpose |
+| --- | --- |
+| `__aps_scheduler_scheduler_start` | Turn one manually enqueued message into the first delayed wake |
+| `__aps_scheduler_scheduler_wakeup` | Evaluate due jobs and publish the successor wake |
 
-| Value | Python | `vercel.json` |
-| --- | --- | --- |
-| topic | `wakeup_topic="__aps_cleanup"` | `topic: "__aps_cleanup"` |
-| consumer | `consumer_group="api/scheduler.py"` | Function path |
-| concurrency | `max_concurrency=1` | `maxConcurrency: 1` |
+`vercel.queue.get_subscriptions()` supplies the builder with both topics, the
+sanitized consumer group, retry behavior, and `max_concurrency=1`. The builder
+then generates the queue handler and `queue/v2beta` triggers. `vercel.json`
+does not duplicate any of these values.
 
-The scheduler ID is a stable logical name used in payloads and idempotency
-keys. Keep it unchanged across deployments of the same scheduler.
+The derived identity is used in payloads, topics, consumer groups, and
+idempotency keys. Keeping the same pyproject entrypoint preserves the chain
+across deployments; changing the entrypoint intentionally creates a new
+scheduler identity that must be started separately.
 
-### Why installation is explicit
-
-The installer patches scheduler construction and `add_job()` before jobs are
-declared. That lets the adapter remember whether an ID and interval anchor were
-explicit and build a stable schedule fingerprint. Calling only `get_asgi_app()`
-after all jobs exist cannot recover those original arguments reliably.
-
-The installer must therefore run before constructing the scheduler. Automatic
-installation can return later when the runtime has a stable scheduler-specific
-bootstrap contract; the current Function path does not pretend discovery can
-supply information that has already been lost.
+The adapter patches scheduler construction and `add_job()` before the module is
+imported. That lets it remember whether an ID and interval anchor were explicit
+and build a stable schedule fingerprint. On Vercel, construction also registers
+the start and wake callbacks. Off Vercel, no queue callbacks are registered and
+the stock scheduler loop remains available.
 
 ## One Delivery
 
@@ -137,7 +104,8 @@ its successor `W(U)` already exists durably:
 ack(W(T)) => accepted(W(U)) or duplicate-key(W(U))
 ```
 
-The base case is the deployment seed. For the inductive step, the handler sends
+The base case is the first wake published by the manual start subscriber. For
+the inductive step, the handler sends
 `W(U)` before returning. A send failure escapes the subscriber, produces a
 failed delivery, and leaves `W(T)` available for redelivery. A duplicate key is
 success because it proves another attempt already persisted the same successor.
@@ -145,7 +113,7 @@ Therefore, once seeded, normal queue processing cannot acknowledge the last
 copy of a wake without first creating the next one.
 
 When the scheduler has no future jobs, omitting a successor is intentional: the
-schedule is terminal until a later deployment seeds a changed definition.
+schedule is terminal until another start message evaluates a changed definition.
 
 Jobs run through an inline executor. A thread or process executor could let the
 request return and freeze while work is still running, so custom executors are
@@ -179,8 +147,8 @@ Reconciliation is mechanical:
 
 ## Supported Memory Schedules
 
-A cold start and a cursor-free deployment seed must reproduce the same future schedule.
-That gives MemoryJobStore a deliberate boundary:
+A cold start and a cursor-free manual start must reproduce the same future
+schedule. That gives MemoryJobStore a deliberate boundary:
 
 | Feature | Support |
 | --- | --- |
@@ -218,7 +186,7 @@ nominal(k) = start_date + k * interval
 actual(k)  = nominal(k) + deterministic_offset(k)
 ```
 
-The adapter also looks backward through the jitter window during a fresh seed.
+The adapter also looks backward through the jitter window during a fresh start.
 If deployment happens at `12:00:10` and the `12:00:00` occurrence was
 deterministically delayed to `12:00:20`, that pending occurrence is retained.
 
@@ -282,7 +250,7 @@ job execution during the overlap.
 
 ```text
 old chain already contains:       wake(11:00) in queue A
-new deployment is seeded:         wake(10:05) in queue B
+new deployment is manually started: wake(10:05) in queue B
 queue B processes 10:05:          publishes wake(11:00), key K(cleanup, 11:00)
 old 11:00 routes to current code: publishes wake(12:00), key K(cleanup, 12:00)
 new 11:00 processes current code: publishes wake(12:00), same key
@@ -301,7 +269,7 @@ new code: cleanup at 11:00 + sync at 10:05
 deploy:   10:00
 ```
 
-The new seed sees `sync` and schedules `10:05`. If the old `11:00` wake also
+The new start sees `sync` and schedules `10:05`. If the old `11:00` wake also
 arrives, it imports the new registry and sees both jobs. The chains converge at
 a later shared occurrence.
 
@@ -326,46 +294,35 @@ new: id="cleanup", cron hour=5, fingerprint=B
 from the new trigger. Keeping the same ID is fine; changing the fingerprint is
 what invalidates stale timing.
 
-## Watchdog Seed
-
-The queue subscriber is private and receives only queue pushes. A separate
-public cron Function imports the same scheduler definition:
-
-```python
-from api.scheduler import OPTIONS, scheduler
-from vercel.integrations.apscheduler import get_watchdog_asgi_app
-
-app = get_watchdog_asgi_app(scheduler, options=OPTIONS)
-```
+## Manual Start
 
 ```text
-Vercel Cron -> watchdog Function -> seed current deployment partition
-                                      |
-                                      v
-                         private queue subscriber -> successor chain
+manual send -> __aps_scheduler_scheduler_start -> first delayed wakeup
+                                             |
+                                             v
+                                  recurring successor chain
 ```
 
-This solves two jobs with one idempotent operation:
-
-1. The first cron after activation bootstraps the deployment.
-2. Later crons recalculate the current frontier and repair it if necessary.
-
-A healthy chain and the watchdog publish the same logical-time key, so the
-watchdog does not create a second permanent chain. It is coarse control-plane
-maintenance; queue-delayed messages still provide the actual schedule timing.
-
-The watchdog is a separate Function because `queue/v2beta` consumers are
-air-gapped and have no public URL, while Vercel Cron invokes an HTTP GET path.
-If `CRON_SECRET` is configured, the watchdog validates its bearer token.
-
-The CLI remains available for diagnostics or an explicit one-off seed:
+Builds cannot enqueue into the deployment's queue consumer registry, so the
+integration does not try to seed during the build. After the deployment is
+ready, enqueue an empty JSON object on the start topic:
 
 ```bash
-vc env run -e production -- .venv/bin/python -m vercel.integrations.apscheduler \
-  --entrypoint api.scheduler:scheduler \
-  --deployment dpl_YOUR_DEPLOYMENT_ID \
-  --region iad1
+uv run python -m vercel.queue send \
+  --topic __aps_scheduler_scheduler_start \
+  --region iad1 \
+  --json '{}'
 ```
+
+The start callback uses the message's immutable creation timestamp as the
+reference time. A redelivery of the same start message therefore attempts the
+same first wake and converges through the ordinary wake idempotency key. Once
+that first wake exists, the recurring subscriber maintains the chain.
+
+This is intentionally a manual bootstrap for now. Automatic activation seeding
+needs a platform hook that runs only after the deployment's queue consumers are
+registered and routable; this example also deliberately leaves watchdog healing
+out of scope.
 
 ## Durable Job Stores
 
@@ -388,13 +345,16 @@ operations APScheduler expects.
 
 The current integration intentionally copies Celery's deployable shape:
 
-1. A normal Python Function declares `experimentalTriggers` in `vercel.json`.
-2. User code registers framework-specific behavior with `vercel.queue`.
-3. `vercel.queue` owns ASGI dispatch, retries, and acknowledgment.
-4. The framework adapter remains an explicit package dependency.
+1. `[[tool.vercel.subscribers]]` points at a framework object.
+2. Importing that module registers framework-specific callbacks with
+   `vercel.queue`.
+3. The Python builder extracts subscriptions from the queue registry and
+   generates the Function triggers.
+4. `vercel.queue` owns ASGI dispatch, retries, and acknowledgment.
+5. The framework adapter remains an explicit package dependency.
 
 APScheduler's message means "evaluate time T," while Celery's message carries
 a specific task invocation. That difference is why APScheduler carries a small
-timing cursor and needs one initial deployment seed.
+timing cursor and needs one manual start after deployment.
 
 The complete Function example is in `examples/cleanup`.

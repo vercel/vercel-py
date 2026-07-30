@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import Awaitable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from inspect import isawaitable
 from traceback import format_tb
 
@@ -19,6 +19,8 @@ from ._imports import (
     MaxInstancesReachedError,
 )
 from ._time import as_utc
+
+UTC = timezone.utc
 
 __all__ = ["VercelInlineExecutor"]
 

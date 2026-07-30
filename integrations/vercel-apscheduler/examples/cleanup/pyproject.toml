@@ -11,5 +11,8 @@ dependencies = [
 [tool.uv]
 package = false
 
+[[tool.vercel.subscribers]]
+entrypoint = "scheduler:scheduler"
+
 [tool.uv.sources]
 vercel-apscheduler = { git = "https://github.com/vercel/vercel-py.git", branch = "ricardo/vqs-apscheduler", subdirectory = "integrations/vercel-apscheduler" }

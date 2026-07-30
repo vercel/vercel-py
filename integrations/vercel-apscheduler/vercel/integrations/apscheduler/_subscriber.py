@@ -35,8 +35,18 @@ def register_scheduler(
     adapter = adopt_scheduler(scheduler, options)
 
     @vqs.subscribe(
-        topic=adapter.options.wakeup_topic,
-        consumer_group=adapter.options.consumer_group,
+        topic=adapter.identity.start_topic,
+        consumer_group=vqs.SanitizedName(adapter.identity.consumer_group),
+        retry_after=adapter.options.retry_after_seconds,
+        max_concurrency=adapter.options.max_concurrency,
+        max_attempts=adapter.options.max_attempts,
+    )
+    def _handle_start(message: vqs.Message[dict[str, Any]]) -> None:
+        adapter.seed(now=message.metadata.created_at, kind="start")
+
+    @vqs.subscribe(
+        topic=adapter.identity.wakeup_topic,
+        consumer_group=vqs.SanitizedName(adapter.identity.consumer_group),
         retry_after=adapter.options.retry_after_seconds,
         max_concurrency=adapter.options.max_concurrency,
         max_attempts=adapter.options.max_attempts,
@@ -54,18 +64,18 @@ def register_scheduler(
             )
             return
 
-        if payload.scheduler_id != adapter.options.scheduler_id:
+        if payload.scheduler_id != adapter.identity.scheduler_id:
             LOGGER.warning(
                 "Ignoring APScheduler wakeup message %s for scheduler %r; expected %r",
                 message.metadata.message_id,
                 payload.scheduler_id,
-                adapter.options.scheduler_id,
+                adapter.identity.scheduler_id,
             )
             return
 
         adapter.process_payload(payload)
 
-    _registered_callbacks.append(_handle_wakeup)
+    _registered_callbacks.extend((_handle_start, _handle_wakeup))
     _registered_schedulers[scheduler] = adapter
     return adapter
 

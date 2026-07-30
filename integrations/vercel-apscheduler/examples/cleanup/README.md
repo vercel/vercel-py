@@ -1,33 +1,27 @@
 # APScheduler cleanup example
 
-This example uses two file-based Python Functions:
+This example deploys a FastAPI app and a queue-driven APScheduler subscriber:
 
 ```text
-/                  --rewrite--> api/index.py
-queue __aps_cleanup ----------> api/scheduler.py -> get_asgi_app(scheduler)
-Vercel Cron -------------------> api/scheduler_watchdog.py -> seed
+/                                             -> main.py
+queue __aps_scheduler_scheduler_start          -> scheduler.py -> first delayed wake
+queue __aps_scheduler_scheduler_wakeup         -> scheduler.py -> jobs + successor wake
 ```
 
-Both files live under `api/`, so Vercel discovers them as separate Functions.
-The framework preset is disabled to prevent root FastAPI zero-config from
-collapsing the project into one Function. The tracked `public/` directory is
-configured as an otherwise empty static output.
+The subscriber is declared in `pyproject.toml`:
 
-There is no `[[tool.vercel.subscribers]]` discovery step. The scheduler values
-are declared explicitly in code and `vercel.json`:
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "scheduler:scheduler"
+```
 
-| Field | Value |
-| --- | --- |
-| hello function | `api/index.py` |
-| function | `api/scheduler.py` |
-| scheduler ID | `cleanup` |
-| queue topic | `__aps_cleanup` |
-| consumer group | `api/scheduler.py` |
-| watchdog function | `api/scheduler_watchdog.py` |
-| queue and Function region | `iad1` |
+The Python builder derives the stable internal ID `scheduler_scheduler` from
+the declared module/object pair, activates the adapter before importing
+`scheduler.py`, and extracts both registered queue topics. There is no
+Vercel-specific setup in `scheduler.py` and no handwritten trigger
+configuration in `vercel.json`.
 
-Deploy the directory. The every-minute watchdog cron seeds the final deployment
-partition after activation:
+Deploy and link the directory normally:
 
 ```bash
 cd integrations/vercel-apscheduler/examples/cleanup
@@ -35,22 +29,21 @@ vc link
 vc deploy --prod
 ```
 
-The scheduler Function remains a private queue consumer. The public watchdog
-Function exists only for Vercel Cron; it seeds the current deployment and
-periodically reconciles the wake frontier. Both Functions run in `iad1`, so
-every wake uses the same regional queue endpoint.
+For now, start the chain manually after the deployment is ready:
 
-`buildCommand` is explicitly `null` so a previously configured Project Settings
-command cannot run the obsolete build-time seed.
+```bash
+uv run python -m vercel.queue send \
+  --topic __aps_scheduler_scheduler_start \
+  --region iad1 \
+  --json '{}'
+```
 
-Every successful wake delivery durably publishes its successor before the
-current wake is acknowledged. Repeated watchdog seeds use deterministic keys,
-so a healthy chain absorbs them.
+The queue CLI resolves the linked project's current production deployment.
+Pass `--deployment dpl_...` to target a deployment explicitly. The start
+subscriber uses the message creation time as its deterministic seed time,
+publishes the first delayed message on
+`__aps_scheduler_scheduler_wakeup`, and then acknowledges the start message.
+Every recurring wake publishes its successor before it is acknowledged.
 
-`install_vercel_apscheduler_integration()` must run before the scheduler is
-constructed. It captures stable job definitions and deterministic jitter
-inputs. `get_asgi_app()` then registers the queue callback and exposes the
-plain `vercel.queue` ASGI subscriber.
-
-The interval job has an explicit `start_date`, and every memory-backed job has
-an explicit ID. Those anchors let cold starts reconstruct the same cadence.
+Every memory-backed job has an explicit ID, and the interval job has an explicit
+`start_date`. Those anchors let cold starts reconstruct the same cadence.

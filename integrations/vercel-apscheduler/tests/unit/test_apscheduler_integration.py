@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import os
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import pytest
@@ -20,14 +19,23 @@ from vercel.integrations.apscheduler import (
     MemoryCursor,
     VercelAPSchedulerOptions,
     WakeupPayload,
+    _adapter as adapter_module,
     adopt_scheduler,
     install_vercel_apscheduler_integration,
 )
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter
 from vercel.integrations.apscheduler._payload import CursorEntry
-from vercel.integrations.apscheduler._seed import main as seed_main
 from vercel.integrations.apscheduler._watchdog import APSchedulerWatchdogAsgiApp
-from vercel.queue import DuplicateIdempotencyKeyError
+from vercel.queue import (
+    DuplicateIdempotencyKeyError,
+    Message,
+    MessageMetadata,
+    SanitizedName,
+    get_subscriptions,
+)
+from vercel.queue.testing import clear_subscriptions
+
+UTC = timezone.utc
 
 
 class DurableLikeJobStore(BaseJobStore):
@@ -67,9 +75,6 @@ class DurableLikeJobStore(BaseJobStore):
 
 def _options() -> VercelAPSchedulerOptions:
     return VercelAPSchedulerOptions(
-        scheduler_id="scheduler-a",
-        wakeup_topic="__aps_scheduler_a",
-        consumer_group="apscheduler",
         max_delay_seconds=23 * 60 * 60,
         retention_seconds=24 * 60 * 60,
     )
@@ -79,6 +84,12 @@ def _scheduler() -> tuple[BlockingScheduler, SchedulerAdapter]:
     install_vercel_apscheduler_integration(options=_options())
     scheduler = BlockingScheduler(timezone=UTC)
     return scheduler, adopt_scheduler(scheduler, _options())
+
+
+@pytest.fixture(autouse=True)
+def disable_vercel_runtime_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "scheduler-a")
 
 
 class TestWakeupPayload:
@@ -167,16 +178,133 @@ class TestWakeupPayload:
             WakeupPayload.from_payload(payload)
 
 
+class TestQueueRegistration:
+    def test_queue_identity_comes_from_builder_subscriber_id(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "jobs_scheduler")
+
+        options = VercelAPSchedulerOptions()
+        adapter = adopt_scheduler(BlockingScheduler(timezone=UTC), options)
+
+        assert adapter.identity.scheduler_id == "jobs_scheduler"
+        assert adapter.identity.start_topic == "__aps_jobs_scheduler_start"
+        assert adapter.identity.wakeup_topic == "__aps_jobs_scheduler_wakeup"
+        assert adapter.identity.consumer_group == "apscheduler-jobs_scheduler"
+        with pytest.raises(TypeError, match="unknown APScheduler integration option"):
+            VercelAPSchedulerOptions.from_value({"scheduler_id": "user-chosen"})
+
+    def test_publish_only_activation_does_not_register_topics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("VERCEL", "1")
+        monkeypatch.delenv("VERCEL_DEV_QUEUE_SERVING", raising=False)
+        monkeypatch.delenv("VERCEL_SERVICE_TYPE", raising=False)
+        monkeypatch.delenv("VERCEL_SERVICE_TRIGGER", raising=False)
+        monkeypatch.setattr(adapter_module._PATCH_STATE, "register_queues", False)
+        clear_subscriptions()
+
+        install_vercel_apscheduler_integration(register_queues=False)
+        BlockingScheduler(timezone=UTC)
+
+        assert get_subscriptions() == ()
+
+    def test_dev_queue_sidecar_registers_after_publish_only_activation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("VERCEL", "1")
+        monkeypatch.setenv("VERCEL_DEV_QUEUE_SERVING", "1")
+        monkeypatch.setattr(adapter_module._PATCH_STATE, "register_queues", False)
+        clear_subscriptions()
+
+        install_vercel_apscheduler_integration(register_queues=False)
+        BlockingScheduler(timezone=UTC)
+
+        assert [subscription.topic for subscription in get_subscriptions()] == [
+            "__aps_scheduler-a_start",
+            "__aps_scheduler-a_wakeup",
+        ]
+        clear_subscriptions()
+
+    def test_local_scheduler_construction_does_not_register_queue_topics(self) -> None:
+        clear_subscriptions()
+        install_vercel_apscheduler_integration(options=_options())
+
+        BlockingScheduler(timezone=UTC)
+
+        assert get_subscriptions() == ()
+
+    def test_vercel_import_registers_start_and_wakeup_topics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        created_at = datetime(2026, 4, 9, 11, 59, tzinfo=UTC)
+        monkeypatch.setenv("VERCEL", "1")
+        clear_subscriptions()
+        install_vercel_apscheduler_integration(options=_options())
+        scheduler = BlockingScheduler(timezone=UTC)
+        adapter = adopt_scheduler(scheduler)
+
+        subscriptions = get_subscriptions()
+
+        assert [
+            (
+                subscription.topic,
+                subscription.consumer_group,
+                subscription.retry_after_seconds,
+                subscription.max_concurrency,
+                subscription.max_attempts,
+            )
+            for subscription in subscriptions
+        ] == [
+            (
+                "__aps_scheduler-a_start",
+                "apscheduler-scheduler-a",
+                30,
+                1,
+                None,
+            ),
+            (
+                "__aps_scheduler-a_wakeup",
+                "apscheduler-scheduler-a",
+                30,
+                1,
+                None,
+            ),
+        ]
+
+        start_subscription = subscriptions[0]
+        message: Message[dict[str, Any]] = Message(
+            payload={},
+            metadata=MessageMetadata(
+                message_id="msg-start",
+                delivery_count=1,
+                created_at=created_at,
+                topic=start_subscription.topic,
+                consumer_group=SanitizedName(start_subscription.consumer_group),
+            ),
+        )
+        with patch.object(adapter, "seed") as seed:
+            start_subscription.func(message)
+
+        seed.assert_called_once_with(now=created_at, kind="start")
+        clear_subscriptions()
+
+
 class TestStockSchedulerAdapter:
-    def test_install_adopts_new_stock_scheduler_with_explicit_options(self) -> None:
+    def test_install_adopts_new_stock_scheduler_with_builder_identity(self) -> None:
         install_vercel_apscheduler_integration(options=_options())
         scheduler = BlockingScheduler(timezone=UTC)
 
         adapter = adopt_scheduler(scheduler)
 
-        assert adapter.options.scheduler_id == "scheduler-a"
-        assert adapter.options.wakeup_topic == "__aps_scheduler_a"
-        assert adapter.options.consumer_group == "apscheduler"
+        assert adapter.identity.scheduler_id == "scheduler-a"
+        assert adapter.identity.wakeup_topic == "__aps_scheduler-a_wakeup"
+        assert adapter.identity.start_topic == "__aps_scheduler-a_start"
+        assert adapter.identity.consumer_group == "apscheduler-scheduler-a"
 
     @patch("vercel.integrations.apscheduler._adapter.vqs_sync.send")
     def test_process_wakeup_runs_due_job_and_publishes_successor(self, mock_send: Any) -> None:
@@ -485,8 +613,10 @@ class TestStockSchedulerAdapter:
             )
             adapter.ensure_started(pending_jobs_reference_time=tick_at)
             cursor = adapter._memory_cursor()
-            next_run_times.append(cursor.jobs["id:jittered"].next_run_time)
-            nominal_run_times.append(cursor.jobs["id:jittered"].nominal_run_time)
+            entry = cursor.jobs["id:jittered"]
+            assert entry.next_run_time is not None
+            next_run_times.append(entry.next_run_time)
+            nominal_run_times.append(entry.nominal_run_time)
             adapter.shutdown(wait=True)
 
         assert next_run_times[0] == next_run_times[1]
@@ -512,6 +642,7 @@ class TestStockSchedulerAdapter:
         first_entry = first_adapter._memory_cursor().jobs["id:jittered"]
         first_adapter.shutdown(wait=True)
 
+        assert first_entry.next_run_time is not None
         assert first_entry.next_run_time > nominal_time
         redeploy_time = nominal_time + (first_entry.next_run_time - nominal_time) / 2
         second_scheduler, second_adapter = _scheduler()
@@ -545,6 +676,7 @@ class TestStockSchedulerAdapter:
         adapter.ensure_started(pending_jobs_reference_time=anchor)
         first_cursor = adapter._memory_cursor()
         first_actual = first_cursor.jobs["id:jittered-interval"].next_run_time
+        assert first_actual is not None
 
         result = adapter.process_wakeup(
             first_actual,
@@ -556,9 +688,13 @@ class TestStockSchedulerAdapter:
 
         assert calls == ["ran"]
         assert result.due_job_ids == ("jittered-interval",)
-        assert next_entry.nominal_run_time == anchor + timedelta(seconds=30)
-        assert next_entry.nominal_run_time <= next_entry.next_run_time
-        assert next_entry.next_run_time <= next_entry.nominal_run_time + timedelta(seconds=10)
+        next_nominal = next_entry.nominal_run_time
+        next_actual = next_entry.next_run_time
+        assert next_nominal is not None
+        assert next_nominal == anchor + timedelta(seconds=30)
+        assert next_actual is not None
+        assert next_nominal <= next_actual
+        assert next_actual <= next_nominal + timedelta(seconds=10)
         adapter.shutdown(wait=True)
 
     def test_jobs_sharing_nominal_time_keep_distinct_jittered_wakes(self) -> None:
@@ -577,7 +713,11 @@ class TestStockSchedulerAdapter:
         adapter.ensure_started(pending_jobs_reference_time=nominal_time)
         cursor = adapter._memory_cursor()
         entries = [cursor.jobs["id:first"], cursor.jobs["id:second"]]
-        actual_times = sorted(entry.next_run_time for entry in entries)
+        first_actual = entries[0].next_run_time
+        second_actual = entries[1].next_run_time
+        assert first_actual is not None
+        assert second_actual is not None
+        actual_times = sorted((first_actual, second_actual))
 
         assert {entry.nominal_run_time for entry in entries} == {nominal_time}
         assert actual_times[0] != actual_times[1]
@@ -607,6 +747,7 @@ class TestStockSchedulerAdapter:
         entry = adapter._memory_cursor().jobs["id:frequent"]
 
         assert entry.nominal_run_time == anchor
+        assert entry.next_run_time is not None
         assert anchor <= entry.next_run_time < anchor + timedelta(seconds=5)
         adapter.shutdown(wait=True)
 
@@ -695,57 +836,3 @@ class TestWatchdog:
 
         assert responses[0]["status"] == 405
         adapter.seed.assert_not_called()
-
-
-class TestSeedCli:
-    @patch("vercel.integrations.apscheduler._adapter.vqs_sync.send")
-    def test_seed_cli_imports_scheduler_and_sends_first_wakeup(
-        self,
-        mock_send: Any,
-        tmp_path: Any,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock_send.return_value = "message-1"
-        schedule = tmp_path / "schedule.py"
-        schedule.write_text(
-            """
-from datetime import UTC, datetime
-from apscheduler.schedulers.blocking import BlockingScheduler
-
-scheduler = BlockingScheduler(timezone=UTC)
-
-def task(): pass
-
-scheduler.add_job(
-    task,
-    'cron',
-    hour=12,
-    minute=0,
-    id='cleanup',
-)
-""".lstrip(),
-            encoding="utf-8",
-        )
-        monkeypatch.syspath_prepend(str(tmp_path))
-        monkeypatch.setenv("VERCEL_APSCHEDULER_SCHEDULER_ID", "schedule_scheduler")
-        monkeypatch.setenv("VERCEL_APSCHEDULER_TOPIC", "__aps_schedule_scheduler")
-        monkeypatch.setenv("VERCEL_APSCHEDULER_CONSUMER", "consumer")
-
-        exit_code = seed_main([
-            "--entrypoint",
-            "schedule:scheduler",
-            "--deployment",
-            "dpl_test",
-            "--region",
-            "iad1",
-            "--now",
-            "2026-04-09T11:59:00+00:00",
-        ])
-
-        assert exit_code == 0
-        assert os.environ["VERCEL_DEPLOYMENT_ID"] == "dpl_test"
-        assert os.environ["VERCEL_REGION"] == "iad1"
-        assert mock_send.call_args.args[0] == "__aps_schedule_scheduler"
-        assert mock_send.call_args.kwargs["idempotency_key"] == (
-            "aps:schedule_scheduler:2026-04-09T12:00:00+00:00"
-        )

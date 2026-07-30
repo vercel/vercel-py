@@ -2,82 +2,64 @@
 
 Run APScheduler 3.x schedules through delayed Vercel Queue messages.
 
-For the current testing path, define an ordinary Python Function and its queue
-trigger explicitly:
+Declare the scheduler as a Python subscriber:
+
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "scheduler:scheduler"
+```
 
 ```python
 from apscheduler.schedulers.blocking import BlockingScheduler
-from vercel.integrations.apscheduler import (
-    VercelAPSchedulerOptions,
-    get_asgi_app,
-    install_vercel_apscheduler_integration,
-)
-
-options = VercelAPSchedulerOptions(
-    scheduler_id="cleanup",
-    wakeup_topic="__aps_cleanup",
-    consumer_group="api/scheduler.py",
-)
-install_vercel_apscheduler_integration(options=options)
 
 scheduler = BlockingScheduler(timezone="UTC")
 
 
 @scheduler.scheduled_job("cron", hour=4, jitter=120, id="cleanup")
-def cleanup(): ...
+def cleanup() -> None: ...
 
 
-app = get_asgi_app(scheduler, options=options)
+if __name__ == "__main__":
+    scheduler.start()
 ```
 
-```json
-{
-    "framework": null,
-    "buildCommand": null,
-    "outputDirectory": "public",
-    "regions": ["iad1"],
-    "functions": {
-        "api/scheduler.py": {
-            "experimentalTriggers": [
-                {
-                    "type": "queue/v2beta",
-                    "topic": "__aps_cleanup",
-                    "maxConcurrency": 1
-                }
-            ]
-        },
-        "api/scheduler_watchdog.py": {
-            "maxDuration": 60
-        }
-    },
-    "crons": [
-        { "path": "/api/scheduler_watchdog", "schedule": "* * * * *" }
-    ]
-}
+The Python builder detects APScheduler, activates the Vercel adapter before
+importing the subscriber, and derives a stable internal identity from the
+`module:object` entrypoint. No Vercel-specific scheduler setup is required.
+
+For `scheduler:scheduler`, scheduler construction registers two subscriptions
+in `vercel.queue`:
+
+- `__aps_scheduler_scheduler_start` accepts a manually enqueued `{}` and
+  publishes the first delayed wake.
+- `__aps_scheduler_scheduler_wakeup` evaluates due jobs and publishes the next
+  delayed wake before acknowledging the current one.
+
+The builder reads both topics, their consumer group, and trigger tuning from
+`vercel.queue.get_subscriptions()`. It generates the subscriber Function and
+`queue/v2beta` triggers; no ASGI app or handwritten `experimentalTriggers`
+configuration is needed.
+
+After deploying, manually start the chain:
+
+```bash
+uv run python -m vercel.queue send \
+  --topic __aps_scheduler_scheduler_start \
+  --region iad1 \
+  --json '{}'
 ```
 
-The queue consumer remains private. A separate cron Function imports the same
-scheduler and idempotently seeds the current deployment partition:
-
-```python
-from api.scheduler import OPTIONS, scheduler
-from vercel.integrations.apscheduler import get_watchdog_asgi_app
-
-app = get_watchdog_asgi_app(scheduler, options=OPTIONS)
-```
-
-The watchdog bootstraps a new deployment and repairs the chain if necessary.
-Between watchdog runs, the queue subscriber handles precise delayed wakes and
-publishes each successor before acknowledging the current message.
+The command targets the linked project's current production deployment by
+default. Use `--deployment dpl_...` to choose one explicitly. Nothing is
+enqueued during the build.
 
 The chain is durable: a wake is acknowledged only after its successor has been
-accepted by Vercel Queues. A publish failure fails the current delivery so Vercel
-Queues redelivers it; an idempotency-key conflict proves the successor already
-exists and is therefore also safe to acknowledge.
+accepted by Vercel Queues. A publish failure fails the current delivery so
+Vercel Queues redelivers it; an idempotency-key conflict proves the successor
+already exists and is therefore also safe to acknowledge.
 
-This path does not use `[[tool.vercel.subscribers]]`, builder topic extraction,
-or runtime auto-installation. The integration package must be an explicit
-dependency and installation must happen before constructing the scheduler.
+Off Vercel, the same module retains stock APScheduler behavior and
+`scheduler.start()` runs normally.
 
 See [SCHEDULER.md](SCHEDULER.md) for the runtime model, convergence walkthroughs,
 and schedule restrictions. A deployable example is in

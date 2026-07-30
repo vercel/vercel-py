@@ -34,7 +34,9 @@ class APSchedulerWatchdogAsgiApp:
             return
 
         try:
-            await anyio.to_thread.run_sync(partial(self.adapter.seed, kind="watchdog"))
+            await anyio.to_thread.run_sync(  # ty: ignore[unresolved-attribute]
+                partial(self.adapter.seed, kind="watchdog")
+            )
         except Exception:
             LOGGER.exception("APScheduler watchdog failed to seed a wakeup")
             await self._send_status(send, 500)
