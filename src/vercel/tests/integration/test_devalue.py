@@ -58,13 +58,11 @@ _NO_PY = object()
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _npm_install_devalue() -> Path | None:
-    """Install the pinned devalue into a version-keyed temp dir, and reuse it."""
-    prefix = Path(tempfile.gettempdir()) / f"vercel-py-devalue-{DEVALUE_VERSION}"
-    entry = prefix / "node_modules" / "devalue" / "index.js"
-    if entry.is_file():
-        return entry
+def _entry_in(prefix: Path) -> Path:
+    return prefix / "node_modules" / "devalue" / "index.js"
 
+
+def _npm_install_into(prefix: Path) -> bool:
     prefix.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         [
@@ -82,9 +80,42 @@ def _npm_install_devalue() -> Path | None:
         timeout=300,
         check=False,
     )
-    if result.returncode != 0 or not entry.is_file():
+    return result.returncode == 0 and _entry_in(prefix).is_file()
+
+
+def _npm_install_devalue() -> Path | None:
+    """Install the pinned devalue into a version-keyed temp dir, and reuse it.
+
+    pytest-xdist gives every worker its own session fixture, so several
+    processes reach this at once. npm rebuilds ``node_modules`` in place and
+    non-atomically, so installing straight into the shared directory lets one
+    worker observe ``index.js`` and then have it vanish underneath a running
+    node. Each worker therefore installs into a private staging directory and
+    publishes it with a single atomic rename; losers of that race reuse the
+    winner's copy.
+    """
+    shared = Path(tempfile.gettempdir()) / f"vercel-py-devalue-{DEVALUE_VERSION}"
+    if _entry_in(shared).is_file():
+        return _entry_in(shared)
+
+    staging = Path(tempfile.mkdtemp(prefix=f"vercel-py-devalue-{DEVALUE_VERSION}-"))
+    if not _npm_install_into(staging):
+        shutil.rmtree(staging, ignore_errors=True)
         return None
-    return entry
+
+    try:
+        # Atomic when `shared` does not exist; raises if another worker won.
+        staging.rename(shared)
+    except OSError:
+        if _entry_in(shared).is_file():
+            shutil.rmtree(staging, ignore_errors=True)
+            return _entry_in(shared)
+        # `shared` exists but holds no usable install (e.g. a partial tree from
+        # an interrupted run). Keep our own copy rather than deleting a path
+        # another process may be reading.
+        return _entry_in(staging)
+
+    return _entry_in(shared)
 
 
 def _resolve_devalue_entry() -> tuple[Path | None, str]:
