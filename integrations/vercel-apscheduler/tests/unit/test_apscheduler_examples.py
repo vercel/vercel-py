@@ -63,6 +63,7 @@ def test_cleanup_scheduler_registers_introspectable_queue_subscriptions(
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_REGION", "iad1")
     monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "scheduler_scheduler")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     clear_subscriptions()
     install_vercel_apscheduler_integration()
     sys.modules[module_name] = module

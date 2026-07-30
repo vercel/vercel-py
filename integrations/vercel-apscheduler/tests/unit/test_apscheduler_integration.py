@@ -12,29 +12,45 @@ from unittest.mock import patch
 import pytest
 from apscheduler.jobstores.base import ConflictingIdError, JobLookupError
 from apscheduler.jobstores.redis import RedisJobStore
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.base import STATE_PAUSED, STATE_RUNNING
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from vercel.integrations.apscheduler import (
     APSchedulerConfigurationError,
+    VercelRedisJobStore,
     install_vercel_apscheduler_integration,
 )
 from vercel.integrations.apscheduler._adapter import get_adapter
 from vercel.integrations.apscheduler._driver import (
     ClaimResult,
     DriverSnapshot,
+    FinishResult,
     StartDecision,
     WakeToken,
 )
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
 from vercel.integrations.apscheduler._subscriber import register_scheduler
-from vercel.queue import Message, MessageMetadata, SanitizedName, get_subscriptions
+from vercel.integrations.apscheduler._time import canonical_scheduled_logical_time
+from vercel.queue import (
+    Message,
+    MessageMetadata,
+    RetryAfter,
+    SanitizedName,
+    get_subscriptions,
+)
 from vercel.queue.testing import clear_subscriptions
 
 UTC = timezone.utc
 
 
+def durable_noop_job() -> None:
+    return
+
+
 class InMemoryRedisJobStore(RedisJobStore):
     def __init__(self) -> None:
+        self._vercel_apscheduler_test_store = True
         self.jobs_key = "apscheduler.jobs"
         self.run_times_key = "apscheduler.run_times"
         self.redis = object()
@@ -95,6 +111,7 @@ class FakeDriver:
         self.start_status: str | None = None
         self.activation_time: datetime | None = None
         self.current: WakeToken | None = None
+        self.last_sequence = 0
         self.owner: str | None = None
 
     def start(self, now: datetime) -> StartDecision:
@@ -107,6 +124,7 @@ class FakeDriver:
                 self.start_status = "pending"
                 self.activation_time = None
                 self.current = None
+                self.last_sequence = 0
             return StartDecision(
                 generation=self.generation,
                 changed=changed,
@@ -156,19 +174,25 @@ class FakeDriver:
         self,
         generation: int,
         owner: str,
-        next_logical_time: datetime,
+        next_logical_time: datetime | None,
         now: datetime,
-    ) -> WakeToken | None:
+    ) -> FinishResult:
         del now
         with self.lock:
-            if self.owner != owner or self.state != "running" or generation != self.generation:
-                if self.owner == owner:
-                    self.owner = None
-                return None
+            if self.owner != owner:
+                return FinishResult("lost")
+            if self.state != "running" or generation != self.generation:
+                self.owner = None
+                return FinishResult("fenced")
             self.owner = None
             self.start_status = "active"
-            self.current = WakeToken(generation, 1, next_logical_time)
-            return self.current
+            self.current = (
+                WakeToken(generation, 1, next_logical_time)
+                if next_logical_time is not None
+                else None
+            )
+            self.last_sequence = 1 if self.current is not None else 0
+            return FinishResult("advanced", self.current)
 
     def mark_wake_published(
         self,
@@ -215,27 +239,48 @@ class FakeDriver:
         self,
         token: WakeToken,
         owner: str,
-        next_logical_time: datetime,
+        next_logical_time: datetime | None,
         now: datetime,
-    ) -> WakeToken | None:
+    ) -> FinishResult:
         del now
         with self.lock:
+            if self.owner != owner:
+                return FinishResult("lost")
             if (
-                self.owner != owner
-                or self.state != "running"
+                self.state != "running"
                 or token.generation != self.generation
                 or self.current is None
                 or token.sequence != self.current.sequence
             ):
-                if self.owner == owner:
-                    self.owner = None
-                return None
+                self.owner = None
+                return FinishResult("fenced")
             self.owner = None
-            self.current = WakeToken(
-                self.generation,
-                token.sequence + 1,
-                next_logical_time,
+            self.current = (
+                WakeToken(
+                    self.generation,
+                    token.sequence + 1,
+                    next_logical_time,
+                )
+                if next_logical_time is not None
+                else None
             )
+            self.last_sequence = (
+                self.current.sequence if self.current is not None else token.sequence
+            )
+            return FinishResult("advanced", self.current)
+
+    def rearm(self, logical_time: datetime, now: datetime) -> WakeToken | None:
+        del now
+        with self.lock:
+            if self.state != "running" or self.start_status != "active":
+                return None
+            if self.owner is not None:
+                return None
+            if self.current is not None and self.current.logical_time <= logical_time:
+                return None
+            sequence = self.last_sequence + 1
+            self.current = WakeToken(self.generation, sequence, logical_time)
+            self.last_sequence = sequence
             return self.current
 
     def snapshot(self) -> DriverSnapshot:
@@ -281,7 +326,8 @@ def scheduler_with_driver() -> tuple[BlockingScheduler, Any, FakeDriver]:
     assert adapter is not None
     adapter._bind_runtime()
     driver = FakeDriver()
-    adapter._driver = driver  # ty: ignore[invalid-assignment]
+    adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    adapter.coordinator.driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     return scheduler, adapter, driver
 
 
@@ -317,6 +363,33 @@ def test_payloads_round_trip_generation_and_sequence() -> None:
     assert WakeupPayload.from_payload(wake.to_payload()) == wake
 
 
+def test_far_future_wakes_bridge_without_an_idle_poll() -> None:
+    now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+    due = now + timedelta(seconds=70)
+
+    first = canonical_scheduled_logical_time(
+        due,
+        now=now,
+        max_delay_seconds=30,
+    )
+    second = canonical_scheduled_logical_time(
+        due,
+        now=first,
+        max_delay_seconds=30,
+    )
+    final = canonical_scheduled_logical_time(
+        due,
+        now=second,
+        max_delay_seconds=30,
+    )
+
+    assert (first, second, final) == (
+        now + timedelta(seconds=10),
+        now + timedelta(seconds=40),
+        due,
+    )
+
+
 def test_memory_job_store_is_rejected() -> None:
     scheduler = BlockingScheduler(timezone=UTC)
 
@@ -325,6 +398,55 @@ def test_memory_job_store_is_rejected() -> None:
         match="default RedisJobStore",
     ):
         scheduler.start()
+
+
+def test_scheduler_lifecycle_remains_native_outside_vercel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NativeBackgroundScheduler(BackgroundScheduler):
+        pass
+
+    monkeypatch.delenv("VERCEL", raising=False)
+    scheduler = NativeBackgroundScheduler(timezone=UTC)
+    scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        minutes=5,
+        id="native-before-start",
+    )
+
+    scheduler.start()
+    try:
+        assert scheduler.state == STATE_RUNNING
+        assert scheduler.get_job("native-before-start") is not None
+        scheduler.add_job(
+            durable_noop_job,
+            "interval",
+            minutes=10,
+            id="native-after-start",
+        )
+        assert scheduler.get_job("native-after-start") is not None
+        scheduler.pause()
+        assert scheduler.state == STATE_PAUSED
+        scheduler.resume()
+        assert scheduler.state == STATE_RUNNING
+    finally:
+        scheduler.shutdown()
+
+
+def test_vercel_redis_job_store_requires_an_explicit_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    with pytest.raises(
+        APSchedulerConfigurationError,
+        match="requires REDIS_URL",
+    ):
+        VercelRedisJobStore()
+
+    store = VercelRedisJobStore(host="redis.example")
+    assert store.redis.connection_pool.connection_kwargs["host"] == "redis.example"
 
 
 def test_runtime_registry_binds_the_loaded_subscriber_object(
@@ -380,12 +502,132 @@ def test_start_paused_waits_for_resume_to_publish() -> None:
         send.assert_not_called()
         assert driver.state == "paused"
         assert driver.generation == 0
+        assert scheduler.state == STATE_PAUSED
 
         scheduler.resume()
 
     send.assert_called_once()
     assert driver.state == "running"
     assert driver.generation == 1
+    assert scheduler.state == STATE_RUNNING
+
+
+def test_start_with_no_jobs_becomes_dormant_without_wakeup() -> None:
+    scheduler, adapter, driver = scheduler_with_driver()
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+
+    with patch.object(adapter, "publish_wakeup") as publish:
+        start_subscription.func(
+            message(
+                start_payload,
+                message_id="start",
+                topic=start_subscription.topic,
+                consumer_group=start_subscription.consumer_group,
+            )
+        )
+
+    publish.assert_not_called()
+    assert driver.state == "running"
+    assert driver.start_status == "active"
+    assert driver.current is None
+
+
+def test_runtime_add_rearms_dormant_chain_with_monotonic_sequence() -> None:
+    scheduler, _adapter, driver = scheduler_with_driver()
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+    start_subscription.func(
+        message(
+            start_payload,
+            message_id="start",
+            topic=start_subscription.topic,
+            consumer_group=start_subscription.consumer_group,
+        )
+    )
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="wake-1",
+    ) as send:
+        scheduler.add_job(
+            lambda: None,
+            "date",
+            run_date=datetime.now(UTC) + timedelta(minutes=5),
+            id="first",
+        )
+
+    first = driver.current
+    assert first is not None
+    assert first.sequence == 1
+    assert send.call_count == 1
+
+    assert driver.claim_wake(first, "owner", datetime.now(UTC)).state == "claimed"
+    terminal = driver.finish_wake(first, "owner", None, datetime.now(UTC))
+    assert terminal.state == "advanced"
+    assert terminal.wake is None
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="wake-2",
+    ) as send:
+        scheduler.add_job(
+            lambda: None,
+            "date",
+            run_date=datetime.now(UTC) + timedelta(minutes=10),
+            id="second",
+        )
+
+    second = driver.current
+    assert second is not None
+    assert second.sequence == 2
+    assert send.call_count == 1
+
+
+def test_runtime_mutation_requires_lifecycle_activation() -> None:
+    scheduler, adapter, _ = scheduler_with_driver()
+
+    @scheduler.scheduled_job("interval", minutes=5, id="cleanup")
+    def cleanup() -> None:
+        return
+
+    with pytest.raises(
+        APSchedulerConfigurationError,
+        match=r"call scheduler\.start\(\)",
+    ):
+        scheduler.modify_job("cleanup", name="changed")
+
+    assert adapter.scheduler.state == 0
+
+
+def test_multiple_job_stores_are_rejected() -> None:
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={
+            "default": InMemoryRedisJobStore(),
+            "secondary": InMemoryRedisJobStore(),
+        },
+    )
+
+    with pytest.raises(
+        APSchedulerConfigurationError,
+        match="exactly one job store",
+    ):
+        scheduler.start()
 
 
 def test_pause_resume_fences_old_start_messages() -> None:
@@ -406,9 +648,11 @@ def test_pause_resume_fences_old_start_messages() -> None:
     ):
         scheduler.start()
         scheduler.pause()
+        assert scheduler.state == STATE_PAUSED
         scheduler.resume()
 
     assert driver.generation == 2
+    assert scheduler.state == STATE_RUNNING
     assert len(sent_payloads) == 2
 
     with (
@@ -517,6 +761,47 @@ def test_stale_wakeup_runs_no_jobs_and_publishes_no_successor() -> None:
     publish.assert_not_called()
 
 
+def test_lost_wakeup_owner_retries_instead_of_acknowledging() -> None:
+    scheduler, adapter, driver = scheduler_with_driver()
+    register_scheduler(scheduler)
+    wake_subscription = get_subscriptions()[1]
+    driver.start(datetime.now(UTC))
+    driver.start_status = "active"
+    token = WakeToken(
+        generation=1,
+        sequence=1,
+        logical_time=datetime.now(UTC),
+        status="published",
+    )
+    driver.current = token
+
+    result = type(
+        "Result",
+        (),
+        {"next_wakeup_time": None},
+    )()
+    with (
+        patch.object(adapter, "process_wakeup", return_value=result),
+        patch.object(
+            driver,
+            "finish_wake",
+            return_value=FinishResult("lost"),
+        ),
+        pytest.raises(RetryAfter),
+    ):
+        wake_subscription.func(
+            message(
+                WakeupPayload.from_token(
+                    "scheduler_scheduler",
+                    token,
+                ).to_payload(),
+                message_id="lost",
+                topic=wake_subscription.topic,
+                consumer_group=wake_subscription.consumer_group,
+            )
+        )
+
+
 def test_durable_job_requires_explicit_id() -> None:
     scheduler, adapter, _ = scheduler_with_driver()
     scheduler.add_job(lambda: None, "interval", minutes=1)
@@ -532,20 +817,33 @@ def test_cold_start_preserves_persisted_next_run_time() -> None:
     scheduler, adapter, _ = scheduler_with_driver()
     persisted_time = datetime.now(UTC) + timedelta(hours=2)
 
-    @scheduler.scheduled_job("interval", minutes=5, id="cleanup")
-    def cleanup() -> None:
-        return
+    scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        minutes=5,
+        id="cleanup",
+        replace_existing=True,
+    )
 
     store = scheduler._jobstores["default"]
     pending_job = scheduler.get_job("cleanup")
     assert pending_job is not None
-    pending_job._modify(next_run_time=persisted_time)
-    pending_job._jobstore_alias = "default"
-    store.jobs["cleanup"] = pending_job
+    persisted_job = object.__new__(type(pending_job))
+    for attribute in pending_job.__slots__:
+        if attribute != "__weakref__" and hasattr(pending_job, attribute):
+            setattr(persisted_job, attribute, getattr(pending_job, attribute))
+    persisted_job._modify(
+        name="runtime-name",
+        next_run_time=persisted_time,
+    )
+    persisted_job._jobstore_alias = "default"
+    store.jobs["cleanup"] = persisted_job
 
     adapter.ensure_local_started()
 
-    assert store.lookup_job("cleanup").next_run_time == persisted_time
+    materialized = store.lookup_job("cleanup")
+    assert materialized.name == "runtime-name"
+    assert materialized.next_run_time == persisted_time
 
 
 def test_new_generation_skips_paused_interval() -> None:

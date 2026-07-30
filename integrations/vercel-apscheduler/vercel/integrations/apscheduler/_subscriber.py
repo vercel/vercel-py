@@ -43,7 +43,7 @@ def register_scheduler(
         consumer_group=vqs.SanitizedName(adapter.identity.consumer_group),
         retry_after=adapter.options.retry_after_seconds,
         max_concurrency=adapter.options.max_concurrency,
-        max_attempts=adapter.options.max_attempts,
+        max_attempts=None,
     )
     def _handle_start(message: vqs.Message[dict[str, Any]]) -> None:
         _process_start(adapter, message)
@@ -53,7 +53,7 @@ def register_scheduler(
         consumer_group=vqs.SanitizedName(adapter.identity.consumer_group),
         retry_after=adapter.options.retry_after_seconds,
         max_concurrency=adapter.options.max_concurrency,
-        max_attempts=adapter.options.max_attempts,
+        max_attempts=None,
     )
     def _handle_wakeup(message: vqs.Message[dict[str, Any]]) -> None:
         _process_wakeup(adapter, message)
@@ -98,18 +98,22 @@ def _process_start(
         with adapter.driver.renewing(owner):
             adapter.activate_generation(activation_time)
             now = datetime.now(UTC)
-            next_time = adapter.canonical_wakeup_time(
-                adapter.get_next_wakeup_time(now),
-                now=now,
+            next_due_time = adapter.get_next_wakeup_time(now)
+            next_time = (
+                adapter.canonical_wakeup_time(next_due_time, now=now)
+                if next_due_time is not None
+                else None
             )
-            token = adapter.driver.finish_start(
+            result = adapter.driver.finish_start(
                 payload.generation,
                 owner,
                 next_time,
                 now,
             )
-            if token is not None:
-                adapter.publish_wakeup(token, now=now)
+            if result.state == "lost":
+                raise vqs.RetryAfter(BUSY_RETRY_SECONDS)
+            if result.wake is not None:
+                adapter.publish_wakeup(result.wake, now=now)
     finally:
         adapter.driver.release(owner)
 
@@ -143,18 +147,21 @@ def _process_wakeup(
         with adapter.driver.renewing(owner):
             now = datetime.now(UTC)
             result = adapter.process_wakeup(token.logical_time, now=now)
-            next_time = adapter.canonical_wakeup_time(
-                result.next_wakeup_time,
-                now=now,
+            next_time = (
+                adapter.canonical_wakeup_time(result.next_wakeup_time, now=now)
+                if result.next_wakeup_time is not None
+                else None
             )
-            successor = adapter.driver.finish_wake(
+            finish = adapter.driver.finish_wake(
                 token,
                 owner,
                 next_time,
                 datetime.now(UTC),
             )
-            if successor is not None:
-                adapter.publish_wakeup(successor)
+            if finish.state == "lost":
+                raise vqs.RetryAfter(BUSY_RETRY_SECONDS)
+            if finish.wake is not None:
+                adapter.publish_wakeup(finish.wake)
     finally:
         adapter.driver.release(owner)
 

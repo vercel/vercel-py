@@ -39,9 +39,14 @@ extend = "../ruff.toml"
     "FBT001",  # patched APScheduler signatures must match upstream.
     "FBT002",  # patched APScheduler signatures must match upstream.
     "N806",  # scheduler class names imported lazily mirror upstream names.
+    "PLR0904",  # adapter intentionally owns one scheduler's full integration lifecycle.
     "PLC0415",  # optional scheduler classes are imported only when patching.
     "SLF001",  # integration relies on APScheduler private extension points.
     "TRY400",  # executor lookup failure is logged with APScheduler context.
+]
+"vercel/integrations/apscheduler/_jobstore.py" = [
+    "S403",  # APScheduler's RedisJobStore persistence format is pickle-based.
+    "SLF001",  # coordinated reads must reuse APScheduler's reconstitution hook.
 ]
 "vercel/integrations/apscheduler/_executor.py" = [
     "BLE001",  # mirrors APScheduler BaseExecutor error handling.

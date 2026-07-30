@@ -5,7 +5,8 @@ from typing import Any, cast
 import json
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from os import environ
@@ -25,6 +26,7 @@ from ._executor import VercelInlineExecutor
 from ._imports import (
     EVENT_JOB_MAX_INSTANCES,
     EVENT_JOB_SUBMITTED,
+    STATE_PAUSED,
     STATE_RUNNING,
     STATE_STOPPED,
     BaseScheduler,
@@ -32,6 +34,7 @@ from ._imports import (
     MaxInstancesReachedError,
     RedisJobStore,
 )
+from ._jobstore import RedisJobCoordinator
 from ._options import (
     SUBSCRIBER_ID_ENV,
     VercelAPSchedulerOptions,
@@ -80,7 +83,7 @@ class PublishedWakeup:
 class WakeupProcessingResult:
     logical_time: datetime
     due_job_ids: tuple[str, ...]
-    next_wakeup_time: datetime
+    next_wakeup_time: datetime | None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -88,11 +91,12 @@ class WakeupProcessingResult:
             "logical_time",
             as_utc(self.logical_time, name="logical_time"),
         )
-        object.__setattr__(
-            self,
-            "next_wakeup_time",
-            as_utc(self.next_wakeup_time, name="next_wakeup_time"),
-        )
+        if self.next_wakeup_time is not None:
+            object.__setattr__(
+                self,
+                "next_wakeup_time",
+                as_utc(self.next_wakeup_time, name="next_wakeup_time"),
+            )
 
 
 @dataclass(slots=True)
@@ -101,6 +105,7 @@ class _DueJobPlan:
     jobstore_alias: str
     run_times: list[datetime]
     next_run_time: datetime | None
+    expected_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +121,10 @@ class _PatchState:
     original_init: Callable[..., Any] | None = None
     original_add_job: Callable[..., Any] | None = None
     original_real_add_job: Callable[..., Any] | None = None
+    original_modify_job: Callable[..., Any] | None = None
+    original_remove_job: Callable[..., Any] | None = None
+    original_remove_all_jobs: Callable[..., Any] | None = None
+    original_resume_job: Callable[..., Any] | None = None
     original_base_start: Callable[..., Any] | None = None
     original_blocking_start: Callable[..., Any] | None = None
     original_background_start: Callable[..., Any] | None = None
@@ -145,8 +154,14 @@ class SchedulerAdapter:
         self._identity_bound = environ.get(SUBSCRIBER_ID_ENV) is not None
         self._deployment: str | None = None
         self._driver: RedisDriver | None = None
+        self._coordinator: RedisJobCoordinator | None = None
         self._job_definitions: dict[str, _JobDefinition] = {}
+        self._current_add_explicit = False
+        self._runtime_mutation_depth = 0
+        self._lifecycle_called = False
+        self._queue_lifecycle_warning_emitted = False
         self._suppress_wakeup = False
+        self._native_wakeup = scheduler.wakeup
         self._adopt_instance_methods()
 
     @property
@@ -158,6 +173,15 @@ class SchedulerAdapter:
     def driver(self) -> RedisDriver:
         self._bind_runtime()
         return cast("RedisDriver", self._driver)
+
+    @property
+    def coordinator(self) -> RedisJobCoordinator:
+        self._bind_runtime()
+        return cast("RedisJobCoordinator", self._coordinator)
+
+    @property
+    def is_runtime_mutation(self) -> bool:
+        return self._runtime_mutation_depth > 0 and not self._suppress_wakeup
 
     def _adopt_instance_methods(self) -> None:
         self.scheduler.wakeup = MethodType(  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
@@ -182,9 +206,12 @@ class SchedulerAdapter:
         """Durably start this deployment's scheduler exactly once."""
         self._bind_runtime()
         self._validate_durable_configuration()
+        self._lifecycle_called = True
+        self.ensure_local_started()
         now = datetime.now(UTC)
         if paused:
             self.driver.pause(now)
+            self._pause_local()
             return
         decision = self.driver.start(now)
         self._publish_start_if_needed(decision, now=now)
@@ -195,12 +222,16 @@ class SchedulerAdapter:
             and decision.current_wake.status == "pending"
         ):
             self.publish_wakeup(decision.current_wake, now=now)
+        self._resume_local_if_paused()
 
     def pause(self) -> None:
         """Durably fence the current generation."""
         self._bind_runtime()
         self._validate_durable_configuration()
+        self._lifecycle_called = True
+        self.ensure_local_started()
         self.driver.pause(datetime.now(UTC))
+        self._pause_local()
 
     def resume(self) -> None:
         """Resume by creating one new durable generation."""
@@ -297,6 +328,26 @@ class SchedulerAdapter:
             max_delay_seconds=self.options.max_delay_seconds,
         )
 
+    @contextmanager
+    def runtime_mutation(self, *, explicit_id: bool | None = None) -> Iterator[None]:
+        self.prepare_runtime_mutation()
+        prior_explicit = self._current_add_explicit
+        if explicit_id is not None:
+            self._current_add_explicit = explicit_id
+        self._runtime_mutation_depth += 1
+        try:
+            yield
+        finally:
+            self._runtime_mutation_depth -= 1
+            self._current_add_explicit = prior_explicit
+
+    def prepare_runtime_mutation(self) -> None:
+        if not self._lifecycle_called:
+            raise APSchedulerConfigurationError(
+                "call scheduler.start() before mutating durable jobs in this Function"
+            )
+        self.ensure_local_started()
+
     def ensure_local_started(self) -> None:
         """Start APScheduler internals without starting a scheduler thread."""
         self._bind_runtime()
@@ -320,6 +371,29 @@ class SchedulerAdapter:
         finally:
             self._suppress_wakeup = previous
 
+    def _pause_local(self) -> None:
+        if self.scheduler.state != STATE_RUNNING:
+            return
+        original_pause = cast(
+            "Callable[[BaseScheduler], None]",
+            _PATCH_STATE.original_pause,
+        )
+        original_pause(self.scheduler)
+
+    def _resume_local_if_paused(self) -> None:
+        if self.scheduler.state != STATE_PAUSED:
+            return
+        previous = self._suppress_wakeup
+        self._suppress_wakeup = True
+        try:
+            original_resume = cast(
+                "Callable[[BaseScheduler], None]",
+                _PATCH_STATE.original_resume,
+            )
+            original_resume(self.scheduler)
+        finally:
+            self._suppress_wakeup = previous
+
     def activate_generation(self, activation_time: datetime) -> None:
         """Start locally and skip occurrences from the paused interval."""
         self.ensure_local_started()
@@ -327,20 +401,11 @@ class SchedulerAdapter:
             as_utc(activation_time, name="activation_time").astimezone(self.scheduler.timezone)
         )
 
-    def get_next_wakeup_time(self, reference_time: datetime) -> datetime:
-        """Return the next due time, capped by the durable-store poll interval."""
-        reference = as_utc(reference_time, name="reference_time").astimezone(
-            self.scheduler.timezone
-        )
-        next_wakeup_time: datetime | None = None
+    def get_next_wakeup_time(self, reference_time: datetime) -> datetime | None:
+        """Return the exact next durable due time, if any."""
+        del reference_time
         with self.scheduler._jobstores_lock:
-            for jobstore in self.scheduler._jobstores.values():
-                next_wakeup_time = earliest(
-                    next_wakeup_time,
-                    jobstore.get_next_run_time(),
-                )
-        poll_time = reference + timedelta(seconds=self.options.durable_poll_interval_seconds)
-        return cast("datetime", earliest(next_wakeup_time, poll_time))
+            return self.scheduler._jobstores["default"].get_next_run_time()
 
     def process_wakeup(
         self,
@@ -370,7 +435,9 @@ class SchedulerAdapter:
         return WakeupProcessingResult(
             logical_time=evaluation_time.astimezone(UTC),
             due_job_ids=tuple(plan.job.id for plan in due_jobs),
-            next_wakeup_time=cast("datetime", next_wakeup_time).astimezone(UTC),
+            next_wakeup_time=(
+                next_wakeup_time.astimezone(UTC) if next_wakeup_time is not None else None
+            ),
         )
 
     def materialize_pending_job(
@@ -378,7 +445,7 @@ class SchedulerAdapter:
         job: Any,
         jobstore_alias: str,
         replace_existing: bool,
-    ) -> None:
+    ) -> bool:
         jobstore = self.scheduler._lookup_jobstore(jobstore_alias)
         if not isinstance(jobstore, RedisJobStore):
             raise APSchedulerConfigurationError(
@@ -386,7 +453,10 @@ class SchedulerAdapter:
                 f'job store "{jobstore_alias}" is {type(jobstore).__name__}'
             )
         definition = self._job_definitions.get(str(job.id))
-        if definition is None or not definition.explicit_id:
+        explicit_id = (
+            definition.explicit_id if definition is not None else self._current_add_explicit
+        )
+        if not explicit_id:
             raise APSchedulerConfigurationError(
                 "jobs in a durable APScheduler store require an explicit stable id"
             )
@@ -396,18 +466,33 @@ class SchedulerAdapter:
             )
         existing = jobstore.lookup_job(job.id)
         if existing is None:
-            return
+            return True
         if not replace_existing:
             raise APSchedulerConfigurationError(
                 f'job "{job.id}" already exists in Redis; declare it with replace_existing=True'
             )
-        job._modify(next_run_time=getattr(existing, "next_run_time", None))
+        if self.is_runtime_mutation:
+            return True
+        job._jobstore_alias = jobstore_alias
+        return False
 
     def wakeup(self) -> None:
-        # APScheduler invokes wakeup() while jobs are materialized and updated.
-        # The Redis driver, never a warm process, owns successor publication.
+        if not is_vercel_runtime():
+            self._native_wakeup()
+            return
         if self._suppress_wakeup or self.scheduler.state != STATE_RUNNING:
             return
+        self.publish_pending_wakeup()
+
+    def warn_ignored_queue_lifecycle(self, method: str) -> None:
+        if self._queue_lifecycle_warning_emitted:
+            return
+        self._queue_lifecycle_warning_emitted = True
+        LOGGER.warning(
+            "Ignoring scheduler.%s() while serving an APScheduler queue delivery; "
+            "call lifecycle methods from a web Function instead",
+            method,
+        )
 
     def _bind_runtime(self) -> None:
         if not self._identity_bound:
@@ -416,7 +501,7 @@ class SchedulerAdapter:
         deployment = environ.get(DEPLOYMENT_ENV)
         if not deployment:
             raise APSchedulerConfigurationError(
-                f"{DEPLOYMENT_ENV} is required to control an APScheduler subscriber"
+                f"{DEPLOYMENT_ENV} is required to run an APScheduler subscriber"
             )
         if self._deployment is not None and self._deployment != deployment:
             raise APSchedulerConfigurationError(
@@ -433,6 +518,10 @@ class SchedulerAdapter:
                     f'job store "{alias}" is already bound to another scheduler'
                 )
             if namespace is None:
+                if any(character in store.jobs_key + store.run_times_key for character in "{}"):
+                    raise APSchedulerConfigurationError(
+                        "custom Redis job-store keys cannot contain Redis hash tags"
+                    )
                 store.jobs_key = f"{store.jobs_key}:{tag}:jobs"
                 store.run_times_key = f"{store.run_times_key}:{tag}:run_times"
                 store.__dict__["_vercel_apscheduler_namespace"] = expected_namespace
@@ -442,6 +531,13 @@ class SchedulerAdapter:
                 deployment=deployment,
                 scheduler_id=self.identity.scheduler_id,
             )
+        if self._coordinator is None:
+            self._coordinator = RedisJobCoordinator(
+                stores["default"],
+                self._driver,
+                self,
+            )
+            self._coordinator.install()
 
     def _validate_durable_configuration(self) -> dict[str, RedisJobStore]:
         stores = self.scheduler._jobstores
@@ -449,15 +545,15 @@ class SchedulerAdapter:
             raise APSchedulerConfigurationError(
                 "vercel-apscheduler requires a configured default RedisJobStore"
             )
-        unsupported = {
-            alias: type(store).__name__
-            for alias, store in stores.items()
-            if not isinstance(store, RedisJobStore)
-        }
-        if unsupported:
-            details = ", ".join(f"{alias}={kind}" for alias, kind in sorted(unsupported.items()))
+        if set(stores) != {"default"}:
+            aliases = ", ".join(sorted(stores))
             raise APSchedulerConfigurationError(
-                "vercel-apscheduler v1 supports RedisJobStore only; " + details
+                "vercel-apscheduler v1 supports exactly one job store named "
+                f'"default"; configured: {aliases}'
+            )
+        if not isinstance(stores["default"], RedisJobStore):
+            raise APSchedulerConfigurationError(
+                "vercel-apscheduler requires a configured default RedisJobStore"
             )
         return cast("dict[str, RedisJobStore]", stores)
 
@@ -482,31 +578,29 @@ class SchedulerAdapter:
 
     def _rebase_before(self, activation_time: datetime) -> None:
         with self.scheduler._jobstores_lock:
-            for jobstore in self.scheduler._jobstores.values():
-                for job in jobstore.get_all_jobs():
-                    next_run_time = getattr(job, "next_run_time", None)
-                    if next_run_time is None or next_run_time >= activation_time:
-                        continue
+            for job, revision in self.coordinator.get_all_jobs_with_revisions():
+                next_run_time = getattr(job, "next_run_time", None)
+                if next_run_time is None or next_run_time >= activation_time:
+                    continue
+                next_run_time = job.trigger.get_next_fire_time(
+                    None,
+                    activation_time,
+                )
+                while next_run_time is not None and next_run_time < activation_time:
+                    previous_run_time = next_run_time
                     next_run_time = job.trigger.get_next_fire_time(
-                        None,
+                        previous_run_time,
                         activation_time,
                     )
-                    while next_run_time is not None and next_run_time < activation_time:
-                        previous_run_time = next_run_time
-                        next_run_time = job.trigger.get_next_fire_time(
-                            previous_run_time,
-                            activation_time,
+                    if next_run_time is not None and next_run_time <= previous_run_time:
+                        raise RuntimeError(
+                            f'APScheduler trigger for job "{job.id}" did not advance while resuming'
                         )
-                        if next_run_time is not None and next_run_time <= previous_run_time:
-                            raise RuntimeError(
-                                f'APScheduler trigger for job "{job.id}" '
-                                "did not advance while resuming"
-                            )
-                    if next_run_time is None:
-                        jobstore.remove_job(job.id)
-                    else:
-                        job._modify(next_run_time=next_run_time)
-                        jobstore.update_job(job)
+                if next_run_time is None:
+                    self.coordinator.cas_remove_job(job.id, revision)
+                else:
+                    job._modify(next_run_time=next_run_time)
+                    self.coordinator.cas_update_job(job, revision)
 
     def _plan_due_jobs(
         self,
@@ -515,21 +609,18 @@ class SchedulerAdapter:
         due_jobs: list[_DueJobPlan] = []
         retry_time: datetime | None = None
         with self.scheduler._jobstores_lock:
-            for alias, jobstore in self.scheduler._jobstores.items():
-                try:
-                    jobs = jobstore.get_due_jobs(logical_time)
-                except Exception as exc:
-                    self._logger.warning(
-                        'Error getting due jobs from job store "%s": %s',
-                        alias,
-                        exc,
-                    )
-                    retry_time = earliest(
-                        retry_time,
-                        logical_time + timedelta(seconds=self.scheduler.jobstore_retry_interval),
-                    )
-                    continue
-                for job in jobs:
+            try:
+                jobs = self.coordinator.get_due_jobs_with_revisions(logical_time)
+            except Exception as exc:
+                self._logger.warning(
+                    'Error getting due jobs from job store "default": %s',
+                    exc,
+                )
+                retry_time = logical_time + timedelta(
+                    seconds=self.scheduler.jobstore_retry_interval
+                )
+            else:
+                for job, revision in jobs:
                     run_times = job._get_run_times(logical_time)
                     next_run_time = (
                         job.trigger.get_next_fire_time(run_times[-1], logical_time)
@@ -542,9 +633,10 @@ class SchedulerAdapter:
                         due_jobs.append(
                             _DueJobPlan(
                                 job=job,
-                                jobstore_alias=alias,
+                                jobstore_alias="default",
                                 run_times=list(run_times),
                                 next_run_time=next_run_time,
+                                expected_revision=revision,
                             )
                         )
         return due_jobs, retry_time
@@ -581,12 +673,17 @@ class SchedulerAdapter:
                             plan.run_times,
                         )
                     )
-                jobstore = self.scheduler._lookup_jobstore(plan.jobstore_alias)
                 if plan.next_run_time is None:
-                    jobstore.remove_job(plan.job.id)
+                    self.coordinator.cas_remove_job(
+                        plan.job.id,
+                        plan.expected_revision,
+                    )
                 else:
                     plan.job._modify(next_run_time=plan.next_run_time)
-                    jobstore.update_job(plan.job)
+                    self.coordinator.cas_update_job(
+                        plan.job,
+                        plan.expected_revision,
+                    )
         for event in events:
             self.scheduler._dispatch_event(event)
 
@@ -663,8 +760,21 @@ def _patched_add_job(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
     original = _PATCH_STATE.original_add_job
     if original is None:
         raise RuntimeError("APScheduler integration patch is not initialized")
-    job = original(self, *args, **kwargs)
     adapter = get_adapter(self)
+    explicit_id = kwargs.get("id")
+    if explicit_id is None and len(args) > 4:
+        explicit_id = args[4]
+    if (
+        adapter is not None
+        and is_vercel_runtime()
+        and not is_discovery_runtime()
+        and not is_queue_serving_runtime()
+        and adapter._lifecycle_called
+    ):
+        with adapter.runtime_mutation(explicit_id=explicit_id is not None):
+            job = original(self, *args, **kwargs)
+    else:
+        job = original(self, *args, **kwargs)
     if adapter is not None:
         adapter.capture_job_definition(job, args, dict(kwargs))
     return job
@@ -677,16 +787,100 @@ def _patched_real_add_job(
     replace_existing: bool,
 ) -> Any:
     adapter = get_adapter(self)
-    if adapter is not None:
-        adapter.materialize_pending_job(
+    if adapter is not None and is_vercel_runtime():
+        should_write = adapter.materialize_pending_job(
             job,
             jobstore_alias,
             replace_existing,
         )
+        if not should_write:
+            return None
     original = _PATCH_STATE.original_real_add_job
     if original is None:
         raise RuntimeError("APScheduler integration patch is not initialized")
     return original(self, job, jobstore_alias, replace_existing)
+
+
+def _patched_modify_job(
+    self: BaseScheduler,
+    job_id: str,
+    jobstore: str | None = None,
+    **changes: Any,
+) -> Any:
+    original = _PATCH_STATE.original_modify_job
+    if original is None:
+        raise RuntimeError("APScheduler integration patch is not initialized")
+    adapter = get_adapter(self)
+    if (
+        adapter is None
+        or not is_vercel_runtime()
+        or is_discovery_runtime()
+        or is_queue_serving_runtime()
+    ):
+        return original(self, job_id, jobstore, **changes)
+    with adapter.runtime_mutation():
+        return original(self, job_id, jobstore, **changes)
+
+
+def _patched_remove_job(
+    self: BaseScheduler,
+    job_id: str,
+    jobstore: str | None = None,
+) -> None:
+    original = _PATCH_STATE.original_remove_job
+    if original is None:
+        raise RuntimeError("APScheduler integration patch is not initialized")
+    adapter = get_adapter(self)
+    if (
+        adapter is None
+        or not is_vercel_runtime()
+        or is_discovery_runtime()
+        or is_queue_serving_runtime()
+    ):
+        original(self, job_id, jobstore)
+        return
+    with adapter.runtime_mutation():
+        original(self, job_id, jobstore)
+
+
+def _patched_remove_all_jobs(
+    self: BaseScheduler,
+    jobstore: str | None = None,
+) -> None:
+    original = _PATCH_STATE.original_remove_all_jobs
+    if original is None:
+        raise RuntimeError("APScheduler integration patch is not initialized")
+    adapter = get_adapter(self)
+    if (
+        adapter is None
+        or not is_vercel_runtime()
+        or is_discovery_runtime()
+        or is_queue_serving_runtime()
+    ):
+        original(self, jobstore)
+        return
+    with adapter.runtime_mutation():
+        original(self, jobstore)
+
+
+def _patched_resume_job(
+    self: BaseScheduler,
+    job_id: str,
+    jobstore: str | None = None,
+) -> Any:
+    original = _PATCH_STATE.original_resume_job
+    if original is None:
+        raise RuntimeError("APScheduler integration patch is not initialized")
+    adapter = get_adapter(self)
+    if (
+        adapter is None
+        or not is_vercel_runtime()
+        or is_discovery_runtime()
+        or is_queue_serving_runtime()
+    ):
+        return original(self, job_id, jobstore)
+    adapter.prepare_runtime_mutation()
+    return original(self, job_id, jobstore)
 
 
 def _patched_start(self: BaseScheduler, paused: bool = False) -> None:
@@ -694,9 +888,24 @@ def _patched_start(self: BaseScheduler, paused: bool = False) -> None:
     if adapter is None or not is_vercel_runtime():
         _original_start_for_instance(self)(self, paused=paused)
         return
-    if is_discovery_runtime() or is_queue_serving_runtime():
+    if is_discovery_runtime():
+        return
+    if is_queue_serving_runtime():
+        adapter.warn_ignored_queue_lifecycle("start")
         return
     adapter.start(paused=paused)
+
+
+def _patched_base_start(self: BaseScheduler, paused: bool = False) -> None:
+    adapter = get_adapter(self)
+    if adapter is None or not is_vercel_runtime():
+        original = cast(
+            "Callable[..., None]",
+            _PATCH_STATE.original_base_start,
+        )
+        original(self, paused=paused)
+        return
+    _patched_start(self, paused=paused)
 
 
 def _patched_pause(self: BaseScheduler) -> None:
@@ -705,7 +914,10 @@ def _patched_pause(self: BaseScheduler) -> None:
         original = cast("Callable[[BaseScheduler], None]", _PATCH_STATE.original_pause)
         original(self)
         return
-    if is_discovery_runtime() or is_queue_serving_runtime():
+    if is_discovery_runtime():
+        return
+    if is_queue_serving_runtime():
+        adapter.warn_ignored_queue_lifecycle("pause")
         return
     adapter.pause()
 
@@ -716,7 +928,10 @@ def _patched_resume(self: BaseScheduler) -> None:
         original = cast("Callable[[BaseScheduler], None]", _PATCH_STATE.original_resume)
         original(self)
         return
-    if is_discovery_runtime() or is_queue_serving_runtime():
+    if is_discovery_runtime():
+        return
+    if is_queue_serving_runtime():
+        adapter.warn_ignored_queue_lifecycle("resume")
         return
     adapter.resume()
 
@@ -724,13 +939,24 @@ def _patched_resume(self: BaseScheduler) -> None:
 def _original_start_for_instance(
     instance: BaseScheduler,
 ) -> Callable[..., Any]:
-    class_name = type(instance).__name__
-    module_name = type(instance).__module__
-    if class_name == "BlockingScheduler" and _PATCH_STATE.original_blocking_start is not None:
-        return _PATCH_STATE.original_blocking_start
-    if class_name == "BackgroundScheduler" and _PATCH_STATE.original_background_start is not None:
+    scheduler_types = {
+        (scheduler_type.__module__, scheduler_type.__name__)
+        for scheduler_type in type(instance).__mro__
+    }
+    if (
+        "apscheduler.schedulers.background",
+        "BackgroundScheduler",
+    ) in scheduler_types and _PATCH_STATE.original_background_start is not None:
         return _PATCH_STATE.original_background_start
-    if module_name.endswith(".asyncio") and _PATCH_STATE.original_asyncio_start is not None:
+    if (
+        "apscheduler.schedulers.blocking",
+        "BlockingScheduler",
+    ) in scheduler_types and _PATCH_STATE.original_blocking_start is not None:
+        return _PATCH_STATE.original_blocking_start
+    if (
+        "apscheduler.schedulers.asyncio",
+        "AsyncIOScheduler",
+    ) in scheduler_types and _PATCH_STATE.original_asyncio_start is not None:
         return _PATCH_STATE.original_asyncio_start
     return cast("Callable[..., Any]", _PATCH_STATE.original_base_start)
 
@@ -768,6 +994,10 @@ def install_vercel_apscheduler_integration(
     _PATCH_STATE.original_init = BaseScheduler.__init__
     _PATCH_STATE.original_add_job = BaseScheduler.add_job
     _PATCH_STATE.original_real_add_job = BaseScheduler._real_add_job
+    _PATCH_STATE.original_modify_job = BaseScheduler.modify_job
+    _PATCH_STATE.original_remove_job = BaseScheduler.remove_job
+    _PATCH_STATE.original_remove_all_jobs = BaseScheduler.remove_all_jobs
+    _PATCH_STATE.original_resume_job = BaseScheduler.resume_job
     _PATCH_STATE.original_base_start = BaseScheduler.start
     _PATCH_STATE.original_pause = BaseScheduler.pause
     _PATCH_STATE.original_resume = BaseScheduler.resume
@@ -775,7 +1005,11 @@ def install_vercel_apscheduler_integration(
     BaseScheduler.__init__ = _patched_init  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
     BaseScheduler.add_job = _patched_add_job  # type: ignore[method-assign]
     BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
-    BaseScheduler.start = _patched_start  # type: ignore[method-assign]
+    BaseScheduler.modify_job = _patched_modify_job  # type: ignore[method-assign]
+    BaseScheduler.remove_job = _patched_remove_job  # type: ignore[method-assign]
+    BaseScheduler.remove_all_jobs = _patched_remove_all_jobs  # type: ignore[method-assign]
+    BaseScheduler.resume_job = _patched_resume_job  # type: ignore[method-assign]
+    BaseScheduler.start = _patched_base_start  # type: ignore[method-assign]
     BaseScheduler.pause = _patched_pause  # type: ignore[method-assign]
     BaseScheduler.resume = _patched_resume  # type: ignore[method-assign]
     _patch_start_methods()

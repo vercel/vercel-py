@@ -91,6 +91,8 @@ current_logical_time
 current_status     pending | published | processing
 active_owner
 active_lease_until
+dirty_logical_time
+job_revision
 ```
 
 Redis Lua scripts update these fields atomically. Driver state has no TTL.
@@ -122,9 +124,12 @@ key. Queue either accepts it or reports the existing key; both outcomes allow
 Redis to advance.
 
 The start delivery acquires the driver's single active-owner lease. It starts
-APScheduler's internals without starting a background scheduler thread,
-materializes the code-declared jobs into Redis, and atomically reserves
-sequence 1 before publishing it.
+APScheduler's internals without starting a background scheduler thread and
+materializes code-declared jobs into Redis using insert-if-absent semantics.
+This keeps a cold import from overwriting a job changed through a runtime API.
+If at least one job is scheduled, start atomically reserves sequence 1 before
+publishing it. If the store has no scheduled jobs, the running driver becomes
+dormant with no wake message.
 
 ## One wake
 
@@ -168,10 +173,57 @@ the exact same payload and key. A handler never acknowledges a successfully
 processed nonterminal wake without either publishing or making that pending
 successor repairable.
 
-Far-future jobs use deterministic bridge wakes, at most 23 hours apart by
-default. A 60-second durable-store poll cap lets the scheduler notice jobs
-inserted into Redis by another process even when its previously known next job
-was much later.
+The successor is the exact next due job. There are no periodic or idle
+heartbeat wakes. Far-future jobs use deterministic bridge wakes, at most 23
+hours apart by default, because Queue delay is bounded. Once no job remains,
+the chain goes dormant.
+
+## Runtime job mutations
+
+Runtime calls through APScheduler's public APIs are event-driven:
+
+```python
+scheduler.start()  # idempotent activation boundary in this Function instance
+scheduler.add_job(...)
+scheduler.modify_job(...)
+scheduler.reschedule_job(...)
+scheduler.pause_job(...)
+scheduler.resume_job(...)
+scheduler.remove_job(...)
+```
+
+The integration coordinates the Redis job write and wake rearm in one Lua
+transaction:
+
+- while paused, only the job is changed;
+- while running with no active owner, an earlier or missing current wake is
+  replaced with one new monotonic sequence;
+- while a start or wake owns the driver, the mutation records its earliest
+  candidate time and the owner folds that value into its one successor.
+
+Moving or removing a job may leave an already published wake in Queue. Queue
+messages cannot be canceled, so that now-empty wake is allowed to arrive; it
+recomputes the next exact due time and cannot fork the chain.
+
+Each persisted job has a monotonic revision. After executing a job, the wake
+updates or removes it only if the revision it read is still current. A
+concurrent runtime mutation therefore wins instead of being overwritten or
+resurrected by a late handler.
+
+Every cold Function instance that performs a runtime mutation must first call
+the idempotent `scheduler.start()`. Before that boundary, `add_job()` calls are
+treated as module-level declarations. Raw writes to Redis job-store keys are
+unsupported because they bypass atomic wake rearming and revision checks.
+
+The no-heartbeat design has one deliberate liveness contract: `start()` and
+mutation calls are durable after they return successfully. If a process dies
+after committing Redis but before publishing Queue, an idempotent `start()`
+republishes the pending token. The caller must determine whether an interrupted
+job mutation committed before repeating that mutation. A completely dormant
+scheduler does not wake periodically to repair an otherwise unobserved
+ambiguous failure. A delayed repair can pass a job's default misfire window;
+jobs whose occurrence must remain eligible should set an appropriate
+`misfire_grace_time` or `None`.
 
 ## Pausing and resuming
 
@@ -209,6 +261,8 @@ is skipped, rather than replayed as a burst.
 | `resume()` while an old wake runs | new start retries until old owner exits |
 | crash before Queue send | pending Redis token is republished |
 | old message after resume | generation check makes it stale |
+| concurrent runtime add/modify | one token is rearmed; no second chain |
+| handler finishes after a job mutation | revision check preserves the mutation |
 
 These properties prevent parallel logical chains. They do not provide
 exactly-once job side effects. If a process dies after an external side effect
@@ -217,9 +271,9 @@ execute it again. Jobs must be idempotent.
 
 ## Redis and execution requirements
 
-v1 supports only APScheduler `RedisJobStore`, including
-`VercelRedisJobStore`. Every configured store must be Redis-backed. The default
-store is also the lifecycle coordinator.
+v1 supports exactly one job store named `default`. It must be APScheduler
+`RedisJobStore`, including `VercelRedisJobStore`, and it is also the lifecycle
+coordinator.
 
 `VercelRedisJobStore()` reads `REDIS_URL`; an explicit URL can be passed:
 
@@ -242,9 +296,10 @@ executors are rejected in v1. A scheduled function can enqueue longer work to
 another queue.
 
 Code-declared jobs require explicit stable IDs. If a job with that ID is
-already persisted, the declaration must permit replacement. The
-`scheduled_job()` decorator does this automatically; `add_job()` callers
-should pass `replace_existing=True`.
+already persisted, the declaration must permit replacement, but materializing
+the declaration does not overwrite the persisted runtime value. The
+`scheduled_job()` decorator enables replacement automatically; declaration
+calls to `add_job()` should pass `replace_existing=True`.
 
 ## Deployment behavior
 

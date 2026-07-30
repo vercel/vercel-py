@@ -20,6 +20,7 @@ try:
         RedisJobStore,
     )
     from apscheduler.schedulers.base import (  # type: ignore[import-untyped]
+        STATE_PAUSED,
         STATE_RUNNING,
         STATE_STOPPED,
         BaseScheduler,
@@ -36,6 +37,7 @@ __all__ = [
     "EVENT_JOB_MAX_INSTANCES",
     "EVENT_JOB_MISSED",
     "EVENT_JOB_SUBMITTED",
+    "STATE_PAUSED",
     "STATE_RUNNING",
     "STATE_STOPPED",
     "BaseExecutor",

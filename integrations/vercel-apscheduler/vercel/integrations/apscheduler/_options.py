@@ -8,14 +8,12 @@ from os import environ
 
 DEFAULT_MAX_DELAY_SECONDS = 23 * 60 * 60
 DEFAULT_RETRY_AFTER_SECONDS = 30
-DEFAULT_DURABLE_POLL_INTERVAL_SECONDS = 60
 DEFAULT_SUBSCRIBER_ID = "default"
 DISCOVERY_ENV = "VERCEL_APSCHEDULER_DISCOVERY"
 SUBSCRIBER_ID_ENV = "VERCEL_PYTHON_SUBSCRIBER_ID"
 _SUBSCRIBER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 __all__ = [
-    "DEFAULT_DURABLE_POLL_INTERVAL_SECONDS",
     "DEFAULT_MAX_DELAY_SECONDS",
     "DEFAULT_RETRY_AFTER_SECONDS",
     "VercelAPSchedulerOptions",
@@ -37,9 +35,11 @@ def _int_env(name: str, default: int) -> int:
         return default
     try:
         parsed = int(value)
-    except ValueError:
-        return default
-    return parsed if parsed > 0 else default
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
 
 
 def is_vercel_runtime() -> bool:
@@ -91,16 +91,19 @@ class VercelAPSchedulerOptions:
     max_delay_seconds: int = DEFAULT_MAX_DELAY_SECONDS
     retention_seconds: int | None = DEFAULT_MAX_DELAY_SECONDS + 3600
     retry_after_seconds: int = DEFAULT_RETRY_AFTER_SECONDS
-    durable_poll_interval_seconds: int = DEFAULT_DURABLE_POLL_INTERVAL_SECONDS
-    max_attempts: int | None = None
     max_concurrency: int = 1
 
     @classmethod
     def from_env(cls) -> VercelAPSchedulerOptions:
-        max_attempts_raw = environ.get("VERCEL_APSCHEDULER_MAX_ATTEMPTS")
-        max_attempts = int(max_attempts_raw) if max_attempts_raw else None
         retention_raw = environ.get("VERCEL_APSCHEDULER_RETENTION_SECONDS")
-        retention = int(retention_raw) if retention_raw else DEFAULT_MAX_DELAY_SECONDS + 3600
+        try:
+            retention = int(retention_raw) if retention_raw else DEFAULT_MAX_DELAY_SECONDS + 3600
+        except ValueError as exc:
+            raise ValueError(
+                "VERCEL_APSCHEDULER_RETENTION_SECONDS must be a positive integer"
+            ) from exc
+        if retention <= 0:
+            raise ValueError("VERCEL_APSCHEDULER_RETENTION_SECONDS must be a positive integer")
         return cls(
             max_delay_seconds=_int_env(
                 "VERCEL_APSCHEDULER_MAX_DELAY_SECONDS",
@@ -111,11 +114,6 @@ class VercelAPSchedulerOptions:
                 "VERCEL_APSCHEDULER_RETRY_AFTER_SECONDS",
                 DEFAULT_RETRY_AFTER_SECONDS,
             ),
-            durable_poll_interval_seconds=_int_env(
-                "VERCEL_APSCHEDULER_DURABLE_POLL_INTERVAL_SECONDS",
-                DEFAULT_DURABLE_POLL_INTERVAL_SECONDS,
-            ),
-            max_attempts=max_attempts,
             max_concurrency=_int_env("VERCEL_APSCHEDULER_MAX_CONCURRENCY", 1),
         )
 

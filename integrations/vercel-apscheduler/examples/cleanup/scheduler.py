@@ -29,9 +29,9 @@ def cleanup_expired_sessions() -> None:
     "interval",
     seconds=30,
     start_date=datetime(2026, 1, 1, tzinfo=UTC),
-    id="heartbeat",
+    id="frequent-cleanup",
 )
-def heartbeat() -> None:
+def frequent_cleanup() -> None:
     print("running every 30 seconds")
 
 

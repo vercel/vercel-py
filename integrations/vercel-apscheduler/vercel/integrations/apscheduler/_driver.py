@@ -18,12 +18,14 @@ DRIVER_RENEW_INTERVAL_SECONDS = 60
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 ClaimState = Literal["claimed", "busy", "stale"]
+FinishState = Literal["advanced", "fenced", "lost"]
 LifecycleState = Literal["running", "paused"]
 
 __all__ = [
     "APSchedulerConfigurationError",
     "ClaimResult",
     "DriverSnapshot",
+    "FinishResult",
     "RedisDriver",
     "StartDecision",
     "WakeToken",
@@ -78,6 +80,14 @@ class ClaimResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FinishResult:
+    """Atomic outcome of completing a claimed start or wake."""
+
+    state: FinishState
+    wake: WakeToken | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DriverSnapshot:
     """Current durable driver state."""
 
@@ -108,10 +118,11 @@ if state ~= "running" then
     "HDEL",
     KEYS[1],
     "activation_time",
-    "current_sequence",
     "current_logical_time",
-    "current_status"
+    "current_status",
+    "dirty_logical_time"
   )
+  redis.call("HSET", KEYS[1], "current_sequence", "0")
 end
 
 return {
@@ -139,7 +150,7 @@ redis.call(
 return changed
 """
 
-_MARK_SEED_PUBLISHED_SCRIPT = """
+_MARK_START_PUBLISHED_SCRIPT = """
 -- vercel-apscheduler-v1:mark-start-published
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return 0
@@ -159,7 +170,7 @@ end
 return 1
 """
 
-_CLAIM_SEED_SCRIPT = """
+_CLAIM_START_SCRIPT = """
 -- vercel-apscheduler-v1:claim-start
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return {"stale", ""}
@@ -195,11 +206,17 @@ redis.call(
 return {"claimed", activation_time}
 """
 
-_FINISH_SEED_SCRIPT = """
+_FINISH_START_SCRIPT = """
 -- vercel-apscheduler-v1:finish-start
 local owner = redis.call("HGET", KEYS[1], "active_owner")
 if owner ~= ARGV[2] then
-  return 0
+  if redis.call("HGET", KEYS[1], "state") == "running"
+    and tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") == tonumber(ARGV[1])
+    and redis.call("HGET", KEYS[1], "start_status") == "processing"
+  then
+    return {"lost", "", ""}
+  end
+  return {"fenced", "", ""}
 end
 
 if redis.call("HGET", KEYS[1], "state") ~= "running"
@@ -213,27 +230,42 @@ then
     "active_generation",
     "active_lease_until"
   )
-  return 0
+  return {"fenced", "", ""}
 end
 
+local logical_time = ARGV[3]
+local dirty_time = redis.call("HGET", KEYS[1], "dirty_logical_time")
+if dirty_time and (logical_time == "" or dirty_time < logical_time) then
+  logical_time = dirty_time
+end
 redis.call(
   "HSET",
   KEYS[1],
   "start_status", "active",
-  "current_sequence", "1",
-  "current_logical_time", ARGV[3],
-  "current_status", "pending",
   "updated_at", ARGV[4]
 )
+if logical_time ~= "" then
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "current_sequence", "1",
+    "current_logical_time", logical_time,
+    "current_status", "pending"
+  )
+else
+  redis.call("HSET", KEYS[1], "current_sequence", "0")
+  redis.call("HDEL", KEYS[1], "current_logical_time", "current_status")
+end
 redis.call(
   "HDEL",
   KEYS[1],
   "active_owner",
-  "active_kind",
-  "active_generation",
-  "active_lease_until"
-)
-return 1
+    "active_kind",
+    "active_generation",
+    "active_lease_until",
+    "dirty_logical_time"
+  )
+return {"advanced", logical_time ~= "" and "1" or "", logical_time}
 """
 
 _MARK_WAKE_PUBLISHED_SCRIPT = """
@@ -296,12 +328,20 @@ return "claimed"
 _FINISH_WAKE_SCRIPT = """
 -- vercel-apscheduler-v1:finish-wake
 if redis.call("HGET", KEYS[1], "active_owner") ~= ARGV[3] then
-  return 0
+  if redis.call("HGET", KEYS[1], "state") == "running"
+    and tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") == tonumber(ARGV[1])
+    and tonumber(redis.call("HGET", KEYS[1], "current_sequence") or "-1") == tonumber(ARGV[2])
+    and redis.call("HGET", KEYS[1], "current_logical_time") == ARGV[4]
+  then
+    return {"lost", "", ""}
+  end
+  return {"fenced", "", ""}
 end
 
 if redis.call("HGET", KEYS[1], "state") ~= "running"
   or tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") ~= tonumber(ARGV[1])
   or tonumber(redis.call("HGET", KEYS[1], "current_sequence") or "-1") ~= tonumber(ARGV[2])
+  or redis.call("HGET", KEYS[1], "current_logical_time") ~= ARGV[4]
 then
   redis.call(
     "HDEL",
@@ -312,28 +352,49 @@ then
     "active_sequence",
     "active_lease_until"
   )
-  return 0
+  return {"fenced", "", ""}
 end
 
-local next_sequence = tonumber(ARGV[2]) + 1
+local logical_time = ARGV[5]
+local dirty_time = redis.call("HGET", KEYS[1], "dirty_logical_time")
+if dirty_time and (logical_time == "" or dirty_time < logical_time) then
+  logical_time = dirty_time
+end
+local next_sequence = tonumber(ARGV[2])
+if logical_time ~= "" then
+  next_sequence = next_sequence + 1
+end
 redis.call(
   "HSET",
   KEYS[1],
   "current_sequence", tostring(next_sequence),
-  "current_logical_time", ARGV[4],
-  "current_status", "pending",
-  "updated_at", ARGV[5]
+  "updated_at", ARGV[6]
 )
+if logical_time ~= "" then
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "current_logical_time", logical_time,
+    "current_status", "pending"
+  )
+else
+  redis.call("HDEL", KEYS[1], "current_logical_time", "current_status")
+end
 redis.call(
   "HDEL",
   KEYS[1],
   "active_owner",
   "active_kind",
-  "active_generation",
-  "active_sequence",
-  "active_lease_until"
-)
-return next_sequence
+    "active_generation",
+    "active_sequence",
+    "active_lease_until",
+    "dirty_logical_time"
+  )
+return {
+  "advanced",
+  logical_time ~= "" and tostring(next_sequence) or "",
+  logical_time
+}
 """
 
 _RENEW_SCRIPT = """
@@ -420,7 +481,7 @@ class RedisDriver:
 
     def mark_start_published(self, generation: int, now: datetime) -> None:
         self._eval(
-            _MARK_SEED_PUBLISHED_SCRIPT,
+            _MARK_START_PUBLISHED_SCRIPT,
             str(generation),
             as_utc(now, name="now").isoformat(),
         )
@@ -434,7 +495,7 @@ class RedisDriver:
         now_utc = as_utc(now, name="now")
         lease_until = now_utc + timedelta(seconds=DRIVER_LEASE_SECONDS)
         result = self._eval(
-            _CLAIM_SEED_SCRIPT,
+            _CLAIM_START_SCRIPT,
             str(generation),
             owner,
             str(now_utc.timestamp()),
@@ -461,23 +522,24 @@ class RedisDriver:
         self,
         generation: int,
         owner: str,
-        next_logical_time: datetime,
+        next_logical_time: datetime | None,
         now: datetime,
-    ) -> WakeToken | None:
-        logical_time = as_utc(next_logical_time, name="next_logical_time")
+    ) -> FinishResult:
+        logical_time = (
+            as_utc(next_logical_time, name="next_logical_time")
+            if next_logical_time is not None
+            else None
+        )
         result = self._eval(
-            _FINISH_SEED_SCRIPT,
+            _FINISH_START_SCRIPT,
             str(generation),
             owner,
-            logical_time.isoformat(),
+            logical_time.isoformat() if logical_time is not None else "",
             as_utc(now, name="now").isoformat(),
         )
-        if not bool(int(result)):
-            return None
-        return WakeToken(
+        return _finish_result(
+            result,
             generation=generation,
-            sequence=1,
-            logical_time=logical_time,
         )
 
     def mark_wake_published(
@@ -521,26 +583,26 @@ class RedisDriver:
         self,
         token: WakeToken,
         owner: str,
-        next_logical_time: datetime,
+        next_logical_time: datetime | None,
         now: datetime,
-    ) -> WakeToken | None:
-        logical_time = as_utc(next_logical_time, name="next_logical_time")
-        result = int(
-            self._eval(
-                _FINISH_WAKE_SCRIPT,
-                str(token.generation),
-                str(token.sequence),
-                owner,
-                logical_time.isoformat(),
-                as_utc(now, name="now").isoformat(),
-            )
+    ) -> FinishResult:
+        logical_time = (
+            as_utc(next_logical_time, name="next_logical_time")
+            if next_logical_time is not None
+            else None
         )
-        if result < 1:
-            return None
-        return WakeToken(
+        result = self._eval(
+            _FINISH_WAKE_SCRIPT,
+            str(token.generation),
+            str(token.sequence),
+            owner,
+            token.logical_time.isoformat(),
+            logical_time.isoformat() if logical_time is not None else "",
+            as_utc(now, name="now").isoformat(),
+        )
+        return _finish_result(
+            result,
             generation=token.generation,
-            sequence=result,
-            logical_time=logical_time,
         )
 
     def snapshot(self) -> DriverSnapshot:
@@ -633,6 +695,29 @@ def _text(value: Any) -> str:
 def _optional_text(value: Any) -> str | None:
     resolved = _text(value)
     return resolved or None
+
+
+def _finish_result(result: Any, *, generation: int) -> FinishResult:
+    if not isinstance(result, (list, tuple)) or len(result) != 3:
+        raise RuntimeError("Redis returned an invalid APScheduler finish result")
+    state = _text(result[0])
+    if state not in {"advanced", "fenced", "lost"}:
+        raise RuntimeError("Redis returned an unknown APScheduler finish result")
+    sequence_raw = _text(result[1])
+    logical_time_raw = _text(result[2])
+    wake = (
+        WakeToken(
+            generation=generation,
+            sequence=int(sequence_raw),
+            logical_time=datetime.fromisoformat(logical_time_raw),
+        )
+        if sequence_raw and logical_time_raw
+        else None
+    )
+    return FinishResult(
+        state=cast("FinishState", state),
+        wake=wake,
+    )
 
 
 def _wake_from_values(
