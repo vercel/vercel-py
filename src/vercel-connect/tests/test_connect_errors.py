@@ -5,6 +5,7 @@ in it, and the installation codes are never tested. The taxonomy is the package'
 main public contract, so every code is parametrized here.
 """
 
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -361,3 +362,81 @@ async def test_oauth_shaped_error_bodies_map_to_the_taxonomy(
     assert type(exc_info.value) is expected
     assert exc_info.value.code == body["error"]
     assert body["error_description"] in str(exc_info.value)
+
+
+@respx.mock
+async def test_prose_error_string_is_a_message_not_a_code(mock_env_clear: None) -> None:
+    """Some services put a sentence in `error`. A code is a machine token."""
+    respx.post(TOKEN_URL).mock(
+        return_value=error_response(403, {"error": "Something went wrong, please try again later"})
+    )
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    error = exc_info.value
+    assert error.code is None
+    assert type(error) is ConnectApiError
+    assert str(error) == "Something went wrong, please try again later (status=403)"
+
+
+@respx.mock
+async def test_single_word_message_is_still_a_message(mock_env_clear: None) -> None:
+    """A short message can look code-shaped; only `error` is ambiguous."""
+    respx.post(TOKEN_URL).mock(
+        return_value=error_response(400, {"error": {"code": "no_token", "message": "gone"}})
+    )
+
+    async with session(service_options=session_options()):
+        with pytest.raises(NoValidTokenError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    assert str(exc_info.value) == "gone (code=no_token, status=400)"
+
+
+@respx.mock
+async def test_code_only_body_renders_the_reason_phrase(mock_env_clear: None) -> None:
+    """No message anywhere: use the HTTP reason, not the extractor's preamble."""
+    respx.post(TOKEN_URL).mock(return_value=error_response(404, {"error": "not_found"}))
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    rendered = str(exc_info.value)
+    assert rendered == "Not Found (code=not_found, status=404)"
+    assert "HTTP 404" not in rendered
+
+
+def test_validation_errors_are_catchable_as_connect_errors() -> None:
+    """Examples catch ConnectError; argument validation must not escape that."""
+    from vercel.connect import ConnectServiceOptions, ConnectValidationError
+
+    for kwargs in (
+        {"token_cache_size": 0},
+        {"validity_buffer": timedelta(seconds=-1)},
+        {"timeout": timedelta(0)},
+    ):
+        with pytest.raises(ConnectValidationError) as exc_info:
+            ConnectServiceOptions(**kwargs)  # type: ignore[arg-type]
+        error = exc_info.value
+        assert isinstance(error, ConnectError)
+        # Still a ValueError, so the obvious `except ValueError` keeps working.
+        assert isinstance(error, ValueError)
+
+
+@respx.mock
+async def test_per_call_validation_error_is_a_connect_error(mock_env_clear: None) -> None:
+    from vercel.connect import ConnectOptions, ConnectValidationError
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectValidationError) as exc_info:
+            await get_token(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                options=ConnectOptions(validity_buffer=-1),
+            )
+
+    assert isinstance(exc_info.value, ConnectError)
+    assert isinstance(exc_info.value, ValueError)

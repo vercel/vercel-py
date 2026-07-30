@@ -1,6 +1,7 @@
 """Internal Connect API client."""
 
 import platform
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
@@ -28,9 +29,6 @@ from vercel.connect._internal.errors import (
 )
 from vercel.connect._internal.models import (
     ConnectAuthorizationDetail,
-    ConnectCustomAuthorizationDetail,
-    ConnectGitHubAppInstallationAuthorizationDetail,
-    ConnectJwtBearerTokenSubject,
     ConnectTokenSubject,
     JSONObject,
 )
@@ -40,6 +38,10 @@ from vercel.connect._internal.state import (
     ConnectorMetadataState,
     ConnectorRefState,
     ConnectTokenState,
+)
+from vercel.connect._internal.wire import (
+    serialize_authorization_detail as _serialize_authorization_detail,
+    serialize_subject as _serialize_subject,
 )
 
 try:
@@ -56,6 +58,10 @@ USER_AGENT = (
 )
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
+
+# Server error codes are machine tokens such as `user_authorization_required`.
+# A prose sentence in the same field is a message, not a code.
+_ERROR_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 
 _ERROR_CLASSES: Mapping[str, type[ConnectApiError]] = {
     "no_token": NoValidTokenError,
@@ -179,48 +185,18 @@ def _encode_connector(connector: str) -> str:
     return quote(connector, safe="")
 
 
-def _serialize_subject(subject: ConnectTokenSubject) -> JSONObject:
-    body: dict[str, Any] = {"type": subject.type}
-    match subject:
-        case ConnectJwtBearerTokenSubject():
-            body["sub"] = subject.sub
-            if subject.iss is not None:
-                body["iss"] = subject.iss
-            if subject.aud is not None:
-                body["aud"] = subject.aud
-            if subject.additional_claims is not None:
-                body["additionalClaims"] = dict(subject.additional_claims)
-        case _:
-            for name, wire_name in (("id", "id"), ("issuer", "issuer"), ("token", "token")):
-                value = getattr(subject, name, None)
-                if value is not None:
-                    body[wire_name] = value
-    return body
-
-
-def _serialize_authorization_detail(detail: ConnectAuthorizationDetail) -> JSONObject:
-    match detail:
-        case ConnectGitHubAppInstallationAuthorizationDetail():
-            body: dict[str, Any] = {"type": detail.type}
-            if detail.org is not None:
-                body["org"] = detail.org
-            if detail.permissions is not None:
-                body["permissions"] = list(detail.permissions)
-            if detail.repositories is not None:
-                body["repositories"] = list(detail.repositories)
-            return body
-        case ConnectCustomAuthorizationDetail():
-            # `type` is written last so a stray "type" key in `details` cannot
-            # silently change which kind of authorization is being requested.
-            return {**dict(detail.details), "type": detail.type}
-
-
 def _raise_api_error(response: Response) -> None:
     # `extract_structured_error` returns a message that already embeds the status
     # and code. `ConnectApiError.__str__` renders those itself, so only the bare
     # provider message is passed through and the shared text is used purely as a
     # fallback for bodies the envelope parser cannot read.
     fallback, data = extract_structured_error(response)
+    if isinstance(data, Mapping):
+        # The body parsed, so the shared extractor's "HTTP <status>" preamble adds
+        # nothing that `__str__` does not already render.
+        fallback = response.reason_phrase or fallback
+    else:
+        fallback = fallback.removeprefix(f"HTTP {response.status_code}: ")
     code = _error_code(data)
     error_class = _ERROR_CLASSES.get(code or "", ConnectApiError)
     raise error_class(
@@ -253,9 +229,18 @@ def _error_message(data: object) -> str | None:
     for candidate in candidates:
         if candidate is None:
             continue
+        # These fields are unambiguously prose, even when the text is a single
+        # word that happens to look code-shaped.
         for name in ("message", "msg", "error_description"):
             message = candidate.get(name)
             if isinstance(message, str) and message:
+                return message
+    # `error` is ambiguous: a code-shaped value is read as the code, and anything
+    # else in that field is prose meant for a human.
+    if isinstance(data, Mapping):
+        for name in ("error", "err"):
+            message = data.get(name)
+            if isinstance(message, str) and message and not _ERROR_CODE_PATTERN.match(message):
                 return message
     return None
 
@@ -268,11 +253,11 @@ def _error_code(data: object) -> str | None:
             return code
     # OAuth-shaped bodies put the code directly in `error` as a string, so the
     # taxonomy has to read that too or every such failure degrades to the base
-    # class.
+    # class. Only accept code-shaped values: some services put a sentence there.
     if isinstance(data, Mapping):
         for name in ("error", "err", "code"):
             code = data.get(name)
-            if isinstance(code, str) and code:
+            if isinstance(code, str) and _ERROR_CODE_PATTERN.match(code):
                 return code
     return None
 

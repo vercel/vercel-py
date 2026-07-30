@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from vercel.oidc import verify_vercel_oidc_token
 from vercel.oidc.aio import verify_vercel_oidc_token as verify_vercel_oidc_token_async
 from vercel.oidc.verify import (
+    FETCH_WAIT_TIMEOUT,
     VercelOidcVerificationError,
     clear_jwks_cache,
     extract_bearer_token,
@@ -557,3 +558,114 @@ async def test_concurrent_rotation_waiters_do_not_fail(
     assert all(r["project_id"] == "prj_123" for r in results)
     # One refetch shared by every waiter.
     assert route.call_count == 2
+
+
+def test_async_lock_is_not_reused_across_backends(signing_key: rsa.RSAPrivateKey) -> None:
+    """An anyio lock binds to the backend of first use.
+
+    A lock created under asyncio cannot be awaited under trio, so the cache is
+    keyed by backend. Without that, a process using both raises
+    `RuntimeError: no running event loop`.
+    """
+    import asyncio
+
+    import trio
+
+    clear_jwks_cache()
+
+    @respx.mock
+    async def verify_current(kid: str) -> dict[str, Any]:
+        respx.get(JWKS_URL).mock(
+            return_value=httpx.Response(200, json=jwks_for(signing_key, kid=kid))
+        )
+        return await verify_vercel_oidc_token_async(sign(signing_key, kid=kid), **EXPECTATIONS)
+
+    assert asyncio.run(verify_current("k-asyncio"))["project_id"] == "prj_123"
+    # Unknown kid, so this takes the lock path rather than the cache fast path.
+    assert trio.run(verify_current, "k-trio")["project_id"] == "prj_123"
+
+
+@respx.mock
+def test_cold_cache_outage_is_not_amplified(signing_key: rsa.RSAPrivateKey) -> None:
+    """With nothing cached, a failing endpoint must be hit once, not once per caller."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    clear_jwks_cache()
+    route = respx.get(JWKS_URL).mock(return_value=httpx.Response(503, text="unavailable"))
+    token = sign(signing_key)
+
+    def attempt(_: int) -> None:
+        with pytest.raises(VercelOidcVerificationError):
+            verify_vercel_oidc_token(token, **EXPECTATIONS)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(attempt, range(8)))
+
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_throttled_unknown_kid_fails_fast(signing_key: rsa.RSAPrivateKey) -> None:
+    """Waiting is only for a fetch actually in flight, so a throttled miss is quick."""
+    import time as time_module
+
+    clear_jwks_cache()
+    jwks_route(signing_key)
+    verify_vercel_oidc_token(sign(signing_key), **EXPECTATIONS)
+
+    # First forged kid triggers the one permitted refetch and sets the throttle.
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(sign(signing_key, kid="forged-1"), **EXPECTATIONS)
+
+    started = time_module.monotonic()
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(sign(signing_key, kid="forged-2"), **EXPECTATIONS)
+    elapsed = time_module.monotonic() - started
+
+    assert elapsed < FETCH_WAIT_TIMEOUT.total_seconds(), (
+        "a throttled miss must not wait for a fetch that is not running"
+    )
+
+
+@respx.mock
+def test_sync_waits_for_an_async_rotation_refresh(
+    signing_key: rsa.RSAPrivateKey,
+    other_signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """The two modes hold different locks, so they coordinate through the
+    in-progress marker rather than one rejecting a token the other is fetching."""
+    import asyncio
+    import threading
+
+    clear_jwks_cache()
+    route = jwks_route(signing_key, kid="k-old")
+    verify_vercel_oidc_token(sign(signing_key, kid="k-old"), **EXPECTATIONS)
+
+    fetch_started = threading.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        fetch_started.set()
+        await asyncio.sleep(0.1)
+        return httpx.Response(200, json=jwks_for(other_signing_key, kid="k-new"))
+
+    route.mock(side_effect=slow)
+    token = sign(other_signing_key, kid="k-new")
+    outcome: dict[str, object] = {}
+
+    def sync_side() -> None:
+        fetch_started.wait(2.0)
+        try:
+            outcome["claims"] = verify_vercel_oidc_token(token, **EXPECTATIONS)
+        except VercelOidcVerificationError as error:
+            outcome["error"] = str(error)
+
+    async def drive() -> None:
+        thread = threading.Thread(target=sync_side)
+        thread.start()
+        await verify_vercel_oidc_token_async(token, **EXPECTATIONS)
+        thread.join(5.0)
+
+    asyncio.run(drive())
+
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["claims"]  # type: ignore[truthy-bool]

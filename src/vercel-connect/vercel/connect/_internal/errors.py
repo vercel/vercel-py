@@ -97,8 +97,12 @@ class ConnectCredentialsError(ConnectError):
     """Raised when the deployment's Vercel OIDC token cannot be resolved."""
 
 
-class ConnectValidationError(ConnectError):
-    """Raised when caller-supplied arguments are rejected before any request."""
+class ConnectValidationError(ConnectError, ValueError):
+    """Raised when caller-supplied arguments are rejected before any request.
+
+    Also a `ValueError`, so both `except ConnectError` and the `except ValueError`
+    a caller would reach for on an invalid argument catch it.
+    """
 
 
 class ConnectWebhookVerificationError(ConnectError):

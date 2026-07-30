@@ -21,16 +21,25 @@ from vercel.connect._internal.models import (
     ConnectTokenSubject,
 )
 from vercel.connect._internal.state import ConnectTokenState
+from vercel.connect._internal.wire import (
+    serialize_authorization_detail,
+    serialize_subject,
+)
 
 
 class _PendingLoad:
-    """Bookkeeping for one key with loads in flight."""
+    """Bookkeeping for one key with loads in flight.
 
-    __slots__ = ("refs", "invalidated")
+    `epoch` is bumped by every invalidation of this key. A load carries the epoch
+    it started under, so an invalidation cancels the loads that were already
+    running without also cancelling loads that begin afterwards.
+    """
+
+    __slots__ = ("refs", "epoch")
 
     def __init__(self) -> None:
         self.refs = 0
-        self.invalidated = False
+        self.epoch = 0
 
 
 class TokenCacheKey:
@@ -104,11 +113,12 @@ def _digest(value: str) -> str:
 def _canonical_subject(subject: ConnectTokenSubject) -> Any:
     """Canonicalize a subject, replacing any credential with a digest.
 
-    A token-exchange subject carries a live bearer credential. It has to
-    participate in the key so two inbound tokens never share an entry, but it
-    must not be stored, so only its digest is kept.
+    Built from the wire form so the key cannot disagree with the request about
+    what the subject is. A token-exchange subject carries a live bearer
+    credential: it has to participate in the key so two inbound tokens never
+    share an entry, but it must not be stored, so only its digest is kept.
     """
-    canonical = _canonical(subject)
+    canonical = _canonical(serialize_subject(subject))
     if isinstance(canonical, dict) and "token" in canonical:
         token = canonical["token"]
         canonical = {name: value for name, value in canonical.items() if name != "token"}
@@ -145,7 +155,13 @@ def build_cache_key(
             None
             if authorization_details is None
             else sorted(
-                json.dumps(_canonical(detail), sort_keys=True, separators=(",", ":"))
+                # Keyed by the wire form: two requests the server cannot tell
+                # apart must not occupy separate cache entries.
+                json.dumps(
+                    _canonical(serialize_authorization_detail(detail)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
                 for detail in authorization_details
             )
         ),
@@ -191,14 +207,15 @@ class TokenCache:
             self._entries.move_to_end(key)
             return state
 
-    def begin_load(self, key: TokenCacheKey) -> None:
-        """Register an in-flight load so invalidation can reach it."""
+    def begin_load(self, key: TokenCacheKey) -> int:
+        """Register an in-flight load and return the epoch it starts under."""
         with self._lock:
             pending = self._pending.get(key)
             if pending is None:
                 pending = _PendingLoad()
                 self._pending[key] = pending
             pending.refs += 1
+            return pending.epoch
 
     def finish_load(self, key: TokenCacheKey) -> None:
         """Release an in-flight load registration."""
@@ -210,15 +227,17 @@ class TokenCache:
             if pending.refs <= 0:
                 del self._pending[key]
 
-    def set(self, key: TokenCacheKey, value: ConnectTokenState) -> bool:
+    def set(self, key: TokenCacheKey, value: ConnectTokenState, *, epoch: int) -> bool:
         """Store a token, evicting the least recently used entry when full.
 
-        Returns False without storing when this key was invalidated while the
-        token was in flight, so a revoked credential is never resurrected.
+        Returns False without storing when this key was invalidated after the
+        load began, so a revoked credential is never resurrected. A load that
+        started after the invalidation carries the current epoch and is stored
+        normally.
         """
         with self._lock:
             pending = self._pending.get(key)
-            if pending is not None and pending.invalidated:
+            if pending is not None and pending.epoch != epoch:
                 return False
             self._entries[key] = value
             self._entries.move_to_end(key)
@@ -233,7 +252,7 @@ class TokenCache:
             removed = self._entries.pop(key, None) is not None
             pending = self._pending.get(key)
             if pending is not None:
-                pending.invalidated = True
+                pending.epoch += 1
             return removed
 
     def delete_by_identity(
@@ -274,7 +293,7 @@ class TokenCache:
                     and key.subject_key == subject_key
                     and (installation_id is None or key.installation_id == installation_id)
                 ):
-                    pending.invalidated = True
+                    pending.epoch += 1
             return len(doomed)
 
     def clear(self) -> None:
@@ -282,7 +301,7 @@ class TokenCache:
         with self._lock:
             self._entries.clear()
             for pending in self._pending.values():
-                pending.invalidated = True
+                pending.epoch += 1
 
     def __len__(self) -> int:
         with self._lock:

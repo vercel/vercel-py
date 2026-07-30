@@ -7,7 +7,7 @@ from typing import Protocol, TypeAlias
 
 from vercel._internal.core.http import DEFAULT_API_BASE_URL, DEFAULT_TIMEOUT
 from vercel._internal.core.options import ServiceOptions
-from vercel.connect._internal.errors import ConnectCredentialsError
+from vercel.connect._internal.errors import ConnectCredentialsError, ConnectValidationError
 from vercel.connect._internal.models import DurationInput
 
 DEFAULT_CONNECT_API_BASE_URL = DEFAULT_API_BASE_URL
@@ -108,11 +108,11 @@ class ConnectServiceOptions(ServiceOptions):
         # matches the session mode.
         object.__setattr__(self, "credentials_factory", credentials_factory)
         if timeout is not None and timeout.total_seconds() <= 0:
-            raise ValueError("timeout must be positive")
+            raise ConnectValidationError("timeout must be positive")
         object.__setattr__(self, "timeout", timeout if timeout is not None else DEFAULT_TIMEOUT)
         # A negative buffer would treat an already-expired token as still usable.
         if validity_buffer is not None and validity_buffer.total_seconds() < 0:
-            raise ValueError("validity_buffer must not be negative")
+            raise ConnectValidationError("validity_buffer must not be negative")
         object.__setattr__(
             self,
             "validity_buffer",
@@ -120,7 +120,7 @@ class ConnectServiceOptions(ServiceOptions):
         )
         # Below one, eviction would pop from an empty mapping.
         if token_cache_size is not None and token_cache_size < 1:
-            raise ValueError("token_cache_size must be at least 1")
+            raise ConnectValidationError("token_cache_size must be at least 1")
         object.__setattr__(
             self,
             "token_cache_size",

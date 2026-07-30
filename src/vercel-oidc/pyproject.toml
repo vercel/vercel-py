@@ -30,6 +30,9 @@ dependencies = [
     # requires it unconditionally so this adds no install weight.
     "anyio>=4.0.0,<5",
     "httpx>=0.27.0,<1",
+    # sniffio identifies the running async backend, so a cached anyio lock is
+    # never reused across backends. Required by anyio already.
+    "sniffio>=1.3.0,<2",
     "vercel-headers>=0.6.0",
 ]
 

@@ -204,7 +204,7 @@ class ConnectService:
             seconds = coerce_duration(options.validity_buffer, _SECOND).total_seconds()
             # A negative buffer would make an already-expired token look usable.
             if seconds < 0:
-                raise ValueError("validity_buffer must not be negative")
+                raise ConnectValidationError("validity_buffer must not be negative")
             return seconds
         return self._options.validity_buffer.total_seconds()
 
@@ -239,9 +239,10 @@ class ConnectService:
         )
 
         async def load() -> ConnectTokenState:
-            # Registered so a concurrent revoke can mark this load invalid even
-            # though nothing is cached under the key yet.
-            self._cache.begin_load(key)
+            # Registered so a concurrent revoke can cancel this load even though
+            # nothing is cached under the key yet. The epoch scopes that to loads
+            # already running, so a load started after the revoke still caches.
+            epoch = self._cache.begin_load(key)
             try:
                 state = await self._api_client.create_token(
                     connector,
@@ -255,7 +256,7 @@ class ConnectService:
                 )
                 if not no_cache:
                     # Dropped when an invalidation landed while this was in flight.
-                    self._cache.set(key, state)
+                    self._cache.set(key, state, epoch=epoch)
                 return state
             finally:
                 self._cache.finish_load(key)

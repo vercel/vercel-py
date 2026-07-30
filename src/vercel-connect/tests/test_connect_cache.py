@@ -866,3 +866,107 @@ def test_invalid_cache_size_is_rejected() -> None:
     for size in (0, -1):
         with pytest.raises(ValueError, match="token_cache_size"):
             ConnectServiceOptions(token_cache_size=size)
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_forced_refresh_caches_despite_a_concurrent_load(mock_env_clear: None) -> None:
+    """Invalidation must cancel loads already running, not loads starting after it.
+
+    The forced refresh evicts the key, so an earlier in-flight load is discarded —
+    but the forced load itself begins after that eviction and has to be cached.
+    """
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await release.wait()
+        return httpx.Response(200, json=token_body(token=f"t{calls['n']}"))
+
+    respx.post(TOKEN_URL).mock(side_effect=handler)
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        first = asyncio.ensure_future(get_token("slack/my-bot", subject=subject))
+        await asyncio.sleep(0)
+        forced = await get_token(
+            "slack/my-bot", subject=subject, options=ConnectOptions(force_refresh=True)
+        )
+        release.set()
+        await first
+        settled = calls["n"]
+
+        served = await get_token("slack/my-bot", subject=subject)
+
+    assert served == forced
+    assert calls["n"] == settled, "the forced result should have been cached"
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_load_started_after_a_revoke_is_cached(mock_env_clear: None) -> None:
+    route = counting_route()
+    respx.delete(f"{TEST_BASE_URL}/v1/connect/connectors/slack%2Fmy-bot/tokens").mock(
+        return_value=httpx.Response(204, content=b"")
+    )
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=subject)
+        await revoke_token("slack/my-bot", subject=subject)
+        after = await get_token("slack/my-bot", subject=subject)
+        assert route.call_count == 2
+
+        assert await get_token("slack/my-bot", subject=subject) == after
+
+    assert route.call_count == 2
+
+
+async def test_stray_detail_type_does_not_split_the_cache_key(mock_env_clear: None) -> None:
+    """The wire drops a stray `type`, so the key must too or they diverge."""
+    from vercel.connect import ConnectCustomAuthorizationDetail
+
+    common: dict[str, Any] = {
+        "subject": ConnectAppTokenSubject(),
+        "vercel_token": "oidc-token",
+    }
+    without = build_cache_key(
+        "oauth/thing",
+        authorization_details=[
+            ConnectCustomAuthorizationDetail(type="payment", details={"amount": "1.00"})
+        ],
+        **common,
+    )
+    with_stray = build_cache_key(
+        "oauth/thing",
+        authorization_details=[
+            ConnectCustomAuthorizationDetail(
+                type="payment", details={"amount": "1.00", "type": "ignored"}
+            )
+        ],
+        **common,
+    )
+
+    assert without == with_stray
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_equivalent_detail_requests_share_one_request(mock_env_clear: None) -> None:
+    from vercel.connect import ConnectCustomAuthorizationDetail
+
+    route = counting_route()
+
+    async with session(service_options=session_options()):
+        for details in ({"amount": "1.00"}, {"amount": "1.00", "type": "ignored"}):
+            await get_token(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                authorization_details=[
+                    ConnectCustomAuthorizationDetail(type="payment", details=details)
+                ],
+            )
+
+    assert route.call_count == 1
