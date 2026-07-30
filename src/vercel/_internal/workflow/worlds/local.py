@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import hashlib
 import json
@@ -13,7 +14,6 @@ from datetime import datetime
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
-import cbor2
 import pydantic
 
 import vercel.queue as vqs
@@ -37,10 +37,85 @@ def is_step_terminal(status: str) -> bool:
     return status in ["completed", "failed"]
 
 
+# Marker the TypeScript `world-local` package uses to smuggle binary payloads
+# through JSON. See its `jsonReplacer` / `jsonReviver`.
+UINT8ARRAY_TYPE_TAG = "Uint8Array"
+
+
+def to_js_iso(value: datetime) -> str:
+    """Format a datetime exactly like JS ``Date.prototype.toISOString``.
+
+    Always UTC with a ``Z`` suffix and exactly three fractional digits;
+    naive datetimes are read as UTC. Sub-millisecond precision is dropped,
+    which a JS ``Date`` never had in the first place.
+    """
+    value = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return f"{value:%Y-%m-%dT%H:%M:%S}.{value.microsecond // 1000:03d}Z"
+
+
+def js_now() -> datetime:
+    """The current time at JS ``Date`` resolution (whole milliseconds).
+
+    Timestamps are stored via :func:`to_js_iso`, which truncates to
+    milliseconds. Truncating up front keeps the value we hand back to the
+    caller equal to the one a reader will parse back out of the file.
+    """
+    now = datetime.now(UTC)
+    return now.replace(microsecond=now.microsecond // 1000 * 1000)
+
+
+def _encode_js(value: Any) -> Any:
+    """Rewrite a dumped model into what TS feeds to ``JSON.stringify``."""
+    if isinstance(value, bytes | bytearray | memoryview):
+        return {
+            "__type": UINT8ARRAY_TYPE_TAG,
+            "data": base64.b64encode(bytes(value)).decode("ascii"),
+        }
+    if isinstance(value, datetime):
+        return to_js_iso(value)
+    if isinstance(value, dict):
+        return {k: _encode_js(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_encode_js(v) for v in value]
+    if isinstance(value, float) and not isinstance(value, bool):
+        # JS has a single number type: 1.0 stringifies as `1`, and
+        # `JSON.stringify` writes non-finite numbers as null.
+        if not math.isfinite(value):
+            return None
+        return int(value) if value.is_integer() else value
+    return value
+
+
+def _decode_js(value: Any) -> Any:
+    """Inverse of :func:`_encode_js` for the parts TS revives on read."""
+    if isinstance(value, dict):
+        if value.get("__type") == UINT8ARRAY_TYPE_TAG and isinstance(value.get("data"), str):
+            return base64.b64decode(value["data"])
+        return {k: _decode_js(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decode_js(v) for v in value]
+    return value
+
+
+def dumps_js(data: Any) -> bytes:
+    """Serialize like ``JSON.stringify(data, jsonReplacer, 2)`` in TS.
+
+    Two-space indent, no space before the comma, and no ``\\uXXXX`` escapes
+    for non-ASCII — the byte-for-byte shape `world-local` writes.
+    """
+    text = json.dumps(
+        _encode_js(data),
+        indent=2,
+        separators=(",", ": "),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return text.encode()
+
+
 def read_json(path: pathlib.Path, schema: type[T] | pydantic.TypeAdapter[T]) -> T | None:
     if path.exists():
-        with path.open("rb") as f:
-            data = cbor2.load(f)
+        data = _decode_js(json.loads(path.read_text(encoding="utf-8")))
         if isinstance(schema, pydantic.TypeAdapter):
             return schema.validate_python(data)
         else:
@@ -82,9 +157,13 @@ def write_json(path: pathlib.Path, data: w.BaseModel | dict, *, overwrite: bool 
         raise w.EntityConflictError(f"File already exists: {path}")
 
     if isinstance(data, w.BaseModel):
-        data = data.model_dump()
+        # `exclude_none` mirrors JS: an unset field is `undefined`, which
+        # `JSON.stringify` drops. Writing an explicit null instead would be
+        # rejected by the TS reader, whose schemas type these as `undefined`
+        # (and would silently coerce a null date to the epoch).
+        data = data.model_dump(exclude_none=True)
     try:
-        atomic_write(path, cbor2.dumps(data), overwrite=overwrite)
+        atomic_write(path, dumps_js(data), overwrite=overwrite)
     except FileExistsError:
         raise w.EntityConflictError(f"File already exists: {path}") from None
 
@@ -147,6 +226,14 @@ def _local_queue_delivery(
         "ce-vqscreatedat": datetime.now(UTC).isoformat(),
         "content-type": request.headers.get("content-type") or "application/json",
     }
+
+
+def event_record(event: w.Event) -> dict[str, Any]:
+    """The on-disk event row: the event plus the world-assigned server props."""
+    record = event.model_dump(exclude_none=True)
+    if event.server_props is not None:
+        record |= event.server_props.model_dump()
+    return record
 
 
 class LocalWorld(w.World):
@@ -355,7 +442,7 @@ class LocalWorld(w.World):
 
     def _events_create_impl(self, run_id: str | None, data: w.Event) -> w.EventResult:
         event_id = f"evnt_{self.monotonic_ulid(None)}"
-        now = datetime.now(UTC)
+        now = js_now()
 
         if data.event_type == "run_created" and not run_id:
             effective_run_id = f"wrun_{self.monotonic_ulid(None)}"
@@ -384,7 +471,7 @@ class LocalWorld(w.World):
                 )
                 composite_key = f"{effective_run_id}-{event_id}"
                 event_path = self.data_dir / "events" / f"{composite_key}.json"
-                write_json(event_path, event.model_dump() | event.server_props.model_dump())
+                write_json(event_path, event_record(event))
                 return w.EventResult(event=event, run=current_run)
 
             if data.event_type in run_terminal_events or data.event_type == "run_cancelled":
@@ -462,6 +549,7 @@ class LocalWorld(w.World):
                     specVersion=current_run.spec_version,
                     executionContext=current_run.execution_context,
                     input=current_run.input,
+                    attributes=current_run.attributes,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     status="running",
@@ -481,6 +569,7 @@ class LocalWorld(w.World):
                     specVersion=current_run.spec_version,
                     executionContext=current_run.execution_context,
                     input=current_run.input,
+                    attributes=current_run.attributes,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     startedAt=current_run.started_at,
@@ -517,6 +606,7 @@ class LocalWorld(w.World):
                     specVersion=current_run.spec_version,
                     executionContext=current_run.execution_context,
                     input=current_run.input,
+                    attributes=current_run.attributes,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     startedAt=current_run.started_at,
@@ -542,6 +632,7 @@ class LocalWorld(w.World):
                     specVersion=current_run.spec_version,
                     executionContext=current_run.execution_context,
                     input=current_run.input,
+                    attributes=current_run.attributes,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     startedAt=current_run.started_at,
@@ -651,12 +742,17 @@ class LocalWorld(w.World):
             constraint_path = self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
             token_claimed = write_exclusive(
                 constraint_path,
+                # Compact, key-for-key what TS writes here — including the
+                # `eventId` its cross-process claim recovery reads back.
                 json.dumps(
                     {
                         "token": hook_data.token,
                         "hookId": data.correlation_id,
                         "runId": effective_run_id,
-                    }
+                        "eventId": event_id,
+                    },
+                    separators=(",", ":"),
+                    ensure_ascii=False,
                 ),
             )
             if not token_claimed:
@@ -682,10 +778,7 @@ class LocalWorld(w.World):
                 assert conflict_event.server_props is not None
                 composite_key = f"{effective_run_id}-{event_id}"
                 event_path = self.data_dir / "events" / f"{composite_key}.json"
-                write_json(
-                    event_path,
-                    conflict_event.model_dump() | conflict_event.server_props.model_dump(),
-                )
+                write_json(event_path, event_record(conflict_event))
                 return w.EventResult(
                     event=conflict_event,
                     run=run,
@@ -703,6 +796,7 @@ class LocalWorld(w.World):
                 createdAt=now,
                 specVersion=2,
                 isWebhook=False,
+                isSystem=False,
             )
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
             write_json(hook_path, hook)
@@ -739,10 +833,7 @@ class LocalWorld(w.World):
 
         composite_key = f"{effective_run_id}-{event_id}"
         event_path = self.data_dir / "events" / f"{composite_key}.json"
-        if event.server_props:
-            write_json(event_path, event.model_dump() | event.server_props.model_dump())
-        else:
-            write_json(event_path, event.model_dump())
+        write_json(event_path, event_record(event))
 
         return w.EventResult(
             event=event,

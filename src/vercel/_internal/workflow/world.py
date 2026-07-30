@@ -191,6 +191,9 @@ class BaseWorkflowRun(BaseModel):
     input: bytes | str | None = None
     output: bytes | None = None
     error: StructuredError | None = None
+    # Plaintext string-string metadata. Always materialized (as `{}` when
+    # unset) so a run row carries the same field set the TS SDK writes.
+    attributes: dict[str, str] = pydantic.Field(default_factory=dict)
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
     started_at: datetime | None = pydantic.Field(default=None, alias="startedAt")
     completed_at: datetime | None = pydantic.Field(default=None, alias="completedAt")
