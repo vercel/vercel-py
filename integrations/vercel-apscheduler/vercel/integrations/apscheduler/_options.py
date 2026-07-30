@@ -10,6 +10,7 @@ DEFAULT_MAX_DELAY_SECONDS = 23 * 60 * 60
 DEFAULT_RETRY_AFTER_SECONDS = 30
 DEFAULT_DURABLE_POLL_INTERVAL_SECONDS = 60
 DEFAULT_SUBSCRIBER_ID = "default"
+DISCOVERY_ENV = "VERCEL_APSCHEDULER_DISCOVERY"
 SUBSCRIBER_ID_ENV = "VERCEL_PYTHON_SUBSCRIBER_ID"
 _SUBSCRIBER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -18,6 +19,7 @@ __all__ = [
     "DEFAULT_MAX_DELAY_SECONDS",
     "DEFAULT_RETRY_AFTER_SECONDS",
     "VercelAPSchedulerOptions",
+    "is_discovery_runtime",
     "is_queue_serving_runtime",
     "is_vercel_runtime",
 ]
@@ -44,6 +46,10 @@ def is_vercel_runtime() -> bool:
     return _truthy(environ.get("VERCEL"))
 
 
+def is_discovery_runtime() -> bool:
+    return _truthy(environ.get(DISCOVERY_ENV))
+
+
 def is_queue_serving_runtime() -> bool:
     if _truthy(environ.get("VERCEL_DEV_QUEUE_SERVING")):
         return True
@@ -62,8 +68,7 @@ class _SchedulerIdentity:
     consumer_group: str
 
     @classmethod
-    def from_env(cls) -> _SchedulerIdentity:
-        subscriber_id = environ.get(SUBSCRIBER_ID_ENV) or DEFAULT_SUBSCRIBER_ID
+    def from_subscriber_id(cls, subscriber_id: str) -> _SchedulerIdentity:
         if not _SUBSCRIBER_ID_PATTERN.fullmatch(subscriber_id):
             raise ValueError(
                 f"{SUBSCRIBER_ID_ENV} must contain only ASCII letters, digits, "
@@ -75,6 +80,10 @@ class _SchedulerIdentity:
             start_topic=f"__aps_{subscriber_id}_start",
             consumer_group=f"apscheduler-{subscriber_id}",
         )
+
+    @classmethod
+    def from_env(cls) -> _SchedulerIdentity:
+        return cls.from_subscriber_id(environ.get(SUBSCRIBER_ID_ENV) or DEFAULT_SUBSCRIBER_ID)
 
 
 @dataclass(frozen=True, slots=True)

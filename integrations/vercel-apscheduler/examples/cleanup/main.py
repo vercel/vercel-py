@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from hmac import compare_digest
 from os import environ
 
 from fastapi import FastAPI, Header, HTTPException
-from scheduler import control
+from scheduler import scheduler
 
 app = FastAPI()
 
@@ -16,24 +15,33 @@ def read_root() -> dict[str, str]:
 
 
 def _authorize(secret: str | None) -> None:
-    expected = environ.get("APSCHEDULER_CONTROL_SECRET")
+    expected = environ.get("APSCHEDULER_ADMIN_SECRET")
     if not expected or not secret or not compare_digest(secret, expected):
-        raise HTTPException(status_code=401, detail="invalid control secret")
+        raise HTTPException(status_code=401, detail="invalid admin secret")
 
 
 @app.post("/scheduler/start")
 def start_scheduler(
-    deployment: str | None = None,
-    x_control_secret: str | None = Header(default=None),
-) -> dict[str, object]:
-    _authorize(x_control_secret)
-    return asdict(control.start(deployment=deployment))
+    x_admin_secret: str | None = Header(default=None),
+) -> dict[str, str]:
+    _authorize(x_admin_secret)
+    scheduler.start()
+    return {"state": "running"}
 
 
-@app.post("/scheduler/stop")
-def stop_scheduler(
-    deployment: str | None = None,
-    x_control_secret: str | None = Header(default=None),
-) -> dict[str, object]:
-    _authorize(x_control_secret)
-    return asdict(control.stop(deployment=deployment))
+@app.post("/scheduler/pause")
+def pause_scheduler(
+    x_admin_secret: str | None = Header(default=None),
+) -> dict[str, str]:
+    _authorize(x_admin_secret)
+    scheduler.pause()
+    return {"state": "paused"}
+
+
+@app.post("/scheduler/resume")
+def resume_scheduler(
+    x_admin_secret: str | None = Header(default=None),
+) -> dict[str, str]:
+    _authorize(x_admin_secret)
+    scheduler.resume()
+    return {"state": "running"}

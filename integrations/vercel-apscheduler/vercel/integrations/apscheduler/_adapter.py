@@ -8,41 +8,47 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
+from os import environ
+from sys import modules
 from types import MethodType
 
 import vercel.queue as vqs
 import vercel.queue.sync as vqs_sync
 
+from ._driver import (
+    APSchedulerConfigurationError,
+    RedisDriver,
+    StartDecision,
+    WakeToken,
+)
 from ._executor import VercelInlineExecutor
 from ._imports import (
     EVENT_JOB_MAX_INSTANCES,
     EVENT_JOB_SUBMITTED,
-    STATE_PAUSED,
     STATE_RUNNING,
     STATE_STOPPED,
     BaseScheduler,
-    CronTrigger,
-    DateTrigger,
-    IntervalTrigger,
     JobSubmissionEvent,
     MaxInstancesReachedError,
-    MemoryJobStore,
+    RedisJobStore,
 )
 from ._options import (
+    SUBSCRIBER_ID_ENV,
     VercelAPSchedulerOptions,
     _SchedulerIdentity,
+    is_discovery_runtime,
     is_queue_serving_runtime,
     is_vercel_runtime,
 )
-from ._payload import CursorEntry, MemoryCursor, WakeupPayload
-from ._time import as_utc, canonical_scheduled_logical_time, earliest, require_aware_datetime
+from ._payload import StartPayload, WakeupPayload
+from ._time import as_utc, canonical_scheduled_logical_time, earliest
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 UTC = timezone.utc
 ADAPTER_ATTR = "_vercel_apscheduler_adapter"
+DEPLOYMENT_ENV = "VERCEL_DEPLOYMENT_ID"
+SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 WAKEUP_KEY_PREFIX = "aps"
-MAX_JITTER_LOOKBACK_OCCURRENCES = 10_000
 
 __all__ = [
     "ADAPTER_ATTR",
@@ -63,24 +69,30 @@ class PublishedWakeup:
     message_id: str | None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "logical_time", as_utc(self.logical_time, name="logical_time"))
+        object.__setattr__(
+            self,
+            "logical_time",
+            as_utc(self.logical_time, name="logical_time"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class WakeupProcessingResult:
     logical_time: datetime
     due_job_ids: tuple[str, ...]
-    next_wakeup_time: datetime | None
-    published_wakeup: PublishedWakeup | None
+    next_wakeup_time: datetime
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "logical_time", as_utc(self.logical_time, name="logical_time"))
-        if self.next_wakeup_time is not None:
-            object.__setattr__(
-                self,
-                "next_wakeup_time",
-                as_utc(self.next_wakeup_time, name="next_wakeup_time"),
-            )
+        object.__setattr__(
+            self,
+            "logical_time",
+            as_utc(self.logical_time, name="logical_time"),
+        )
+        object.__setattr__(
+            self,
+            "next_wakeup_time",
+            as_utc(self.next_wakeup_time, name="next_wakeup_time"),
+        )
 
 
 @dataclass(slots=True)
@@ -89,17 +101,11 @@ class _DueJobPlan:
     jobstore_alias: str
     run_times: list[datetime]
     next_run_time: datetime | None
-    next_nominal_run_time: datetime | None = None
-    memory_backed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class _JobDefinition:
-    schedule_key: str
-    fingerprint: str
-    trigger_kind: str
     explicit_id: bool
-    interval_has_explicit_start_date: bool
 
 
 @dataclass(slots=True)
@@ -110,103 +116,15 @@ class _PatchState:
     original_init: Callable[..., Any] | None = None
     original_add_job: Callable[..., Any] | None = None
     original_real_add_job: Callable[..., Any] | None = None
+    original_base_start: Callable[..., Any] | None = None
     original_blocking_start: Callable[..., Any] | None = None
     original_background_start: Callable[..., Any] | None = None
     original_asyncio_start: Callable[..., Any] | None = None
+    original_pause: Callable[..., Any] | None = None
+    original_resume: Callable[..., Any] | None = None
 
 
 _PATCH_STATE = _PatchState()
-
-
-def _stable_repr(value: Any) -> Any:
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_stable_repr(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _stable_repr(value[key]) for key in sorted(value, key=str)}
-    if isinstance(value, datetime):
-        return value.isoformat()
-    module = getattr(value, "__module__", None)
-    qualname = getattr(value, "__qualname__", None)
-    if isinstance(module, str) and isinstance(qualname, str):
-        return f"{module}.{qualname}"
-    return repr(value)
-
-
-def _job_func_name(func: Any) -> str:
-    module = getattr(func, "__module__", "")
-    qualname = getattr(func, "__qualname__", repr(func))
-    return f"{module}.{qualname}" if module else qualname
-
-
-def _json_hash(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return "sha256:" + sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _known_add_job_kwargs() -> set[str]:
-    return {
-        "func",
-        "trigger",
-        "args",
-        "kwargs",
-        "id",
-        "name",
-        "misfire_grace_time",
-        "coalesce",
-        "max_instances",
-        "next_run_time",
-        "jobstore",
-        "executor",
-        "replace_existing",
-    }
-
-
-def _safe_arg(args: tuple[Any, ...], index: int, default: Any = None) -> Any:
-    return args[index] if len(args) > index else default
-
-
-def _build_definition(
-    job: Any,
-    add_args: tuple[Any, ...],
-    add_kwargs: dict[str, Any],
-) -> _JobDefinition:
-    trigger_arg = add_kwargs.get("trigger", _safe_arg(add_args, 1))
-    trigger_kwargs = {
-        key: value for key, value in add_kwargs.items() if key not in _known_add_job_kwargs()
-    }
-    job_id = str(job.id)
-    explicit_id = add_kwargs.get("id", _safe_arg(add_args, 4))
-    schedule_key = f"id:{job_id}" if explicit_id else f"auto:{job_id}"
-
-    if isinstance(trigger_arg, str):
-        trigger_kind = trigger_arg
-    else:
-        trigger_kind = type(getattr(job, "trigger", trigger_arg)).__name__
-
-    interval_has_explicit_start_date = (
-        trigger_arg == "interval" and trigger_kwargs.get("start_date") is not None
-    )
-
-    fingerprint_payload = {
-        "func": _job_func_name(job.func),
-        "args": _stable_repr(job.args),
-        "kwargs": _stable_repr(job.kwargs),
-        "id": explicit_id or job_id,
-        "trigger": _stable_repr(trigger_arg),
-        "trigger_args": _stable_repr(trigger_kwargs),
-        "misfire_grace_time": _stable_repr(getattr(job, "misfire_grace_time", None)),
-        "coalesce": _stable_repr(getattr(job, "coalesce", None)),
-        "max_instances": _stable_repr(getattr(job, "max_instances", None)),
-    }
-    return _JobDefinition(
-        schedule_key=schedule_key,
-        fingerprint=_json_hash(fingerprint_payload),
-        trigger_kind=str(trigger_kind),
-        explicit_id=explicit_id is not None,
-        interval_has_explicit_start_date=interval_has_explicit_start_date,
-    )
 
 
 def get_adapter(scheduler: Any) -> SchedulerAdapter | None:
@@ -214,6 +132,8 @@ def get_adapter(scheduler: Any) -> SchedulerAdapter | None:
 
 
 class SchedulerAdapter:
+    """Turns one durable APScheduler instance into one fenced Queue driver."""
+
     def __init__(
         self,
         scheduler: BaseScheduler,
@@ -222,18 +142,26 @@ class SchedulerAdapter:
         self.scheduler = scheduler
         self.options = options
         self.identity = _SchedulerIdentity.from_env()
-        self._logger = logging.getLogger(f"{LOGGER.name}.{self.identity.scheduler_id}")
-        self._pending_jobs_reference_time: datetime | None = None
-        self._pending_cursor: MemoryCursor = MemoryCursor.empty()
+        self._identity_bound = environ.get(SUBSCRIBER_ID_ENV) is not None
+        self._deployment: str | None = None
+        self._driver: RedisDriver | None = None
         self._job_definitions: dict[str, _JobDefinition] = {}
-        self._memory_nominal_run_times: dict[str, datetime] = {}
-        self._active_epoch: int | None = None
         self._suppress_wakeup = False
         self._adopt_instance_methods()
 
+    @property
+    def deployment(self) -> str:
+        self._bind_runtime()
+        return cast("str", self._deployment)
+
+    @property
+    def driver(self) -> RedisDriver:
+        self._bind_runtime()
+        return cast("RedisDriver", self._driver)
+
     def _adopt_instance_methods(self) -> None:
         self.scheduler.wakeup = MethodType(  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
-            lambda sched: self.wakeup(),
+            lambda scheduler: self.wakeup(),
             self.scheduler,
         )
 
@@ -243,672 +171,383 @@ class SchedulerAdapter:
         add_args: tuple[Any, ...],
         add_kwargs: dict[str, Any],
     ) -> None:
-        try:
-            definition = _build_definition(job, add_args, add_kwargs)
-        except Exception:
-            self._logger.debug("failed to capture APScheduler job definition", exc_info=True)
-            return
-        self._job_definitions[str(job.id)] = definition
-
-    def definition_for_job(self, job: Any) -> _JobDefinition:
-        existing = self._job_definitions.get(str(job.id))
-        if existing is not None:
-            return existing
-        fallback = _JobDefinition(
-            schedule_key=f"id:{job.id}",
-            fingerprint=_json_hash({
-                "func": _job_func_name(job.func),
-                "id": str(job.id),
-                "trigger": repr(job.trigger),
-            }),
-            trigger_kind=type(job.trigger).__name__,
-            explicit_id=False,
-            interval_has_explicit_start_date=False,
+        explicit_id = add_kwargs.get("id")
+        if explicit_id is None and len(add_args) > 4:
+            explicit_id = add_args[4]
+        self._job_definitions[str(job.id)] = _JobDefinition(
+            explicit_id=explicit_id is not None,
         )
-        self._job_definitions[str(job.id)] = fallback
-        return fallback
 
-    def build_wakeup_idempotency_key(
+    def start(self, *, paused: bool = False) -> None:
+        """Durably start this deployment's scheduler exactly once."""
+        self._bind_runtime()
+        self._validate_durable_configuration()
+        now = datetime.now(UTC)
+        if paused:
+            self.driver.pause(now)
+            return
+        decision = self.driver.start(now)
+        self._publish_start_if_needed(decision, now=now)
+        if (
+            not decision.changed
+            and decision.start_status == "active"
+            and decision.current_wake is not None
+            and decision.current_wake.status == "pending"
+        ):
+            self.publish_wakeup(decision.current_wake, now=now)
+
+    def pause(self) -> None:
+        """Durably fence the current generation."""
+        self._bind_runtime()
+        self._validate_durable_configuration()
+        self.driver.pause(datetime.now(UTC))
+
+    def resume(self) -> None:
+        """Resume by creating one new durable generation."""
+        self.start()
+
+    def _publish_start_if_needed(
         self,
-        logical_time: datetime,
+        decision: StartDecision,
         *,
-        epoch: int | None = None,
-    ) -> str:
-        logical_time_utc = as_utc(logical_time, name="logical_time")
-        epoch_part = "" if epoch is None else f":{epoch}"
-        return (
-            f"{WAKEUP_KEY_PREFIX}:{self.identity.scheduler_id}{epoch_part}:"
-            f"{logical_time_utc.isoformat()}"
-        )
-
-    def wakeup(self) -> None:
-        if self._suppress_wakeup or self.scheduler.state != STATE_RUNNING:
-            return
-        self.seed()
-
-    def ensure_started(
-        self,
-        *,
-        pending_jobs_reference_time: datetime | None = None,
-        cursor: MemoryCursor | None = None,
-    ) -> None:
-        if cursor is not None and pending_jobs_reference_time is None:
-            raise ValueError("cursor requires pending_jobs_reference_time")
-        reference = (
-            require_aware_datetime(
-                pending_jobs_reference_time,
-                name="pending_jobs_reference_time",
-            ).astimezone(self.scheduler.timezone)
-            if pending_jobs_reference_time is not None
-            else None
-        )
-        self._pending_jobs_reference_time = reference
-        self._pending_cursor = cursor or MemoryCursor.empty()
-        self._suppress_wakeup = True
-        try:
-            self._start_or_restore(reference, cursor)
-            self._validate_started_configuration()
-        except BaseException:
-            if self.scheduler.state != STATE_STOPPED:
-                BaseScheduler.shutdown(self.scheduler, wait=True)
-            raise
-        finally:
-            self._pending_jobs_reference_time = None
-            self._pending_cursor = MemoryCursor.empty()
-            self._suppress_wakeup = False
-
-    def _start_or_restore(
-        self,
-        reference_time: datetime | None,
-        cursor: MemoryCursor | None,
-    ) -> None:
-        if self.scheduler.state == STATE_STOPPED:
-            self._inject_default_executor()
-            BaseScheduler.start(self.scheduler, paused=False)
-        elif cursor is not None:
-            self._restore_memory_cursor(cursor, cast("datetime", reference_time))
-
-    def _restore_memory_cursor(
-        self,
-        cursor: MemoryCursor,
-        reference_time: datetime,
-    ) -> None:
-        """Restore message-carried state into an already-warm scheduler."""
-        with self.scheduler._jobstores_lock:
-            for jobstore in self.scheduler._jobstores.values():
-                if not isinstance(jobstore, MemoryJobStore):
-                    continue
-                for job in jobstore.get_all_jobs():
-                    self._restore_memory_job(job, cursor, reference_time)
-                    jobstore.update_job(job)
-
-    def _rebase_for_new_generation(self, reference_time: datetime) -> None:
-        """Skip occurrences from an earlier stopped generation."""
-        with self.scheduler._jobstores_lock:
-            for jobstore in self.scheduler._jobstores.values():
-                memory_backed = isinstance(jobstore, MemoryJobStore)
-                for job in jobstore.get_all_jobs():
-                    next_run_time = getattr(job, "next_run_time", None)
-                    if next_run_time is None or next_run_time >= reference_time:
-                        continue
-
-                    if memory_backed:
-                        nominal_run_time, next_run_time = self._get_initial_memory_fire_time(
-                            job, reference_time
-                        )
-                        if nominal_run_time is None:
-                            self._memory_nominal_run_times.pop(str(job.id), None)
-                        else:
-                            self._memory_nominal_run_times[str(job.id)] = nominal_run_time
-                    else:
-                        next_run_time = self._get_first_durable_fire_time(
-                            job,
-                            reference_time,
-                        )
-
-                    job._modify(next_run_time=next_run_time)
-                    jobstore.update_job(job)
-
-    def _get_first_durable_fire_time(
-        self,
-        job: Any,
-        reference_time: datetime,
-    ) -> datetime | None:
-        next_run_time = job.trigger.get_next_fire_time(None, reference_time)
-        for _ in range(MAX_JITTER_LOOKBACK_OCCURRENCES):
-            if next_run_time is None or next_run_time >= reference_time:
-                return next_run_time
-            previous_run_time = next_run_time
-            next_run_time = job.trigger.get_next_fire_time(
-                previous_run_time,
-                reference_time,
-            )
-            if next_run_time is not None and next_run_time <= previous_run_time:
-                raise RuntimeError(
-                    f'APScheduler trigger for job "{job.id}" did not advance while '
-                    "rebasing a new control epoch"
-                )
-        raise RuntimeError(
-            f'APScheduler job "{job.id}" has more than '
-            f"{MAX_JITTER_LOOKBACK_OCCURRENCES} occurrences before the new "
-            "control epoch"
-        )
-
-    def _inject_default_executor(self) -> None:
-        executors = self.scheduler._executors
-        if "default" in executors:
-            return
-        self.scheduler.add_executor(VercelInlineExecutor(), "default")
-
-    def _validate_started_configuration(self) -> None:
-        with self.scheduler._jobstores_lock:
-            for jobstore in self.scheduler._jobstores.values():
-                for job in jobstore.get_all_jobs():
-                    self._validate_executor(job)
-                    if isinstance(jobstore, MemoryJobStore):
-                        self._validate_memory_job(job)
-
-    def _validate_executor(self, job: Any) -> None:
-        executor = self.scheduler._lookup_executor(job.executor)
-        if not isinstance(executor, VercelInlineExecutor):
-            raise TypeError(
-                f'APScheduler job "{job.id}" uses executor "{job.executor}". '
-                "Vercel APScheduler requires the inline default executor so a queue "
-                "delivery cannot be acknowledged before the job finishes."
-            )
-
-    def _validate_memory_job(self, job: Any) -> None:
-        definition = self.definition_for_job(job)
-        if not definition.explicit_id:
-            raise TypeError(
-                "MemoryJobStore jobs on Vercel require an explicit stable id. "
-                f'Add id=... to APScheduler job "{job.id}".'
-            )
-
-        trigger = job.trigger
-        if isinstance(trigger, DateTrigger):
-            raise TypeError(
-                f'APScheduler job "{job.id}" uses a finite DateTrigger with MemoryJobStore. '
-                "Finite memory schedules cannot survive a cursor-free deployment seed; "
-                "use a durable job store or a recurring cron/interval trigger."
-            )
-        if isinstance(trigger, IntervalTrigger):
-            if not definition.interval_has_explicit_start_date:
-                raise RuntimeError(
-                    f'APScheduler job "{job.id}" uses an interval trigger without an explicit '
-                    "start_date. Pass trigger='interval' and start_date=... so cold starts "
-                    "cannot move the schedule. Pre-built IntervalTrigger objects are not "
-                    "accepted because APScheduler does not preserve whether their anchor "
-                    "was explicit."
-                )
-        elif not isinstance(trigger, CronTrigger):
-            raise TypeError(
-                f'APScheduler job "{job.id}" uses unsupported memory trigger '
-                f'"{type(trigger).__name__}". Vercel APScheduler supports deterministic '
-                "CronTrigger and explicitly anchored IntervalTrigger schedules."
-            )
-
-    def _get_nominal_fire_time(
-        self,
-        job: Any,
-        previous_nominal_run_time: datetime | None,
         now: datetime,
-    ) -> datetime | None:
-        trigger = job.trigger
-        jitter = getattr(trigger, "jitter", None)
-        if hasattr(trigger, "jitter"):
-            trigger.jitter = None
-        try:
-            return trigger.get_next_fire_time(previous_nominal_run_time, now)
-        finally:
-            if hasattr(trigger, "jitter"):
-                trigger.jitter = jitter
-
-    def _apply_deterministic_jitter(
-        self,
-        job: Any,
-        nominal_run_time: datetime | None,
-    ) -> datetime | None:
-        if nominal_run_time is None:
-            return None
-        jitter = getattr(job.trigger, "jitter", None)
-        if not jitter:
-            return nominal_run_time
-
-        definition = self.definition_for_job(job)
-        identity = "\0".join((
-            self.identity.scheduler_id,
-            definition.schedule_key,
-            definition.fingerprint,
-            as_utc(nominal_run_time, name="nominal_run_time").isoformat(),
-        ))
-        random_bits = int.from_bytes(sha256(identity.encode("utf-8")).digest(), "big")
-        maximum_microseconds = max(0, int(float(jitter) * 1_000_000))
-        following_nominal_run_time = self._get_nominal_fire_time(
-            job,
-            nominal_run_time,
-            nominal_run_time,
-        )
-        if following_nominal_run_time is not None:
-            gap_microseconds = max(
-                0,
-                int((following_nominal_run_time - nominal_run_time).total_seconds() * 1_000_000)
-                - 1,
-            )
-            maximum_microseconds = min(maximum_microseconds, gap_microseconds)
-        offset_microseconds = (random_bits * (maximum_microseconds + 1)) >> 256
-        jittered_run_time = nominal_run_time + timedelta(microseconds=offset_microseconds)
-
-        end_date = getattr(job.trigger, "end_date", None)
-        if isinstance(job.trigger, CronTrigger) and end_date is not None:
-            return min(jittered_run_time, end_date)
-        if isinstance(job.trigger, IntervalTrigger) and end_date is not None:
-            return jittered_run_time if jittered_run_time <= end_date else None
-        return jittered_run_time
-
-    def _get_next_memory_fire_time(
-        self,
-        job: Any,
-        previous_nominal_run_time: datetime | None,
-        now: datetime,
-    ) -> tuple[datetime | None, datetime | None]:
-        nominal_run_time = self._get_nominal_fire_time(
-            job,
-            previous_nominal_run_time,
-            now,
-        )
-        return nominal_run_time, self._apply_deterministic_jitter(job, nominal_run_time)
-
-    def _get_initial_memory_fire_time(
-        self,
-        job: Any,
-        reference_time: datetime,
-    ) -> tuple[datetime | None, datetime | None]:
-        jitter = getattr(job.trigger, "jitter", None)
-        if not jitter:
-            return self._get_next_memory_fire_time(job, None, reference_time)
-
-        search_time = reference_time - timedelta(seconds=float(jitter))
-        nominal_run_time = self._get_nominal_fire_time(job, None, search_time)
-        for _ in range(MAX_JITTER_LOOKBACK_OCCURRENCES):
-            jittered_run_time = self._apply_deterministic_jitter(job, nominal_run_time)
-            if jittered_run_time is None or jittered_run_time >= reference_time:
-                return nominal_run_time, jittered_run_time
-            nominal_run_time = self._get_nominal_fire_time(
-                job,
-                nominal_run_time,
-                reference_time,
-            )
-            if nominal_run_time is None:
-                return None, None
-
-        raise RuntimeError(
-            f'APScheduler job "{job.id}" has more than '
-            f"{MAX_JITTER_LOOKBACK_OCCURRENCES} nominal occurrences inside its jitter "
-            "window. Reduce jitter or use a less frequent schedule."
-        )
-
-    def materialize_pending_job(self, job: Any, jobstore_alias: str) -> None:
-        jobstore = self.scheduler._lookup_jobstore(jobstore_alias)
-        memory_backed = isinstance(jobstore, MemoryJobStore)
-        self._validate_executor(job)
-        if memory_backed:
-            self._validate_memory_job(job)
-
-        reference = self._pending_jobs_reference_time
-        if reference is None or hasattr(job, "next_run_time"):
-            if memory_backed and getattr(job, "next_run_time", None) is not None:
-                self._memory_nominal_run_times[str(job.id)] = job.next_run_time
-            return
-
-        if memory_backed:
-            self._restore_memory_job(job, self._pending_cursor, reference)
-        else:
-            job._modify(next_run_time=job.trigger.get_next_fire_time(None, reference))
-
-    def _restore_memory_job(
-        self,
-        job: Any,
-        cursor: MemoryCursor,
-        reference_time: datetime,
     ) -> None:
-        definition = self.definition_for_job(job)
-        cursor_entry = cursor.jobs.get(definition.schedule_key)
-        if cursor_entry is not None and cursor_entry.fingerprint == definition.fingerprint:
-            if cursor_entry.state == "scheduled":
-                cursor_next_run_time = cast("datetime", cursor_entry.next_run_time)
-                job._modify(next_run_time=cursor_next_run_time)
-                self._memory_nominal_run_times[str(job.id)] = (
-                    cursor_entry.nominal_run_time or cursor_next_run_time
-                )
-            else:
-                job._modify(next_run_time=None)
-                self._memory_nominal_run_times.pop(str(job.id), None)
+        if decision.start_status != "pending":
             return
-
-        nominal_run_time, next_run_time = self._get_initial_memory_fire_time(
-            job,
-            reference_time,
+        payload = StartPayload(
+            scheduler_id=self.identity.scheduler_id,
+            generation=decision.generation,
+        ).to_payload()
+        idempotency_key = (
+            f"{WAKEUP_KEY_PREFIX}:start:{self.deployment}:"
+            f"{self.identity.scheduler_id}:{decision.generation}"
         )
-        job._modify(next_run_time=next_run_time)
-        if nominal_run_time is None:
-            self._memory_nominal_run_times.pop(str(job.id), None)
-        else:
-            self._memory_nominal_run_times[str(job.id)] = nominal_run_time
-
-    def _memory_cursor(self) -> MemoryCursor:
-        jobs: dict[str, CursorEntry] = {}
-        with self.scheduler._jobstores_lock:
-            for jobstore in self.scheduler._jobstores.values():
-                if not isinstance(jobstore, MemoryJobStore):
-                    continue
-                for job in jobstore.get_all_jobs():
-                    definition = self.definition_for_job(job)
-                    next_run_time = getattr(job, "next_run_time", None)
-                    if next_run_time is None:
-                        jobs[definition.schedule_key] = CursorEntry(
-                            job_id=str(job.id),
-                            fingerprint=definition.fingerprint,
-                            state="paused",
-                        )
-                    else:
-                        jobs[definition.schedule_key] = CursorEntry(
-                            job_id=str(job.id),
-                            fingerprint=definition.fingerprint,
-                            state="scheduled",
-                            next_run_time=next_run_time,
-                            nominal_run_time=self._memory_nominal_run_times.get(
-                                str(job.id),
-                                next_run_time,
-                            ),
-                        )
-        return MemoryCursor(jobs=jobs)
-
-    def _get_next_wakeup_time_unchecked(self) -> datetime | None:
-        next_wakeup_time: datetime | None = None
-        with self.scheduler._jobstores_lock:
-            for jobstore in self.scheduler._jobstores.values():
-                next_run_time = jobstore.get_next_run_time()
-                if next_run_time is not None:
-                    next_wakeup_time = earliest(
-                        next_wakeup_time,
-                        next_run_time.astimezone(self.scheduler.timezone),
-                    )
-        return next_wakeup_time
-
-    def _has_durable_jobstore_unchecked(self) -> bool:
-        return any(
-            not isinstance(jobstore, MemoryJobStore)
-            for jobstore in self.scheduler._jobstores.values()
-        )
-
-    def _cap_for_durable_jobstores(
-        self,
-        next_wakeup_time: datetime | None,
-        *,
-        reference_time: datetime,
-    ) -> datetime | None:
-        if not self._has_durable_jobstore_unchecked():
-            return next_wakeup_time
-        poll_time = reference_time + timedelta(seconds=self.options.durable_poll_interval_seconds)
-        return earliest(next_wakeup_time, poll_time)
-
-    def get_next_wakeup_time(self) -> datetime | None:
-        self.ensure_started(pending_jobs_reference_time=datetime.now(UTC))
-        next_wakeup_time = self._get_next_wakeup_time_unchecked()
-        with self.scheduler._jobstores_lock:
-            return self._cap_for_durable_jobstores(
-                next_wakeup_time,
-                reference_time=datetime.now(self.scheduler.timezone),
+        try:
+            vqs_sync.send(
+                self.identity.start_topic,
+                payload,
+                deployment=self.deployment,
+                idempotency_key=idempotency_key,
+                retention=self.options.retention_seconds,
             )
-
-    def seed(
-        self,
-        *,
-        now: datetime | None = None,
-        kind: str = "seed",
-        epoch: int | None = None,
-    ) -> PublishedWakeup | None:
-        now_utc = as_utc(now or datetime.now(UTC), name="now")
-        self.ensure_started(pending_jobs_reference_time=now_utc)
-        if epoch is not None and epoch != self._active_epoch:
-            self._rebase_for_new_generation(
-                now_utc.astimezone(self.scheduler.timezone),
-            )
-            self._active_epoch = epoch
-        if self.scheduler.state not in {STATE_RUNNING, STATE_PAUSED}:
-            return None
-
-        next_wakeup_time = self._get_next_wakeup_time_unchecked()
-        if next_wakeup_time is None:
-            with self.scheduler._jobstores_lock:
-                if not self._has_durable_jobstore_unchecked():
-                    return None
-                next_wakeup_time = now_utc.astimezone(self.scheduler.timezone) + timedelta(
-                    seconds=self.options.durable_poll_interval_seconds
-                )
-        else:
-            with self.scheduler._jobstores_lock:
-                next_wakeup_time = self._cap_for_durable_jobstores(
-                    next_wakeup_time,
-                    reference_time=now_utc.astimezone(self.scheduler.timezone),
-                )
-        return self.publish_wakeup(
-            cast("datetime", next_wakeup_time),
-            cursor=self._memory_cursor(),
-            now=now_utc,
-            kind=kind,
-            epoch=epoch,
-        )
+        except vqs.DuplicateIdempotencyKeyError:
+            pass
+        self.driver.mark_start_published(decision.generation, now)
 
     def publish_wakeup(
         self,
-        logical_time: datetime,
+        token: WakeToken,
         *,
-        cursor: MemoryCursor,
         now: datetime | None = None,
-        kind: str = "tick",
-        epoch: int | None = None,
     ) -> PublishedWakeup:
+        """Publish the driver's current wake token with a stable Queue identity."""
         now_utc = as_utc(now or datetime.now(UTC), name="now")
-        scheduled_logical_time = canonical_scheduled_logical_time(
-            logical_time,
-            now=now_utc,
-            max_delay_seconds=self.options.max_delay_seconds,
+        delay_seconds = max(
+            0,
+            math.ceil((token.logical_time - now_utc).total_seconds()),
         )
-        delay_seconds = max(0, math.ceil((scheduled_logical_time - now_utc).total_seconds()))
-        idempotency_key = self.build_wakeup_idempotency_key(
-            scheduled_logical_time,
-            epoch=epoch,
+        idempotency_key = (
+            f"{WAKEUP_KEY_PREFIX}:wake:{self.deployment}:"
+            f"{self.identity.scheduler_id}:{token.generation}:{token.sequence}"
         )
-        payload = WakeupPayload(
-            scheduler_id=self.identity.scheduler_id,
-            logical_time=scheduled_logical_time,
-            cursor=cursor,
-            kind=kind,
-            epoch=epoch,
+        payload = WakeupPayload.from_token(
+            self.identity.scheduler_id,
+            token,
         ).to_payload()
         try:
             message_id = vqs_sync.send(
                 self.identity.wakeup_topic,
                 payload,
+                deployment=self.deployment,
                 idempotency_key=idempotency_key,
                 retention=self.options.retention_seconds,
                 delay=delay_seconds,
             )
         except vqs.DuplicateIdempotencyKeyError:
-            self._logger.info(
-                'Wakeup "%s" is already scheduled via idempotency key "%s"',
-                scheduled_logical_time,
-                idempotency_key,
-            )
             message_id = None
+        self.driver.mark_wake_published(
+            token.generation,
+            token.sequence,
+            now_utc,
+        )
         return PublishedWakeup(
-            logical_time=scheduled_logical_time,
+            logical_time=token.logical_time,
             delay_seconds=delay_seconds,
             idempotency_key=idempotency_key,
             message_id=message_id,
         )
 
-    def process_payload(
+    def publish_pending_wakeup(self) -> PublishedWakeup | None:
+        """Repair a wake reserved in Redis before a failed Queue send."""
+        snapshot = self.driver.snapshot()
+        wake = snapshot.current_wake
+        if snapshot.state != "running" or wake is None or wake.status != "pending":
+            return None
+        return self.publish_wakeup(wake)
+
+    def canonical_wakeup_time(
         self,
-        payload: WakeupPayload,
+        logical_time: datetime,
         *,
-        publish_next: bool = True,
         now: datetime | None = None,
-    ) -> WakeupProcessingResult:
-        if payload.scheduler_id != self.identity.scheduler_id:
-            raise ValueError(
-                f"Wakeup payload targeted scheduler {payload.scheduler_id!r}, "
-                f"expected {self.identity.scheduler_id!r}"
-            )
-        return self.process_wakeup(
-            payload.logical_time,
-            cursor=payload.cursor,
-            publish_next=publish_next,
-            now=now,
-            epoch=payload.epoch,
+    ) -> datetime:
+        return canonical_scheduled_logical_time(
+            logical_time,
+            now=as_utc(now or datetime.now(UTC), name="now"),
+            max_delay_seconds=self.options.max_delay_seconds,
         )
+
+    def ensure_local_started(self) -> None:
+        """Start APScheduler internals without starting a scheduler thread."""
+        self._bind_runtime()
+        self._validate_durable_configuration()
+        if self.scheduler.state != STATE_STOPPED:
+            return
+        self._inject_inline_executor()
+        previous = self._suppress_wakeup
+        self._suppress_wakeup = True
+        try:
+            original_start = cast(
+                "Callable[..., Any]",
+                _PATCH_STATE.original_base_start,
+            )
+            original_start(self.scheduler, paused=False)
+            self._validate_materialized_jobs()
+        except BaseException:
+            if self.scheduler.state != STATE_STOPPED:
+                BaseScheduler.shutdown(self.scheduler, wait=True)
+            raise
+        finally:
+            self._suppress_wakeup = previous
+
+    def activate_generation(self, activation_time: datetime) -> None:
+        """Start locally and skip occurrences from the paused interval."""
+        self.ensure_local_started()
+        self._rebase_before(
+            as_utc(activation_time, name="activation_time").astimezone(self.scheduler.timezone)
+        )
+
+    def get_next_wakeup_time(self, reference_time: datetime) -> datetime:
+        """Return the next due time, capped by the durable-store poll interval."""
+        reference = as_utc(reference_time, name="reference_time").astimezone(
+            self.scheduler.timezone
+        )
+        next_wakeup_time: datetime | None = None
+        with self.scheduler._jobstores_lock:
+            for jobstore in self.scheduler._jobstores.values():
+                next_wakeup_time = earliest(
+                    next_wakeup_time,
+                    jobstore.get_next_run_time(),
+                )
+        poll_time = reference + timedelta(seconds=self.options.durable_poll_interval_seconds)
+        return cast("datetime", earliest(next_wakeup_time, poll_time))
 
     def process_wakeup(
         self,
         logical_time: datetime,
         *,
-        cursor: MemoryCursor | None = None,
-        publish_next: bool = True,
         now: datetime | None = None,
-        epoch: int | None = None,
-        publish_guard: Callable[[], bool] | None = None,
     ) -> WakeupProcessingResult:
-        effective_logical_time = require_aware_datetime(
-            logical_time,
-            name="logical_time",
-        ).astimezone(self.scheduler.timezone)
-        self.ensure_started(
-            pending_jobs_reference_time=effective_logical_time,
-            cursor=cursor,
+        self.ensure_local_started()
+        delivery_time = as_utc(now or datetime.now(UTC), name="now").astimezone(
+            self.scheduler.timezone
         )
-        if epoch is not None:
-            self._active_epoch = epoch
-        if self.scheduler.state != STATE_RUNNING:
-            return WakeupProcessingResult(
-                logical_time=effective_logical_time,
-                due_job_ids=(),
-                next_wakeup_time=self._get_next_wakeup_time_unchecked(),
-                published_wakeup=None,
+        scheduled_time = as_utc(logical_time, name="logical_time").astimezone(
+            self.scheduler.timezone
+        )
+        evaluation_time = max(delivery_time, scheduled_time)
+        previous = self._suppress_wakeup
+        self._suppress_wakeup = True
+        try:
+            due_jobs, retry_time = self._plan_due_jobs(evaluation_time)
+            self._submit_due_jobs(due_jobs, logical_time=evaluation_time)
+            next_wakeup_time = earliest(
+                retry_time,
+                self.get_next_wakeup_time(evaluation_time),
+            )
+        finally:
+            self._suppress_wakeup = previous
+        return WakeupProcessingResult(
+            logical_time=evaluation_time.astimezone(UTC),
+            due_job_ids=tuple(plan.job.id for plan in due_jobs),
+            next_wakeup_time=cast("datetime", next_wakeup_time).astimezone(UTC),
+        )
+
+    def materialize_pending_job(
+        self,
+        job: Any,
+        jobstore_alias: str,
+        replace_existing: bool,
+    ) -> None:
+        jobstore = self.scheduler._lookup_jobstore(jobstore_alias)
+        if not isinstance(jobstore, RedisJobStore):
+            raise APSchedulerConfigurationError(
+                "vercel-apscheduler v1 supports RedisJobStore only; "
+                f'job store "{jobstore_alias}" is {type(jobstore).__name__}'
+            )
+        definition = self._job_definitions.get(str(job.id))
+        if definition is None or not definition.explicit_id:
+            raise APSchedulerConfigurationError(
+                "jobs in a durable APScheduler store require an explicit stable id"
+            )
+        if getattr(job, "executor", "default") != "default":
+            raise APSchedulerConfigurationError(
+                f'job "{job.id}" must use the default Vercel inline executor'
+            )
+        existing = jobstore.lookup_job(job.id)
+        if existing is None:
+            return
+        if not replace_existing:
+            raise APSchedulerConfigurationError(
+                f'job "{job.id}" already exists in Redis; declare it with replace_existing=True'
+            )
+        job._modify(next_run_time=getattr(existing, "next_run_time", None))
+
+    def wakeup(self) -> None:
+        # APScheduler invokes wakeup() while jobs are materialized and updated.
+        # The Redis driver, never a warm process, owns successor publication.
+        if self._suppress_wakeup or self.scheduler.state != STATE_RUNNING:
+            return
+
+    def _bind_runtime(self) -> None:
+        if not self._identity_bound:
+            self.identity = _resolve_identity(self.scheduler)
+            self._identity_bound = True
+        deployment = environ.get(DEPLOYMENT_ENV)
+        if not deployment:
+            raise APSchedulerConfigurationError(
+                f"{DEPLOYMENT_ENV} is required to control an APScheduler subscriber"
+            )
+        if self._deployment is not None and self._deployment != deployment:
+            raise APSchedulerConfigurationError(
+                "one scheduler object cannot be shared across Vercel deployments"
+            )
+        self._deployment = deployment
+        stores = self._validate_durable_configuration()
+        tag = f"{{{deployment}:{self.identity.scheduler_id}}}"
+        for alias, store in stores.items():
+            namespace = getattr(store, "_vercel_apscheduler_namespace", None)
+            expected_namespace = (deployment, self.identity.scheduler_id)
+            if namespace is not None and namespace != expected_namespace:
+                raise APSchedulerConfigurationError(
+                    f'job store "{alias}" is already bound to another scheduler'
+                )
+            if namespace is None:
+                store.jobs_key = f"{store.jobs_key}:{tag}:jobs"
+                store.run_times_key = f"{store.run_times_key}:{tag}:run_times"
+                store.__dict__["_vercel_apscheduler_namespace"] = expected_namespace
+        if self._driver is None:
+            self._driver = RedisDriver(
+                stores["default"].redis,
+                deployment=deployment,
+                scheduler_id=self.identity.scheduler_id,
             )
 
-        due_jobs, retry_wakeup_time = self._plan_due_jobs(effective_logical_time)
-        self._submit_due_jobs(due_jobs, logical_time=effective_logical_time)
-        next_wakeup_time = earliest(
-            retry_wakeup_time,
-            self._get_next_wakeup_time_unchecked(),
-        )
+    def _validate_durable_configuration(self) -> dict[str, RedisJobStore]:
+        stores = self.scheduler._jobstores
+        if "default" not in stores:
+            raise APSchedulerConfigurationError(
+                "vercel-apscheduler requires a configured default RedisJobStore"
+            )
+        unsupported = {
+            alias: type(store).__name__
+            for alias, store in stores.items()
+            if not isinstance(store, RedisJobStore)
+        }
+        if unsupported:
+            details = ", ".join(f"{alias}={kind}" for alias, kind in sorted(unsupported.items()))
+            raise APSchedulerConfigurationError(
+                "vercel-apscheduler v1 supports RedisJobStore only; " + details
+            )
+        return cast("dict[str, RedisJobStore]", stores)
+
+    def _inject_inline_executor(self) -> None:
+        existing = self.scheduler._executors.get("default")
+        if existing is not None and not isinstance(existing, VercelInlineExecutor):
+            raise APSchedulerConfigurationError(
+                "vercel-apscheduler requires the default executor; "
+                "custom executors are not supported in v1"
+            )
+        if existing is None:
+            self.scheduler.add_executor(VercelInlineExecutor(), "default")
+
+    def _validate_materialized_jobs(self) -> None:
         with self.scheduler._jobstores_lock:
-            next_wakeup_time = self._cap_for_durable_jobstores(
-                next_wakeup_time,
-                reference_time=effective_logical_time,
-            )
-        published_wakeup = (
-            self.publish_wakeup(
-                next_wakeup_time,
-                cursor=self._memory_cursor(),
-                now=now,
-                kind="tick",
-                epoch=epoch,
-            )
-            if (
-                publish_next
-                and next_wakeup_time is not None
-                and (publish_guard is None or publish_guard())
-            )
-            else None
-        )
-        return WakeupProcessingResult(
-            logical_time=effective_logical_time,
-            due_job_ids=tuple(plan.job.id for plan in due_jobs),
-            next_wakeup_time=next_wakeup_time,
-            published_wakeup=published_wakeup,
-        )
+            for alias, jobstore in self.scheduler._jobstores.items():
+                for job in jobstore.get_all_jobs():
+                    if getattr(job, "executor", "default") != "default":
+                        raise APSchedulerConfigurationError(
+                            f'job "{job.id}" in "{alias}" must use the default executor'
+                        )
+
+    def _rebase_before(self, activation_time: datetime) -> None:
+        with self.scheduler._jobstores_lock:
+            for jobstore in self.scheduler._jobstores.values():
+                for job in jobstore.get_all_jobs():
+                    next_run_time = getattr(job, "next_run_time", None)
+                    if next_run_time is None or next_run_time >= activation_time:
+                        continue
+                    next_run_time = job.trigger.get_next_fire_time(
+                        None,
+                        activation_time,
+                    )
+                    while next_run_time is not None and next_run_time < activation_time:
+                        previous_run_time = next_run_time
+                        next_run_time = job.trigger.get_next_fire_time(
+                            previous_run_time,
+                            activation_time,
+                        )
+                        if next_run_time is not None and next_run_time <= previous_run_time:
+                            raise RuntimeError(
+                                f'APScheduler trigger for job "{job.id}" '
+                                "did not advance while resuming"
+                            )
+                    if next_run_time is None:
+                        jobstore.remove_job(job.id)
+                    else:
+                        job._modify(next_run_time=next_run_time)
+                        jobstore.update_job(job)
 
     def _plan_due_jobs(
         self,
         logical_time: datetime,
     ) -> tuple[list[_DueJobPlan], datetime | None]:
         due_jobs: list[_DueJobPlan] = []
-        retry_wakeup_time: datetime | None = None
+        retry_time: datetime | None = None
         with self.scheduler._jobstores_lock:
-            for jobstore_alias, jobstore in self.scheduler._jobstores.items():
+            for alias, jobstore in self.scheduler._jobstores.items():
                 try:
-                    due_store_jobs = jobstore.get_due_jobs(logical_time)
+                    jobs = jobstore.get_due_jobs(logical_time)
                 except Exception as exc:
                     self._logger.warning(
                         'Error getting due jobs from job store "%s": %s',
-                        jobstore_alias,
+                        alias,
                         exc,
                     )
-                    retry_wakeup_time = earliest(
-                        retry_wakeup_time,
+                    retry_time = earliest(
+                        retry_time,
                         logical_time + timedelta(seconds=self.scheduler.jobstore_retry_interval),
                     )
                     continue
-
-                for job in due_store_jobs:
-                    memory_backed = isinstance(jobstore, MemoryJobStore)
-                    next_nominal_run_time: datetime | None = None
-                    if memory_backed:
-                        (
-                            run_times,
-                            next_nominal_run_time,
-                            next_run_time,
-                        ) = self._get_memory_run_times(job, logical_time)
-                    else:
-                        run_times = job._get_run_times(logical_time)
-                        next_run_time = (
-                            job.trigger.get_next_fire_time(run_times[-1], logical_time)
-                            if run_times
-                            else None
-                        )
+                for job in jobs:
+                    run_times = job._get_run_times(logical_time)
+                    next_run_time = (
+                        job.trigger.get_next_fire_time(run_times[-1], logical_time)
+                        if run_times
+                        else None
+                    )
                     if run_times and job.coalesce:
                         run_times = run_times[-1:]
-
-                    if not run_times:
-                        continue
-
-                    due_jobs.append(
-                        _DueJobPlan(
-                            job=job,
-                            jobstore_alias=jobstore_alias,
-                            run_times=list(run_times),
-                            next_run_time=next_run_time,
-                            next_nominal_run_time=next_nominal_run_time,
-                            memory_backed=memory_backed,
+                    if run_times:
+                        due_jobs.append(
+                            _DueJobPlan(
+                                job=job,
+                                jobstore_alias=alias,
+                                run_times=list(run_times),
+                                next_run_time=next_run_time,
+                            )
                         )
-                    )
-
-        return due_jobs, retry_wakeup_time
-
-    def _get_memory_run_times(
-        self,
-        job: Any,
-        logical_time: datetime,
-    ) -> tuple[list[datetime], datetime | None, datetime | None]:
-        run_times: list[datetime] = []
-        next_run_time = job.next_run_time
-        nominal_run_time = self._memory_nominal_run_times.get(
-            str(job.id),
-            next_run_time,
-        )
-
-        while next_run_time is not None and next_run_time <= logical_time:
-            run_times.append(next_run_time)
-            nominal_run_time, next_run_time = self._get_next_memory_fire_time(
-                job,
-                nominal_run_time,
-                logical_time,
-            )
-
-        return run_times, nominal_run_time, next_run_time
+        return due_jobs, retry_time
 
     def _submit_due_jobs(
         self,
@@ -919,31 +558,12 @@ class SchedulerAdapter:
         events = []
         with self.scheduler._jobstores_lock:
             for plan in due_jobs:
-                try:
-                    executor = self.scheduler._lookup_executor(plan.job.executor)
-                except BaseException:
-                    self._logger.error(
-                        'Executor lookup ("%s") failed for job "%s" -- removing it from '
-                        "the job store",
-                        plan.job.executor,
-                        plan.job,
-                    )
-                    self.scheduler.remove_job(plan.job.id, plan.jobstore_alias)
-                    if plan.memory_backed:
-                        self._memory_nominal_run_times.pop(str(plan.job.id), None)
-                    continue
-
+                executor = self.scheduler._lookup_executor(plan.job.executor)
                 try:
                     if hasattr(executor, "set_reference_time"):
                         executor.set_reference_time(logical_time)
                     executor.submit_job(plan.job, plan.run_times)
                 except MaxInstancesReachedError:
-                    self._logger.warning(
-                        'Execution of job "%s" skipped: maximum number of running '
-                        "instances reached (%d)",
-                        plan.job,
-                        plan.job.max_instances,
-                    )
                     events.append(
                         JobSubmissionEvent(
                             EVENT_JOB_MAX_INSTANCES,
@@ -951,12 +571,6 @@ class SchedulerAdapter:
                             plan.jobstore_alias,
                             plan.run_times,
                         )
-                    )
-                except BaseException:
-                    self._logger.exception(
-                        'Error submitting job "%s" to executor "%s"',
-                        plan.job,
-                        plan.job.executor,
                     )
                 else:
                     events.append(
@@ -967,25 +581,53 @@ class SchedulerAdapter:
                             plan.run_times,
                         )
                     )
-
-                if plan.next_run_time is not None:
-                    plan.job._modify(next_run_time=plan.next_run_time)
-                    if plan.memory_backed and plan.next_nominal_run_time is not None:
-                        self._memory_nominal_run_times[str(plan.job.id)] = (
-                            plan.next_nominal_run_time
-                        )
-                    self.scheduler._lookup_jobstore(plan.jobstore_alias).update_job(plan.job)
+                jobstore = self.scheduler._lookup_jobstore(plan.jobstore_alias)
+                if plan.next_run_time is None:
+                    jobstore.remove_job(plan.job.id)
                 else:
-                    self.scheduler.remove_job(plan.job.id, plan.jobstore_alias)
-                    if plan.memory_backed:
-                        self._memory_nominal_run_times.pop(str(plan.job.id), None)
-
+                    plan.job._modify(next_run_time=plan.next_run_time)
+                    jobstore.update_job(plan.job)
         for event in events:
             self.scheduler._dispatch_event(event)
 
-    def shutdown(self, *, wait: bool = True) -> None:
-        if self.scheduler.state != STATE_STOPPED:
-            BaseScheduler.shutdown(self.scheduler, wait=wait)
+    @property
+    def _logger(self) -> logging.Logger:
+        return logging.getLogger(f"{LOGGER.name}.{self.identity.scheduler_id}")
+
+
+def _resolve_identity(scheduler: BaseScheduler) -> _SchedulerIdentity:
+    raw = environ.get(SUBSCRIBERS_ENV)
+    if not raw:
+        raise APSchedulerConfigurationError(
+            f"{SUBSCRIBERS_ENV} is not set. Declare the scheduler in [[tool.vercel.subscribers]]."
+        )
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise APSchedulerConfigurationError(f"{SUBSCRIBERS_ENV} must contain JSON") from exc
+    if not isinstance(entries, list):
+        raise APSchedulerConfigurationError(f"{SUBSCRIBERS_ENV} must contain a JSON array")
+
+    matches: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        subscriber_id = entry.get("id")
+        entrypoint = entry.get("entrypoint")
+        if not isinstance(subscriber_id, str) or not isinstance(entrypoint, str):
+            continue
+        module_name, separator, variable_name = entrypoint.partition(":")
+        if not separator:
+            continue
+        module = modules.get(module_name)
+        if module is not None and getattr(module, variable_name, None) is scheduler:
+            matches.append(subscriber_id)
+    if len(matches) != 1:
+        raise APSchedulerConfigurationError(
+            "scheduler.start()/pause()/resume() must be called on exactly one "
+            "object declared in [[tool.vercel.subscribers]]"
+        )
+    return _SchedulerIdentity.from_subscriber_id(matches[0])
 
 
 def adopt_scheduler(
@@ -996,36 +638,32 @@ def adopt_scheduler(
     if existing is not None:
         return existing
     install_vercel_apscheduler_integration(options=options)
-    resolved_options = VercelAPSchedulerOptions.from_value(options or _PATCH_STATE.default_options)
-    adapter = SchedulerAdapter(scheduler, resolved_options)
+    resolved = VercelAPSchedulerOptions.from_value(options or _PATCH_STATE.default_options)
+    adapter = SchedulerAdapter(scheduler, resolved)
     setattr(scheduler, ADAPTER_ATTR, adapter)
     return adapter
 
 
 def _patched_init(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
-    original_init = _PATCH_STATE.original_init
-    if original_init is None:
+    original = _PATCH_STATE.original_init
+    if original is None:
         raise RuntimeError("APScheduler integration patch is not initialized")
-    result = original_init(self, *args, **kwargs)
-    if get_adapter(self) is None:
-        options = VercelAPSchedulerOptions.from_value(_PATCH_STATE.default_options)
-        setattr(self, ADAPTER_ATTR, SchedulerAdapter(self, options))
-        if is_vercel_runtime() and (_PATCH_STATE.register_queues or is_queue_serving_runtime()):
-            # The Python builder imports pyproject subscriber modules with
-            # VERCEL=1 and introspects vercel.queue's process-wide registry.
-            # Register here so a stock scheduler entrypoint is discoverable
-            # without requiring a user-authored ASGI app.
-            from ._subscriber import register_scheduler
+    result = original(self, *args, **kwargs)
+    options = VercelAPSchedulerOptions.from_value(_PATCH_STATE.default_options)
+    adapter = SchedulerAdapter(self, options)
+    setattr(self, ADAPTER_ATTR, adapter)
+    if is_vercel_runtime() and (_PATCH_STATE.register_queues or is_queue_serving_runtime()):
+        from ._subscriber import register_scheduler
 
-            register_scheduler(self, options=options)
+        register_scheduler(self, options=options)
     return result
 
 
 def _patched_add_job(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
-    original_add_job = _PATCH_STATE.original_add_job
-    if original_add_job is None:
+    original = _PATCH_STATE.original_add_job
+    if original is None:
         raise RuntimeError("APScheduler integration patch is not initialized")
-    job = original_add_job(self, *args, **kwargs)
+    job = original(self, *args, **kwargs)
     adapter = get_adapter(self)
     if adapter is not None:
         adapter.capture_job_definition(job, args, dict(kwargs))
@@ -1040,23 +678,52 @@ def _patched_real_add_job(
 ) -> Any:
     adapter = get_adapter(self)
     if adapter is not None:
-        adapter.materialize_pending_job(job, jobstore_alias)
-    original_real_add_job = _PATCH_STATE.original_real_add_job
-    if original_real_add_job is None:
+        adapter.materialize_pending_job(
+            job,
+            jobstore_alias,
+            replace_existing,
+        )
+    original = _PATCH_STATE.original_real_add_job
+    if original is None:
         raise RuntimeError("APScheduler integration patch is not initialized")
-    return original_real_add_job(self, job, jobstore_alias, replace_existing)
+    return original(self, job, jobstore_alias, replace_existing)
 
 
-def _defused_start(self: BaseScheduler, paused: bool = False) -> None:
+def _patched_start(self: BaseScheduler, paused: bool = False) -> None:
     adapter = get_adapter(self)
     if adapter is None or not is_vercel_runtime():
-        original = _original_start_for_instance(self)
-        original(self, paused=paused)
+        _original_start_for_instance(self)(self, paused=paused)
         return
-    adapter.ensure_started(pending_jobs_reference_time=datetime.now(UTC))
+    if is_discovery_runtime() or is_queue_serving_runtime():
+        return
+    adapter.start(paused=paused)
 
 
-def _original_start_for_instance(instance: BaseScheduler) -> Callable[..., Any]:
+def _patched_pause(self: BaseScheduler) -> None:
+    adapter = get_adapter(self)
+    if adapter is None or not is_vercel_runtime():
+        original = cast("Callable[[BaseScheduler], None]", _PATCH_STATE.original_pause)
+        original(self)
+        return
+    if is_discovery_runtime() or is_queue_serving_runtime():
+        return
+    adapter.pause()
+
+
+def _patched_resume(self: BaseScheduler) -> None:
+    adapter = get_adapter(self)
+    if adapter is None or not is_vercel_runtime():
+        original = cast("Callable[[BaseScheduler], None]", _PATCH_STATE.original_resume)
+        original(self)
+        return
+    if is_discovery_runtime() or is_queue_serving_runtime():
+        return
+    adapter.resume()
+
+
+def _original_start_for_instance(
+    instance: BaseScheduler,
+) -> Callable[..., Any]:
     class_name = type(instance).__name__
     module_name = type(instance).__module__
     if class_name == "BlockingScheduler" and _PATCH_STATE.original_blocking_start is not None:
@@ -1065,37 +732,26 @@ def _original_start_for_instance(instance: BaseScheduler) -> Callable[..., Any]:
         return _PATCH_STATE.original_background_start
     if module_name.endswith(".asyncio") and _PATCH_STATE.original_asyncio_start is not None:
         return _PATCH_STATE.original_asyncio_start
-    return BaseScheduler.start
+    return cast("Callable[..., Any]", _PATCH_STATE.original_base_start)
 
 
-def _patch_scheduler_start_methods() -> None:
-    try:
-        from apscheduler.schedulers.blocking import (
-            BlockingScheduler,  # type: ignore[import-untyped]
-        )
-    except ImportError:
-        BlockingScheduler = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-    if BlockingScheduler is not None and _PATCH_STATE.original_blocking_start is None:
-        _PATCH_STATE.original_blocking_start = BlockingScheduler.start
-        BlockingScheduler.start = _defused_start  # type: ignore[method-assign]
+def _patch_start_methods() -> None:
+    from apscheduler.schedulers.asyncio import (  # type: ignore[import-untyped]
+        AsyncIOScheduler,
+    )
+    from apscheduler.schedulers.background import (  # type: ignore[import-untyped]
+        BackgroundScheduler,
+    )
+    from apscheduler.schedulers.blocking import (  # type: ignore[import-untyped]
+        BlockingScheduler,
+    )
 
-    try:
-        from apscheduler.schedulers.background import (
-            BackgroundScheduler,  # type: ignore[import-untyped]
-        )
-    except ImportError:
-        BackgroundScheduler = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-    if BackgroundScheduler is not None and _PATCH_STATE.original_background_start is None:
-        _PATCH_STATE.original_background_start = BackgroundScheduler.start
-        BackgroundScheduler.start = _defused_start  # type: ignore[method-assign]
-
-    try:
-        from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
-    except ImportError:
-        AsyncIOScheduler = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-    if AsyncIOScheduler is not None and _PATCH_STATE.original_asyncio_start is None:
-        _PATCH_STATE.original_asyncio_start = AsyncIOScheduler.start
-        AsyncIOScheduler.start = _defused_start  # type: ignore[method-assign]
+    _PATCH_STATE.original_blocking_start = BlockingScheduler.start
+    _PATCH_STATE.original_background_start = BackgroundScheduler.start
+    _PATCH_STATE.original_asyncio_start = AsyncIOScheduler.start
+    BlockingScheduler.start = _patched_start  # type: ignore[method-assign]
+    BackgroundScheduler.start = _patched_start  # type: ignore[method-assign]
+    AsyncIOScheduler.start = _patched_start  # type: ignore[method-assign]
 
 
 def install_vercel_apscheduler_integration(
@@ -1106,18 +762,21 @@ def install_vercel_apscheduler_integration(
     if options is not None:
         _PATCH_STATE.default_options = VercelAPSchedulerOptions.from_value(options)
     _PATCH_STATE.register_queues = _PATCH_STATE.register_queues or register_queues
-    if not _PATCH_STATE.installed:
-        _PATCH_STATE.original_init = BaseScheduler.__init__
-        _PATCH_STATE.original_add_job = BaseScheduler.add_job
-        _PATCH_STATE.original_real_add_job = BaseScheduler._real_add_job
+    if _PATCH_STATE.installed:
+        return
 
-        BaseScheduler.__init__ = _patched_init  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
-        BaseScheduler.add_job = _patched_add_job  # type: ignore[method-assign]
-        BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
-        _patch_scheduler_start_methods()
-        _PATCH_STATE.installed = True
+    _PATCH_STATE.original_init = BaseScheduler.__init__
+    _PATCH_STATE.original_add_job = BaseScheduler.add_job
+    _PATCH_STATE.original_real_add_job = BaseScheduler._real_add_job
+    _PATCH_STATE.original_base_start = BaseScheduler.start
+    _PATCH_STATE.original_pause = BaseScheduler.pause
+    _PATCH_STATE.original_resume = BaseScheduler.resume
 
-    if register_queues or is_queue_serving_runtime():
-        from .control import _load_control_from_env
-
-        _load_control_from_env()
+    BaseScheduler.__init__ = _patched_init  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+    BaseScheduler.add_job = _patched_add_job  # type: ignore[method-assign]
+    BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
+    BaseScheduler.start = _patched_start  # type: ignore[method-assign]
+    BaseScheduler.pause = _patched_pause  # type: ignore[method-assign]
+    BaseScheduler.resume = _patched_resume  # type: ignore[method-assign]
+    _patch_start_methods()
+    _PATCH_STATE.installed = True

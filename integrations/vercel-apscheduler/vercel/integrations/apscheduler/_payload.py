@@ -1,256 +1,132 @@
+"""Stable Queue payloads for the durable APScheduler driver."""
+
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
+from ._driver import WakeToken
 from ._time import as_utc
 
-WAKEUP_KIND = "apscheduler.wakeup"
-WAKEUP_VERSION = 2
 START_KIND = "apscheduler.start"
 START_VERSION = 1
+WAKEUP_KIND = "apscheduler.wakeup"
+WAKEUP_VERSION = 1
 
-CursorState = Literal["scheduled", "paused", "finished"]
-
-__all__ = [
-    "WAKEUP_KIND",
-    "WAKEUP_VERSION",
-    "CursorEntry",
-    "MemoryCursor",
-    "StartPayload",
-    "WakeupPayload",
-]
+__all__ = ["StartPayload", "WakeupPayload"]
 
 
 @dataclass(frozen=True, slots=True)
-class CursorEntry:
-    job_id: str
-    fingerprint: str
-    state: CursorState
-    next_run_time: datetime | None = None
-    nominal_run_time: datetime | None = None
+class StartPayload:
+    scheduler_id: str
+    generation: int
 
     def __post_init__(self) -> None:
-        if self.state == "scheduled" and self.next_run_time is None:
-            raise ValueError("scheduled cursor entry requires next_run_time")
-        if self.next_run_time is not None:
-            object.__setattr__(
-                self,
-                "next_run_time",
-                as_utc(self.next_run_time, name="next_run_time"),
-            )
-        if self.nominal_run_time is not None:
-            object.__setattr__(
-                self,
-                "nominal_run_time",
-                as_utc(self.nominal_run_time, name="nominal_run_time"),
-            )
-
-    def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "job_id": self.job_id,
-            "fingerprint": self.fingerprint,
-            "state": self.state,
-        }
-        if self.next_run_time is not None:
-            payload["next_run_time"] = self.next_run_time.isoformat()
-        if self.nominal_run_time is not None:
-            payload["nominal_run_time"] = self.nominal_run_time.isoformat()
-        return payload
-
-    @classmethod
-    def from_payload(cls, payload: Any) -> CursorEntry:
-        if not isinstance(payload, dict):
-            raise ValueError("cursor entry must be an object")
-
-        job_id = payload.get("job_id")
-        if not isinstance(job_id, str) or not job_id:
-            raise ValueError("cursor entry missing job_id")
-
-        fingerprint = payload.get("fingerprint")
-        if not isinstance(fingerprint, str) or not fingerprint:
-            raise ValueError("cursor entry missing fingerprint")
-
-        state = payload.get("state")
-        if state not in {"scheduled", "paused", "finished"}:
-            raise ValueError("cursor entry has invalid state")
-
-        next_run_time: datetime | None = None
-        next_run_time_raw = payload.get("next_run_time")
-        if next_run_time_raw is not None:
-            if not isinstance(next_run_time_raw, str):
-                raise ValueError("cursor entry next_run_time must be a string")
-            try:
-                next_run_time = datetime.fromisoformat(next_run_time_raw)
-            except ValueError as exc:
-                raise ValueError("cursor entry next_run_time must be ISO-8601") from exc
-
-        nominal_run_time: datetime | None = None
-        nominal_run_time_raw = payload.get("nominal_run_time")
-        if nominal_run_time_raw is not None:
-            if not isinstance(nominal_run_time_raw, str):
-                raise ValueError("cursor entry nominal_run_time must be a string")
-            try:
-                nominal_run_time = datetime.fromisoformat(nominal_run_time_raw)
-            except ValueError as exc:
-                raise ValueError("cursor entry nominal_run_time must be ISO-8601") from exc
-
-        return cls(
-            job_id=job_id,
-            fingerprint=fingerprint,
-            state=state,
-            next_run_time=next_run_time,
-            nominal_run_time=nominal_run_time,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryCursor:
-    jobs: dict[str, CursorEntry] = field(default_factory=dict)
-    version: int = 1
+        if not self.scheduler_id:
+            raise ValueError("scheduler_id must be non-empty")
+        if self.generation < 1:
+            raise ValueError("generation must be greater than or equal to 1")
 
     def to_payload(self) -> dict[str, Any]:
         return {
-            "version": self.version,
-            "jobs": {key: entry.to_payload() for key, entry in self.jobs.items()},
+            "vercel": {"kind": START_KIND, "version": START_VERSION},
+            "scheduler_id": self.scheduler_id,
+            "generation": self.generation,
         }
 
     @classmethod
-    def empty(cls) -> MemoryCursor:
-        return cls()
-
-    @classmethod
-    def from_payload(cls, payload: Any) -> MemoryCursor:
-        if payload is None:
-            return cls.empty()
-        if not isinstance(payload, dict):
-            raise ValueError("cursor must be an object")
-        if int(payload.get("version", 0)) != 1:
-            raise ValueError("cursor has unsupported version")
-
-        raw_jobs = payload.get("jobs", {})
-        if not isinstance(raw_jobs, dict):
-            raise ValueError("cursor jobs must be an object")
-
-        jobs: dict[str, CursorEntry] = {}
-        for key, raw_entry in raw_jobs.items():
-            if not isinstance(key, str) or not key:
-                raise ValueError("cursor job keys must be non-empty strings")
-            jobs[key] = CursorEntry.from_payload(raw_entry)
-        return cls(jobs=jobs)
+    def from_payload(cls, payload: Any) -> StartPayload:
+        envelope = _envelope(payload, kind=START_KIND, version=START_VERSION)
+        scheduler_id = envelope.get("scheduler_id")
+        if not isinstance(scheduler_id, str) or not scheduler_id:
+            raise ValueError("Invalid start payload: missing scheduler_id")
+        generation = _positive_int(envelope.get("generation"), name="generation")
+        return cls(scheduler_id=scheduler_id, generation=generation)
 
 
 @dataclass(frozen=True, slots=True)
 class WakeupPayload:
     scheduler_id: str
+    generation: int
+    sequence: int
     logical_time: datetime
-    cursor: MemoryCursor = field(default_factory=MemoryCursor.empty)
-    kind: str = "tick"
-    epoch: int | None = None
 
     def __post_init__(self) -> None:
         if not self.scheduler_id:
             raise ValueError("scheduler_id must be non-empty")
-        if self.epoch is not None and self.epoch < 1:
-            raise ValueError("epoch must be greater than or equal to 1")
-        object.__setattr__(self, "logical_time", as_utc(self.logical_time, name="logical_time"))
-
-    def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "vercel": {"kind": WAKEUP_KIND, "version": WAKEUP_VERSION},
-            "scheduler_id": self.scheduler_id,
-            "logical_time": self.logical_time.isoformat(),
-            "kind": self.kind,
-            "cursor": self.cursor.to_payload(),
-        }
-        if self.epoch is not None:
-            payload["epoch"] = self.epoch
-        return payload
-
-    @classmethod
-    def from_payload(cls, payload: Any) -> WakeupPayload:
-        if not isinstance(payload, dict):
-            raise ValueError("Invalid wakeup payload: expected object")
-
-        vercel_info = payload.get("vercel")
-        if not isinstance(vercel_info, dict) or vercel_info.get("kind") != WAKEUP_KIND:
-            raise ValueError("Invalid wakeup payload: not an APScheduler wakeup envelope")
-
-        if int(vercel_info.get("version", 0)) != WAKEUP_VERSION:
-            raise ValueError("Invalid wakeup payload: unsupported version")
-
-        scheduler_id = payload.get("scheduler_id")
-        if not isinstance(scheduler_id, str) or not scheduler_id:
-            raise ValueError("Invalid wakeup payload: missing scheduler_id")
-
-        logical_time_raw = payload.get("logical_time")
-        if not isinstance(logical_time_raw, str) or not logical_time_raw:
-            raise ValueError("Invalid wakeup payload: missing logical_time")
-
-        try:
-            logical_time = datetime.fromisoformat(logical_time_raw)
-        except ValueError as exc:
-            raise ValueError("Invalid wakeup payload: logical_time must be ISO-8601") from exc
-
-        kind = payload.get("kind", "tick")
-        if not isinstance(kind, str) or not kind:
-            raise ValueError("Invalid wakeup payload: missing kind")
-
-        epoch = payload.get("epoch")
-        if epoch is not None and (
-            not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1
-        ):
-            raise ValueError("Invalid wakeup payload: epoch must be a positive integer")
-
-        return cls(
-            scheduler_id=scheduler_id,
-            logical_time=logical_time,
-            kind=kind,
-            cursor=MemoryCursor.from_payload(payload.get("cursor")),
-            epoch=epoch,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class StartPayload:
-    epoch: int
-    reference_time: datetime
-
-    def __post_init__(self) -> None:
-        if self.epoch < 1:
-            raise ValueError("epoch must be greater than or equal to 1")
+        if self.generation < 1:
+            raise ValueError("generation must be greater than or equal to 1")
+        if self.sequence < 1:
+            raise ValueError("sequence must be greater than or equal to 1")
         object.__setattr__(
             self,
-            "reference_time",
-            as_utc(self.reference_time, name="reference_time"),
+            "logical_time",
+            as_utc(self.logical_time, name="logical_time"),
+        )
+
+    @classmethod
+    def from_token(cls, scheduler_id: str, token: WakeToken) -> WakeupPayload:
+        return cls(
+            scheduler_id=scheduler_id,
+            generation=token.generation,
+            sequence=token.sequence,
+            logical_time=token.logical_time,
+        )
+
+    def to_token(self) -> WakeToken:
+        return WakeToken(
+            generation=self.generation,
+            sequence=self.sequence,
+            logical_time=self.logical_time,
         )
 
     def to_payload(self) -> dict[str, Any]:
         return {
-            "vercel": {"kind": START_KIND, "version": START_VERSION},
-            "epoch": self.epoch,
-            "reference_time": self.reference_time.isoformat(),
+            "vercel": {"kind": WAKEUP_KIND, "version": WAKEUP_VERSION},
+            "scheduler_id": self.scheduler_id,
+            "generation": self.generation,
+            "sequence": self.sequence,
+            "logical_time": self.logical_time.isoformat(),
         }
 
     @classmethod
-    def from_payload(cls, payload: Any) -> StartPayload:
-        if not isinstance(payload, dict):
-            raise ValueError("Invalid start payload: expected object")
-        vercel_info = payload.get("vercel")
-        if not isinstance(vercel_info, dict) or vercel_info.get("kind") != START_KIND:
-            raise ValueError("Invalid start payload: not an APScheduler start envelope")
-        if int(vercel_info.get("version", 0)) != START_VERSION:
-            raise ValueError("Invalid start payload: unsupported version")
-        epoch = payload.get("epoch")
-        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
-            raise ValueError("Invalid start payload: epoch must be a positive integer")
-        reference_time_raw = payload.get("reference_time")
-        if not isinstance(reference_time_raw, str) or not reference_time_raw:
-            raise ValueError("Invalid start payload: missing reference_time")
+    def from_payload(cls, payload: Any) -> WakeupPayload:
+        envelope = _envelope(payload, kind=WAKEUP_KIND, version=WAKEUP_VERSION)
+        scheduler_id = envelope.get("scheduler_id")
+        if not isinstance(scheduler_id, str) or not scheduler_id:
+            raise ValueError("Invalid wakeup payload: missing scheduler_id")
+        logical_time_raw = envelope.get("logical_time")
+        if not isinstance(logical_time_raw, str) or not logical_time_raw:
+            raise ValueError("Invalid wakeup payload: missing logical_time")
         try:
-            reference_time = datetime.fromisoformat(reference_time_raw)
+            logical_time = datetime.fromisoformat(logical_time_raw)
         except ValueError as exc:
-            raise ValueError("Invalid start payload: reference_time must be ISO-8601") from exc
-        return cls(epoch=epoch, reference_time=reference_time)
+            raise ValueError("Invalid wakeup payload: logical_time must be ISO-8601") from exc
+        return cls(
+            scheduler_id=scheduler_id,
+            generation=_positive_int(
+                envelope.get("generation"),
+                name="generation",
+            ),
+            sequence=_positive_int(envelope.get("sequence"), name="sequence"),
+            logical_time=logical_time,
+        )
+
+
+def _envelope(payload: Any, *, kind: str, version: int) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid APScheduler payload: expected object")
+    vercel_info = payload.get("vercel")
+    if not isinstance(vercel_info, dict) or vercel_info.get("kind") != kind:
+        raise ValueError("Invalid APScheduler payload: unexpected envelope kind")
+    if int(vercel_info.get("version", 0)) != version:
+        raise ValueError("Invalid APScheduler payload: unsupported version")
+    return payload
+
+
+def _positive_int(value: Any, *, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"Invalid APScheduler payload: {name} must be positive")
+    return value

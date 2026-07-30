@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from vercel.integrations.apscheduler.control import Control, RedisControlBackend
+from vercel.integrations.apscheduler import VercelRedisJobStore
 
 UTC = timezone.utc
 
-scheduler = BlockingScheduler(timezone=UTC)
-control = Control(backend=RedisControlBackend())
+scheduler = BlockingScheduler(
+    timezone=UTC,
+    jobstores={"default": VercelRedisJobStore()},
+)
 
 
 @scheduler.scheduled_job(

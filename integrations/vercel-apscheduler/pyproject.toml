@@ -12,7 +12,7 @@ license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
     "APScheduler>=3.10.4,<4",
-    "anyio>=4,<5",
+    "redis>=5,<7",
     "vercel-queue>=0.6.0",
 ]
 
@@ -54,9 +54,6 @@ extend = "../ruff.toml"
 ]
 "vercel/integrations/apscheduler/_payload.py" = [
     "TRY004",  # payload parse failures are reported uniformly as ValueError.
-]
-"vercel/integrations/apscheduler/control.py" = [
-    "PLC0415",  # redis is an optional dependency and is imported lazily.
 ]
 "vercel/integrations/apscheduler/version.py" = [
     "D100",

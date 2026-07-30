@@ -4,7 +4,7 @@ from typing import Any
 
 import logging
 from datetime import datetime, timezone
-from os import environ
+from uuid import uuid4
 from weakref import WeakKeyDictionary
 
 import vercel.queue as vqs
@@ -13,22 +13,18 @@ from ._adapter import SchedulerAdapter, adopt_scheduler
 from ._imports import BaseScheduler
 from ._options import VercelAPSchedulerOptions
 from ._payload import StartPayload, WakeupPayload
-from .control import (
-    CURRENT_DEPLOYMENT_ENV,
-    ControlConfigurationError,
-    _get_configured_control,
-)
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 UTC = timezone.utc
+BUSY_RETRY_SECONDS = 5
 
-_registered_schedulers: WeakKeyDictionary[BaseScheduler, SchedulerAdapter] = WeakKeyDictionary()
+_registered_schedulers: WeakKeyDictionary[
+    BaseScheduler,
+    SchedulerAdapter,
+] = WeakKeyDictionary()
 _registered_callbacks: list[Any] = []
 
-__all__ = [
-    "get_asgi_app",
-    "register_scheduler",
-]
+__all__ = ["register_scheduler"]
 
 
 def register_scheduler(
@@ -50,39 +46,7 @@ def register_scheduler(
         max_attempts=adapter.options.max_attempts,
     )
     def _handle_start(message: vqs.Message[dict[str, Any]]) -> None:
-        control = _get_configured_control()
-        if control is None:
-            adapter.seed(now=message.metadata.created_at, kind="start")
-            return
-
-        try:
-            payload = StartPayload.from_payload(message.payload)
-        except ValueError as exc:
-            LOGGER.warning(
-                "Ignoring invalid controlled APScheduler start message %s: %s",
-                message.metadata.message_id,
-                exc,
-            )
-            return
-        deployment = _current_deployment()
-        activation_time = control._claim_seed(  # noqa: SLF001
-            deployment,
-            payload.epoch,
-            adapter.identity.scheduler_id,
-            max(payload.reference_time, datetime.now(UTC)),
-        )
-        if activation_time is None:
-            return
-        adapter.seed(
-            now=activation_time,
-            kind="start",
-            epoch=payload.epoch,
-        )
-        control._mark_seed_active(  # noqa: SLF001
-            deployment,
-            payload.epoch,
-            adapter.identity.scheduler_id,
-        )
+        _process_start(adapter, message)
 
     @vqs.subscribe(
         topic=adapter.identity.wakeup_topic,
@@ -92,75 +56,122 @@ def register_scheduler(
         max_attempts=adapter.options.max_attempts,
     )
     def _handle_wakeup(message: vqs.Message[dict[str, Any]]) -> None:
-        try:
-            payload = WakeupPayload.from_payload(message.payload)
-        except ValueError as exc:
-            LOGGER.warning(
-                "Ignoring invalid APScheduler wakeup message %s on %s/%s: %s",
-                message.metadata.message_id,
-                message.metadata.topic,
-                message.metadata.consumer_group,
-                exc,
-            )
-            return
-
-        if payload.scheduler_id != adapter.identity.scheduler_id:
-            LOGGER.warning(
-                "Ignoring APScheduler wakeup message %s for scheduler %r; expected %r",
-                message.metadata.message_id,
-                payload.scheduler_id,
-                adapter.identity.scheduler_id,
-            )
-            return
-
-        control = _get_configured_control()
-        if control is None:
-            adapter.process_payload(payload)
-            return
-        if payload.epoch is None:
-            LOGGER.warning(
-                "Ignoring uncontrolled APScheduler wakeup message %s while durable "
-                "control is configured",
-                message.metadata.message_id,
-            )
-            return
-        epoch = payload.epoch
-        deployment = _current_deployment()
-        if not control._is_running(deployment, epoch):  # noqa: SLF001
-            return
-        control._mark_seed_active(  # noqa: SLF001
-            deployment,
-            epoch,
-            adapter.identity.scheduler_id,
-        )
-        adapter.process_wakeup(
-            payload.logical_time,
-            cursor=payload.cursor,
-            epoch=epoch,
-            publish_guard=lambda: control._is_running(  # noqa: SLF001
-                deployment,
-                epoch,
-            ),
-        )
+        _process_wakeup(adapter, message)
 
     _registered_callbacks.extend((_handle_start, _handle_wakeup))
     _registered_schedulers[scheduler] = adapter
     return adapter
 
 
-def get_asgi_app(
-    scheduler: BaseScheduler,
-    *,
-    options: VercelAPSchedulerOptions | dict[str, Any] | None = None,
-) -> Any:
-    register_scheduler(scheduler, options=options)
-    return vqs.asgi_app()
-
-
-def _current_deployment() -> str:
-    deployment = environ.get(CURRENT_DEPLOYMENT_ENV)
-    if not deployment:
-        raise ControlConfigurationError(
-            f"{CURRENT_DEPLOYMENT_ENV} must be set in controlled subscriber processes"
+def _process_start(
+    adapter: SchedulerAdapter,
+    message: vqs.Message[dict[str, Any]],
+) -> None:
+    try:
+        payload = StartPayload.from_payload(message.payload)
+    except ValueError as exc:
+        LOGGER.warning(
+            "Ignoring invalid APScheduler start message %s: %s",
+            message.metadata.message_id,
+            exc,
         )
-    return deployment
+        return
+    if not _targets_adapter(adapter, payload.scheduler_id, message, "start"):
+        return
+
+    owner = uuid4().hex
+    claim = adapter.driver.claim_start(
+        payload.generation,
+        owner,
+        datetime.now(UTC),
+    )
+    if claim.state == "busy":
+        raise vqs.RetryAfter(BUSY_RETRY_SECONDS)
+    if claim.state == "stale":
+        adapter.publish_pending_wakeup()
+        return
+    activation_time = claim.activation_time
+    if activation_time is None:
+        raise RuntimeError("Redis start claim omitted its activation time")
+
+    try:
+        with adapter.driver.renewing(owner):
+            adapter.activate_generation(activation_time)
+            now = datetime.now(UTC)
+            next_time = adapter.canonical_wakeup_time(
+                adapter.get_next_wakeup_time(now),
+                now=now,
+            )
+            token = adapter.driver.finish_start(
+                payload.generation,
+                owner,
+                next_time,
+                now,
+            )
+            if token is not None:
+                adapter.publish_wakeup(token, now=now)
+    finally:
+        adapter.driver.release(owner)
+
+
+def _process_wakeup(
+    adapter: SchedulerAdapter,
+    message: vqs.Message[dict[str, Any]],
+) -> None:
+    try:
+        payload = WakeupPayload.from_payload(message.payload)
+    except ValueError as exc:
+        LOGGER.warning(
+            "Ignoring invalid APScheduler wakeup message %s: %s",
+            message.metadata.message_id,
+            exc,
+        )
+        return
+    if not _targets_adapter(adapter, payload.scheduler_id, message, "wakeup"):
+        return
+
+    token = payload.to_token()
+    owner = uuid4().hex
+    claim = adapter.driver.claim_wake(token, owner, datetime.now(UTC))
+    if claim.state == "busy":
+        raise vqs.RetryAfter(BUSY_RETRY_SECONDS)
+    if claim.state == "stale":
+        adapter.publish_pending_wakeup()
+        return
+
+    try:
+        with adapter.driver.renewing(owner):
+            now = datetime.now(UTC)
+            result = adapter.process_wakeup(token.logical_time, now=now)
+            next_time = adapter.canonical_wakeup_time(
+                result.next_wakeup_time,
+                now=now,
+            )
+            successor = adapter.driver.finish_wake(
+                token,
+                owner,
+                next_time,
+                datetime.now(UTC),
+            )
+            if successor is not None:
+                adapter.publish_wakeup(successor)
+    finally:
+        adapter.driver.release(owner)
+
+
+def _targets_adapter(
+    adapter: SchedulerAdapter,
+    scheduler_id: str,
+    message: vqs.Message[dict[str, Any]],
+    kind: str,
+) -> bool:
+    if scheduler_id == adapter.identity.scheduler_id:
+        return True
+    LOGGER.warning(
+        "Ignoring APScheduler %s message %s for scheduler %r; expected %r",
+        kind,
+        message.metadata.message_id,
+        scheduler_id,
+        adapter.identity.scheduler_id,
+    )
+    return False
