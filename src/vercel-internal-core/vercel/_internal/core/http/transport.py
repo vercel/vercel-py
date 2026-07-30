@@ -6,7 +6,7 @@ import abc
 import json
 import queue
 import threading
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -713,8 +713,24 @@ class SyncTransport(BaseTransport):
 class AsyncTransport(BaseTransport):
     _client: httpx.AsyncClient
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
+    def __init__(self, client: httpx.AsyncClient | Callable[[], httpx.AsyncClient]) -> None:
+        """Take a client, or a callable consulted before every request.
+
+        Keep-alive sockets belong to the event loop that opened them, so an owner
+        that outlives a loop passes a callable and gets a client per loop. The
+        transport object itself is memoized by callers and cannot be swapped out.
+        """
+        self._resolve_client: Callable[[], httpx.AsyncClient] = (
+            (lambda: client) if isinstance(client, httpx.AsyncClient) else client
+        )
+        self._client = self._resolve_client()
+
+    def _acquire_client(self) -> httpx.AsyncClient:
+        client = self._resolve_client()
+        # `_client` exists for the inherited `_build_request`, which reads client
+        # defaults; keep it on the client this request is actually sent on.
         self._client = client
+        return client
 
     async def send(
         self,
@@ -730,10 +746,11 @@ class AsyncTransport(BaseTransport):
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
+        client = self._acquire_client()
         request = self._build_request(
             method, path, token=token, params=params, body=body, headers=headers, timeout=timeout
         )
-        response = await self._client.send(
+        response = await client.send(
             request,
             stream=stream,
             follow_redirects=follow_redirects
@@ -757,6 +774,7 @@ class AsyncTransport(BaseTransport):
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         response_chunk_size: int | None = None,
     ) -> AsyncIterator[StreamingRequest]:
+        client = self._acquire_client()
         send, receive = anyio.create_memory_object_stream[bytes](1)
         request = self._build_request(
             method,
@@ -768,7 +786,7 @@ class AsyncTransport(BaseTransport):
             timeout=timeout,
         )
         streaming_request = _AsyncStreamingRequest(
-            client=self._client,
+            client=client,
             request=request,
             send=send,
             receive=receive,
