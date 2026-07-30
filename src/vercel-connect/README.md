@@ -115,10 +115,12 @@ pinned to a specific connector or deployment.
 
 ```python
 from vercel.api import session
-from vercel.connect import ConnectServiceOptions
+from vercel.connect import ConnectAppTokenSubject, ConnectServiceOptions, get_token
 
-with session(service_options=[ConnectServiceOptions(base_url="https://staging.example.com")]):
-    ...
+async with session(
+    service_options=[ConnectServiceOptions(base_url="https://staging.example.com")]
+):
+    token = await get_token("github/my-app", subject=ConnectAppTokenSubject())
 ```
 
 ## Local development
@@ -132,3 +134,6 @@ vercel env pull    # writes VERCEL_OIDC_TOKEN into .env.local
 
 The connector must be attached to your project and enabled for the target
 environment, or every call fails.
+
+Use a plain `with` block and `vercel.connect.sync` together; mixing an async call
+into a sync session (or the reverse) is rejected.

@@ -242,13 +242,19 @@ def _error_envelope(data: object) -> Mapping[str, Any] | None:
 
 
 def _error_message(data: object) -> str | None:
-    envelope = _error_envelope(data)
-    if envelope is None:
-        return None
-    for name in ("message", "msg"):
-        message = envelope.get(name)
-        if isinstance(message, str) and message:
-            return message
+    # Check the envelope first, then the top level: a body like
+    # `{"message": "Forbidden"}` has no envelope, and falling back to the shared
+    # extractor's text would re-embed the status that `__str__` already renders.
+    candidates = [_error_envelope(data)]
+    if isinstance(data, Mapping):
+        candidates.append(data)
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for name in ("message", "msg", "error_description"):
+            message = candidate.get(name)
+            if isinstance(message, str) and message:
+                return message
     return None
 
 

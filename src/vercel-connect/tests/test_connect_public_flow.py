@@ -201,3 +201,70 @@ async def test_public_surface_works_without_an_explicit_session(
 
     assert token == "upstream"
     assert route.calls.last.request.headers["authorization"] == "Bearer env-oidc-token"
+
+
+@respx.mock
+def test_sync_surface_tolerates_a_suspending_default_refresh(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default resolver must not suspend: `iter_coroutine` cannot allow it.
+
+    The async resolver awaits an HTTP refresh on the local-dev path, so a sync
+    session has to use the synchronous one or every call fails when a token
+    needs refreshing.
+    """
+    token_route()
+
+    async def suspending_async_resolver() -> str:
+        await asyncio.sleep(0)
+        return "should-not-be-used"
+
+    def sync_resolver() -> str:
+        return "sync-oidc-token"
+
+    monkeypatch.setattr("vercel.oidc.aio.get_vercel_oidc_token", suspending_async_resolver)
+    monkeypatch.setattr("vercel.oidc.get_vercel_oidc_token", sync_resolver)
+
+    with session(service_options=[ConnectServiceOptions(base_url=TEST_BASE_URL)]):
+        token = connect_sync.get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    assert token == "upstream"
+
+
+@respx.mock
+async def test_async_surface_uses_the_async_default_resolver(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = token_route()
+
+    async def async_resolver() -> str:
+        await asyncio.sleep(0)
+        return "async-oidc-token"
+
+    monkeypatch.setattr("vercel.oidc.aio.get_vercel_oidc_token", async_resolver)
+
+    async with session(service_options=[ConnectServiceOptions(base_url=TEST_BASE_URL)]):
+        await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    assert route.calls.last.request.headers["authorization"] == "Bearer async-oidc-token"
+
+
+@respx.mock
+async def test_empty_vercel_token_is_rejected(mock_env_clear: None) -> None:
+    from vercel.connect import ConnectCredentialsError, ConnectOptions
+
+    token_route()
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectCredentialsError, match="empty string"):
+            await get_token(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                options=ConnectOptions(vercel_token=""),
+            )
+
+
+def test_unset_credentials_factory_defers_to_the_session_mode() -> None:
+    assert ConnectServiceOptions().credentials_factory is None

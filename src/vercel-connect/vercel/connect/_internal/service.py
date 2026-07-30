@@ -30,7 +30,13 @@ from vercel.connect._internal.models import (
     ConnectWebhookClaims,
     DurationInput,
 )
-from vercel.connect._internal.options import ConnectOptions, ConnectServiceOptions
+from vercel.connect._internal.options import (
+    ConnectCredentialsFactory,
+    ConnectOptions,
+    ConnectServiceOptions,
+    _default_async_credentials_factory,
+    _default_sync_credentials_factory,
+)
 from vercel.connect._internal.single_flight import (
     AsyncSingleFlight,
     SingleFlight,
@@ -165,10 +171,12 @@ class ConnectService:
         single_flight: SingleFlight,
         ensure_open: Callable[[], None],
         verify_oidc_token: Callable[..., Any],
+        credentials_factory: ConnectCredentialsFactory,
     ) -> None:
         self._api_client = api_client
         self._options = options
         self._cache = cache
+        self._credentials_factory = credentials_factory
         self._single_flight = single_flight
         self._ensure_open = ensure_open
         self._verify_oidc_token = verify_oidc_token
@@ -176,15 +184,19 @@ class ConnectService:
     async def _identity(self, options: ConnectOptions | None) -> str:
         supplied = options.vercel_token if options is not None else None
         if supplied is None:
-            return await self._options.credentials_factory()
+            return await self._credentials_factory()
         if callable(supplied):
             resolved = supplied()
             # Guarded so a sync callable never forces the sync path to suspend.
+            # An async callable that genuinely suspends is only usable from the
+            # async surface; see ConnectOptions.vercel_token.
             if inspect.isawaitable(resolved):
                 resolved = await resolved
             if not isinstance(resolved, str) or not resolved:
                 raise ConnectCredentialsError("vercel_token callable returned no token")
             return resolved
+        if not supplied:
+            raise ConnectCredentialsError("vercel_token was an empty string")
         return supplied
 
     def _validity_buffer_seconds(self, options: ConnectOptions | None) -> float:
@@ -222,6 +234,8 @@ class ConnectService:
             authorization_details=authorization_details,
         )
 
+        generation = self._cache.generation
+
         async def load() -> ConnectTokenState:
             state = await self._api_client.create_token(
                 connector,
@@ -234,7 +248,8 @@ class ConnectService:
                 authorization_details=authorization_details,
             )
             if not no_cache:
-                self._cache.set(key, state)
+                # Dropped when an invalidation landed while this was in flight.
+                self._cache.set(key, state, generation=generation)
             return state
 
         if no_cache:
@@ -249,6 +264,10 @@ class ConnectService:
                 return _token_response(cached)
 
         if force_refresh:
+            # Evict up front: if the refetch fails, the caller must not keep being
+            # served the credential they just asked to re-validate.
+            self._cache.delete(key)
+            generation = self._cache.generation
             return _token_response(await load())
         return _token_response(await self._single_flight.run(key, read=read, load=load))
 
@@ -417,10 +436,13 @@ def get_connect_service(session: "SdkSession | SyncSdkSession") -> ConnectServic
                 return oidc_verify.verify_vercel_oidc_token(token, **kwargs)
             return oidc_verify.verify_vercel_oidc_token_async(token, **kwargs)
 
+        credentials_factory = options.credentials_factory or (
+            _default_sync_credentials_factory if is_sync else _default_async_credentials_factory
+        )
         return ConnectService(
             api_client=ConnectApiClient(
                 base_url=options.base_url,
-                credentials_factory=options.credentials_factory,
+                credentials_factory=credentials_factory,
                 transport=session.get_transport(),
                 timeout=options.timeout,
             ),
@@ -429,6 +451,7 @@ def get_connect_service(session: "SdkSession | SyncSdkSession") -> ConnectServic
             single_flight=SyncSingleFlight() if is_sync else AsyncSingleFlight(),
             ensure_open=session.check_open,
             verify_oidc_token=verify_oidc_token,
+            credentials_factory=credentials_factory,
         )
 
     return session.get_or_create_service(ConnectService, factory)

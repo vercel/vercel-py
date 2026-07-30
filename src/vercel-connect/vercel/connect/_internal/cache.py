@@ -30,18 +30,39 @@ class TokenCacheKey:
     changes which credential the server would mint, plus a SHA-256 of the
     effective platform identity token so two identities can never share an entry.
     Excludes read-time policy such as the validity buffer.
+
+    Credentials are never embedded verbatim: both the platform identity token and
+    an inbound token-exchange credential are reduced to digests, so a key is safe
+    to log.
     """
 
-    __slots__ = ("_value", "_identity")
+    __slots__ = ("_value", "_connector", "_subject_key", "_installation_id")
 
-    def __init__(self, value: str, identity: str) -> None:
+    def __init__(
+        self,
+        value: str,
+        *,
+        connector: str,
+        subject_key: str,
+        installation_id: str | None,
+    ) -> None:
         self._value = value
-        self._identity = identity
+        self._connector = connector
+        self._subject_key = subject_key
+        self._installation_id = installation_id
 
     @property
-    def identity(self) -> str:
-        """The connector, subject, and installation this entry belongs to."""
-        return self._identity
+    def connector(self) -> str:
+        return self._connector
+
+    @property
+    def subject_key(self) -> str:
+        """Canonical subject identity, with any credential reduced to a digest."""
+        return self._subject_key
+
+    @property
+    def installation_id(self) -> str | None:
+        return self._installation_id
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, TokenCacheKey) and other._value == self._value
@@ -50,8 +71,10 @@ class TokenCacheKey:
         return hash(self._value)
 
     def __repr__(self) -> str:
-        # The identity token is only ever present as a digest, never verbatim.
-        return f"TokenCacheKey({self._value!r})"
+        # Only a digest: the full value carries subject fields, and diagnostics
+        # must never become a credential disclosure path.
+        digest = hashlib.sha256(self._value.encode()).hexdigest()[:16]
+        return f"TokenCacheKey({self._connector!r}, digest={digest})"
 
 
 def _canonical(value: Any) -> Any:
@@ -64,20 +87,27 @@ def _canonical(value: Any) -> Any:
     return value
 
 
-def _identity_of(
-    connector: str,
-    subject: ConnectTokenSubject,
-    installation_id: str | None,
-) -> str:
-    return json.dumps(
-        {
-            "connector": connector,
-            "subject": _canonical(subject),
-            "installationId": installation_id,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _canonical_subject(subject: ConnectTokenSubject) -> Any:
+    """Canonicalize a subject, replacing any credential with a digest.
+
+    A token-exchange subject carries a live bearer credential. It has to
+    participate in the key so two inbound tokens never share an entry, but it
+    must not be stored, so only its digest is kept.
+    """
+    canonical = _canonical(subject)
+    if isinstance(canonical, dict) and "token" in canonical:
+        token = canonical["token"]
+        canonical = {name: value for name, value in canonical.items() if name != "token"}
+        canonical["tokenDigest"] = _digest(token) if isinstance(token, str) else None
+    return canonical
+
+
+def _subject_key(subject: ConnectTokenSubject) -> str:
+    return json.dumps(_canonical_subject(subject), sort_keys=True, separators=(",", ":"))
 
 
 def build_cache_key(
@@ -94,7 +124,7 @@ def build_cache_key(
     """Build a canonical cache key. Permuted inputs must produce equal keys."""
     payload = {
         "connector": connector,
-        "subject": _canonical(subject),
+        "subject": _canonical_subject(subject),
         "installationId": installation_id,
         # Scope order does not change which credential is minted, so it must not
         # change the key either.
@@ -114,7 +144,12 @@ def build_cache_key(
         "identity": hashlib.sha256(vercel_token.encode()).hexdigest(),
     }
     value = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return TokenCacheKey(value, _identity_of(connector, subject, installation_id))
+    return TokenCacheKey(
+        value,
+        connector=connector,
+        subject_key=_subject_key(subject),
+        installation_id=installation_id,
+    )
 
 
 class TokenCache:
@@ -124,7 +159,10 @@ class TokenCache:
         self._max_size = max_size
         self._entries: OrderedDict[TokenCacheKey, ConnectTokenState] = OrderedDict()
         self._lock = threading.RLock()
-        self._in_flight: dict[TokenCacheKey, Any] = {}
+        # Bumped on every invalidation. A load that started before an eviction
+        # carries the older generation and is discarded instead of resurrecting a
+        # revoked credential.
+        self._generation = 0
 
     def get(
         self,
@@ -143,19 +181,41 @@ class TokenCache:
             self._entries.move_to_end(key)
             return state
 
-    def set(self, key: TokenCacheKey, value: ConnectTokenState) -> None:
-        """Store a token, evicting the least recently used entry when full."""
+    @property
+    def generation(self) -> int:
+        """Counter incremented by every invalidation."""
         with self._lock:
+            return self._generation
+
+    def set(
+        self,
+        key: TokenCacheKey,
+        value: ConnectTokenState,
+        *,
+        generation: int | None = None,
+    ) -> bool:
+        """Store a token, evicting the least recently used entry when full.
+
+        Returns False without storing when `generation` predates an invalidation
+        that happened while the token was being fetched.
+        """
+        with self._lock:
+            if generation is not None and generation != self._generation:
+                return False
             self._entries[key] = value
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_size:
                 # O(1) eviction; the TypeScript implementation scans.
                 self._entries.popitem(last=False)
+            return True
 
     def delete(self, key: TokenCacheKey) -> bool:
         """Drop exactly one entry. Returns whether an entry was removed."""
         with self._lock:
-            return self._entries.pop(key, None) is not None
+            removed = self._entries.pop(key, None) is not None
+            if removed:
+                self._generation += 1
+            return removed
 
     def delete_by_identity(
         self,
@@ -164,31 +224,38 @@ class TokenCache:
         subject: ConnectTokenSubject,
         installation_id: str | None = None,
     ) -> int:
-        """Drop every entry for a connector/subject/installation identity.
+        """Drop every entry for a connector and subject.
 
-        Scoped invalidation for revocation: unlike the TypeScript SDK this never
-        clears unrelated entries.
+        `installation_id=None` means every installation, matching the server's
+        revocation semantics, rather than only entries that were cached without
+        an installation. Scoped invalidation: unlike the TypeScript SDK this
+        never clears unrelated connectors or subjects.
+
+        Known limitation: a connector is matched by the string used at call time,
+        so entries cached under an opaque id (`scl_...`) are not evicted by a call
+        naming the readable UID (`slack/my-bot`), and vice versa. Resolving
+        aliases would require a network round trip.
         """
-        identity = _identity_of(connector, subject, installation_id)
+        subject_key = _subject_key(subject)
         with self._lock:
-            doomed = [key for key in self._entries if key.identity == identity]
+            doomed = [
+                key
+                for key in self._entries
+                if key.connector == connector
+                and key.subject_key == subject_key
+                and (installation_id is None or key.installation_id == installation_id)
+            ]
             for key in doomed:
                 del self._entries[key]
+            if doomed:
+                self._generation += 1
             return len(doomed)
 
     def clear(self) -> None:
         """Drop every entry."""
         with self._lock:
             self._entries.clear()
-
-    def lock_for(self, key: TokenCacheKey) -> Any:
-        """Return the per-key lock used to collapse concurrent cold fetches."""
-        with self._lock:
-            existing = self._in_flight.get(key)
-            if existing is None:
-                existing = threading.RLock()
-                self._in_flight[key] = existing
-            return existing
+            self._generation += 1
 
     def __len__(self) -> int:
         with self._lock:

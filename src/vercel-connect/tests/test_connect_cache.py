@@ -18,6 +18,7 @@ import respx
 import time_machine
 from conftest import TEST_BASE_URL, session_options
 
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.session import get_active_sync_session
 from vercel.api import session
 from vercel.connect import (
@@ -608,3 +609,167 @@ async def test_explicit_scopes_still_key_separately_from_defaults(mock_env_clear
         await get_token("slack/my-bot", subject=ConnectAppTokenSubject(), scopes=["chat:write"])
 
     assert route.call_count == 2
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_revoke_without_installation_evicts_every_installation(
+    mock_env_clear: None,
+) -> None:
+    """Omitting installation_id revokes everywhere server-side, so it must evict
+    everywhere locally too."""
+    route = counting_route()
+    respx.delete(f"{TEST_BASE_URL}/v1/connect/connectors/slack%2Fmy-bot/tokens").mock(
+        return_value=httpx.Response(204, content=b"")
+    )
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=subject, installation_id="T1")
+        await get_token("slack/my-bot", subject=subject, installation_id="T2")
+        await get_token("slack/my-bot", subject=subject)
+        assert route.call_count == 3
+
+        await revoke_token("slack/my-bot", subject=subject)
+
+        await get_token("slack/my-bot", subject=subject, installation_id="T1")
+        await get_token("slack/my-bot", subject=subject, installation_id="T2")
+        await get_token("slack/my-bot", subject=subject)
+
+    assert route.call_count == 6
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_revoke_with_installation_spares_other_installations(
+    mock_env_clear: None,
+) -> None:
+    route = counting_route()
+    respx.delete(f"{TEST_BASE_URL}/v1/connect/connectors/slack%2Fmy-bot/tokens").mock(
+        return_value=httpx.Response(204, content=b"")
+    )
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=subject, installation_id="T1")
+        await get_token("slack/my-bot", subject=subject, installation_id="T2")
+        await revoke_token("slack/my-bot", subject=subject, installation_id="T1")
+
+        await get_token("slack/my-bot", subject=subject, installation_id="T2")
+        assert route.call_count == 2
+        await get_token("slack/my-bot", subject=subject, installation_id="T1")
+
+    assert route.call_count == 3
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_failed_forced_refresh_does_not_keep_serving_the_old_token(
+    mock_env_clear: None,
+) -> None:
+    """A caller who asked to re-validate must not keep getting the stale token."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json=token_body())
+        return httpx.Response(401, json={"error": {"code": "no_token", "message": "revoked"}})
+
+    respx.post(TOKEN_URL).mock(side_effect=handler)
+    from vercel.connect import NoValidTokenError
+
+    async with session(service_options=session_options()):
+        assert await get_token("slack/my-bot", subject=ConnectAppTokenSubject()) == "t1"
+        with pytest.raises(NoValidTokenError):
+            await get_token(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                options=ConnectOptions(force_refresh=True),
+            )
+        # The known-invalid credential must be gone, not re-served.
+        with pytest.raises(NoValidTokenError):
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_invalidation_during_an_in_flight_fetch_is_not_undone(
+    mock_env_clear: None,
+) -> None:
+    """A load that started before a revoke must not repopulate the cache."""
+    release = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await release.wait()
+        return httpx.Response(200, json=token_body())
+
+    respx.post(TOKEN_URL).mock(side_effect=slow)
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        pending = asyncio.ensure_future(get_token("slack/my-bot", subject=subject))
+        await asyncio.sleep(0)
+        clear_token_cache()
+        release.set()
+        await pending
+
+        assert len(_active_cache()) == 0
+
+
+def _active_cache() -> Any:
+    from vercel._internal.core.session import get_active_session
+    from vercel.connect._internal.service import get_connect_service
+
+    return get_connect_service(get_active_session())._cache
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_exchange_credentials_are_not_stored_in_cache_keys(
+    mock_env_clear: None,
+) -> None:
+    from vercel.connect import ConnectTokenExchangeSubject
+
+    key = build_cache_key(
+        "slack/my-bot",
+        subject=ConnectTokenExchangeSubject(token="xoxb-INBOUND-SECRET"),
+        vercel_token="identity-secret",
+    )
+
+    assert "xoxb-INBOUND-SECRET" not in repr(key)
+    assert "xoxb-INBOUND-SECRET" not in key.subject_key
+    assert "identity-secret" not in repr(key)
+    # Distinct inbound credentials must still key separately.
+    other = build_cache_key(
+        "slack/my-bot",
+        subject=ConnectTokenExchangeSubject(token="xoxb-OTHER"),
+        vercel_token="identity-secret",
+    )
+    assert key != other
+
+
+def test_single_flight_locks_do_not_accumulate() -> None:
+    from vercel.connect._internal.single_flight import SyncSingleFlight
+
+    flight = SyncSingleFlight()
+    state = token_body()
+
+    async def load() -> Any:
+        from vercel.connect._internal.state import ConnectorRefState, ConnectTokenState
+
+        return ConnectTokenState(
+            token=state["token"],
+            expires_at=NOW + timedelta(hours=1),
+            connector=ConnectorRefState(id="scl_1", uid="slack/my-bot", type="slack"),
+        )
+
+    for index in range(50):
+        key = build_cache_key(
+            "slack/my-bot",
+            subject=ConnectUserTokenSubject(id=f"u_{index}"),
+            vercel_token=f"rotating-token-{index}",
+        )
+        iter_coroutine(flight.run(key, read=lambda: None, load=load))
+
+    assert len(flight) == 0

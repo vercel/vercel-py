@@ -29,7 +29,15 @@ class ConnectCredentialsFactory(Protocol):
     async def __call__(self) -> str: ...
 
 
-async def _default_connect_credentials_factory() -> str:
+def _missing_token_error() -> ConnectCredentialsError:
+    return ConnectCredentialsError(
+        "no Vercel OIDC token available; run `vercel env pull` for local "
+        "development, or pass options=ConnectOptions(vercel_token=...)"
+    )
+
+
+async def _default_async_credentials_factory() -> str:
+    """Resolve the deployment identity for an async session."""
     try:
         from vercel.oidc.aio import get_vercel_oidc_token
 
@@ -38,10 +46,28 @@ async def _default_connect_credentials_factory() -> str:
         raise ConnectCredentialsError(str(exc)) from exc
 
     if not token:
-        raise ConnectCredentialsError(
-            "no Vercel OIDC token available; run `vercel env pull` for local "
-            "development, or pass options=ConnectOptions(vercel_token=...)"
-        )
+        raise _missing_token_error()
+    return token
+
+
+async def _default_sync_credentials_factory() -> str:
+    """Resolve the deployment identity for a sync session.
+
+    Declared async to satisfy the shared service, but deliberately calls the
+    purely synchronous resolver: the sync surface is driven by `iter_coroutine`,
+    which cannot tolerate a suspension. The async resolver awaits an HTTP refresh
+    on the local-dev path, so using it here would fail exactly when a token needs
+    refreshing. `vercel-sandbox` makes the same choice for the same reason.
+    """
+    try:
+        from vercel.oidc import get_vercel_oidc_token
+
+        token = get_vercel_oidc_token()
+    except Exception as exc:
+        raise ConnectCredentialsError(str(exc)) from exc
+
+    if not token:
+        raise _missing_token_error()
     return token
 
 
@@ -56,7 +82,7 @@ class ConnectServiceOptions(ServiceOptions):
     """
 
     base_url: str
-    credentials_factory: ConnectCredentialsFactory
+    credentials_factory: ConnectCredentialsFactory | None
     timeout: timedelta
     validity_buffer: timedelta
     token_cache_size: int
@@ -73,11 +99,9 @@ class ConnectServiceOptions(ServiceOptions):
         oidc_issuer: str | None = None,
     ) -> None:
         object.__setattr__(self, "base_url", base_url or DEFAULT_CONNECT_API_BASE_URL)
-        object.__setattr__(
-            self,
-            "credentials_factory",
-            credentials_factory or _default_connect_credentials_factory,
-        )
+        # Left as None when unset so the service can pick the resolver that
+        # matches the session mode.
+        object.__setattr__(self, "credentials_factory", credentials_factory)
         object.__setattr__(self, "timeout", timeout if timeout is not None else DEFAULT_TIMEOUT)
         object.__setattr__(
             self,
@@ -115,6 +139,8 @@ class ConnectOptions:
 
 
 __all__ = [
+    "_default_async_credentials_factory",
+    "_default_sync_credentials_factory",
     "DEFAULT_CONNECT_API_BASE_URL",
     "DEFAULT_TOKEN_CACHE_SIZE",
     "DEFAULT_VALIDITY_BUFFER",

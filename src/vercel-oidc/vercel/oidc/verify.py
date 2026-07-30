@@ -45,6 +45,7 @@ _WILDCARD = "*"
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _jwks_last_fetch: dict[str, float] = {}
+_jwks_fetch_locks: dict[str, threading.Lock] = {}
 
 _MISSING_EXTRA_MESSAGE = (
     "OIDC token verification requires the 'verify' extra: pip install \"vercel-oidc[verify]\""
@@ -65,6 +66,11 @@ def _require_pyjwt() -> Any:
         import jwt
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised by packaging
         raise VercelOidcVerificationError(_MISSING_EXTRA_MESSAGE, exc) from exc
+    # PyJWT installs without `cryptography` by default, and defines RSAAlgorithm
+    # only when it is present. Detect that here rather than failing later with an
+    # AttributeError that hides the real remedy.
+    if not hasattr(jwt.algorithms, "RSAAlgorithm"):  # pragma: no cover - env dependent
+        raise VercelOidcVerificationError(_MISSING_EXTRA_MESSAGE)
     return jwt
 
 
@@ -93,12 +99,20 @@ def _store_jwks(url: str, document: dict[str, Any]) -> None:
         _jwks_last_fetch[url] = time.monotonic()
 
 
-def _may_refetch(url: str) -> bool:
+def _reserve_refetch(url: str) -> bool:
+    """Atomically claim the right to refetch, rate-limited per JWKS URL.
+
+    Checking and stamping in one critical section keeps concurrent callers with
+    an unknown `kid` from each issuing their own request, which would turn an
+    attacker-chosen `kid` into request amplification against the JWKS endpoint.
+    """
     with _jwks_lock:
+        now = time.monotonic()
         last = _jwks_last_fetch.get(url)
-    if last is None:
+        if last is not None and now - last < DEFAULT_JWKS_MIN_REFETCH_INTERVAL.total_seconds():
+            return False
+        _jwks_last_fetch[url] = now
         return True
-    return time.monotonic() - last >= DEFAULT_JWKS_MIN_REFETCH_INTERVAL.total_seconds()
 
 
 def _parse_jwks(payload: object) -> dict[str, Any]:
@@ -107,7 +121,26 @@ def _parse_jwks(payload: object) -> dict[str, Any]:
     return payload
 
 
+def _fetch_lock(url: str) -> threading.Lock:
+    with _jwks_lock:
+        lock = _jwks_fetch_locks.get(url)
+        if lock is None:
+            lock = threading.Lock()
+            _jwks_fetch_locks[url] = lock
+        return lock
+
+
 def _fetch_jwks_sync(url: str) -> dict[str, Any]:
+    # Single-flight across threads: concurrent cold verifications would otherwise
+    # each issue their own JWKS request.
+    with _fetch_lock(url):
+        cached = _cached_jwks(url)
+        if cached is not None:
+            return cached
+        return _fetch_jwks_sync_uncached(url)
+
+
+def _fetch_jwks_sync_uncached(url: str) -> dict[str, Any]:
     try:
         with httpx.Client(timeout=_JWKS_TIMEOUT) as client:
             response = client.get(url)
@@ -122,6 +155,11 @@ def _fetch_jwks_sync(url: str) -> dict[str, Any]:
 
 
 async def _fetch_jwks_async(url: str) -> dict[str, Any]:
+    # No cross-task single-flight here: a threading lock held across an await
+    # would block the event loop, and an asyncio primitive would break trio
+    # callers. The cold-start burst is bounded by concurrency at process start;
+    # the attacker-controlled path (an unknown `kid` forcing a refetch) is
+    # rate-limited by _reserve_refetch.
     try:
         async with httpx.AsyncClient(timeout=_JWKS_TIMEOUT) as client:
             response = await client.get(url)
@@ -301,7 +339,7 @@ def verify_vercel_oidc_token(
         fetched = True
 
     key = _select_key(document, kid)
-    if key is None and not fetched and _may_refetch(url):
+    if key is None and not fetched and _reserve_refetch(url):
         key = _select_key(_fetch_jwks_sync(url), kid)
     if key is None:
         raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
@@ -360,7 +398,7 @@ async def verify_vercel_oidc_token_async(
         fetched = True
 
     key = _select_key(document, kid)
-    if key is None and not fetched and _may_refetch(url):
+    if key is None and not fetched and _reserve_refetch(url):
         key = _select_key(await _fetch_jwks_async(url), kid)
     if key is None:
         raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
@@ -414,6 +452,7 @@ def clear_jwks_cache() -> None:
     with _jwks_lock:
         _jwks_cache.clear()
         _jwks_last_fetch.clear()
+        _jwks_fetch_locks.clear()
 
 
 __all__ = [

@@ -12,7 +12,10 @@ def load_environment() -> None:
     except ImportError:
         # python-dotenv is a convenience for local runs, not a requirement.
         return
-    load_dotenv()
+    # `vercel env pull` writes .env.local; a bare load_dotenv() would look for
+    # .env and silently find no credentials.
+    for candidate in (".env.local", ".env"):
+        load_dotenv(candidate, override=False)
 
 
 def require_connector() -> str:

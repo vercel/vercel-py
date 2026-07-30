@@ -38,15 +38,26 @@ class SyncSingleFlight:
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
-        self._locks: dict[TokenCacheKey, threading.Lock] = {}
+        # Reference-counted so the table cannot grow without bound: cache keys
+        # embed a digest of the platform identity token, and those rotate, so a
+        # long-lived process would otherwise accumulate one lock per token
+        # generation per request shape.
+        self._locks: dict[TokenCacheKey, tuple[threading.Lock, list[int]]] = {}
 
-    def _lock_for(self, key: TokenCacheKey) -> threading.Lock:
+    def _acquire_slot(self, key: TokenCacheKey) -> tuple[threading.Lock, list[int]]:
         with self._guard:
-            lock = self._locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._locks[key] = lock
-            return lock
+            slot = self._locks.get(key)
+            if slot is None:
+                slot = (threading.Lock(), [0])
+                self._locks[key] = slot
+            slot[1][0] += 1
+            return slot
+
+    def _release_slot(self, key: TokenCacheKey, waiters: list[int]) -> None:
+        with self._guard:
+            waiters[0] -= 1
+            if waiters[0] <= 0:
+                self._locks.pop(key, None)
 
     async def run(
         self,
@@ -55,13 +66,21 @@ class SyncSingleFlight:
         read: Reader,
         load: Loader,
     ) -> ConnectTokenState:
-        lock = self._lock_for(key)
-        with lock:
-            # The holder may have populated the cache while this thread waited.
-            cached = read()
-            if cached is not None:
-                return cached
-            return await load()
+        lock, waiters = self._acquire_slot(key)
+        try:
+            with lock:
+                # The holder may have populated the cache while this thread waited.
+                cached = read()
+                if cached is not None:
+                    return cached
+                return await load()
+        finally:
+            self._release_slot(key, waiters)
+
+    def __len__(self) -> int:
+        """Number of keys currently being resolved. Intended for tests."""
+        with self._guard:
+            return len(self._locks)
 
 
 class AsyncSingleFlight:

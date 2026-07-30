@@ -413,3 +413,55 @@ def test_extract_bearer_token_is_header_name_insensitive() -> None:
 def test_extract_bearer_token_rejects_invalid_headers(headers: dict[str, str]) -> None:
     with pytest.raises(VercelOidcVerificationError):
         extract_bearer_token(headers)
+
+
+@respx.mock
+def test_unknown_kid_refetch_is_rate_limited_under_concurrency(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """An attacker-chosen `kid` must not amplify into one JWKS request per caller."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    route = jwks_route(signing_key)
+    clear_jwks_cache()
+    verify_vercel_oidc_token(sign(signing_key), **EXPECTATIONS)  # warm the cache
+    assert route.call_count == 1
+
+    def attempt(index: int) -> None:
+        with pytest.raises(VercelOidcVerificationError):
+            verify_vercel_oidc_token(sign(signing_key, kid=f"forged-{index}"), **EXPECTATIONS)
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(attempt, range(12)))
+
+    assert route.call_count <= 2
+
+
+@respx.mock
+def test_concurrent_cold_verifications_fetch_jwks_once(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    route = jwks_route(signing_key)
+    clear_jwks_cache()
+    token = sign(signing_key)
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(
+            pool.map(lambda _: verify_vercel_oidc_token(token, **EXPECTATIONS), range(12))
+        )
+
+    assert all(r["project_id"] == "prj_123" for r in results)
+    assert route.call_count == 1
+
+
+def test_missing_crypto_backend_reports_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PyJWT without `cryptography` must name the remedy, not raise AttributeError."""
+    import jwt
+
+    from vercel.oidc import verify as verify_module
+
+    monkeypatch.delattr(jwt.algorithms, "RSAAlgorithm")
+    with pytest.raises(VercelOidcVerificationError, match="verify"):
+        verify_module._require_pyjwt()

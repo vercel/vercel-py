@@ -313,3 +313,18 @@ async def test_unreadable_body_still_renders_once(mock_env_clear: None) -> None:
     assert "Bad Gateway" in rendered
     assert rendered.count("status=502") == 1
     assert rendered.endswith("(status=502)")
+
+
+@respx.mock
+async def test_top_level_message_body_renders_status_once(mock_env_clear: None) -> None:
+    """A body without an `error` envelope must not fall back to text that already
+    embeds the status."""
+    respx.post(TOKEN_URL).mock(return_value=error_response(403, {"message": "Forbidden"}))
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    rendered = str(exc_info.value)
+    assert rendered == "Forbidden (status=403)"
+    assert "HTTP 403" not in rendered
