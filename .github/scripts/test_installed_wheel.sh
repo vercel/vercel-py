@@ -275,6 +275,47 @@ def ignored_test_files() -> list[Path]:
     return ignored
 
 
+def node_source(text: str, node: ast.AST) -> str:
+    """Source of a node together with its decorators.
+
+    `ast.get_source_segment` starts at the `def` or `class` line, so a decorator
+    such as `@respx.mock` falls outside the segment and has to be read from
+    `decorator_list` separately.
+    """
+    segments = [ast.get_source_segment(text, node) or ""]
+    for decorator in getattr(node, "decorator_list", []):
+        segments.append(ast.get_source_segment(text, decorator) or "")
+    return "\n".join(segments)
+
+
+def respx_helper_names(text: str, module: ast.Module) -> set[str]:
+    """Module-level helpers and fixtures that touch respx.
+
+    A test that only calls `some_route()` or requests a respx fixture never
+    mentions respx itself, so those names have to be collected first.
+    """
+    return {
+        node.name
+        for node in module.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and "respx" in node_source(text, node)
+    }
+
+
+def uses_respx(text: str, node: ast.AST, helper_names: set[str]) -> bool:
+    if "respx" in node_source(text, node):
+        return True
+    referenced = {
+        child.func.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+    }
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        # Fixtures are requested by parameter name rather than called.
+        referenced |= {argument.arg for argument in node.args.args}
+    return bool(referenced & helper_names)
+
+
 def pytest_filter_for_tests(paths: list[Path], texts: str) -> str:
     if not uses_vendored_httpx or "respx" not in texts:
         return ""
@@ -283,11 +324,11 @@ def pytest_filter_for_tests(paths: list[Path], texts: str) -> str:
     for path in paths:
         text = path.read_text(encoding="utf-8")
         module = ast.parse(text, filename=str(path))
+        helper_names = respx_helper_names(text, module)
         for node in module.body:
             if not isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
-            source = ast.get_source_segment(text, node) or ""
-            if "respx" in source:
+            if uses_respx(text, node, helper_names):
                 excluded_names.append(node.name)
     return " and ".join(f"not {name}" for name in excluded_names)
 
