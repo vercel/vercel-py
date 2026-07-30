@@ -11,9 +11,7 @@ from .http import HttpResponse, PushDeliveryBody
 from .names import SanitizedName
 from .types import (
     Duration,
-    Message,
     MessageID,
-    MessageMetadata,
     RawHeaders,
     Topic,
 )
@@ -128,26 +126,12 @@ def poll(
     return _iterate()
 
 
-def acknowledge(message: Message[T] | MessageMetadata) -> None:
-    """Acknowledge a received message with the default sync client."""
-    client = QueueClient()
-    client.acknowledge(message)
-
-
-def extend_lease(message: Message[T] | MessageMetadata, duration: Duration) -> None:
-    """Extend message processing with the default sync client."""
-    client = QueueClient()
-    client.extend_lease(message, duration)
-
-
 # Only add public symbols to __all__; internal helpers must stay unexported.
 __all__ = (
     "Delivery",
     "LeaseRenewal",
     "QueueClient",
     "accept_and_handle",
-    "acknowledge",
-    "extend_lease",
     "poll",
     "send",
 )

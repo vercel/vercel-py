@@ -17,7 +17,7 @@ from vercel._internal.blob.multipart import (
     MultipartClient,
     SyncMultipartClient,
 )
-from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.blob.errors import BlobError
 from vercel.blob.types import (
     Access,

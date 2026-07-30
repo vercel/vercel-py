@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from workspace_packages import workspace_packages
+from workspace import main
 
-for package in workspace_packages():
-    print(package)
+raise SystemExit(main(["list", "--names", "--topological"]))

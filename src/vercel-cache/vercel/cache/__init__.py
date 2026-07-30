@@ -1,12 +1,13 @@
 from .cache_build import RuntimeCacheError
 from .purge import dangerously_delete_by_tag, invalidate_by_tag
-from .runtime_cache import AsyncRuntimeCache, RuntimeCache, get_cache
+from .runtime_cache import AsyncRuntimeCache, RuntimeCache, get_cache, prime_runtime_cache
 
 __all__ = [
     "RuntimeCache",
     "RuntimeCacheError",
     "AsyncRuntimeCache",
     "get_cache",
+    "prime_runtime_cache",
     "invalidate_by_tag",
     "dangerously_delete_by_tag",
 ]

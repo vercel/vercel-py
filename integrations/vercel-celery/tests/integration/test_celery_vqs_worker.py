@@ -138,7 +138,9 @@ def test_push_worker_processes_sdk_callback_and_acknowledges_task(
 def test_push_callback_retries_until_worker_channel_is_available(
     isolated_eqs: EmbeddedQueueDevServer,
     push_worker: WorkerApp,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(vqs_celery, "_PUSH_CHANNEL_WAIT_SECONDS", 0.0)
     result = push_worker.add.apply_async((8, 13), queue="emails")
     push_channels = list(vqs_celery._push_channels)
     vqs_celery._push_channels.clear()
@@ -254,6 +256,55 @@ def test_auto_worker_uses_push_on_vercel(
             os.environ.pop("VERCEL", None)
         else:
             os.environ["VERCEL"] = previous_vercel
+        eqs.reset()
+        _clear_celery_broker_state()
+
+
+def test_embedded_worker_settles_push_delivery_inline(
+    eqs: EmbeddedQueueDevServer,
+) -> None:
+    queue_name = "embedded-push-emails"
+    _clear_celery_broker_state()
+    eqs.reset()
+    app = _celery_app(
+        "embedded-push-worker",
+        "vercel-push://localhost//",
+        eqs.base_url,
+        queue_name=queue_name,
+    )
+
+    @app.task(name="embedded-push-worker.add")
+    def add(left: int, right: int) -> int:
+        return left + right
+
+    app.finalize(auto=True)
+    embedded = None
+    try:
+        # The production path on Vercel: the in-process embedded worker owns
+        # consumption, and nothing ever pumps its pending operations between
+        # push requests.
+        vqs_celery.register_celery_app_queues(app)
+        embedded = vqs_celery._embedded_workers.get(app)
+        assert embedded is not None
+
+        result = add.apply_async((2, 40), queue=queue_name)
+        worker_app = WorkerApp(
+            app=app,
+            add=add,
+            worker=embedded.worker,
+            push_channels=tuple(vqs_celery._push_channels),
+        )
+        _deliver_push(eqs, worker_app, queue=queue_name)
+
+        # Settlement must complete inside the push delivery itself: no
+        # perform_pending_operations pumping happens after this point.
+        assert len(eqs.state.messages) == 1
+        assert eqs.state.messages[0].acknowledged is True
+        assert result.get(timeout=10, disable_sync_subtasks=False) == 42
+    finally:
+        if embedded is not None:
+            embedded.worker.stop()
+            embedded.thread.join(timeout=10)
         eqs.reset()
         _clear_celery_broker_state()
 

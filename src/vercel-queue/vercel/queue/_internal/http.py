@@ -26,6 +26,7 @@ from anyio.lowlevel import get_async_backend
 from .asynctools import iter_bytes_async
 from .config import resolve_token, resolve_token_async
 from .constants import HEADER_RETRY_AFTER
+from .errors import CommunicationError
 from .log import content_type, debug_enabled, debug_log, redact_text, safe_header_names, safe_url
 from .types import Duration, Headers, RawHeaders, RequestContent, duration_to_float_seconds
 
@@ -453,7 +454,7 @@ class SyncQueueRuntime(BaseQueueRuntime):
             response = client.request(method, url, **kwargs)
         except httpx.TransportError as exc:
             _log_http_error(method, url, exc)
-            raise
+            raise CommunicationError(str(exc)) from exc
         finally:
             self._release_client()
         _log_http_response(method, url, response.status_code, response.headers)
@@ -481,7 +482,7 @@ class SyncQueueRuntime(BaseQueueRuntime):
                 yield _SyncResponse(response)
         except httpx.TransportError as exc:
             _log_http_error(method, resolved_url, exc)
-            raise
+            raise CommunicationError(str(exc)) from exc
         finally:
             self._release_client()
 
@@ -526,7 +527,7 @@ class AsyncQueueRuntime(BaseQueueRuntime):
             response = await client.request(method, url, **kwargs)
         except httpx.TransportError as exc:
             _log_http_error(method, url, exc)
-            raise
+            raise CommunicationError(str(exc)) from exc
         finally:
             await self._release_client(key)
         _log_http_response(method, url, response.status_code, response.headers)
@@ -554,7 +555,7 @@ class AsyncQueueRuntime(BaseQueueRuntime):
                 yield response
         except httpx.TransportError as exc:
             _log_http_error(method, resolved_url, exc)
-            raise
+            raise CommunicationError(str(exc)) from exc
         finally:
             await self._release_client(key)
 

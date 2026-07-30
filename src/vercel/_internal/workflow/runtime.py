@@ -18,7 +18,7 @@ from typing import Any, Generic, Literal, ParamSpec, TypeVar
 import anyio
 import pydantic
 
-from vercel._internal.polyfills import UTC, Self
+from vercel._internal.core.polyfills import UTC, Self
 
 from . import core, nanoid, ulid, world as w
 from .py_sandbox import workflow_sandbox
@@ -27,6 +27,7 @@ P = ParamSpec("P")
 T = TypeVar("T")
 SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 logger = logging.getLogger("vercel.workflow")
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # Wait-continuation dispatch — mirrors @workflow/core's wait-continuation.ts.
 # The delayed re-enqueue that wakes a run when a pending wait elapses is keyed on
@@ -204,6 +205,7 @@ class WorkflowOrchestratorContext:
         prng = random.Random(seed)
         self.generate_ulid = functools.partial(ulid.monotonic_factory(prng.random), started_at)
         self.generate_nanoid = nanoid.custom_random(nanoid.URL_ALPHABET, 21, prng.random)
+        self._user_random = random.Random(f"{seed}:random")
         self._fut: asyncio.Future[Any] | None = None
         self.suspensions: dict[str, BaseSuspension] = {}
         self.hooks: dict[str, Hook] = {}
@@ -223,9 +225,7 @@ class WorkflowOrchestratorContext:
             raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
         args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
 
-        with workflow_sandbox(
-            random_seed=workflow_run.run_id, policy=self.registry._sandbox_policy
-        ):
+        with workflow_sandbox(policy=self.registry._sandbox_policy):
             mod = importlib.import_module(wf.module)
 
             # Resolve the sandboxed Workflow by qualname from the
@@ -260,6 +260,20 @@ class WorkflowOrchestratorContext:
         )
         self.suspensions[wait.correlation_id] = wait
         await wait.future
+
+    def now(self) -> datetime:
+        if not self.events:
+            raise RuntimeError("now() requires at least one event in the run's event log")
+        event = self.events[max(self.replay_index - 1, 0)]
+        assert event.server_props is not None
+        return event.server_props.created_at
+
+    def time_ns(self) -> int:
+        delta = self.now() - _EPOCH
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+
+    def random(self) -> random.Random:
+        return self._user_random
 
     def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
         hook = Hook(

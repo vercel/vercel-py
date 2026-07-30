@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Seque
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from vercel._internal.iter_coroutine import iter_coroutine
+from vercel._internal.core.iter_coroutine import iter_coroutine
 
 PageT = TypeVar("PageT")
 ItemT = TypeVar("ItemT")

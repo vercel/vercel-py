@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 import anyio
 import anyio.lowlevel
 import pytest
-import respx
 import time_machine
 from pydantic import BaseModel
 
@@ -58,6 +57,7 @@ from .helpers import (
     malformed_multipart_body,
     mock_response,
     multipart_body,
+    queue_httpx_module,
 )
 
 
@@ -624,56 +624,69 @@ def test_poll_by_id_uses_default_visibility_timeout(
     )
 
 
-@respx.mock
+def _single_response_client_factory(response: Any) -> Any:
+    queue_httpx = queue_httpx_module()
+
+    def handler(request: Any) -> Any:
+        del request
+        return response
+
+    return lambda **kwargs: queue_httpx.Client(
+        transport=queue_httpx.MockTransport(handler),
+        **kwargs,
+    )
+
+
 def test_poll_raises_on_missing_multipart_receipt_handle() -> None:
     boundary = "queue-boundary"
-    respx.post("https://iad1.vercel-queue.com/api/v3/topic/emails/consumer/test-group").mock(
-        return_value=mock_response(
-            200,
-            headers={"Content-Type": f"multipart/mixed; boundary={boundary}"},
-            content=malformed_multipart_body(
-                boundary,
-                [
-                    b"Content-Type: application/json",
-                    b"Vqs-Message-Id: msg_1",
-                    f"Vqs-Timestamp: {CREATED_AT}".encode(),
-                ],
-            ),
-        )
+    response = mock_response(
+        200,
+        headers={"Content-Type": f"multipart/mixed; boundary={boundary}"},
+        content=malformed_multipart_body(
+            boundary,
+            [
+                b"Content-Type: application/json",
+                b"Vqs-Message-Id: msg_1",
+                f"Vqs-Timestamp: {CREATED_AT}".encode(),
+            ],
+        ),
     )
 
     with pytest.raises(MessageCorruptedError, match="Vqs-Receipt-Handle"):
         list(
-            SyncQueueClient(token="token", deployment=ALL_DEPLOYMENTS).poll(
+            SyncQueueClient(
+                token="token",
+                deployment=ALL_DEPLOYMENTS,
+                http_client_factory=_single_response_client_factory(response),
+            ).poll(
                 "emails",
                 "test-group",
             )
         )
 
 
-@respx.mock
 def test_poll_by_id_raises_on_missing_multipart_message_id() -> None:
     boundary = "queue-boundary"
-    respx.post(
-        "https://iad1.vercel-queue.com/api/v3/topic/emails/consumer/test-group/id/msg_1"
-    ).mock(
-        return_value=mock_response(
-            200,
-            headers={"Content-Type": f"multipart/mixed; boundary={boundary}"},
-            content=malformed_multipart_body(
-                boundary,
-                [
-                    b"Content-Type: application/json",
-                    b"Vqs-Receipt-Handle: rh_1",
-                    f"Vqs-Timestamp: {CREATED_AT}".encode(),
-                ],
-            ),
-        )
+    response = mock_response(
+        200,
+        headers={"Content-Type": f"multipart/mixed; boundary={boundary}"},
+        content=malformed_multipart_body(
+            boundary,
+            [
+                b"Content-Type: application/json",
+                b"Vqs-Receipt-Handle: rh_1",
+                f"Vqs-Timestamp: {CREATED_AT}".encode(),
+            ],
+        ),
     )
 
     with pytest.raises(MessageCorruptedError, match="Vqs-Message-Id"):
         iter_coroutine(
-            SyncQueueClient(token="token", deployment=ALL_DEPLOYMENTS)._poll_by_id(
+            SyncQueueClient(
+                token="token",
+                deployment=ALL_DEPLOYMENTS,
+                http_client_factory=_single_response_client_factory(response),
+            )._poll_by_id(
                 "emails",
                 "test-group",
                 "msg_1",
@@ -681,18 +694,19 @@ def test_poll_by_id_raises_on_missing_multipart_message_id() -> None:
         )
 
 
-@respx.mock
 def test_poll_metadata_allows_missing_expires_at() -> None:
     boundary = "queue-boundary"
-    respx.post("https://iad1.vercel-queue.com/api/v3/topic/emails/consumer/test-group").mock(
-        return_value=mock_response(
-            200,
-            headers={"Content-Type": f"multipart/mixed; boundary={boundary}"},
-            content=multipart_body(boundary, expires_at=None),
-        )
+    response = mock_response(
+        200,
+        headers={"Content-Type": f"multipart/mixed; boundary={boundary}"},
+        content=multipart_body(boundary, expires_at=None),
     )
     delivery: Delivery[Any] = next(
-        SyncQueueClient(token="token", deployment=ALL_DEPLOYMENTS).poll("emails", "test-group")
+        SyncQueueClient(
+            token="token",
+            deployment=ALL_DEPLOYMENTS,
+            http_client_factory=_single_response_client_factory(response),
+        ).poll("emails", "test-group")
     )
     message = delivery.message
 

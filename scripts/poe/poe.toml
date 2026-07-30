@@ -9,22 +9,13 @@ TY = { default = "${POE_CONF_DIR}/tasks/ty" }
 MYPY = { default = "${POE_CONF_DIR}/tasks/mypy" }
 
 [tool.poe.tasks.fix]
-shell = """
-$RUFF_CHECK_FIX
-$RUFF_FORMAT_FIX
-"""
+cmd = "$POE_CONF_DIR/workspace_poe.py tool-group fix"
 
 [tool.poe.tasks.lint]
-shell = """
-$RUFF_CHECK
-$RUFF_FORMAT
-"""
+cmd = "$POE_CONF_DIR/workspace_poe.py tool-group lint"
 
 [tool.poe.tasks.typecheck]
-shell = """
-$POE typecheck-mypy
-$POE typecheck-ty
-"""
+cmd = "$POE_CONF_DIR/workspace_poe.py tool-group typecheck"
 
 [tool.poe.tasks.typecheck-mypy]
 cmd = "$MYPY"

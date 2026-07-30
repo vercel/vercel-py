@@ -176,26 +176,6 @@ class _RestrictedRandom(random.Random, metaclass=_RestrictedRandomMeta):
         super().seed(a, **kwargs)
 
 
-# Per-sandbox Random instance, so concurrent sandboxes with different
-# seeds don't corrupt each other's random state.
-_sandbox_random: contextvars.ContextVar[random.Random | None] = contextvars.ContextVar(
-    "_sandbox_random", default=None
-)
-
-
-class _RestrictedRandomPolicy(_ModulePolicy):
-    def __init__(self) -> None:
-        super().__init__("random", overrides={"Random": _RestrictedRandom})
-
-    def resolve_attr(self, name: str, real: types.ModuleType) -> Any:
-        inst = _sandbox_random.get(None)
-        if inst is not None:
-            method = getattr(inst, name, None)
-            if method is not None:
-                return method
-        return getattr(real, name)
-
-
 def _wrap_get_loop(real_fn: Callable[..., Any]) -> Callable[..., Any]:
     cache: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 
@@ -327,7 +307,7 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
         allow_if=str.isupper,
         drops=["fork", "register_at_fork"],
     ),
-    "random": _RestrictedRandomPolicy(),
+    "random": _allowlist("random", Random=_RestrictedRandom),
     "time": _allowlist(
         "time",
         "mktime",
@@ -959,16 +939,14 @@ class SandboxPolicy:
 
 # TODO: we probably want to support some form of sandbox caching
 @contextmanager
-def workflow_sandbox(*, random_seed: str, policy: SandboxPolicy | None = None) -> Iterator[None]:
+def workflow_sandbox(*, policy: SandboxPolicy | None = None) -> Iterator[None]:
     """Activate the workflow sandbox for the current context.
 
-    Gives this context its own private ``sys.modules`` table, marks it as
-    in-sandbox so proxy modules enforce restrictions, and provides a seeded
-    ``Random``.  All three are ContextVars, so concurrent runs are isolated
-    without touching any shared global.
+    Gives this context its own private ``sys.modules`` table and marks it
+    as in-sandbox so proxy modules enforce restrictions. Both are
+    ContextVars, so concurrent runs are isolated without touching any
+    shared global.
     """
-    if not isinstance(random_seed, str):
-        raise TypeError("random_seed must be a str")
     if policy is None:
         policy = SandboxPolicy()
 
@@ -976,13 +954,11 @@ def workflow_sandbox(*, random_seed: str, policy: SandboxPolicy | None = None) -
     table = _new_sandbox_table()
     table_token = _sandbox_sys_modules.set(table)
     sandbox_token = _in_sandbox.set(True)
-    random_token = _sandbox_random.set(random.Random(random_seed))
     passthrough_token = _policy_passthroughs.set(frozenset(policy.passthrough_modules))
     try:
         yield
     finally:
         _policy_passthroughs.reset(passthrough_token)
-        _sandbox_random.reset(random_token)
         _in_sandbox.reset(sandbox_token)
         _sandbox_sys_modules.reset(table_token)
         context = SandboxCleanupContext(run_modules=dict(table))

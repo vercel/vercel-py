@@ -1,0 +1,8 @@
+[project]
+name = "vercel-dramatiq-example-chunks"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "vercel-dramatiq @ git+https://github.com/vercel/vercel-py.git@elprans/vq-dramatiq#subdirectory=integrations/vercel-dramatiq",
+    "vercel-cache @ git+https://github.com/vercel/vercel-py.git@elprans/vq-dramatiq#subdirectory=src/vercel-cache",
+]

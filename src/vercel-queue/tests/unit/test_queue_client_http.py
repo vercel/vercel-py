@@ -14,10 +14,13 @@ from pydantic import BaseModel
 
 from vercel.queue import (
     ALL_DEPLOYMENTS,
+    BadRequestError,
+    CommunicationError,
     ConsumerDiscoveryError,
     ConsumerRegistryNotConfiguredError,
     Delivery,
     DuplicateIdempotencyKeyError,
+    MessageNotFoundError,
     QueueClient,
     Topic,
 )
@@ -29,6 +32,8 @@ from vercel.queue._internal.constants import (
 from vercel.queue.devserver import EmbeddedQueueDevServer
 from vercel.queue.sync import QueueClient as SyncQueueClient
 from vercel.queue.testing import reset_default_async_queue_clients
+
+from .helpers import make_leased_metadata
 
 
 def _queue_debug_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
@@ -540,6 +545,160 @@ def test_module_poll_acknowledge_extend_lease_reuse_process_default_client(
 
     assert created == 1
     assert embedded_queue_module_env.state.by_id["msg_1"].acknowledged
+
+
+def _mock_transport_sync_client(
+    handler: Any,
+    **kwargs: Any,
+) -> SyncQueueClient:
+    def client_factory(**client_kwargs: Any) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler), **client_kwargs)
+
+    return _sync_client(
+        token="token",
+        region="iad1",
+        base_url="http://queue.test",
+        deployment=ALL_DEPLOYMENTS,
+        http_client_factory=client_factory,
+        **kwargs,
+    )
+
+
+def test_sync_acknowledge_retries_transport_errors() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if len(calls) < 3:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(204)
+
+    client = _mock_transport_sync_client(handler)
+    client.acknowledge(make_leased_metadata("emails"))
+
+    assert calls == ["DELETE", "DELETE", "DELETE"]
+
+
+def test_sync_acknowledge_gives_up_after_transport_error_retries() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        raise httpx.ConnectError("connection reset", request=request)
+
+    client = _mock_transport_sync_client(handler)
+    with pytest.raises(CommunicationError) as exc_info:
+        client.acknowledge(make_leased_metadata("emails"))
+
+    assert calls == ["DELETE", "DELETE", "DELETE"]
+    # The wrapped error keeps the underlying httpx failure as its cause but
+    # does not require callers to depend on httpx.
+    assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
+    assert isinstance(exc_info.value, ConnectionError)
+
+
+def test_sync_acknowledge_tolerates_missing_lease() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(404)
+
+    client = _mock_transport_sync_client(handler)
+    client.acknowledge(make_leased_metadata("emails"))
+
+    assert calls == ["DELETE"]
+
+
+def test_sync_extend_lease_retries_transport_errors() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if len(calls) < 2:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(200)
+
+    client = _mock_transport_sync_client(handler)
+    client.extend_lease(make_leased_metadata("emails"), 30)
+
+    assert calls == ["PATCH", "PATCH"]
+
+
+def test_sync_extend_lease_still_raises_for_missing_lease() -> None:
+    client = _mock_transport_sync_client(lambda request: httpx.Response(404))
+    with pytest.raises(MessageNotFoundError):
+        client.extend_lease(make_leased_metadata("emails"), 30)
+
+
+def test_sync_retry_after_tolerates_missing_lease_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _mock_transport_sync_client(lambda request: httpx.Response(404))
+    with caplog.at_level(logging.WARNING, logger="vercel.queue._internal.lease"):
+        client.retry_after(make_leased_metadata("emails"), 5)
+
+    assert any(
+        record.levelno == logging.WARNING and "no longer exists" in record.message
+        for record in caplog.records
+    )
+
+
+def test_sync_retry_after_raises_other_client_errors() -> None:
+    client = _mock_transport_sync_client(lambda request: httpx.Response(400, text="bad"))
+    with pytest.raises(BadRequestError):
+        client.retry_after(make_leased_metadata("emails"), 5)
+
+
+@pytest.mark.anyio
+async def test_async_acknowledge_retries_transport_errors() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if len(calls) < 3:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(204)
+
+    def client_factory(**client_kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), **client_kwargs)
+
+    client = _async_client(
+        token="token",
+        region="iad1",
+        base_url="http://queue.test",
+        deployment=ALL_DEPLOYMENTS,
+        http_client_factory=client_factory,
+    )
+    await client.acknowledge(make_leased_metadata("emails"))
+
+    assert calls == ["DELETE", "DELETE", "DELETE"]
+
+
+@pytest.mark.anyio
+async def test_async_retry_after_tolerates_missing_lease_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def client_factory(**client_kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(404)),
+            **client_kwargs,
+        )
+
+    client = _async_client(
+        token="token",
+        region="iad1",
+        base_url="http://queue.test",
+        deployment=ALL_DEPLOYMENTS,
+        http_client_factory=client_factory,
+    )
+    with caplog.at_level(logging.WARNING, logger="vercel.queue._internal.lease"):
+        await client.retry_after(make_leased_metadata("emails"), 5)
+
+    assert any(
+        record.levelno == logging.WARNING and "no longer exists" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.anyio

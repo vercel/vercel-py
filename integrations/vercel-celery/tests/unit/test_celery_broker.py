@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import sys
+import threading
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -27,13 +28,16 @@ import vercel.integrations.celery as public_vqs_celery
 import vercel.integrations.celery._broker as vqs_celery
 from vercel.headers import get_headers, set_headers
 from vercel.queue import (
+    CommunicationError as QueueCommunicationError,
     Duration,
     Handoff,
     Message,
     MessageMetadata,
     RetryAfter,
     SanitizedName,
+    TokenResolutionError,
     Topic,
+    UnauthorizedError,
 )
 from vercel.queue._internal import subscribers as queue_subscribers
 
@@ -125,9 +129,11 @@ class FakeSyncQueueClient:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.sent: list[dict[str, Any]] = []
+        self.send_headers: list[dict[str, str] | None] = []
         self.message_batches: list[list[FakeMessage]] = []
         self.acknowledged: list[MessageMetadata] = []
         self.ack_headers: list[dict[str, str] | None] = []
+        self.poll_headers: list[dict[str, str] | None] = []
         self.visibility_changes: list[tuple[MessageMetadata, Duration]] = []
         self.visibility_headers: list[dict[str, str] | None] = []
         self.lease_renewals: list[FakeLeaseRenewal] = []
@@ -138,6 +144,8 @@ class FakeSyncQueueClient:
         FakeSyncQueueClient.instances.append(self)
 
     def send(self, topic: str, payload: dict[str, Any], **kwargs: Any) -> None:
+        headers = get_headers()
+        self.send_headers.append(dict(headers) if headers is not None else None)
         self.sent.append({"topic": topic, "payload": payload, "kwargs": kwargs})
 
     def poll(
@@ -146,6 +154,8 @@ class FakeSyncQueueClient:
         consumer_group: str,
         **kwargs: Any,
     ) -> Iterator[FakeDelivery]:
+        headers = get_headers()
+        self.poll_headers.append(dict(headers) if headers is not None else None)
         batch = self.message_batches.pop(0) if self.message_batches else []
         self.last_topic = topic
         self.last_consumer_group = consumer_group
@@ -172,13 +182,18 @@ class FakeSyncQueueClient:
         self.visibility_headers.append(dict(headers) if headers is not None else None)
         self.visibility_changes.append((metadata, duration))
 
+    def retry_after(
+        self,
+        message: Message[dict[str, Any]] | MessageMetadata,
+        delay: Duration,
+    ) -> None:
+        self.extend_lease(message, delay)
+
     def run_lease_renewal(
         self,
         message: Message[dict[str, Any]],
         lease_duration: Duration | None = None,
-        headers_context: Any | None = None,
     ) -> FakeLeaseRenewal:
-        del headers_context
         renewal = FakeLeaseRenewal(message=message, lease_duration=lease_duration)
         self.lease_renewals.append(renewal)
         return renewal
@@ -257,6 +272,7 @@ def clean_celery_integration_state() -> Iterator[None]:
         vqs_celery._push_channels.clear()
         vqs_celery._finalize_hook_state.installed = False
         vqs_celery._finalize_hook_state.register_queues = False
+        set_headers(None)
 
 
 @pytest.fixture(autouse=True)
@@ -311,7 +327,6 @@ def track(channel: vqs_celery._BaseChannel, tag: str, queued_message: FakeMessag
         message=queued_message,
         lease_renewal=renewal,
         queue_client=channel._queue_client,
-        headers_context=vqs_celery.get_headers_context(),
     )
 
 
@@ -1064,6 +1079,48 @@ def test_start_embedded_worker_uses_solo_worker_options(
     assert embedded.thread.daemon is True
 
 
+def test_start_embedded_worker_thread_does_not_inherit_header_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_headers: list[dict[str, str] | None] = []
+    worker_started = threading.Event()
+
+    class FakeWorkController:
+        consumer = object()
+
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            headers = get_headers()
+            seen_headers.append(dict(headers) if headers is not None else None)
+            worker_started.set()
+
+    app = CeleryApp("worker-context")
+    monkeypatch.setattr(app, "WorkController", FakeWorkController)
+    monkeypatch.setattr(vqs_celery, "_wait_for_embedded_worker_channel", lambda worker: None)
+
+    set_headers({"x-vercel-oidc-token": "boot"})
+    try:
+        _REAL_START_EMBEDDED_WORKER(app)
+    finally:
+        set_headers(None)
+
+    assert worker_started.wait(5)
+    assert seen_headers == [None]
+
+
+def test_transports_treat_auth_and_network_errors_as_recoverable() -> None:
+    for transport in (
+        public_vqs_celery.VercelQueueTransport,
+        public_vqs_celery.VercelQueuePollTransport,
+        public_vqs_celery.VercelQueuePushTransport,
+    ):
+        assert TokenResolutionError in transport.connection_errors
+        assert UnauthorizedError in transport.connection_errors
+        assert QueueCommunicationError in transport.connection_errors
+
+
 def test_embedded_worker_ready_requires_channel_for_same_app() -> None:
     @dataclass
     class FakeWorker:
@@ -1485,8 +1542,8 @@ def test_registered_callback_delivers_to_active_push_channel() -> None:
     assert renewal.entered == 1
 
 
-def test_push_delivery_follow_ups_use_delivery_header_contexts() -> None:
-    app = CeleryApp("callback-context")
+def test_push_delivery_follow_ups_do_not_replay_delivery_headers() -> None:
+    app = CeleryApp("callback-no-context-replay")
     configure_push_broker(app)
     app.conf.task_queues = (Queue("emails"),)
     channel = make_push_channel(requeue_delay_seconds=7)
@@ -1509,10 +1566,83 @@ def test_push_delivery_follow_ups_use_delivery_header_contexts() -> None:
     channel.basic_reject(second_tag, requeue=True)
 
     fake_client = cast("FakeSyncQueueClient", channel._queue_client)
-    assert fake_client.ack_headers == [{"x-vercel-oidc-token": "token-1"}]
-    assert fake_client.visibility_headers == [{"x-vercel-oidc-token": "token-2"}]
+    assert fake_client.ack_headers == [{"x-vercel-oidc-token": "current"}]
+    assert fake_client.visibility_headers == [{"x-vercel-oidc-token": "current"}]
     assert get_headers() == {"x-vercel-oidc-token": "current"}
     assert len(FakeSyncQueueClient.instances) == 1
+
+
+def deliver_push_message(headers: dict[str, str]) -> None:
+    set_headers(headers)
+    try:
+        with pytest.raises(Handoff):
+            registered_callback()(FakeMessage(message(), topic="emails"))
+    finally:
+        set_headers(None)
+
+
+def test_publish_without_request_context_does_not_install_delivery_headers() -> None:
+    app = CeleryApp("no-context-fallback-put")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+    channel = make_push_channel()
+    received: list[Any] = []
+    channel.basic_consume("emails", no_ack=False, callback=received.append, consumer_tag="ctag")
+    vqs_celery.register_celery_app_queues(app)
+
+    deliver_push_message({"x-vercel-oidc-token": "token-1"})
+    channel._put("emails", message())
+
+    deliver_push_message({"x-vercel-oidc-token": "token-2"})
+    channel._put("emails", message())
+
+    fake_client = cast("FakeSyncQueueClient", channel._queue_client)
+    assert fake_client.send_headers == [None, None]
+
+
+def test_publish_preserves_ambient_request_context() -> None:
+    app = CeleryApp("context-ambient")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+    channel = make_push_channel()
+    received: list[Any] = []
+    channel.basic_consume("emails", no_ack=False, callback=received.append, consumer_tag="ctag")
+    vqs_celery.register_celery_app_queues(app)
+
+    deliver_push_message({"x-vercel-oidc-token": "stale"})
+    set_headers({"x-vercel-oidc-token": "current"})
+    try:
+        channel._put("emails", message())
+    finally:
+        set_headers(None)
+
+    fake_client = cast("FakeSyncQueueClient", channel._queue_client)
+    assert fake_client.send_headers == [{"x-vercel-oidc-token": "current"}]
+
+
+def test_poll_without_request_context_does_not_install_delivery_headers() -> None:
+    app = CeleryApp("no-context-fallback-poll")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+    push_channel = make_push_channel()
+    received: list[Any] = []
+    push_channel.basic_consume(
+        "emails",
+        no_ack=False,
+        callback=received.append,
+        consumer_tag="ctag",
+    )
+    vqs_celery.register_celery_app_queues(app)
+    deliver_push_message({"x-vercel-oidc-token": "token-1"})
+
+    channel = make_poll_channel()
+    fake_client = cast("FakeSyncQueueClient", channel._queue_client)
+    fake_client.message_batches.append([FakeMessage(message())])
+    payload = channel._get("emails")
+    channel.basic_ack(payload["properties"]["delivery_tag"])
+
+    assert fake_client.poll_headers == [None]
+    assert fake_client.ack_headers == [None]
 
 
 def test_registered_callback_matches_push_channel_consumer_group() -> None:
@@ -1572,7 +1702,10 @@ def test_registered_callback_uses_channel_that_consumes_queue() -> None:
     assert idle_channel._messages_by_tag == {}
 
 
-def test_registered_callback_retries_when_consumer_group_has_no_channel() -> None:
+def test_registered_callback_retries_when_consumer_group_has_no_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(vqs_celery, "_PUSH_CHANNEL_WAIT_SECONDS", 0.0)
     app = CeleryApp("callback-group-retry")
     configure_push_broker(app)
     app.conf.broker_transport_options = {"consumer_group": "workers"}
@@ -1591,7 +1724,10 @@ def test_registered_callback_retries_when_consumer_group_has_no_channel() -> Non
     assert channel.connection.delivered == []
 
 
-def test_registered_callback_retries_without_active_channel() -> None:
+def test_registered_callback_retries_without_active_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(vqs_celery, "_PUSH_CHANNEL_WAIT_SECONDS", 0.0)
     app = CeleryApp("callback-retry")
     configure_push_broker(app)
     app.conf.task_queues = (Queue("emails"),)
@@ -1711,7 +1847,7 @@ def test_push_queue_callback_uses_registered_queue_name() -> None:
 
 
 def test_push_queue_callback_retries_when_no_consumer_is_registered() -> None:
-    channel = make_push_channel()
+    channel = make_push_channel(push_handoff_wait_seconds=0)
     queued_message = FakeMessage(message())
 
     with pytest.raises(RetryAfter) as exc_info:
@@ -1728,7 +1864,11 @@ def test_push_queue_callback_retries_when_no_consumer_is_registered() -> None:
 
 
 def test_push_queue_callback_retries_when_prefetch_is_exhausted() -> None:
-    channel = make_push_channel(requeue_delay_seconds=8, push_retry_delay_seconds=3)
+    channel = make_push_channel(
+        requeue_delay_seconds=8,
+        push_retry_delay_seconds=3,
+        push_handoff_wait_seconds=0,
+    )
     channel.qos.prefetch_count = 1
     cast("Any", channel.qos._delivered)["existing"] = object()
     queued_message = FakeMessage(message())
@@ -1745,6 +1885,125 @@ def test_push_queue_callback_retries_when_prefetch_is_exhausted() -> None:
     assert FakeSyncQueueClient.instances[0].acknowledged == []
     assert FakeSyncQueueClient.instances[0].visibility_changes == []
     assert channel._messages_by_tag == {}
+
+
+@dataclass
+class _FakeWorkController:
+    consumer: Any
+
+
+def _register_fake_embedded_worker(app: CeleryApp, consumer: Any) -> None:
+    vqs_celery._embedded_workers[app] = vqs_celery._EmbeddedWorker(
+        app=app,
+        worker=_FakeWorkController(consumer),
+        thread=cast("Any", None),
+    )
+
+
+def test_push_queue_delivery_settles_deferred_ack_inline() -> None:
+    app = CeleryApp("inline-settle")
+    channel = make_push_channel()
+    queued_message = FakeMessage(message())
+    pending_operations: list[Any] = []
+    received: list[Any] = []
+
+    def consume(delivered: Any) -> None:
+        received.append(delivered)
+        # Celery consumers defer settlement into the worker's pending
+        # operations; emulate that instead of acking inline.
+        pending_operations.append(lambda: channel.basic_ack(delivered.delivery_tag))
+
+    class FakeConsumer:
+        def perform_pending_operations(self) -> None:
+            while pending_operations:
+                pending_operations.pop()()
+
+    _register_fake_embedded_worker(app, FakeConsumer())
+    channel.basic_consume("emails", no_ack=False, callback=consume, consumer_tag="ctag")
+
+    with pytest.raises(Handoff):
+        channel._handle_queue_delivery(
+            queued_message.payload,
+            queued_message.metadata,
+            queue="emails",
+        )
+
+    assert len(received) == 1
+    assert cast("FakeSyncQueueClient", channel._queue_client).acknowledged == [
+        queued_message.metadata
+    ]
+    assert channel._messages_by_tag == {}
+    assert pending_operations == []
+
+
+def test_push_queue_delivery_waits_for_prefetch_capacity() -> None:
+    app = CeleryApp("capacity-wait")
+    channel = make_push_channel(push_handoff_wait_seconds=5)
+    channel.qos.prefetch_count = 1
+    cast("Any", channel.qos._delivered)["existing"] = object()
+    queued_message = FakeMessage(message())
+    received: list[Any] = []
+
+    def consume(delivered: Any) -> None:
+        received.append(delivered)
+        channel.basic_ack(delivered.delivery_tag)
+
+    class FakeConsumer:
+        def perform_pending_operations(self) -> None:
+            # Emulate the deferred ACK of a previously delivered message
+            # freeing prefetch capacity.
+            cast("Any", channel.qos._delivered).pop("existing", None)
+
+    _register_fake_embedded_worker(app, FakeConsumer())
+    channel.basic_consume("emails", no_ack=False, callback=consume, consumer_tag="ctag")
+
+    with pytest.raises(Handoff):
+        channel._handle_queue_delivery(
+            queued_message.payload,
+            queued_message.metadata,
+            queue="emails",
+        )
+
+    assert len(received) == 1
+
+
+def test_push_queue_delivery_waits_for_handoff_lock() -> None:
+    channel = make_push_channel(push_handoff_wait_seconds=5)
+    queued_message = FakeMessage(message())
+    received: list[Any] = []
+
+    def consume(delivered: Any) -> None:
+        received.append(delivered)
+        channel.basic_ack(delivered.delivery_tag)
+
+    channel.basic_consume("emails", no_ack=False, callback=consume, consumer_tag="ctag")
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with channel._push_handoff_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert held.wait(5)
+    releaser = threading.Timer(0.1, release.set)
+    releaser.start()
+    try:
+        with pytest.raises(Handoff):
+            channel._handle_queue_delivery(
+                queued_message.payload,
+                queued_message.metadata,
+                queue="emails",
+            )
+    finally:
+        release.set()
+        holder.join(5)
+        releaser.cancel()
+
+    assert len(received) == 1
 
 
 def test_push_accept_releases_lease_when_callback_fails() -> None:

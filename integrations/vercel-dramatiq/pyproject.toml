@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-dramatiq"
+dynamic = ["version"]
+description = "Dramatiq broker backed by Vercel Queue Service"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "dramatiq>=2.2,<3",
+    "vercel-cache>=0.6.0",
+    "vercel-queue>=0.6.0",
+]
+
+[tool.uv.sources]
+vercel-cache = { workspace = true }
+vercel-queue = { workspace = true }
+
+[tool.ruff]
+extend = "../ruff.toml"
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "vercel/integrations/dramatiq/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/integrations/dramatiq/**/*.py",
+    "/vercel/integrations/dramatiq/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/integrations/dramatiq",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1

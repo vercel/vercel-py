@@ -9,6 +9,7 @@ from vercel.queue._internal.streams import AsyncStreamPayload
 
 from .helpers import (
     one_chunk,
+    queue_streams_anyio_module,
     run_with_anyio_backend,
 )
 
@@ -68,7 +69,7 @@ def test_async_stream_payload_readexactly_reports_partial(anyio_backend: str) ->
     async def check() -> None:
         payload = AsyncStreamPayload(one_chunk(b"abc"))
 
-        with pytest.raises(anyio.IncompleteRead):
+        with pytest.raises(queue_streams_anyio_module().IncompleteRead):
             await payload.readexactly(4)
 
     run_with_anyio_backend(check, anyio_backend)
@@ -79,7 +80,7 @@ def test_async_stream_payload_readuntil_reports_partial(anyio_backend: str) -> N
     async def check() -> None:
         payload = AsyncStreamPayload(one_chunk(b"abc"))
 
-        with pytest.raises(anyio.IncompleteRead):
+        with pytest.raises(queue_streams_anyio_module().IncompleteRead):
             await payload.readuntil(b"--")
 
     run_with_anyio_backend(check, anyio_backend)
@@ -90,7 +91,7 @@ def test_async_stream_payload_readuntil_is_bounded(anyio_backend: str) -> None:
     async def check() -> None:
         payload = AsyncStreamPayload(one_chunk(b"x" * (64 * 1024)))
 
-        with pytest.raises(anyio.DelimiterNotFound):
+        with pytest.raises(queue_streams_anyio_module().DelimiterNotFound):
             await payload.readuntil(b"--")
 
     run_with_anyio_backend(check, anyio_backend)
@@ -134,7 +135,7 @@ def test_async_stream_payload_rejects_concurrent_reads(anyio_backend: str) -> No
             task_group.start_soon(read_all)
             await started.wait()
 
-            with pytest.raises(anyio.BusyResourceError):
+            with pytest.raises(queue_streams_anyio_module().BusyResourceError):
                 await payload.read(1)
 
             release.set()

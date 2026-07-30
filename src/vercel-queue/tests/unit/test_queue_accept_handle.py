@@ -109,7 +109,7 @@ def test_sync_message_lifecycle_ack_stops_renewal_without_wait(
         def acknowledge(self, message: Message[Any]) -> None:
             acknowledged.append(message.metadata.message_id)
 
-        def extend_lease(self, message: Message[Any], duration: int) -> None:
+        def _extend_lease(self, message: Message[Any], duration: int) -> None:
             del message, duration
             raise AssertionError("ACK must not extend visibility")
 
@@ -155,7 +155,7 @@ def test_sync_message_lifecycle_retry_after_waits_for_renewal_stop(
             del message
             raise AssertionError("RetryAfter must not acknowledge")
 
-        def extend_lease(self, message: Message[Any], duration: int) -> None:
+        async def _extend_lease(self, message: Message[Any], duration: int) -> None:
             del message
             extensions.append(duration)
 
@@ -203,7 +203,7 @@ def test_sync_message_lifecycle_handoff_waits_for_renewal_stop(
             del message
             raise AssertionError("Handoff must not acknowledge")
 
-        def extend_lease(self, message: Message[Any], duration: int) -> None:
+        def _extend_lease(self, message: Message[Any], duration: int) -> None:
             del message, duration
             raise AssertionError("Handoff must not extend visibility")
 
@@ -249,7 +249,7 @@ async def test_async_message_lifecycle_ack_stops_renewal_without_wait(
         async def acknowledge(self, message: Message[Any]) -> None:
             acknowledged.append(message.metadata.message_id)
 
-        async def extend_lease(self, message: Message[Any], duration: int) -> None:
+        async def _extend_lease(self, message: Message[Any], duration: int) -> None:
             del message, duration
             raise AssertionError("ACK must not extend visibility")
 
@@ -296,7 +296,7 @@ async def test_async_message_lifecycle_retry_after_waits_for_renewal_stop(
             del message
             raise AssertionError("RetryAfter must not acknowledge")
 
-        async def extend_lease(self, message: Message[Any], duration: int) -> None:
+        async def _extend_lease(self, message: Message[Any], duration: int) -> None:
             del message
             extensions.append(duration)
 
@@ -344,7 +344,7 @@ async def test_async_message_lifecycle_handoff_waits_for_renewal_stop(
             del message
             raise AssertionError("Handoff must not acknowledge")
 
-        async def extend_lease(self, message: Message[Any], duration: int) -> None:
+        async def _extend_lease(self, message: Message[Any], duration: int) -> None:
             del message, duration
             raise AssertionError("Handoff must not extend visibility")
 

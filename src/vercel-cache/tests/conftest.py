@@ -24,8 +24,11 @@ def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, Non
     for var in env_vars_to_clear:
         monkeypatch.delenv(var, raising=False)
 
+    import vercel.cache.runtime_cache as runtime_cache
     from vercel.headers import set_headers
 
     set_headers(None)
+    monkeypatch.setattr(runtime_cache, "_cached_cache_instance", None)
+    monkeypatch.setattr(runtime_cache, "_cached_async_cache_instance", None)
     yield
     set_headers(None)

@@ -77,3 +77,8 @@ and may change without public API guarantees.
 
 Sync counterparts are available for the main client classes and module-level
 helpers when you are not running an async application.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for information on development setup and
+process.

@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/dramatiq_worker.py": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "dramatiq-vercel-dramatiq-example-chunks-default*"
+        }
+      ]
+    }
+  }
+}

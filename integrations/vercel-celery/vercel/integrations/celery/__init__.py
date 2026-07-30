@@ -4,6 +4,7 @@ from kombu.transport import TRANSPORT_ALIASES, virtual
 
 from celery.app import backends as celery_backends
 from celery.app.defaults import DEFAULTS as CELERY_DEFAULTS
+from vercel.queue import CommunicationError, TokenResolutionError, UnauthorizedError
 
 from ._broker import (
     AutoChannel,
@@ -20,6 +21,21 @@ from ._result_backend import DEFAULT_RESULT_BACKEND_ALIAS, VercelRuntimeCacheBac
 from .version import __version__
 
 _DEFAULT_CONNECTION_PARAMS = {"hostname": None, "port": None}
+# Token resolution depends on request-scoped OIDC context that may be
+# momentarily unavailable on Celery-owned threads (and refreshes with the next
+# push delivery). A cached token can also expire between local resolution and the
+# remote request, producing UnauthorizedError once before the next resolution
+# evicts it. CommunicationError is ordinary network trouble. Treat all three as
+# recoverable connection failures so the Celery consumer restarts instead of
+# shutting the worker down permanently. Kombu's own connection_errors use
+# amqp.exceptions.ConnectionError, not the builtin, so CommunicationError must be
+# listed explicitly.
+_CONNECTION_ERRORS = (
+    *virtual.Transport.connection_errors,
+    TokenResolutionError,
+    UnauthorizedError,
+    CommunicationError,
+)
 
 
 class VercelQueueTransport(virtual.Transport):
@@ -33,6 +49,7 @@ class VercelQueueTransport(virtual.Transport):
     driver_type = "vercel"
     driver_name = "Vercel Queue Service"
     default_connection_params = _DEFAULT_CONNECTION_PARAMS
+    connection_errors = _CONNECTION_ERRORS
 
 
 class VercelQueuePollTransport(virtual.Transport):
@@ -46,6 +63,7 @@ class VercelQueuePollTransport(virtual.Transport):
     driver_type = "vercel"
     driver_name = "Vercel Queue Service (poll)"
     default_connection_params = _DEFAULT_CONNECTION_PARAMS
+    connection_errors = _CONNECTION_ERRORS
 
 
 class VercelQueuePushTransport(virtual.Transport):
@@ -59,6 +77,7 @@ class VercelQueuePushTransport(virtual.Transport):
     driver_type = "vercel"
     driver_name = "Vercel Queue Service (push)"
     default_connection_params = _DEFAULT_CONNECTION_PARAMS
+    connection_errors = _CONNECTION_ERRORS
 
 
 def install_vercel_celery_integration(

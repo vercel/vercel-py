@@ -17,9 +17,7 @@ from .names import SanitizedName
 from .subscribers import QueueSubscriber
 from .types import (
     Duration,
-    Message,
     MessageID,
-    MessageMetadata,
     RawHeaders,
     StrContainer,
     Topic,
@@ -209,45 +207,12 @@ async def poll_and_handle(
     )
 
 
-async def acknowledge(message: Message[T] | MessageMetadata) -> None:
-    """Acknowledge a received message with the default async client.
-
-    Args:
-        message: Message or metadata containing a delivery token.
-
-    Raises:
-        ValueError: If delivery metadata is incomplete.
-        QueueError: If the service rejects the acknowledgement.
-
-    """
-    client = QueueClient()
-    await client.acknowledge(message)
-
-
-async def extend_lease(message: Message[T] | MessageMetadata, duration: Duration) -> None:
-    """Extend message processing with the default async client.
-
-    Args:
-        message: Message or metadata containing a delivery token.
-        duration: New processing timeout. Use zero to make it available again.
-
-    Raises:
-        ValueError: If duration or delivery metadata is invalid.
-        QueueError: If the service rejects the update.
-
-    """
-    client = QueueClient()
-    await client.extend_lease(message, duration)
-
-
 # Only add public symbols to __all__; internal helpers must stay unexported.
 __all__: tuple[str, ...] = (
     "Delivery",
     "LeaseRenewal",
     "QueueClient",
     "accept_and_handle",
-    "acknowledge",
-    "extend_lease",
     "poll",
     "poll_and_handle",
     "send",

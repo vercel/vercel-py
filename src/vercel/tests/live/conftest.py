@@ -1,0 +1,158 @@
+"""Fixtures for live API tests.
+
+These tests require real API credentials set via environment variables:
+- VERCEL_TOKEN or VERCEL_OIDC_TOKEN: Vercel API/OIDC token
+- VERCEL_TEAM_ID and VERCEL_PROJECT_ID when using VERCEL_TOKEN
+- BLOB_READ_WRITE_TOKEN: Blob storage read/write token
+"""
+
+import os
+import uuid
+from collections.abc import Generator
+from typing import Any
+
+import pytest
+
+
+def has_vercel_credentials() -> bool:
+    """Check if Vercel API credentials are available."""
+    return bool(
+        (os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN"))
+        and os.getenv("VERCEL_TEAM_ID")
+    )
+
+
+def has_blob_credentials() -> bool:
+    """Check if Blob storage credentials are available."""
+    return bool(os.getenv("BLOB_READ_WRITE_TOKEN"))
+
+
+# Skip markers for live tests
+requires_vercel_credentials = pytest.mark.skipif(
+    not has_vercel_credentials(),
+    reason="Requires VERCEL_TOKEN or VERCEL_OIDC_TOKEN, plus VERCEL_TEAM_ID",
+)
+
+requires_blob_credentials = pytest.mark.skipif(
+    not has_blob_credentials(),
+    reason="Requires BLOB_READ_WRITE_TOKEN environment variable",
+)
+
+
+@pytest.fixture
+def vercel_token() -> str:
+    """Get Vercel API or OIDC token from environment."""
+    token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
+    if not token:
+        pytest.skip("VERCEL_TOKEN or VERCEL_OIDC_TOKEN environment variable not set")
+    return token
+
+
+@pytest.fixture
+def vercel_team_id() -> str:
+    """Get Vercel team ID from environment when provided."""
+    team_id = os.getenv("VERCEL_TEAM_ID")
+    if not team_id and os.getenv("VERCEL_TOKEN"):
+        pytest.skip("VERCEL_TEAM_ID environment variable not set")
+    return team_id or ""
+
+
+@pytest.fixture
+def blob_token() -> str:
+    """Get Blob storage token from environment."""
+    token = os.getenv("BLOB_READ_WRITE_TOKEN")
+    if not token:
+        pytest.skip("BLOB_READ_WRITE_TOKEN environment variable not set")
+    return token
+
+
+@pytest.fixture
+def unique_test_name() -> str:
+    """Generate a collision-resistant test resource name.
+
+    Format: vercel-py-test-{uuid}
+    """
+    return f"vercel-py-test-{uuid.uuid4().hex}"
+
+
+@pytest.fixture
+def unique_blob_path() -> str:
+    """Generate a collision-resistant blob path for testing.
+
+    Format: test/{uuid}/file.txt
+    """
+    return f"test/{uuid.uuid4().hex}/file.txt"
+
+
+class CleanupRegistry:
+    """Registry for tracking resources that need cleanup after tests."""
+
+    def __init__(self) -> None:
+        self._cleanups: list[tuple[str, Any]] = []
+
+    def register(self, resource_type: str, resource_id: Any) -> None:
+        """Register a resource for cleanup.
+
+        Args:
+            resource_type: Type of resource (e.g., "blob" or "project")
+            resource_id: Identifier for the resource
+        """
+        self._cleanups.append((resource_type, resource_id))
+
+    def get_resources(self, resource_type: str) -> list[Any]:
+        """Get all registered resources of a specific type."""
+        return [rid for rtype, rid in self._cleanups if rtype == resource_type]
+
+    def clear(self) -> None:
+        """Clear all registered resources."""
+        self._cleanups.clear()
+
+
+@pytest.fixture
+def cleanup_registry() -> Generator[CleanupRegistry, None, None]:
+    """Fixture providing a cleanup registry for tracking test resources.
+
+    Usage:
+        def test_create_resource(cleanup_registry, blob_token):
+            result = put("test.txt", b"data", token=blob_token)
+            cleanup_registry.register("blob", result.url)
+            # Test continues...
+            # Cleanup happens automatically after test
+    """
+    registry = CleanupRegistry()
+    yield registry
+
+    # Cleanup blob resources
+    blob_urls = registry.get_resources("blob")
+    if blob_urls:
+        try:
+            from vercel.blob import delete
+
+            blob_token = os.getenv("BLOB_READ_WRITE_TOKEN")
+            if blob_token:
+                for url in blob_urls:
+                    try:
+                        delete(url, token=blob_token)
+                    except Exception:
+                        pass  # Best effort cleanup
+        except ImportError:
+            pass
+
+    # Cleanup project resources
+    project_ids = registry.get_resources("project")
+    if project_ids:
+        try:
+            from vercel.projects import delete_project
+
+            vercel_token = os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN")
+            team_id = os.getenv("VERCEL_TEAM_ID")
+            if vercel_token and team_id:
+                for project_id in project_ids:
+                    try:
+                        delete_project(project_id, token=vercel_token, team_id=team_id)
+                    except Exception:
+                        pass  # Best effort cleanup
+        except ImportError:
+            pass
+
+    registry.clear()

@@ -21,17 +21,21 @@ dev = [
     "zizmor>=1.24.1,<2",
     "hatchling>=1.27.0,<2",
     "time-machine>=2.16,<3",
+    "textual>=8.0.0,<9",
     "trio>=0.33.0,<1",
-    "poethepoet>=0.47.0",
+    "poethepoet>=0.48.0",
     "tox>=4",
     "tox-uv-bare",
     "tomli>=2.0.0,<3; python_version < '3.11'",
+    "vendoring>=1,<2",
+    "lograil~=0.5.0",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = false
 exclude-newer = "2 days"
+exclude-newer-package = { lograil = "2026-07-22T00:00:00Z" }
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
@@ -59,6 +63,7 @@ commands = [["./scripts/test.sh", { replace = "posargs", extend = true }]]
 
 [tool.mypy]
 python_version = "3.10"
+cache_dir = "$MYPY_CONFIG_FILE_DIR/.mypy_cache/root"
 ignore_missing_imports = true
 explicit_package_bases = true
 mypy_path = [
@@ -67,28 +72,14 @@ mypy_path = [
     "src/vercel-headers",
     "src/vercel-queue",
     "src/vercel-oidc",
+    "src/vercel-internal-core",
     "src/vercel-internal-telemetry",
     "integrations/vercel-apscheduler",
+    "src/vercel-sandbox",
     "integrations/vercel-celery",
+    "integrations/vercel-dramatiq",
     "tests/stubs",
 ]
-
-[[tool.mypy.overrides]]
-module = [
-    "vercel._internal.unstable",
-    "vercel._internal.unstable.*",
-    "vercel.unstable",
-    "vercel.unstable.*",
-]
-check_untyped_defs = true
-disallow_any_generics = true
-disallow_incomplete_defs = true
-disallow_untyped_decorators = true
-disallow_untyped_defs = true
-no_implicit_optional = true
-no_implicit_reexport = true
-strict_equality = true
-warn_return_any = true
 
 [tool.ty.environment]
 python-version = "3.10"
@@ -120,33 +111,101 @@ keep-runtime-typing = false
 include = "scripts/poe/poe.toml"
 verbosity = -1
 
+[tool.poe.tasks.setup]
+sequence = ["sync-githooks"]
+
+[tool.poe.tasks.sync-githooks]
+cmd = "python scripts/sync-githooks.py"
+
+[tool.poe.tasks.check-news-fragments]
+cmd = "scripts/poe/workspace_poe.py root-task check-news-fragments-root"
+
+[tool.poe.tasks.check-news-fragments-root]
+cmd = "python scripts/release.py check-news-fragments"
+
+[tool.poe.tasks.fix]
+cmd = "scripts/poe/workspace_poe.py workspace fix --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.fix-root]
+cmd = "scripts/poe/workspace_poe.py root-task fix-root"
+
+[tool.poe.tasks.pre-commit]
+cmd = "scripts/poe/workspace_poe.py hook pre-commit"
+
+[tool.poe.tasks.pre-push]
+cmd = "scripts/poe/workspace_poe.py hook pre-push"
+
 [tool.poe.tasks.lint]
-shell = """
-$RUFF_CHECK
-$RUFF_FORMAT
-if [ -z "$WORKSPACE_POE_SCOPE_ARGS" ]; then
-  $POE lint-zizmor
-fi
-"""
+cmd = "scripts/poe/workspace_poe.py workspace lint --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.lint-root]
+cmd = "scripts/poe/workspace_poe.py root-task lint-root"
 
 [tool.poe.tasks.lint-zizmor]
 cmd = "zizmor --offline ."
 
-[tool.poe.tasks.typecheck]
+[tool.poe.tasks.lint-towncrier]
+cmd = "python scripts/release.py lint-towncrier"
+
+[tool.poe.tasks.release-status]
+cmd = "python scripts/release.py status"
+
+[tool.poe.tasks.release]
 shell = """
-$POE typecheck-mypy
+set --
+if [ -n "${force_bump:-}" ]; then
+  set -- "$@" --force-bump "$force_bump"
+fi
+python scripts/release.py release "$@"
 """
+args = [{ name = "force_bump", options = ["--force-bump"] }]
+
+[tool.poe.tasks.changelog]
+cmd = "python scripts/release.py changelog"
+use_exec = true
+
+[tool.poe.tasks.clog]
+cmd = "python scripts/release.py changelog"
+use_exec = true
+
+[tool.poe.tasks.dist]
+cmd = "./scripts/build.sh"
+
+[tool.poe.tasks.typecheck]
+cmd = "scripts/poe/workspace_poe.py workspace typecheck --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.typecheck-root]
+cmd = "scripts/poe/workspace_poe.py root-task typecheck-root"
 
 [tool.poe.tasks.typecheck-mypy]
 cmd = "$MYPY ${WORKSPACE_POE_SCOPE_ARGS:-tests}"
 
 [tool.poe.tasks.test]
-shell = """
-if [ -n "$WORKSPACE_POE_SCOPE_ARGS" ]; then
-  $PYTEST --ignore=tests/test_examples.py $WORKSPACE_POE_SCOPE_ARGS
-elif [ -n "$POE_EXTRA_ARGS" ]; then
-  $PYTEST --ignore=tests/test_examples.py
-else
-  $PYTEST --ignore=tests/test_examples.py tests
-fi
-"""
+cmd = "scripts/poe/workspace_poe.py workspace test --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.test-root]
+cmd = "scripts/poe/workspace_poe.py root-task test-root"
+
+[tool.poe.tasks.qa]
+cmd = "scripts/poe/workspace_poe.py qa --poe-quiet ${quiet} --poe-verbose ${verbose} ${scopes}"
+args = [
+  { name = "quiet", options = ["-q", "--quiet"], type = "boolean" },
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]

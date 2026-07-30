@@ -15,14 +15,16 @@ from datetime import datetime, timedelta, timezone
 
 import anyio
 import anyio.from_thread
-import httpx
 import pytest
 from anyio import to_thread
 from anyio.lowlevel import current_token
 
-from vercel.headers import get_headers, get_headers_context, set_headers
+from vercel.headers import get_headers, set_headers
+from vercel.oidc import get_vercel_oidc_token_sync
+from vercel.oidc.token import _clear_cached_oidc_token
 from vercel.queue import (
     ALL_DEPLOYMENTS,
+    CommunicationError,
     Delivery,
     Handoff,
     LeaseRenewal,
@@ -53,10 +55,9 @@ from vercel.queue._internal.lease import (
     _signal_lease_start_scheduled,
     _signal_lease_stop_complete,
     _wait_for_lease_worker_ready,
-    retry_async_follow_up,
-    retry_sync_follow_up,
     visibility_timeout_seconds,
 )
+from vercel.queue._internal.retry import retry_async_follow_up, retry_sync_follow_up
 from vercel.queue._internal.types import Duration
 from vercel.queue.devserver import EmbeddedQueueDevServer
 from vercel.queue.sync import QueueClient as SyncQueueClient
@@ -64,6 +65,8 @@ from vercel.queue.sync import QueueClient as SyncQueueClient
 from .helpers import (
     CREATED_AT_DT,
     make_leased_metadata,
+    queue_httpx_module,
+    queue_lease_anyio_module,
 )
 
 
@@ -116,6 +119,14 @@ class _FakeLeaseClient:
         if inspect.isawaitable(result):
             await result
 
+    async def _extend_lease(
+        self,
+        message: Message[Any] | MessageMetadata,
+        duration: Duration,
+    ) -> None:
+        assert isinstance(message, Message)
+        await self.extend_lease(message, duration)
+
     async def _renew_lease(self, message: Message[Any], duration: Duration) -> None:
         await self.extend_lease(message, duration)
 
@@ -158,7 +169,7 @@ def test_sync_run_lease_renewal_extends_on_enter_and_stops_on_exit(
 
 
 @pytest.mark.anyio
-async def test_lease_extension_runs_with_captured_headers_context() -> None:
+async def test_lease_extension_does_not_install_captured_headers_context() -> None:
     seen_headers: list[dict[str, str] | None] = []
     message = Message(
         payload=None,
@@ -168,7 +179,6 @@ async def test_lease_extension_runs_with_captured_headers_context() -> None:
         ),
     )
     set_headers({"x-vercel-oidc-token": "delivery-token"})
-    headers_context = get_headers_context()
     set_headers({"x-vercel-oidc-token": "worker-token"})
 
     def record_extension_headers(_message: Message[Any], _duration: object) -> None:
@@ -181,13 +191,35 @@ async def test_lease_extension_runs_with_captured_headers_context() -> None:
         client=_FakeLeaseClient(record_extension_headers),
         lease_seconds=30,
         next_extension_at=time.monotonic(),
-        headers_context=headers_context,
     )
 
     await _run_lease_extension(request, {request.token: request})
 
-    assert seen_headers == [{"x-vercel-oidc-token": "delivery-token"}]
+    assert seen_headers == [{"x-vercel-oidc-token": "worker-token"}]
     assert get_headers() == {"x-vercel-oidc-token": "worker-token"}
+
+
+def test_lease_start_primes_oidc_cache_from_ambient_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    message = Message(payload=None, metadata=make_leased_metadata("emails"))
+    renewal = _sync_test_client().run_lease_renewal(message, lease_duration=30)
+
+    monkeypatch.setattr(
+        "vercel.queue._internal.lease._ensure_lease_renewal_thread",
+        lambda: None,
+    )
+    monkeypatch.setattr("vercel.queue._internal.lease._send_lease_extension_start", calls.append)
+
+    _clear_cached_oidc_token()
+    token = "header.eyJleHAiOjk5OTk5OTk5OTl9.signature"
+    set_headers({"x-vercel-oidc-token": token})
+    renewal.start()
+    set_headers(None)
+
+    assert len(calls) == 1
+    assert get_vercel_oidc_token_sync() == token
 
 
 def test_lease_debug_logs_worker_start_extension_success_and_stop(
@@ -431,14 +463,15 @@ def test_sync_lease_start_reuses_worker_async_client_by_config(
         visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
     created = 0
-    original_client = httpx.AsyncClient
+    queue_httpx = queue_httpx_module()
+    original_client = queue_httpx.AsyncClient
 
-    def client_factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+    def client_factory(*args: Any, **kwargs: Any) -> Any:
         nonlocal created
         created += 1
         return original_client(*args, **kwargs)
 
-    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(queue_httpx, "AsyncClient", client_factory)
     first = client.run_lease_renewal(first_message, lease_duration=30)
     second = client.run_lease_renewal(second_message, lease_duration=45)
     first.start()
@@ -479,14 +512,15 @@ async def test_async_client_reuses_worker_runtime_for_background_lease_extension
         visibility_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
     created = 0
-    original_client = httpx.AsyncClient
+    queue_httpx = queue_httpx_module()
+    original_client = queue_httpx.AsyncClient
 
-    def client_factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+    def client_factory(*args: Any, **kwargs: Any) -> Any:
         nonlocal created
         created += 1
         return original_client(*args, **kwargs)
 
-    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(queue_httpx, "AsyncClient", client_factory)
 
     first = client.run_lease_renewal(first_message, lease_duration=30)
     second = client.run_lease_renewal(second_message, lease_duration=45)
@@ -524,9 +558,7 @@ async def test_retry_async_follow_up_retries_throttled_operation(
         if calls == 1:
             raise ThrottledError(2)
 
-    monkeypatch.setattr(anyio, "sleep", sleep)
-
-    await retry_async_follow_up(operation)
+    await retry_async_follow_up(operation, sleep=sleep)
 
     assert calls == 2
     assert sleeps == [2.0]
@@ -548,11 +580,11 @@ async def test_retry_async_follow_up_does_not_retry_throttle_without_retry_after
 
 
 @pytest.mark.anyio
-async def test_retry_async_follow_up_retries_request_timeout(
+async def test_retry_async_follow_up_does_not_retry_http_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class RequestTimeoutError(QueueError):
-        status_code = 408
+    class ServerError(QueueError):
+        status_code = 500
 
     calls = 0
     sleeps: list[float] = []
@@ -563,15 +595,13 @@ async def test_retry_async_follow_up_retries_request_timeout(
     async def operation() -> None:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            raise RequestTimeoutError("request timeout")
+        raise ServerError("server error")
 
-    monkeypatch.setattr(anyio, "sleep", sleep)
+    with pytest.raises(ServerError):
+        await retry_async_follow_up(operation, sleep=sleep)
 
-    await retry_async_follow_up(operation)
-
-    assert calls == 2
-    assert sleeps == [0.1]
+    assert calls == 1
+    assert sleeps == []
 
 
 def test_retry_sync_follow_up_retries_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -585,7 +615,7 @@ def test_retry_sync_follow_up_retries_transport_error(monkeypatch: pytest.Monkey
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise httpx.ConnectError("network")
+            raise CommunicationError("network")
 
     monkeypatch.setattr(time, "sleep", sleep)
     retry_sync_follow_up(operation)
@@ -594,7 +624,9 @@ def test_retry_sync_follow_up_retries_transport_error(monkeypatch: pytest.Monkey
     assert sleeps == [0.1]
 
 
-def test_retry_sync_follow_up_retries_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_sync_follow_up_does_not_retry_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class ServerError(QueueError):
         status_code = 500
 
@@ -611,10 +643,11 @@ def test_retry_sync_follow_up_retries_server_error(monkeypatch: pytest.MonkeyPat
             raise ServerError("server error")
 
     monkeypatch.setattr(time, "sleep", sleep)
-    retry_sync_follow_up(operation)
+    with pytest.raises(ServerError):
+        retry_sync_follow_up(operation)
 
-    assert calls == 2
-    assert sleeps == [0.1]
+    assert calls == 1
+    assert sleeps == []
 
 
 def test_retry_sync_follow_up_does_not_retry_throttle_without_retry_after() -> None:
@@ -811,7 +844,7 @@ async def test_lease_worker_stop_after_start_timeout_cancels_renewal() -> None:
         lease_seconds=30,
         client=_FakeLeaseClient(extend),
     )
-    command_send, command_receive = anyio.create_memory_object_stream(10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream(10)
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_lease_worker_async, command_receive)
@@ -859,7 +892,7 @@ async def test_lease_renewal_start_async_does_not_block_caller_loop(
 
 @pytest.mark.anyio
 async def test_send_lease_extension_start_waits_for_real_worker_schedule() -> None:
-    command_send, command_receive = anyio.create_memory_object_stream[Any](10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream[Any](10)
     request = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
@@ -914,7 +947,7 @@ def test_signal_lease_start_scheduled_uses_asyncio_native_token(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
     )
-    monkeypatch.setattr(anyio.from_thread, "run_sync", fallback)
+    monkeypatch.setattr(queue_lease_anyio_module().from_thread, "run_sync", fallback)
 
     _signal_lease_start_scheduled(
         _LeaseExtensionStart(
@@ -955,7 +988,7 @@ def test_signal_lease_start_scheduled_uses_trio_native_token(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
     )
-    monkeypatch.setattr(anyio.from_thread, "run_sync", fallback)
+    monkeypatch.setattr(queue_lease_anyio_module().from_thread, "run_sync", fallback)
 
     _signal_lease_start_scheduled(
         _LeaseExtensionStart(
@@ -993,7 +1026,7 @@ def test_signal_lease_start_scheduled_falls_back_to_anyio_from_thread(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
     )
-    monkeypatch.setattr(anyio.from_thread, "run_sync", fallback)
+    monkeypatch.setattr(queue_lease_anyio_module().from_thread, "run_sync", fallback)
 
     _signal_lease_start_scheduled(
         _LeaseExtensionStart(
@@ -1237,8 +1270,9 @@ async def test_lease_worker_processes_stop_while_extension_is_in_flight() -> Non
                 await after_cancel_release.wait()
             raise
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
-    done_send, done_receive = anyio.create_memory_object_stream[None](1)
+    queue_lease_anyio = queue_lease_anyio_module()
+    command_send, command_receive = queue_lease_anyio.create_memory_object_stream(10)
+    done_send, done_receive = queue_lease_anyio.create_memory_object_stream[None](1)
     request = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
@@ -1552,7 +1586,7 @@ async def test_signal_lease_stop_complete_failed_send_does_not_block_event_signa
         def set(self) -> None:
             self.signaled = True
 
-    done_send, done_receive = anyio.create_memory_object_stream[None](1)
+    done_send, done_receive = queue_lease_anyio_module().create_memory_object_stream[None](1)
     await done_send.aclose()
     await done_receive.aclose()
     event = Event()
@@ -1633,8 +1667,9 @@ async def test_lease_worker_ignores_registration_after_stop() -> None:
         del message, duration
         calls += 1
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
-    done_send, done_receive = anyio.create_memory_object_stream[None](1)
+    queue_lease_anyio = queue_lease_anyio_module()
+    command_send, command_receive = queue_lease_anyio.create_memory_object_stream(10)
+    done_send, done_receive = queue_lease_anyio.create_memory_object_stream[None](1)
     request = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails")),
         lease_seconds=30,
@@ -1692,7 +1727,7 @@ async def test_lease_worker_bounds_stopped_token_cache(
     )
     second_request.token = second
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream(10)
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(_lease_worker_async, command_receive)
         await command_send.send(_LeaseExtensionStop(token=second))
@@ -1722,7 +1757,7 @@ async def test_lease_worker_one_renewal_in_flight_does_not_block_another_token()
         if message.metadata.message_id == "second":
             second_started.set()
 
-    command_send, command_receive = anyio.create_memory_object_stream(10)
+    command_send, command_receive = queue_lease_anyio_module().create_memory_object_stream(10)
     client = _FakeLeaseClient(extend)
     first = _lease_request(
         Message(payload=None, metadata=make_leased_metadata("emails", message_id="first")),
@@ -1783,7 +1818,6 @@ def _lease_request(
         client=client,
         lease_seconds=lease_seconds,
         next_extension_at=time.monotonic(),
-        headers_context=get_headers_context(),
     )
 
 

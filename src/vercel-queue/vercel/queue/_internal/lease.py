@@ -34,23 +34,24 @@ import math
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Coroutine, Iterator, MutableMapping
+from collections.abc import Callable, Coroutine, Iterator, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import TracebackType
 
 import anyio
 import anyio.from_thread
-import httpx
 from anyio import to_thread
 from anyio.abc import ObjectReceiveStream, ObjectSendStream, TaskGroup
 from anyio.lowlevel import EventLoopToken, current_token
 from anyio.streams.memory import MemoryObjectSendStream
 
-from vercel.headers import HeadersContext, get_headers_context
+from vercel.oidc import get_vercel_oidc_token_sync
 
-from .errors import QueueError, ThrottledError
+from .asynctools import iter_coroutine
+from .errors import MessageNotFoundError, QueueError, ThrottledError
 from .log import debug_log
+from .retry import retry_async_follow_up, retry_sync_follow_up
 from .streams import (
     AsyncStreamPayload,
     AsyncTextStreamPayload,
@@ -69,13 +70,13 @@ from .types import (
 class AsyncExtendMessageLease(Protocol):
     def __call__(
         self,
-        message: Message[Any],
+        message: Message[Any] | MessageMetadata,
         duration: Duration,
     ) -> Coroutine[Any, Any, None]: ...
 
 
 class ExtendMessageLease(Protocol):
-    def __call__(self, message: Message[Any], duration: Duration) -> None: ...
+    def __call__(self, message: Message[Any] | MessageMetadata, duration: Duration) -> None: ...
 
 
 class _LeaseStopEvent(Protocol):
@@ -86,10 +87,8 @@ DEFAULT_PROCESSING_LEASE_SECONDS = 300
 MIN_PROCESSING_LEASE_SECONDS = 30
 MAX_VISIBILITY_TIMEOUT_SECONDS = 3600
 _TRANSIENT_LEASE_RETRY_SECONDS = 3.0
-_TRANSIENT_FOLLOW_UP_RETRY_SECONDS = 0.1
 _DUE_RENEWAL_START_GRACE_SECONDS = 0.01
 _IMMEDIATE_RENEWAL_GRACE_SECONDS = 10.0
-DIRECTIVE_FOLLOW_UP_ATTEMPTS = 3
 _STOPPED_LEASE_TOKEN_CACHE_SIZE = 1024
 _LEASE_STOP_WAIT_TIMEOUT_SECONDS = 5.0
 _LEASE_START_WAIT_TIMEOUT_SECONDS = 5.0
@@ -105,6 +104,12 @@ class LeaseAsyncClient(Protocol):
         duration: Duration,
     ) -> Coroutine[Any, Any, None]: ...
 
+    def _extend_lease(
+        self,
+        message: Message[Any] | MessageMetadata,
+        duration: Duration,
+    ) -> Coroutine[Any, Any, None]: ...
+
 
 @dataclass(kw_only=True)
 class _LeaseExtensionRequest:
@@ -113,7 +118,6 @@ class _LeaseExtensionRequest:
     client: LeaseAsyncClient
     lease_seconds: int
     next_extension_at: float
-    headers_context: HeadersContext
 
 
 @dataclass(kw_only=True)
@@ -220,12 +224,10 @@ class LeaseRenewal:
         message: Message[Any],
         client: LeaseAsyncClient,
         lease_duration: Duration | None = None,
-        headers_context: HeadersContext | None = None,
     ) -> None:
         self._message = message
         self._client = client
         self._lease_seconds = processing_lease_seconds(lease_duration)
-        self._headers_context = headers_context or get_headers_context()
         self._token: _LeaseRenewalToken | None = None
         self._entered = False
         self._closed = False
@@ -274,6 +276,7 @@ class LeaseRenewal:
         if self._message.metadata.receipt_handle is None:
             return None
         self._entered = True
+        _prime_oidc_token_cache()
         _ensure_lease_renewal_thread()
         self._token = _LeaseRenewalToken(object())
         return _LeaseExtensionRequest(
@@ -282,7 +285,6 @@ class LeaseRenewal:
             client=self._client,
             lease_seconds=self._lease_seconds,
             next_extension_at=_next_extension_at(self._message.metadata, self._lease_seconds),
-            headers_context=self._headers_context,
         )
 
     def _reset_start_after_failure(self) -> None:
@@ -391,31 +393,95 @@ class LeaseRenewal:
         except Exception as exc:  # noqa: BLE001
             _log_best_effort_lease_stop_failure(exc)
 
-    async def extend_async(
-        self,
-        duration: Duration,
-        extend_lease: AsyncExtendMessageLease,
-    ) -> None:
-        """Extend the lease immediately if this message has lease metadata."""
+    async def extend_async(self, duration: Duration) -> None:
+        """Extend the lease immediately if this message has lease metadata.
+
+        Applies settlement retry semantics: transient failures are retried
+        and an already-missing lease is tolerated with a warning.
+        """
         if self._message.metadata.receipt_handle is None:
             return
-        await retry_async_follow_up(
-            lambda: extend_lease(self._message, duration),
-            event_prefix="visibility",
+        await retry_message_after_async(
+            self._message,
+            duration,
+            self._client._extend_lease,  # noqa: SLF001
         )
 
-    def extend(
-        self,
-        duration: Duration,
-        extend_lease: ExtendMessageLease,
-    ) -> None:
-        """Extend the lease immediately if this message has lease metadata."""
+    def extend(self, duration: Duration) -> None:
+        """Sync flavor of :meth:`extend_async`."""
         if self._message.metadata.receipt_handle is None:
             return
-        retry_sync_follow_up(
-            lambda: extend_lease(self._message, duration),
+        retry_message_after_sync(
+            self._message,
+            duration,
+            lambda message, duration: iter_coroutine(
+                self._client._extend_lease(message, duration)  # noqa: SLF001
+            ),
+        )
+
+
+def _prime_oidc_token_cache() -> None:
+    try:
+        get_vercel_oidc_token_sync()
+    except Exception as exc:  # noqa: BLE001
+        debug_log(
+            "lease.oidc_cache_prime_failed",
+            exception_class=exc.__class__.__name__,
+            exception_message=str(exc),
+        )
+
+
+async def retry_message_after_async(
+    message: Message[Any] | MessageMetadata,
+    duration: Duration,
+    extend_lease: AsyncExtendMessageLease,
+) -> None:
+    """Request redelivery of a leased message after ``duration``.
+
+    Retries transient failures and tolerates an already-missing lease with a
+    warning: the message can be settled or redelivered elsewhere before this
+    lands (lease expiry, concurrent consumer), in which case the requested
+    visibility no longer applies but the message itself is not lost.
+    """
+    try:
+        await retry_async_follow_up(
+            lambda: extend_lease(message, duration),
             event_prefix="visibility",
         )
+    except MessageNotFoundError:
+        _warn_lease_gone(message)
+
+
+def retry_message_after_sync(
+    message: Message[Any] | MessageMetadata,
+    duration: Duration,
+    extend_lease: ExtendMessageLease,
+) -> None:
+    """Sync flavor of :func:`retry_message_after_async`."""
+    try:
+        retry_sync_follow_up(
+            lambda: extend_lease(message, duration),
+            event_prefix="visibility",
+        )
+    except MessageNotFoundError:
+        _warn_lease_gone(message)
+
+
+def _warn_lease_gone(message: Message[Any] | MessageMetadata) -> None:
+    metadata = message.metadata if isinstance(message, Message) else message
+    logger.warning(
+        "queue lease for message %s on topic %s/%s no longer exists; "
+        "skipping requested visibility update",
+        metadata.message_id,
+        metadata.topic,
+        metadata.consumer_group,
+    )
+    debug_log(
+        "visibility.lease_gone",
+        message_id=metadata.message_id,
+        topic=metadata.topic,
+        consumer_group=metadata.consumer_group,
+    )
 
 
 def _send_lease_command(command: _LeaseExtensionCommand) -> None:
@@ -852,11 +918,10 @@ async def _run_lease_extension(
         lease_seconds=request.lease_seconds,
     )
     try:
-        with request.headers_context.use():
-            await request.client._renew_lease(  # noqa: SLF001
-                request.message,
-                request.lease_seconds,
-            )
+        await request.client._renew_lease(  # noqa: SLF001
+            request.message,
+            request.lease_seconds,
+        )
     except QueueError as exc:
         if _is_client_error(exc):
             active.pop(request.token, None)
@@ -928,79 +993,6 @@ def _lease_extension_retry_delay(exc: BaseException, lease_seconds: int) -> floa
         retry_after = max(1.0, float(exc.retry_after))
         return min(retry_after, _renewal_interval_seconds(lease_seconds))
     return _TRANSIENT_LEASE_RETRY_SECONDS
-
-
-async def retry_async_follow_up(
-    operation: Callable[[], Awaitable[None]],
-    *,
-    event_prefix: str = "follow_up",
-) -> None:
-    last_error: BaseException | None = None
-    for attempt in range(DIRECTIVE_FOLLOW_UP_ATTEMPTS):
-        try:
-            debug_log(f"{event_prefix}.retry_attempt", attempt=attempt + 1)
-            await operation()
-        except Exception as exc:
-            if not _is_retryable_follow_up_error(exc):
-                raise
-            last_error = exc
-            if attempt == DIRECTIVE_FOLLOW_UP_ATTEMPTS - 1:
-                break
-            await anyio.sleep(_follow_up_retry_delay(exc))
-        else:
-            return
-    if last_error is not None:
-        debug_log(
-            f"{event_prefix}.retry_exhausted",
-            attempts=DIRECTIVE_FOLLOW_UP_ATTEMPTS,
-            exception_class=last_error.__class__.__name__,
-            exception_message=str(last_error),
-        )
-        raise last_error
-
-
-def retry_sync_follow_up(
-    operation: Callable[[], None],
-    *,
-    event_prefix: str = "follow_up",
-) -> None:
-    last_error: BaseException | None = None
-    for attempt in range(DIRECTIVE_FOLLOW_UP_ATTEMPTS):
-        try:
-            debug_log(f"{event_prefix}.retry_attempt", attempt=attempt + 1)
-            operation()
-        except Exception as exc:
-            if not _is_retryable_follow_up_error(exc):
-                raise
-            last_error = exc
-            if attempt == DIRECTIVE_FOLLOW_UP_ATTEMPTS - 1:
-                break
-            time.sleep(_follow_up_retry_delay(exc))
-        else:
-            return
-    if last_error is not None:
-        debug_log(
-            f"{event_prefix}.retry_exhausted",
-            attempts=DIRECTIVE_FOLLOW_UP_ATTEMPTS,
-            exception_class=last_error.__class__.__name__,
-            exception_message=str(last_error),
-        )
-        raise last_error
-
-
-def _is_retryable_follow_up_error(exc: BaseException) -> bool:
-    if isinstance(exc, ThrottledError):
-        return exc.retry_after is not None
-    if isinstance(exc, QueueError):
-        status_code = exc.status_code
-        return status_code == 408 or (status_code is not None and status_code >= 500)
-    return isinstance(exc, httpx.TransportError)
-
-
-def _follow_up_retry_delay(exc: BaseException) -> float:
-    if isinstance(exc, ThrottledError) and exc.retry_after is not None:
-        return max(1.0, float(exc.retry_after))
-    return _TRANSIENT_FOLLOW_UP_RETRY_SECONDS
 
 
 async def finalize_payload_async(payload: Any) -> None:

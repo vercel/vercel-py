@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import sys
-import threading
 import urllib.parse
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import Context, ContextVar
+from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import wraps
-from types import MappingProxyType
 from typing import Any, ParamSpec, Protocol, TypedDict, TypeVar
 
 __all__ = [
@@ -18,8 +14,6 @@ __all__ = [
     "HeadersContext",
     "set_headers",
     "get_headers",
-    "get_headers_context",
-    "context_aware_thread",
     "headers_from_asgi_scope",
     "headers_from_wsgi_environ",
 ]
@@ -67,70 +61,6 @@ class HeadersContext:
     def run(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
         with self.use():
             return func(*args, **kwargs)
-
-
-def get_headers_context() -> HeadersContext:
-    headers = _cv_headers.get()
-    if headers is None:
-        return HeadersContext(None)
-    return HeadersContext(MappingProxyType(dict(headers)))
-
-
-if sys.version_info >= (3, 14):
-
-    def context_aware_thread(
-        group: None = None,
-        target: Callable[..., object] | None = None,
-        name: str | None = None,
-        args: Iterable[Any] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        *,
-        daemon: bool | None = None,
-        context: Context | None = None,
-    ) -> threading.Thread:
-        headers_context = get_headers_context()
-        if target is not None:
-            target = _wrap_thread_target(headers_context, target)
-        return threading.Thread(
-            group=group,
-            target=target,
-            name=name,
-            args=tuple(args),
-            kwargs=None if kwargs is None else dict(kwargs),
-            daemon=daemon,
-            context=context,
-        )
-
-else:
-
-    def context_aware_thread(
-        group: None = None,
-        target: Callable[..., object] | None = None,
-        name: str | None = None,
-        args: Iterable[Any] = (),
-        kwargs: Mapping[str, Any] | None = None,
-        *,
-        daemon: bool | None = None,
-    ) -> threading.Thread:
-        headers_context = get_headers_context()
-        if target is not None:
-            target = _wrap_thread_target(headers_context, target)
-        return threading.Thread(
-            group=group,
-            target=target,
-            name=name,
-            args=tuple(args),
-            kwargs=None if kwargs is None else dict(kwargs),
-            daemon=daemon,
-        )
-
-
-def _wrap_thread_target(context: HeadersContext, target: Callable[P, R]) -> Callable[P, R]:
-    @wraps(target)
-    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
-        return context.run(target, *args, **kwargs)
-
-    return wrapped
 
 
 class _HeadersLike(Protocol):
