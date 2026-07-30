@@ -68,6 +68,22 @@ scheduler.resume()
 makes it paused. `resume()` has the same durable transition as starting a
 paused scheduler. Each method is idempotent.
 
+Production additionally registers an automatic activation task during import.
+The Vercel Python Runtime executes it immediately before the application
+handles its first real request, after request-scoped OIDC credentials are
+available. Preview deployments register the same task only when enabled in
+`pyproject.toml`:
+
+```toml
+[tool.vercel.apscheduler.previews]
+enabled = true
+idle_timeout = "30m"
+```
+
+Preview activation is recurring but request-driven. Eligible incoming requests
+renew the durable idle deadline, with process-local throttling capped at
+five minutes. There is no background timer and no activity Queue topic.
+
 The caller must be executing in the target deployment. v1 has no cross-
 deployment control API.
 
@@ -83,8 +99,9 @@ The default Redis job store supplies both:
 The driver records:
 
 ```text
-state              running | paused
+state              running | paused | inactive
 generation         monotonically increasing integer
+idle_expires_at     preview idle deadline, when enabled
 start_status       pending | published | processing | active
 current_sequence   monotonically increasing within a generation
 current_logical_time
@@ -130,6 +147,11 @@ This keeps a cold import from overwriting a job changed through a runtime API.
 If at least one job is scheduled, start atomically reserves sequence 1 before
 publishing it. If the store has no scheduled jobs, the running driver becomes
 dormant with no wake message.
+
+Automatic activation performs the same generation reservation, with one
+important distinction: it never changes an explicitly paused driver. Many cold
+Function instances can attempt activation concurrently, but the Redis
+transition produces one generation and one start identity.
 
 ## One wake
 
@@ -178,6 +200,30 @@ heartbeat wakes. Far-future jobs use deterministic bridge wakes, at most 23
 hours apart by default, because Queue delay is bounded. Once no job remains,
 the chain goes dormant.
 
+## Preview idle expiry
+
+An opted-in preview stores `idle_expires_at` in the same Redis driver hash.
+The first request starts the preview generation. Later requests renew the
+deadline without changing the generation.
+
+Start and wake claims check the deadline atomically before acquiring ownership.
+Start and wake completion check it again atomically before reserving a
+successor. If it expired, the transition sets the driver to `inactive`, clears
+the current token, and fails closed:
+
+- unclaimed Queue messages do no work;
+- work already in flight may finish, but cannot extend the chain; and
+- no periodic message keeps an abandoned preview alive.
+
+The next real request changes `inactive` to `running`, increments the
+generation, and publishes one start identity. Activation rebases persisted jobs
+to that request time, so the inactive interval is skipped rather than replayed
+as a burst.
+
+`paused` and `inactive` are deliberately distinct. `paused` records an explicit
+operator decision and automatic request activity only renews its deadline; it
+does not resume the scheduler.
+
 ## Runtime job mutations
 
 Runtime calls through APScheduler's public APIs are event-driven:
@@ -210,10 +256,12 @@ updates or removes it only if the revision it read is still current. A
 concurrent runtime mutation therefore wins instead of being overwritten or
 resurrected by a late handler.
 
-Every cold Function instance that performs a runtime mutation must first call
-the idempotent `scheduler.start()`. Before that boundary, `add_job()` calls are
-treated as module-level declarations. Raw writes to Redis job-store keys are
-unsupported because they bypass atomic wake rearming and revision checks.
+Automatic activation establishes the boundary before an opted-in request
+reaches the application. Without automatic activation, every cold Function
+instance that performs a runtime mutation must first call the idempotent
+`scheduler.start()`. Before that boundary, `add_job()` calls are treated as
+module-level declarations. Raw writes to Redis job-store keys are unsupported
+because they bypass atomic wake rearming and revision checks.
 
 The no-heartbeat design has one deliberate liveness contract: `start()` and
 mutation calls are durable after they return successfully. If a process dies
@@ -263,6 +311,11 @@ is skipped, rather than replayed as a burst.
 | old message after resume | generation check makes it stale |
 | concurrent runtime add/modify | one token is rearmed; no second chain |
 | handler finishes after a job mutation | revision check preserves the mutation |
+| concurrent first requests | one automatic generation and one start identity |
+| preview idle deadline expires before claim | message is stale and no job runs |
+| preview idle deadline expires while work runs | current work may finish; no successor |
+| request arrives after preview expiry | one new generation; inactive time is skipped |
+| request arrives after explicit pause | idle deadline renews but state remains paused |
 
 These properties prevent parallel logical chains. They do not provide
 exactly-once job side effects. If a process dies after an external side effect
@@ -304,13 +357,14 @@ calls to `add_job()` should pass `replace_existing=True`.
 ## Deployment behavior
 
 Every deployment has an independent job namespace, driver generation, and
-Queue partition. Creating or promoting a new deployment does not implicitly
-start it, and it does not move the old deployment's chain.
+Queue partition. A production deployment starts on its first real request; an
+opted-in preview does the same and remains active only while requests renew its
+deadline. Promoting a deployment does not move another deployment's chain.
 
-Call `scheduler.start()` through an authenticated route on the new deployment
-when it should begin scheduling. Call `scheduler.pause()` on an older
-deployment before retiring it when its schedules should stop.
+Call `scheduler.pause()` on an older deployment before retiring it when its
+schedules should stop. A paused deployment stays paused even if it receives
+more requests.
 
 Deleting a deployment prevents its Functions from receiving further work.
-Redis records intentionally remain unless the operator removes them; automatic
-expiry would make reliable pause semantics impossible.
+Redis records intentionally remain unless the operator removes them; applying
+a TTL to the records would make reliable pause semantics impossible.

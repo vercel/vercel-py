@@ -25,10 +25,6 @@ scheduler = BlockingScheduler(
     replace_existing=True,
 )
 def cleanup() -> None: ...
-
-
-if __name__ == "__main__":
-    scheduler.start()
 ```
 
 Declare that object as a Python subscriber:
@@ -47,6 +43,39 @@ scheduler IDs, and installation hooks are not application configuration.
 APScheduler `RedisJobStore` also works. v1 requires exactly one job store,
 named `default`, and it must be Redis-backed.
 
+## Automatic activation
+
+Production deployments activate automatically on their first real request.
+The integration is registered while the application imports, but the Redis
+transition and first Queue send are deferred until the runtime has installed
+that request's OIDC credentials. Builds never enqueue messages.
+
+Preview deployments are inactive by default. Opt a project into request-driven
+preview scheduling with:
+
+```toml
+[tool.vercel.apscheduler.previews]
+enabled = true
+idle_timeout = "30m"
+```
+
+Each active Function runtime renews the preview's durable Redis activity
+deadline on incoming requests, throttled to at most once every five minutes
+(or one third of a shorter timeout). This is not a background timer and it
+does not emit periodic Queue messages. If no request renews the deadline:
+
+- a queued start or wake becomes stale before it can run;
+- an in-flight wake may finish its current work but cannot publish a
+  successor; and
+- the next request creates one new generation and skips occurrences from the
+  inactive interval.
+
+An explicit `pause()` remains paused across later requests; automatic
+activation never overrides it. Production scheduling has no idle timeout.
+In either environment, a deployment that has never received a request cannot
+start automatically because it has not received request-scoped OIDC
+credentials.
+
 ## Start, pause, and resume
 
 On Vercel, the normal APScheduler lifecycle methods operate the durable Queue
@@ -58,8 +87,8 @@ scheduler.pause()  # idempotently pause
 scheduler.resume()  # idempotently resume
 ```
 
-Call them from an authenticated runtime route or another trusted runtime
-entrypoint. Builds only discover subscribers and never start a schedule.
+Use these methods when explicit operational control is needed. Call them from
+an authenticated runtime route or another trusted runtime entrypoint.
 
 ```python
 from fastapi import FastAPI
@@ -99,9 +128,10 @@ heartbeat. `add_job()`, `modify_job()`, `reschedule_job()`, `pause_job()`,
 `resume_job()`, and removals update Redis and rearm the one current wake as
 needed.
 
-In every runtime Function instance that changes jobs, call `scheduler.start()`
-first. The call is idempotent and establishes the boundary between
-module-level job declarations and runtime mutations:
+Automatic activation establishes the runtime-mutation boundary before the user
+application handles a production request (or an opted-in preview request). In
+environments without automatic activation, call `scheduler.start()` first in
+each Function instance that changes jobs. The call is idempotent:
 
 ```python
 @app.post("/jobs")
@@ -136,6 +166,9 @@ deployment and subscriber. This gives the driver the following guarantees:
 - A crash between reserving and publishing a successor is repaired by a retry.
 - Occurrences during a pause are skipped on resume instead of replayed in a
   catch-up burst.
+- Preview idle expiry fences both claims and successor publication.
+- A later preview request creates one new generation; concurrent requests
+  converge on that generation.
 
 `start()` and job mutation calls are durable after they return successfully.
 If a process dies before returning, an idempotent `start()` repairs any pending
@@ -165,8 +198,8 @@ retry without running unfenced work.
 - Jobs declared in code need explicit stable IDs.
 - When the same ID already exists in Redis, declare it with
   `replace_existing=True`. `scheduled_job()` already enables replacement.
-- Runtime mutation APIs require `scheduler.start()` first in that Function
-  instance.
+- Runtime mutation APIs require prior activation in that Function instance,
+  either automatically on the request or through `scheduler.start()`.
 - Job execution is at-least-once.
 
 See [SCHEDULER.md](SCHEDULER.md) for the state machine and failure model. A

@@ -19,7 +19,7 @@ _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 ClaimState = Literal["claimed", "busy", "stale"]
 FinishState = Literal["advanced", "fenced", "lost"]
-LifecycleState = Literal["running", "paused"]
+LifecycleState = Literal["running", "paused", "inactive"]
 
 __all__ = [
     "APSchedulerConfigurationError",
@@ -61,6 +61,7 @@ class StartDecision:
     changed: bool
     start_status: str
     current_wake: WakeToken | None
+    state: LifecycleState = "running"
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +136,66 @@ return {
 }
 """
 
+_AUTO_ACTIVATE_SCRIPT = """
+-- vercel-apscheduler-v1:auto-activate
+local state = redis.call("HGET", KEYS[1], "state")
+local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")
+local changed = 0
+
+if ARGV[3] ~= "" then
+  local prior_expiry = tonumber(redis.call("HGET", KEYS[1], "idle_expires_at") or "")
+  if state == "running" and prior_expiry and prior_expiry <= tonumber(ARGV[1]) then
+    state = "inactive"
+    redis.call(
+      "HDEL",
+      KEYS[1],
+      "start_status",
+      "activation_time",
+      "current_logical_time",
+      "current_status",
+      "dirty_logical_time"
+    )
+    redis.call("HSET", KEYS[1], "current_sequence", "0")
+  end
+  redis.call("HSET", KEYS[1], "idle_expires_at", ARGV[3])
+else
+  redis.call("HDEL", KEYS[1], "idle_expires_at")
+end
+
+if not state or state == "inactive" then
+  generation = generation + 1
+  changed = 1
+  state = "running"
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "state", state,
+    "generation", tostring(generation),
+    "start_status", "pending",
+    "current_sequence", "0"
+  )
+  redis.call(
+    "HDEL",
+    KEYS[1],
+    "activation_time",
+    "current_logical_time",
+    "current_status",
+    "dirty_logical_time"
+  )
+end
+
+redis.call("HSET", KEYS[1], "updated_at", ARGV[2])
+return {
+  tostring(changed),
+  tostring(generation),
+  state or "",
+  redis.call("HGET", KEYS[1], "start_status") or "",
+  redis.call("HGET", KEYS[1], "current_sequence") or "",
+  redis.call("HGET", KEYS[1], "current_logical_time") or "",
+  redis.call("HGET", KEYS[1], "current_status") or ""
+}
+"""
+
 _PAUSE_SCRIPT = """
 -- vercel-apscheduler-v1:pause
 local changed = 0
@@ -172,6 +233,29 @@ return 1
 
 _CLAIM_START_SCRIPT = """
 -- vercel-apscheduler-v1:claim-start
+local idle_expiry = tonumber(redis.call("HGET", KEYS[1], "idle_expires_at") or "")
+if redis.call("HGET", KEYS[1], "state") == "running"
+  and idle_expiry
+  and idle_expiry <= tonumber(ARGV[3])
+then
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "state", "inactive",
+    "current_sequence", "0",
+    "updated_at", ARGV[5]
+  )
+  redis.call(
+    "HDEL",
+    KEYS[1],
+    "start_status",
+    "activation_time",
+    "current_logical_time",
+    "current_status",
+    "dirty_logical_time"
+  )
+  return {"stale", ""}
+end
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return {"stale", ""}
 end
@@ -216,6 +300,35 @@ if owner ~= ARGV[2] then
   then
     return {"lost", "", ""}
   end
+  return {"fenced", "", ""}
+end
+
+local idle_expiry = tonumber(redis.call("HGET", KEYS[1], "idle_expires_at") or "")
+if redis.call("HGET", KEYS[1], "state") == "running"
+  and idle_expiry
+  and idle_expiry <= tonumber(ARGV[5])
+then
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "state", "inactive",
+    "current_sequence", "0",
+    "updated_at", ARGV[4]
+  )
+  redis.call(
+    "HDEL",
+    KEYS[1],
+    "start_status",
+    "activation_time",
+    "current_logical_time",
+    "current_status",
+    "dirty_logical_time",
+    "active_owner",
+    "active_kind",
+    "active_generation",
+    "active_sequence",
+    "active_lease_until"
+  )
   return {"fenced", "", ""}
 end
 
@@ -292,6 +405,29 @@ return 1
 
 _CLAIM_WAKE_SCRIPT = """
 -- vercel-apscheduler-v1:claim-wake
+local idle_expiry = tonumber(redis.call("HGET", KEYS[1], "idle_expires_at") or "")
+if redis.call("HGET", KEYS[1], "state") == "running"
+  and idle_expiry
+  and idle_expiry <= tonumber(ARGV[5])
+then
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "state", "inactive",
+    "current_sequence", "0",
+    "updated_at", ARGV[7]
+  )
+  redis.call(
+    "HDEL",
+    KEYS[1],
+    "start_status",
+    "activation_time",
+    "current_logical_time",
+    "current_status",
+    "dirty_logical_time"
+  )
+  return "stale"
+end
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return "stale"
 end
@@ -335,6 +471,35 @@ if redis.call("HGET", KEYS[1], "active_owner") ~= ARGV[3] then
   then
     return {"lost", "", ""}
   end
+  return {"fenced", "", ""}
+end
+
+local idle_expiry = tonumber(redis.call("HGET", KEYS[1], "idle_expires_at") or "")
+if redis.call("HGET", KEYS[1], "state") == "running"
+  and idle_expiry
+  and idle_expiry <= tonumber(ARGV[7])
+then
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "state", "inactive",
+    "current_sequence", "0",
+    "updated_at", ARGV[6]
+  )
+  redis.call(
+    "HDEL",
+    KEYS[1],
+    "start_status",
+    "activation_time",
+    "current_logical_time",
+    "current_status",
+    "dirty_logical_time",
+    "active_owner",
+    "active_kind",
+    "active_generation",
+    "active_sequence",
+    "active_lease_until"
+  )
   return {"fenced", "", ""}
 end
 
@@ -471,6 +636,44 @@ class RedisDriver:
             ),
         )
 
+    def auto_activate(
+        self,
+        now: datetime,
+        *,
+        idle_timeout_seconds: int | None = None,
+    ) -> StartDecision:
+        """Renew activity and start unless the scheduler was explicitly paused."""
+        if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be a positive integer")
+        now_utc = as_utc(now, name="now")
+        expires_at = (
+            now_utc.timestamp() + idle_timeout_seconds if idle_timeout_seconds is not None else None
+        )
+        result = self._eval(
+            _AUTO_ACTIVATE_SCRIPT,
+            str(now_utc.timestamp()),
+            now_utc.isoformat(),
+            str(expires_at) if expires_at is not None else "",
+        )
+        if not isinstance(result, (list, tuple)) or len(result) != 7:
+            raise RuntimeError("Redis returned an invalid APScheduler auto-activation result")
+        generation = int(_text(result[1]))
+        state_raw = _text(result[2])
+        if state_raw not in {"running", "paused", "inactive"}:
+            raise RuntimeError("Redis returned an unknown APScheduler lifecycle state")
+        return StartDecision(
+            generation=generation,
+            changed=bool(int(_text(result[0]))),
+            state=cast("LifecycleState", state_raw),
+            start_status=_text(result[3]),
+            current_wake=_wake_from_values(
+                generation,
+                result[4],
+                result[5],
+                result[6],
+            ),
+        )
+
     def pause(self, now: datetime) -> bool:
         """Fence the running generation without canceling its active owner."""
         result = self._eval(
@@ -530,12 +733,14 @@ class RedisDriver:
             if next_logical_time is not None
             else None
         )
+        now_utc = as_utc(now, name="now")
         result = self._eval(
             _FINISH_START_SCRIPT,
             str(generation),
             owner,
             logical_time.isoformat() if logical_time is not None else "",
-            as_utc(now, name="now").isoformat(),
+            now_utc.isoformat(),
+            str(now_utc.timestamp()),
         )
         return _finish_result(
             result,
@@ -591,6 +796,7 @@ class RedisDriver:
             if next_logical_time is not None
             else None
         )
+        now_utc = as_utc(now, name="now")
         result = self._eval(
             _FINISH_WAKE_SCRIPT,
             str(token.generation),
@@ -598,7 +804,8 @@ class RedisDriver:
             owner,
             token.logical_time.isoformat(),
             logical_time.isoformat() if logical_time is not None else "",
-            as_utc(now, name="now").isoformat(),
+            now_utc.isoformat(),
+            str(now_utc.timestamp()),
         )
         return _finish_result(
             result,
@@ -618,7 +825,11 @@ class RedisDriver:
         if not isinstance(values, (list, tuple)) or len(values) != 6:
             raise RuntimeError("Redis returned an invalid APScheduler driver state")
         state_raw = _text(values[0])
-        state: LifecycleState = "running" if state_raw == "running" else "paused"
+        state: LifecycleState
+        if state_raw in {"running", "paused", "inactive"}:
+            state = cast("LifecycleState", state_raw)
+        else:
+            state = "paused"
         generation_raw = _text(values[1])
         generation = int(generation_raw) if generation_raw else 0
         return DriverSnapshot(

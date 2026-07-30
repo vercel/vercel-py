@@ -22,16 +22,25 @@ vc link
 vc deploy --prod
 ```
 
-Start the scheduler after the deployment is ready:
+Production activates the scheduler automatically on its first request. For
+example:
 
 ```bash
-curl -X POST \
-  -H "x-admin-secret: $APSCHEDULER_ADMIN_SECRET" \
-  https://your-deployment.example/scheduler/start
+curl https://your-deployment.example/
 ```
 
-Pause and resume it through `/scheduler/pause` and `/scheduler/resume`.
-Do not expose these routes without authentication.
+Previews are inactive by default. To keep a preview active while it is
+receiving traffic, add:
+
+```toml
+[tool.vercel.apscheduler.previews]
+enabled = true
+idle_timeout = "30m"
+```
+
+The example retains authenticated `/scheduler/start`, `/scheduler/pause`, and
+`/scheduler/resume` routes for explicit operational control. Do not expose
+these routes without authentication.
 
 These calls affect the deployment serving the request. Repeated and concurrent
 lifecycle calls are safe: Redis fences generations and permits only one current
