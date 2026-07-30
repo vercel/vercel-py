@@ -155,6 +155,9 @@ class SdkSession(_BaseSdkSession):
         """
         loop = self._running_loop()
         with self._clients_lock:
+            # Under the lock, so a request holding this transport cannot build a
+            # client that outlives the session it belongs to.
+            self.check_open()
             client = self._clients.get(loop)
             if client is not None:
                 return client
@@ -220,11 +223,13 @@ class SdkSession(_BaseSdkSession):
     async def aclose(self) -> None:
         if self._closed:
             return
-        self._closed = True
         self._clear_services()
         self._transport = None
         loop = self._running_loop()
         with self._clients_lock:
+            # Closing and the flag that stops new clients have to be one step, or
+            # a resolver already past the check registers a client nothing closes.
+            self._closed = True
             clients = list(self._clients.items())
             self._clients.clear()
         for owner, client in clients:

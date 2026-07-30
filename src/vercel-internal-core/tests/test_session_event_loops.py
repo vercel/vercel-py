@@ -17,6 +17,7 @@ from typing import cast
 import httpx
 import pytest
 
+from vercel._internal.core.errors import VercelSessionClosedError
 from vercel._internal.core.http import AsyncTransport
 from vercel._internal.core.http.transport import ReadResponsePolicy
 from vercel._internal.core.session import SdkSession
@@ -138,6 +139,25 @@ def test_memoized_service_does_not_keep_a_transport_bound_to_a_dead_loop(
         assert server.request_count == 3
         # The service itself is still memoized: only its client changed.
         assert len(services) == 1
+
+
+async def test_a_closed_session_does_not_build_another_client() -> None:
+    """A request still holding the transport must not outlive its session.
+
+    Closing empties the per-loop registry, so without this the next lookup would
+    treat the session as cold, build a client, and run the request outside the
+    lifecycle that was supposed to end.
+    """
+    with _keep_alive_server() as server:
+        session = SdkSession()
+        transport = session.get_transport()
+        await session.aclose()
+
+        with pytest.raises(VercelSessionClosedError):
+            await _post(transport, _url(server))
+
+        assert server.request_count == 0
+        assert len(session._clients) == 0
 
 
 def test_concurrent_loops_in_separate_threads_each_get_their_own_client(
