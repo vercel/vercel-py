@@ -23,6 +23,16 @@ from vercel.connect._internal.models import (
 from vercel.connect._internal.state import ConnectTokenState
 
 
+class _PendingLoad:
+    """Bookkeeping for one key with loads in flight."""
+
+    __slots__ = ("refs", "invalidated")
+
+    def __init__(self) -> None:
+        self.refs = 0
+        self.invalidated = False
+
+
 class TokenCacheKey:
     """Canonical, order-independent identity of a token request.
 
@@ -159,10 +169,10 @@ class TokenCache:
         self._max_size = max_size
         self._entries: OrderedDict[TokenCacheKey, ConnectTokenState] = OrderedDict()
         self._lock = threading.RLock()
-        # Bumped on every invalidation. A load that started before an eviction
-        # carries the older generation and is discarded instead of resurrecting a
-        # revoked credential.
-        self._generation = 0
+        # In-flight loads, so an invalidation can reach a credential that is being
+        # fetched but is not in the cache yet. Tracked per key: a global counter
+        # would let one key's eviction discard an unrelated key's fresh token.
+        self._pending: dict[TokenCacheKey, _PendingLoad] = {}
 
     def get(
         self,
@@ -181,26 +191,34 @@ class TokenCache:
             self._entries.move_to_end(key)
             return state
 
-    @property
-    def generation(self) -> int:
-        """Counter incremented by every invalidation."""
+    def begin_load(self, key: TokenCacheKey) -> None:
+        """Register an in-flight load so invalidation can reach it."""
         with self._lock:
-            return self._generation
+            pending = self._pending.get(key)
+            if pending is None:
+                pending = _PendingLoad()
+                self._pending[key] = pending
+            pending.refs += 1
 
-    def set(
-        self,
-        key: TokenCacheKey,
-        value: ConnectTokenState,
-        *,
-        generation: int | None = None,
-    ) -> bool:
+    def finish_load(self, key: TokenCacheKey) -> None:
+        """Release an in-flight load registration."""
+        with self._lock:
+            pending = self._pending.get(key)
+            if pending is None:
+                return
+            pending.refs -= 1
+            if pending.refs <= 0:
+                del self._pending[key]
+
+    def set(self, key: TokenCacheKey, value: ConnectTokenState) -> bool:
         """Store a token, evicting the least recently used entry when full.
 
-        Returns False without storing when `generation` predates an invalidation
-        that happened while the token was being fetched.
+        Returns False without storing when this key was invalidated while the
+        token was in flight, so a revoked credential is never resurrected.
         """
         with self._lock:
-            if generation is not None and generation != self._generation:
+            pending = self._pending.get(key)
+            if pending is not None and pending.invalidated:
                 return False
             self._entries[key] = value
             self._entries.move_to_end(key)
@@ -213,8 +231,9 @@ class TokenCache:
         """Drop exactly one entry. Returns whether an entry was removed."""
         with self._lock:
             removed = self._entries.pop(key, None) is not None
-            if removed:
-                self._generation += 1
+            pending = self._pending.get(key)
+            if pending is not None:
+                pending.invalidated = True
             return removed
 
     def delete_by_identity(
@@ -247,15 +266,23 @@ class TokenCache:
             ]
             for key in doomed:
                 del self._entries[key]
-            if doomed:
-                self._generation += 1
+            # An in-flight load has stored nothing yet, so matching it here is the
+            # only way a revoke can stop it from caching a revoked credential.
+            for key, pending in self._pending.items():
+                if (
+                    key.connector == connector
+                    and key.subject_key == subject_key
+                    and (installation_id is None or key.installation_id == installation_id)
+                ):
+                    pending.invalidated = True
             return len(doomed)
 
     def clear(self) -> None:
         """Drop every entry."""
         with self._lock:
             self._entries.clear()
-            self._generation += 1
+            for pending in self._pending.values():
+                pending.invalidated = True
 
     def __len__(self) -> int:
         with self._lock:

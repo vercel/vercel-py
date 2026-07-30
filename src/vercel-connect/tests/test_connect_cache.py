@@ -773,3 +773,96 @@ def test_single_flight_locks_do_not_accumulate() -> None:
         iter_coroutine(flight.run(key, read=lambda: None, load=load))
 
     assert len(flight) == 0
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_revoke_during_a_cold_fetch_is_not_undone(mock_env_clear: None) -> None:
+    """The in-flight load has cached nothing yet, so identity invalidation has to
+    reach the pending load rather than the (empty) entry table."""
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        await release.wait()
+        return httpx.Response(200, json=token_body(token=f"t{calls['n']}"))
+
+    respx.post(TOKEN_URL).mock(side_effect=slow)
+    respx.delete(f"{TEST_BASE_URL}/v1/connect/connectors/slack%2Fmy-bot/tokens").mock(
+        return_value=httpx.Response(204, content=b"")
+    )
+    subject = ConnectAppTokenSubject()
+
+    async with session(service_options=session_options()):
+        pending = asyncio.ensure_future(get_token("slack/my-bot", subject=subject))
+        await asyncio.sleep(0)
+        await revoke_token("slack/my-bot", subject=subject)
+        release.set()
+        await pending
+
+        # The revoked credential must not have been cached.
+        await get_token("slack/my-bot", subject=subject)
+
+    assert calls["n"] == 2
+
+
+@time_machine.travel(NOW, tick=False)
+@respx.mock
+async def test_eviction_of_one_key_leaves_other_in_flight_loads_alone(
+    mock_env_clear: None,
+) -> None:
+    """Invalidation is per key: a force_refresh on one subject must not discard a
+    concurrent load for another."""
+    release = asyncio.Event()
+    calls = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            await release.wait()
+        return httpx.Response(200, json=token_body(token=f"t{calls['n']}"))
+
+    respx.post(TOKEN_URL).mock(side_effect=handler)
+    a = ConnectUserTokenSubject(id="A")
+    b = ConnectUserTokenSubject(id="B")
+
+    async with session(service_options=session_options()):
+        await get_token("slack/my-bot", subject=b)
+        pending = asyncio.ensure_future(get_token("slack/my-bot", subject=a))
+        await asyncio.sleep(0)
+        await get_token("slack/my-bot", subject=b, options=ConnectOptions(force_refresh=True))
+        release.set()
+        await pending
+        settled = calls["n"]
+
+        # A's token was cached despite B being evicted mid-flight.
+        await get_token("slack/my-bot", subject=a)
+
+    assert calls["n"] == settled
+
+
+async def test_negative_validity_buffer_is_rejected(mock_env_clear: None) -> None:
+    from vercel.connect import ConnectServiceOptions
+
+    with pytest.raises(ValueError, match="validity_buffer"):
+        ConnectServiceOptions(validity_buffer=timedelta(seconds=-1))
+
+
+async def test_negative_per_call_validity_buffer_is_rejected(mock_env_clear: None) -> None:
+    """Rejected before any request is made, so no credential is minted."""
+    async with session(service_options=session_options()):
+        with pytest.raises(ValueError, match="validity_buffer"):
+            await get_token(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                options=ConnectOptions(validity_buffer=-3600),
+            )
+
+
+def test_invalid_cache_size_is_rejected() -> None:
+    from vercel.connect import ConnectServiceOptions
+
+    for size in (0, -1):
+        with pytest.raises(ValueError, match="token_cache_size"):
+            ConnectServiceOptions(token_cache_size=size)

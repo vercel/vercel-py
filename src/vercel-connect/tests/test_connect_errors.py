@@ -328,3 +328,36 @@ async def test_top_level_message_body_renders_status_once(mock_env_clear: None) 
     rendered = str(exc_info.value)
     assert rendered == "Forbidden (status=403)"
     assert "HTTP 403" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            {"error": "user_authorization_required", "error_description": "consent"},
+            UserAuthorizationRequiredError,
+        ),
+        ({"error": "no_token", "error_description": "gone"}, NoValidTokenError),
+        (
+            {"error": "connector_installation_required", "error_description": "install"},
+            ConnectorInstallationRequiredError,
+        ),
+        ({"error": "invalid_grant", "error_description": "nope"}, ConnectApiError),
+    ],
+)
+@respx.mock
+async def test_oauth_shaped_error_bodies_map_to_the_taxonomy(
+    mock_env_clear: None,
+    body: dict[str, Any],
+    expected: type[ConnectApiError],
+) -> None:
+    """OAuth puts the code directly in `error` as a string rather than an object."""
+    respx.post(TOKEN_URL).mock(return_value=error_response(401, body))
+
+    async with session(service_options=session_options()):
+        with pytest.raises(expected) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    assert type(exc_info.value) is expected
+    assert exc_info.value.code == body["error"]
+    assert body["error_description"] in str(exc_info.value)

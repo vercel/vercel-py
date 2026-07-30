@@ -404,3 +404,25 @@ async def test_wildcard_scopes_are_omitted_from_the_body(mock_env_clear: None) -
         await get_token("slack/my-bot", subject=ConnectAppTokenSubject(), scopes=["*"])
 
     assert json.loads(route.calls.last.request.content) == {"subject": {"type": "app"}}
+
+
+@respx.mock
+async def test_custom_detail_cannot_override_its_declared_type(mock_env_clear: None) -> None:
+    """A stray "type" key in `details` must not change what is being requested."""
+    route = token_route("oauth%2Fthing")
+
+    async with session(service_options=session_options()):
+        await get_token(
+            "oauth/thing",
+            subject=ConnectAppTokenSubject(),
+            authorization_details=[
+                ConnectCustomAuthorizationDetail(
+                    type="payment_initiation",
+                    details={"type": "something_else", "amount": "1.00"},
+                )
+            ],
+        )
+
+    detail = json.loads(route.calls.last.request.content)["authorizationDetails"][0]
+    assert detail["type"] == "payment_initiation"
+    assert detail["amount"] == "1.00"

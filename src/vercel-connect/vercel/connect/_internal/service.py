@@ -201,7 +201,11 @@ class ConnectService:
 
     def _validity_buffer_seconds(self, options: ConnectOptions | None) -> float:
         if options is not None and options.validity_buffer is not None:
-            return coerce_duration(options.validity_buffer, _SECOND).total_seconds()
+            seconds = coerce_duration(options.validity_buffer, _SECOND).total_seconds()
+            # A negative buffer would make an already-expired token look usable.
+            if seconds < 0:
+                raise ValueError("validity_buffer must not be negative")
+            return seconds
         return self._options.validity_buffer.total_seconds()
 
     async def get_token_response(
@@ -217,11 +221,11 @@ class ConnectService:
         options: ConnectOptions | None = None,
     ) -> ConnectTokenResponse:
         self._ensure_open()
+        buffer_seconds = self._validity_buffer_seconds(options)
         identity = await self._identity(options)
         scopes = _normalize_scopes(scopes)
         no_cache = options.no_cache if options is not None else False
         force_refresh = options.force_refresh if options is not None else False
-        buffer_seconds = self._validity_buffer_seconds(options)
 
         key = build_cache_key(
             connector,
@@ -234,23 +238,27 @@ class ConnectService:
             authorization_details=authorization_details,
         )
 
-        generation = self._cache.generation
-
         async def load() -> ConnectTokenState:
-            state = await self._api_client.create_token(
-                connector,
-                subject=subject,
-                vercel_token=identity,
-                scopes=scopes,
-                installation_id=installation_id,
-                audience=audience,
-                resources=resources,
-                authorization_details=authorization_details,
-            )
-            if not no_cache:
-                # Dropped when an invalidation landed while this was in flight.
-                self._cache.set(key, state, generation=generation)
-            return state
+            # Registered so a concurrent revoke can mark this load invalid even
+            # though nothing is cached under the key yet.
+            self._cache.begin_load(key)
+            try:
+                state = await self._api_client.create_token(
+                    connector,
+                    subject=subject,
+                    vercel_token=identity,
+                    scopes=scopes,
+                    installation_id=installation_id,
+                    audience=audience,
+                    resources=resources,
+                    authorization_details=authorization_details,
+                )
+                if not no_cache:
+                    # Dropped when an invalidation landed while this was in flight.
+                    self._cache.set(key, state)
+                return state
+            finally:
+                self._cache.finish_load(key)
 
         if no_cache:
             return _token_response(await load())
@@ -267,7 +275,6 @@ class ConnectService:
             # Evict up front: if the refetch fails, the caller must not keep being
             # served the credential they just asked to re-validate.
             self._cache.delete(key)
-            generation = self._cache.generation
             return _token_response(await load())
         return _token_response(await self._single_flight.run(key, read=read, load=load))
 

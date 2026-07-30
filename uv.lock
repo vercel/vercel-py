@@ -2588,6 +2588,7 @@ requires-dist = [
 name = "vercel-oidc"
 source = { editable = "src/vercel-oidc" }
 dependencies = [
+    { name = "anyio" },
     { name = "httpx" },
     { name = "vercel-headers" },
 ]
@@ -2600,6 +2601,7 @@ verify = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.0.0,<5" },
     { name = "cryptography", marker = "extra == 'verify'", specifier = ">=48.0.1" },
     { name = "httpx", specifier = ">=0.27.0,<1" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'verify'", specifier = ">=2.13.0,<3" },

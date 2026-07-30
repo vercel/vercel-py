@@ -434,7 +434,9 @@ def test_unknown_kid_refetch_is_rate_limited_under_concurrency(
     with ThreadPoolExecutor(max_workers=12) as pool:
         list(pool.map(attempt, range(12)))
 
-    assert route.call_count <= 2
+    # Exactly one refetch for the whole burst: more would be amplification, none
+    # would mean rotation could never be picked up.
+    assert route.call_count == 2
 
 
 @respx.mock
@@ -465,3 +467,93 @@ def test_missing_crypto_backend_reports_the_extra(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delattr(jwt.algorithms, "RSAAlgorithm")
     with pytest.raises(VercelOidcVerificationError, match="verify"):
         verify_module._require_pyjwt()
+
+
+@respx.mock
+def test_rotated_signing_key_is_picked_up_sync(
+    signing_key: rsa.RSAPrivateKey,
+    other_signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """A rotated key must verify immediately, not after the cache TTL.
+
+    Two defects made this fail: the refetch rate limit shared its timestamp with
+    the cache store, so a successful fetch suppressed the next refetch, and the
+    sync fetch short-circuited on the still-warm cache.
+    """
+    route = jwks_route(signing_key, kid="k-old")
+    clear_jwks_cache()
+    verify_vercel_oidc_token(sign(signing_key, kid="k-old"), **EXPECTATIONS)
+    assert route.call_count == 1
+
+    route.mock(return_value=httpx.Response(200, json=jwks_for(other_signing_key, kid="k-new")))
+    verified = verify_vercel_oidc_token(sign(other_signing_key, kid="k-new"), **EXPECTATIONS)
+
+    assert verified["project_id"] == "prj_123"
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_rotated_signing_key_is_picked_up_async(
+    signing_key: rsa.RSAPrivateKey,
+    other_signing_key: rsa.RSAPrivateKey,
+) -> None:
+    route = jwks_route(signing_key, kid="k-old")
+    clear_jwks_cache()
+    await verify_vercel_oidc_token_async(sign(signing_key, kid="k-old"), **EXPECTATIONS)
+
+    route.mock(return_value=httpx.Response(200, json=jwks_for(other_signing_key, kid="k-new")))
+    verified = await verify_vercel_oidc_token_async(
+        sign(other_signing_key, kid="k-new"), **EXPECTATIONS
+    )
+
+    assert verified["project_id"] == "prj_123"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_rotation_still_rejects_a_key_absent_from_the_new_jwks(
+    signing_key: rsa.RSAPrivateKey,
+    other_signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """Refreshing on an unknown kid must not become a way to accept any key."""
+    route = jwks_route(signing_key, kid="k-old")
+    clear_jwks_cache()
+    verify_vercel_oidc_token(sign(signing_key, kid="k-old"), **EXPECTATIONS)
+    route.mock(return_value=httpx.Response(200, json=jwks_for(signing_key, kid="k-old")))
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(sign(other_signing_key, kid="k-unknown"), **EXPECTATIONS)
+
+
+@respx.mock
+async def test_concurrent_rotation_waiters_do_not_fail(
+    signing_key: rsa.RSAPrivateKey,
+    other_signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """Tasks that lose the refetch race must wait for it, not reject a valid token."""
+    import anyio
+
+    clear_jwks_cache()
+    route = jwks_route(signing_key, kid="k-old")
+    await verify_vercel_oidc_token_async(sign(signing_key, kid="k-old"), **EXPECTATIONS)
+
+    async def rotated(request: httpx.Request) -> httpx.Response:
+        await anyio.sleep(0.05)
+        return httpx.Response(200, json=jwks_for(other_signing_key, kid="k-new"))
+
+    route.mock(side_effect=rotated)
+    token = sign(other_signing_key, kid="k-new")
+
+    results = []
+
+    async def verify_one() -> None:
+        results.append(await verify_vercel_oidc_token_async(token, **EXPECTATIONS))
+
+    async with anyio.create_task_group() as group:
+        for _ in range(6):
+            group.start_soon(verify_one)
+
+    assert len(results) == 6
+    assert all(r["project_id"] == "prj_123" for r in results)
+    # One refetch shared by every waiter.
+    assert route.call_count == 2

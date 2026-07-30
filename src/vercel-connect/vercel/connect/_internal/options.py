@@ -20,6 +20,11 @@ VercelTokenInput: TypeAlias = str | Callable[[], str | Awaitable[str]]
 
 Prefer the callable form for anything long-lived: OIDC tokens are short-lived,
 so a captured string goes stale.
+
+A callable returning an awaitable is only usable from the async surface. The sync
+surface steps its coroutine exactly once, so a callable that actually suspends —
+one performing network I/O, for instance — cannot be resolved there. Supply a
+plain synchronous callable when calling `vercel.connect.sync`.
 """
 
 
@@ -102,12 +107,20 @@ class ConnectServiceOptions(ServiceOptions):
         # Left as None when unset so the service can pick the resolver that
         # matches the session mode.
         object.__setattr__(self, "credentials_factory", credentials_factory)
+        if timeout is not None and timeout.total_seconds() <= 0:
+            raise ValueError("timeout must be positive")
         object.__setattr__(self, "timeout", timeout if timeout is not None else DEFAULT_TIMEOUT)
+        # A negative buffer would treat an already-expired token as still usable.
+        if validity_buffer is not None and validity_buffer.total_seconds() < 0:
+            raise ValueError("validity_buffer must not be negative")
         object.__setattr__(
             self,
             "validity_buffer",
             validity_buffer if validity_buffer is not None else DEFAULT_VALIDITY_BUFFER,
         )
+        # Below one, eviction would pop from an empty mapping.
+        if token_cache_size is not None and token_cache_size < 1:
+            raise ValueError("token_cache_size must be at least 1")
         object.__setattr__(
             self,
             "token_cache_size",
@@ -139,8 +152,6 @@ class ConnectOptions:
 
 
 __all__ = [
-    "_default_async_credentials_factory",
-    "_default_sync_credentials_factory",
     "DEFAULT_CONNECT_API_BASE_URL",
     "DEFAULT_TOKEN_CACHE_SIZE",
     "DEFAULT_VALIDITY_BUFFER",

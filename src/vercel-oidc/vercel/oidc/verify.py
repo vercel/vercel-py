@@ -44,8 +44,13 @@ _WILDCARD = "*"
 
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-_jwks_last_fetch: dict[str, float] = {}
+# Deliberately separate from the cache timestamp. Rate limiting must throttle
+# repeated *refetch attempts* (an attacker cycling unknown `kid` values), not be
+# reset by every successful fetch, which would block a legitimate refetch after a
+# key rotation for the whole interval.
+_jwks_refetch_attempt: dict[str, float] = {}
 _jwks_fetch_locks: dict[str, threading.Lock] = {}
+_jwks_async_fetch_locks: dict[str, Any] = {}
 
 _MISSING_EXTRA_MESSAGE = (
     "OIDC token verification requires the 'verify' extra: pip install \"vercel-oidc[verify]\""
@@ -96,7 +101,6 @@ def _cached_jwks(url: str) -> dict[str, Any] | None:
 def _store_jwks(url: str, document: dict[str, Any]) -> None:
     with _jwks_lock:
         _jwks_cache[url] = (time.monotonic(), document)
-        _jwks_last_fetch[url] = time.monotonic()
 
 
 def _reserve_refetch(url: str) -> bool:
@@ -108,10 +112,10 @@ def _reserve_refetch(url: str) -> bool:
     """
     with _jwks_lock:
         now = time.monotonic()
-        last = _jwks_last_fetch.get(url)
+        last = _jwks_refetch_attempt.get(url)
         if last is not None and now - last < DEFAULT_JWKS_MIN_REFETCH_INTERVAL.total_seconds():
             return False
-        _jwks_last_fetch[url] = now
+        _jwks_refetch_attempt[url] = now
         return True
 
 
@@ -130,14 +134,26 @@ def _fetch_lock(url: str) -> threading.Lock:
         return lock
 
 
-def _fetch_jwks_sync(url: str) -> dict[str, Any]:
-    # Single-flight across threads: concurrent cold verifications would otherwise
-    # each issue their own JWKS request.
+def _resolve_key_sync(url: str, kid: str) -> Any:
+    """Find the signing key for `kid`, refreshing the JWKS when it is unknown."""
+    document = _cached_jwks(url)
+    if document is not None:
+        key = _select_key(document, kid)
+        if key is not None:
+            return key
+
+    # Single-flight across threads: concurrent cold verifications, and concurrent
+    # misses after a key rotation, would otherwise each issue their own request.
     with _fetch_lock(url):
-        cached = _cached_jwks(url)
-        if cached is not None:
-            return cached
-        return _fetch_jwks_sync_uncached(url)
+        document = _cached_jwks(url)
+        if document is not None:
+            key = _select_key(document, kid)
+            if key is not None:
+                # Refreshed by whoever held the lock first.
+                return key
+        if document is None or _reserve_refetch(url):
+            return _select_key(_fetch_jwks_sync_uncached(url), kid)
+    return None
 
 
 def _fetch_jwks_sync_uncached(url: str) -> dict[str, Any]:
@@ -154,12 +170,42 @@ def _fetch_jwks_sync_uncached(url: str) -> dict[str, Any]:
     return document
 
 
+def _async_fetch_lock(url: str) -> Any:
+    import anyio
+
+    with _jwks_lock:
+        lock = _jwks_async_fetch_locks.get(url)
+        if lock is None:
+            lock = anyio.Lock()
+            _jwks_async_fetch_locks[url] = lock
+        return lock
+
+
+async def _resolve_key_async(url: str, kid: str) -> Any:
+    """Async twin of `_resolve_key_sync`.
+
+    Uses an anyio lock rather than an asyncio one so the single-flight works on
+    both asyncio and trio, and so a task waiting for a rotation refresh is not
+    rejected while the winner is still fetching.
+    """
+    document = _cached_jwks(url)
+    if document is not None:
+        key = _select_key(document, kid)
+        if key is not None:
+            return key
+
+    async with _async_fetch_lock(url):
+        document = _cached_jwks(url)
+        if document is not None:
+            key = _select_key(document, kid)
+            if key is not None:
+                return key
+        if document is None or _reserve_refetch(url):
+            return _select_key(await _fetch_jwks_async(url), kid)
+    return None
+
+
 async def _fetch_jwks_async(url: str) -> dict[str, Any]:
-    # No cross-task single-flight here: a threading lock held across an await
-    # would block the event loop, and an asyncio primitive would break trio
-    # callers. The cold-start burst is bounded by concurrency at process start;
-    # the attacker-controlled path (an unknown `kid` forcing a refetch) is
-    # rate-limited by _reserve_refetch.
     try:
         async with httpx.AsyncClient(timeout=_JWKS_TIMEOUT) as client:
             response = await client.get(url)
@@ -332,15 +378,7 @@ def verify_vercel_oidc_token(
     expected_project, expected_environment = _resolve_expectations(project_id, environment)
     kid = _unverified_kid(token)
 
-    document = _cached_jwks(url)
-    fetched = False
-    if document is None:
-        document = _fetch_jwks_sync(url)
-        fetched = True
-
-    key = _select_key(document, kid)
-    if key is None and not fetched and _reserve_refetch(url):
-        key = _select_key(_fetch_jwks_sync(url), kid)
+    key = _resolve_key_sync(url, kid)
     if key is None:
         raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
 
@@ -391,15 +429,7 @@ async def verify_vercel_oidc_token_async(
     expected_project, expected_environment = _resolve_expectations(project_id, environment)
     kid = _unverified_kid(token)
 
-    document = _cached_jwks(url)
-    fetched = False
-    if document is None:
-        document = await _fetch_jwks_async(url)
-        fetched = True
-
-    key = _select_key(document, kid)
-    if key is None and not fetched and _reserve_refetch(url):
-        key = _select_key(await _fetch_jwks_async(url), kid)
+    key = await _resolve_key_async(url, kid)
     if key is None:
         raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
 
@@ -451,8 +481,9 @@ def clear_jwks_cache() -> None:
     """Drop the cached JWKS. Intended for tests."""
     with _jwks_lock:
         _jwks_cache.clear()
-        _jwks_last_fetch.clear()
+        _jwks_refetch_attempt.clear()
         _jwks_fetch_locks.clear()
+        _jwks_async_fetch_locks.clear()
 
 
 __all__ = [

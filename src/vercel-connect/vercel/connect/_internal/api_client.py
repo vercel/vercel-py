@@ -210,7 +210,9 @@ def _serialize_authorization_detail(detail: ConnectAuthorizationDetail) -> JSONO
                 body["repositories"] = list(detail.repositories)
             return body
         case ConnectCustomAuthorizationDetail():
-            return {"type": detail.type, **dict(detail.details)}
+            # `type` is written last so a stray "type" key in `details` cannot
+            # silently change which kind of authorization is being requested.
+            return {**dict(detail.details), "type": detail.type}
 
 
 def _raise_api_error(response: Response) -> None:
@@ -260,10 +262,19 @@ def _error_message(data: object) -> str | None:
 
 def _error_code(data: object) -> str | None:
     envelope = _error_envelope(data)
-    if envelope is None:
-        return None
-    code = envelope.get("code")
-    return code if isinstance(code, str) and code else None
+    if envelope is not None:
+        code = envelope.get("code")
+        if isinstance(code, str) and code:
+            return code
+    # OAuth-shaped bodies put the code directly in `error` as a string, so the
+    # taxonomy has to read that too or every such failure degrades to the base
+    # class.
+    if isinstance(data, Mapping):
+        for name in ("error", "err", "code"):
+            code = data.get(name)
+            if isinstance(code, str) and code:
+                return code
+    return None
 
 
 def _error_vendor(data: object) -> JSONObject | None:
