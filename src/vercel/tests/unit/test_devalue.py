@@ -1,7 +1,7 @@
 """Tests for vercel._internal.devalue — Python port of JS devalue.
 
 Test cases are modelled after the JS test suite at
-https://github.com/Rich-Harris/devalue/blob/main/test/index.test.js
+https://github.com/sveltejs/devalue/blob/main/test/index.test.js
 """
 
 from __future__ import annotations

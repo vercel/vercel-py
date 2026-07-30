@@ -1,6 +1,6 @@
 """Minimal Python port of the JavaScript *devalue* serialization library.
 
-Wire-format compatible with https://github.com/Rich-Harris/devalue — values
+Wire-format compatible with https://github.com/sveltejs/devalue — values
 serialized by Python ``stringify`` can be parsed by JS ``devalue.parse`` and
 vice-versa.
 """
