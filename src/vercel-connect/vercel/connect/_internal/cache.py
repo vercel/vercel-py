@@ -240,7 +240,6 @@ class TokenCache:
             self._entries[key] = value
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_size:
-                # O(1) eviction; the TypeScript implementation scans.
                 self._entries.popitem(last=False)
             return True
 
@@ -262,15 +261,13 @@ class TokenCache:
     ) -> int:
         """Drop every entry for a connector and subject.
 
-                `installation_id=None` means every installation, matching the server's
-                revocation semantics, rather than only entries that were cached without
-                an installation. Scoped invalidation: unlike the TypeScript SDK this
-                never clears unrelated connectors or subjects.
+        `installation_id=None` means every installation, matching the server's
+        revocation semantics, rather than only entries cached without one.
 
         A connector has two names, an opaque id (`scl_...`) and a readable UID
-                (`slack/my-bot`). Cached responses carry both, so an entry stored under one
-                name is still evicted by a call naming the other. An in-flight load has no
-                response yet, so it is matched on the name used at call time only.
+        (`slack/my-bot`). Cached responses carry both, so an entry stored under one
+        name is still evicted by a call naming the other. An in-flight load has no
+        response yet, so it is matched on the name used at call time only.
         """
         subject_key = _subject_key(subject)
         with self._lock:

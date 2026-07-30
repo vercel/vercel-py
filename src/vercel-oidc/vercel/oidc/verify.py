@@ -45,18 +45,14 @@ _WILDCARD = "*"
 
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-# Throttle set only by an *unproductive* fetch: one that failed, or that returned
-# a document still missing the requested `kid`. A productive fetch clears it. This
-# is what lets a key rotation be picked up immediately while an attacker cycling
-# unknown `kid` values, or a JWKS outage, is still limited to one request per
-# interval.
+# Set only by an *unproductive* fetch: one that failed, or that returned a document
+# still missing the requested `kid`. A productive fetch clears it, so a rotation is
+# picked up immediately while an attacker cycling unknown `kid` values, or an
+# outage, stays limited to one request per interval.
 _jwks_throttled_until: dict[str, float] = {}
-# URLs with a fetch in flight, so a caller that does not win the claim waits for
-# that result instead of rejecting a token the winner is about to make verifiable.
 _jwks_fetch_in_progress: set[str] = set()
-# Long enough to outlast the fetch itself: a waiter should give up only if the
-# owner has neither succeeded nor failed, which the HTTP timeout already bounds.
-# In practice the wait ends as soon as the owner clears the marker.
+# Longer than the fetch itself, so a waiter gives up only if the owner neither
+# succeeded nor failed.
 FETCH_WAIT_TIMEOUT = _JWKS_TIMEOUT_SECONDS + 1.0
 _FETCH_WAIT_INTERVAL = 0.02
 
@@ -202,9 +198,7 @@ def _resolve_key_sync(url: str, kid: str) -> Any:
         return _record_fetch_outcome(url, kid, _fetch_jwks_sync_uncached)
 
     # Someone else owns the fetch, or fetches are throttled. Wait for their result
-    # rather than rejecting a token that is about to become verifiable. The loop
-    # ends as soon as the owner clears the marker, so this waits for the fetch,
-    # not for the deadline.
+    # rather than rejecting a token that is about to become verifiable.
     deadline = time.monotonic() + FETCH_WAIT_TIMEOUT
     while _fetch_is_in_progress(url) and time.monotonic() < deadline:
         time.sleep(_FETCH_WAIT_INTERVAL)
@@ -215,7 +209,6 @@ def _resolve_key_sync(url: str, kid: str) -> Any:
 
 
 def _fetch_jwks_sync_uncached(url: str) -> dict[str, Any]:
-    # The in-flight marker is set by _claim_fetch; this only has to clear it.
     try:
         with httpx.Client(timeout=_JWKS_TIMEOUT) as client:
             response = client.get(url)
@@ -260,7 +253,6 @@ async def _resolve_key_async(url: str, kid: str) -> Any:
 
 
 async def _fetch_jwks_async(url: str) -> dict[str, Any]:
-    # The in-flight marker is set by _claim_fetch; this only has to clear it.
     try:
         async with httpx.AsyncClient(timeout=_JWKS_TIMEOUT) as client:
             response = await client.get(url)

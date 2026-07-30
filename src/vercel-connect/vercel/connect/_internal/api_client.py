@@ -186,14 +186,12 @@ def _encode_connector(connector: str) -> str:
 
 
 def _raise_api_error(response: Response) -> None:
-    # `extract_structured_error` returns a message that already embeds the status
-    # and code. `ConnectApiError.__str__` renders those itself, so only the bare
-    # provider message is passed through and the shared text is used purely as a
-    # fallback for bodies the envelope parser cannot read.
+    # The shared extractor embeds the status and code in its message, and
+    # `ConnectApiError.__str__` renders both itself, so only the bare provider
+    # message is passed on. Its text is kept purely as a fallback for bodies the
+    # envelope parser cannot read.
     fallback, data = extract_structured_error(response)
     if isinstance(data, Mapping):
-        # The body parsed, so the shared extractor's "HTTP <status>" preamble adds
-        # nothing that `__str__` does not already render.
         fallback = response.reason_phrase or fallback
     else:
         fallback = fallback.removeprefix(f"HTTP {response.status_code}: ")
@@ -220,9 +218,8 @@ def _error_envelope(data: object) -> Mapping[str, Any] | None:
 
 
 def _error_message(data: object) -> str | None:
-    # Check the envelope first, then the top level: a body like
-    # `{"message": "Forbidden"}` has no envelope, and falling back to the shared
-    # extractor's text would re-embed the status that `__str__` already renders.
+    # Envelope first, then top level: a body like `{"message": "Forbidden"}` has no
+    # envelope at all.
     candidates = [_error_envelope(data)]
     if isinstance(data, Mapping):
         candidates.append(data)
@@ -251,9 +248,8 @@ def _error_code(data: object) -> str | None:
         code = envelope.get("code")
         if isinstance(code, str) and code:
             return code
-    # OAuth-shaped bodies put the code directly in `error` as a string, so the
-    # taxonomy has to read that too or every such failure degrades to the base
-    # class. Only accept code-shaped values: some services put a sentence there.
+    # OAuth-shaped bodies put the code directly in `error`, and without reading it
+    # every such failure degrades to the base class.
     if isinstance(data, Mapping):
         for name in ("error", "err", "code"):
             code = data.get(name)
