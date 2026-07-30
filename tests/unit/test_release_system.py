@@ -1025,6 +1025,12 @@ def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> 
         tmp_path / "integrations/vercel-celery/vercel/integrations/celery/version.py",
         (),
     )
+    apscheduler = workspace.Package(
+        "vercel-apscheduler",
+        tmp_path / "integrations/vercel-apscheduler",
+        tmp_path / "integrations/vercel-apscheduler/vercel/integrations/apscheduler/version.py",
+        (),
+    )
     dramatiq = workspace.Package(
         "vercel-dramatiq",
         tmp_path / "integrations/vercel-dramatiq",
@@ -1040,11 +1046,12 @@ def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> 
     umbrella = workspace.Package(
         "vercel", tmp_path / "src/vercel", tmp_path / "src/vercel/version.py", ()
     )
-    for package in (queue, integration, dramatiq, headers):
+    for package in (queue, integration, apscheduler, dramatiq, headers):
         package.path.mkdir(parents=True)
         include = {
             "vercel-queue": "/vercel/queue",
             "vercel-celery": "/vercel/integrations/celery",
+            "vercel-apscheduler": "/vercel/integrations/apscheduler",
             "vercel-dramatiq": "/vercel/integrations/dramatiq",
             "vercel-headers": "/vercel/headers",
         }[package.name]
@@ -1072,6 +1079,7 @@ only-include = ["/_internal", "/blob"]
 
     assert bundle_release.is_vendored_eligible(queue)
     assert bundle_release.is_vendored_eligible(integration)
+    assert bundle_release.is_vendored_eligible(apscheduler)
     assert bundle_release.is_vendored_eligible(dramatiq)
     assert bundle_release.is_vendored_eligible(headers)
     assert not bundle_release.is_vendored_eligible(umbrella)
@@ -1179,6 +1187,50 @@ def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
     ) == (
         "dramatiq>=2.2,<3",
         "vercel-cache-bundle>=0.7.0",
+        "vercel-queue-bundle>=0.7.0",
+        "vercel-internal-shared-vendored-deps>=0.7.0",
+    )
+
+
+def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(bundle_release, "shared_vendored_version", lambda: "0.7.0")
+    queue_version = tmp_path / "vercel-queue/version.py"
+    queue_version.parent.mkdir()
+    queue_version.write_text('__version__ = "0.7.0"\n', encoding="utf-8")
+    monkeypatch.setattr(
+        workspace,
+        "packages",
+        lambda: {
+            "vercel-queue": workspace.Package(
+                "vercel-queue", tmp_path / "vercel-queue", queue_version, ()
+            ),
+        },
+    )
+    data = {
+        "project": {
+            "dependencies": [
+                "APScheduler>=3.10.4,<4",
+                "anyio>=4,<5",
+                "vercel-queue>=0.6.0",
+            ]
+        }
+    }
+
+    assert (
+        bundle_release._derive_vendor_requirements(  # noqa: SLF001
+            "vercel-apscheduler",
+            data,
+        )
+        == ()
+    )
+    assert bundle_release._external_dependencies(  # noqa: SLF001
+        "vercel-apscheduler",
+        data,
+        (),
+    ) == (
+        "APScheduler>=3.10.4,<4",
         "vercel-queue-bundle>=0.7.0",
         "vercel-internal-shared-vendored-deps>=0.7.0",
     )

@@ -58,6 +58,7 @@ SHARED_VENDORED_LIBS = {
 }
 SHARED_VENDORED_REQUIREMENTS = tuple(SHARED_VENDORED_LIBS.values())
 SHARED_VENDORED_CONSUMERS = {
+    "vercel-apscheduler",
     "vercel-cache",
     "vercel-celery",
     "vercel-dramatiq",
@@ -68,6 +69,7 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-sandbox",
 }
 PEER_DEPENDENCIES = {
+    "vercel-apscheduler": {"apscheduler"},
     "vercel-celery": {"celery"},
     "vercel-dramatiq": {"dramatiq"},
 }
