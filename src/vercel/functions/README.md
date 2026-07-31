@@ -35,4 +35,5 @@ helpers from `vercel.headers`, cache clients from `vercel.cache`, and
 
 `wait_until()` is not a durable task queue. Its work must finish within the
 Function's configured maximum duration, and it is not retried if the
-invocation terminates.
+invocation terminates. It accepts awaitables only; run synchronous work with
+`wait_until(asyncio.to_thread(func))`.

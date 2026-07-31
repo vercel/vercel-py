@@ -14,9 +14,18 @@ def wait_until(awaitable: Awaitable[object]) -> None:
 
     The response may be sent before the awaitable completes. Its completion is
     still bounded by the Function's configured maximum duration.
+
+    For synchronous work, pass ``asyncio.to_thread(func)``.
     """
     if not inspect.isawaitable(awaitable):
-        msg = f"wait_until can only be called with an awaitable, got {type(awaitable).__name__}"
+        hint = (
+            "; call it first, or wrap synchronous work in asyncio.to_thread(...)"
+            if callable(awaitable)
+            else ""
+        )
+        msg = (
+            f"wait_until can only be called with an awaitable, got {type(awaitable).__name__}{hint}"
+        )
         raise TypeError(msg)
 
     callback = get_context().wait_until
