@@ -50,6 +50,27 @@ def test_region_and_deployment_resolution(monkeypatch: pytest.MonkeyPatch) -> No
     assert resolve_deployment("dpl_explicit") == "dpl_explicit"
 
 
+def test_deployment_resolution_is_skipped_under_the_dev_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERCEL_DEPLOYMENT_ID", raising=False)
+    monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "vc-dev-token")
+
+    # `vercel dev` sets no deployment ID, and the ambient resolution must not
+    # turn that into a hard error the way it does against real VQS.
+    assert resolve_deployment() is None
+    assert resolve_deployment(ALL_DEPLOYMENTS) is None
+    assert resolve_deployment("dpl_explicit") == "dpl_explicit"
+
+    # A deployment ID that happens to be present is still ignored: the dev
+    # broker serves one working copy, so there is nothing to pin against.
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_env")
+    assert resolve_deployment() is None
+
+    monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "real-token")
+    assert resolve_deployment() == "dpl_env"
+
+
 def test_base_url_resolution_matches_vqs_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VERCEL_QUEUE_BASE_URL", raising=False)
     monkeypatch.delenv("VERCEL_QUEUE_BASE_PATH", raising=False)
@@ -169,6 +190,24 @@ def test_deployment_resolution_and_opt_out_headers(
     explicit_token_message_id = explicit_token_client.send("emails", {"ok": True})
     assert explicit_token_message_id is not None
     assert eqs.state.by_id[explicit_token_message_id].deployment == "dpl_1"
+
+
+def test_dev_token_send_omits_deployment_pinning(
+    eqs: EmbeddedQueueDevServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERCEL_DEPLOYMENT_ID", raising=False)
+    monkeypatch.setenv("VERCEL_REGION", "iad1")
+    monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "vc-dev-token")
+
+    # Publishing from a `vercel dev` service — the Celery and dramatiq brokers
+    # both send this way, naming no deployment — must reach the broker instead
+    # of failing to resolve one.
+    client = eqs.get_sync_client(token=None, deployment=CURRENT_DEPLOYMENT)
+    message_id = client.send("emails", {"ok": True})
+
+    assert message_id is not None
+    assert eqs.state.by_id[message_id].deployment == "__all__"
 
 
 def test_queue_client_timeout_accepts_duration() -> None:
