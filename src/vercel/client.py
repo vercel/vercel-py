@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .deployments.client import AsyncDeploymentsClient, DeploymentsClient
+from .project_routes.client import AsyncProjectRoutesClient, ProjectRoutesClient
 from .projects.client import AsyncProjectsClient, ProjectsClient
 
 
@@ -22,6 +23,9 @@ class Vercel:
         self.projects = ProjectsClient(
             access_token=access_token, base_url=base_url, timeout=timeout
         )
+        self.project_routes = ProjectRoutesClient(
+            access_token=access_token, base_url=base_url, timeout=timeout
+        )
 
 
 class AsyncVercel:
@@ -40,6 +44,9 @@ class AsyncVercel:
             access_token=access_token, base_url=base_url, timeout=timeout
         )
         self.projects = AsyncProjectsClient(
+            access_token=access_token, base_url=base_url, timeout=timeout
+        )
+        self.project_routes = AsyncProjectRoutesClient(
             access_token=access_token, base_url=base_url, timeout=timeout
         )
 
