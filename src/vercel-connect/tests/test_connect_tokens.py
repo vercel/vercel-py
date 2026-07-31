@@ -432,17 +432,59 @@ def test_bare_string_permissions_are_rejected() -> None:
     """`str` satisfies `Sequence[str]`, so this would serialize per character."""
     from vercel.connect import ConnectValidationError
 
-    with pytest.raises(ConnectValidationError, match="permissions must be a sequence"):
+    with pytest.raises(ConnectValidationError, match="permissions must be a container"):
         ConnectGitHubAppInstallationAuthorizationDetail(
             org="acme",
             permissions="contents:read",  # type: ignore[arg-type]
         )
 
-    with pytest.raises(ConnectValidationError, match="repositories must be a sequence"):
+    with pytest.raises(ConnectValidationError, match="repositories must be a container"):
         ConnectGitHubAppInstallationAuthorizationDetail(
             org="acme",
             repositories="web",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize("name", ["scopes", "audience", "resources"])
+@respx.mock
+async def test_bare_strings_are_rejected_at_the_request_boundary(
+    mock_env_clear: None, name: str
+) -> None:
+    """Regression: these silently expanded per character.
+
+    `scopes="repo:read"` type-checked against `Sequence[str]` and then went on the
+    wire as nine one-character scopes. `StringContainer` makes a type checker
+    refuse it; this pins the runtime behaviour for untyped callers.
+    """
+    from vercel.connect import ConnectValidationError
+
+    route = token_route()
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectValidationError, match=f"{name} must be a container"):
+            await get_token(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                **{name: "repo:read"},  # type: ignore[arg-type]
+            )
+
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_bare_string_scopes_are_rejected_by_start_authorization(
+    mock_env_clear: None,
+) -> None:
+    from vercel.connect import ConnectValidationError, start_authorization
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectValidationError, match="scopes must be a container"):
+            await start_authorization(
+                "slack/my-bot",
+                subject=ConnectAppTokenSubject(),
+                scopes="repo:read",  # type: ignore[arg-type]
+                return_url="https://app.example.com/callback",
+            )
 
 
 def test_sequence_permissions_are_accepted() -> None:

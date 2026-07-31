@@ -6,6 +6,8 @@ vulnerability in this space is an algorithm- or key-confusion bug:
 - ``RS256`` is the only accepted algorithm, passed explicitly. The token's own
   ``alg`` header is never consulted to select a verifier, so ``alg: none`` and
   HMAC confusion are structurally impossible.
+- The issuer is pinned to Vercel's OIDC service and is not configurable. The
+  JWKS URL is a constant, so a token can never influence where keys come from.
 - Key material is an RSA public key object resolved by ``kid`` from Vercel's
   JWKS, never a string that could be reinterpreted as an HMAC secret. An unknown
   ``kid`` is rejected; there is no "try every key" fallback.
@@ -21,8 +23,10 @@ Requires the ``verify`` extra: ``pip install "vercel-oidc[verify]"``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -35,13 +39,19 @@ from .token import VercelOidcTokenError
 
 VERCEL_OIDC_ISSUER = "https://oidc.vercel.com"
 JWKS_PATH = "/.well-known/jwks"
+# Fixed, never derived from the token: one global key signs every Vercel OIDC
+# token, including the team-scoped issuers, so there is nothing to discover and
+# no reason to let a claim choose a URL.
+JWKS_URL = f"{VERCEL_OIDC_ISSUER}{JWKS_PATH}"
+# Rejects traversal, extra path segments and query strings.
+_TEAM_SLUG = re.compile(r"[A-Za-z0-9_-]+")
+
 ALLOWED_ALGORITHMS = ("RS256",)
 DEFAULT_LEEWAY = timedelta(seconds=60)
 DEFAULT_JWKS_CACHE_TTL = timedelta(minutes=10)
 DEFAULT_JWKS_MIN_REFETCH_INTERVAL = timedelta(seconds=30)
 _JWKS_TIMEOUT_SECONDS = 10.0
 _JWKS_TIMEOUT = httpx.Timeout(_JWKS_TIMEOUT_SECONDS)
-_WILDCARD = "*"
 
 _jwks_lock = threading.Lock()
 _jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -81,14 +91,6 @@ def _require_pyjwt() -> Any:
     if not hasattr(jwt.algorithms, "RSAAlgorithm"):  # pragma: no cover - env dependent
         raise VercelOidcVerificationError(_MISSING_EXTRA_MESSAGE)
     return jwt
-
-
-def _jwks_url(issuer: str) -> str:
-    # https only: a plaintext JWKS endpoint would let a network attacker choose
-    # the signing key, which defeats the entire verification.
-    if not issuer.startswith("https://"):
-        raise VercelOidcVerificationError(f"OIDC issuer must be https, got {issuer!r}")
-    return f"{issuer.rstrip('/')}{JWKS_PATH}"
 
 
 def _cached_jwks(url: str) -> dict[str, Any] | None:
@@ -304,9 +306,7 @@ def _select_key(document: Mapping[str, Any], kid: str) -> Any:
     return None
 
 
-def _decode(
-    token: str, key: Any, *, issuer: str, audience: Any, leeway: timedelta
-) -> dict[str, Any]:
+def _decode(token: str, key: Any, *, audience: Any, leeway: timedelta) -> dict[str, Any]:
     jwt = _require_pyjwt()
     try:
         return dict(
@@ -317,7 +317,6 @@ def _decode(
                 # verifier, and `key` is an RSA public key object rather than a
                 # string that could be reused as an HMAC secret.
                 algorithms=list(ALLOWED_ALGORITHMS),
-                issuer=issuer,
                 audience=audience,
                 leeway=leeway.total_seconds(),
                 options={
@@ -325,7 +324,9 @@ def _decode(
                     "verify_exp": True,
                     "verify_nbf": True,
                     "verify_iat": True,
-                    "verify_iss": True,
+                    # Checked by `_check_issuer`: PyJWT compares `iss` for exact
+                    # equality, which would reject the team-scoped issuers.
+                    "verify_iss": False,
                     "verify_aud": audience is not None,
                     "require": ["exp", "iss"],
                 },
@@ -333,6 +334,77 @@ def _decode(
         )
     except Exception as exc:
         raise VercelOidcVerificationError("token failed verification", exc) from exc
+
+
+def _check_issuer(claims: Mapping[str, Any]) -> None:
+    """Pin the issuer to Vercel's OIDC service, root or team-scoped.
+
+    Vercel mints both `https://oidc.vercel.com` and `https://oidc.vercel.com/<team>`,
+    signed by the same global key. The accepted prefix includes the host and the
+    next character must be `/`, so a lookalike host such as
+    `https://oidc.vercel.com.evil.example` cannot match.
+    """
+    issuer = claims.get("iss")
+    if not isinstance(issuer, str):
+        raise VercelOidcVerificationError("token has no 'iss' claim")
+    if issuer == VERCEL_OIDC_ISSUER:
+        return
+    prefix = f"{VERCEL_OIDC_ISSUER}/"
+    if issuer.startswith(prefix) and _TEAM_SLUG.fullmatch(issuer[len(prefix) :]):
+        return
+    raise VercelOidcVerificationError(
+        f"token issuer {issuer!r} is not {VERCEL_OIDC_ISSUER} or a team-scoped issuer under it"
+    )
+
+
+def _verified_claims_sync(token: str, *, audience: Any, leeway: timedelta) -> dict[str, Any]:
+    """Resolve the signing key, verify the signature, and pin the issuer."""
+    kid = _unverified_kid(token)
+    key = _resolve_key_sync(JWKS_URL, kid)
+    if key is None:
+        raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
+    claims = _decode(token, key, audience=audience, leeway=leeway)
+    _check_issuer(claims)
+    return claims
+
+
+async def _verified_claims_async(token: str, *, audience: Any, leeway: timedelta) -> dict[str, Any]:
+    kid = _unverified_kid(token)
+    key = await _resolve_key_async(JWKS_URL, kid)
+    if key is None:
+        raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
+    claims = _decode(token, key, audience=audience, leeway=leeway)
+    _check_issuer(claims)
+    return claims
+
+
+# Every claim that names the identity rather than the token. `sub` alone is
+# expected to be unique per identity, but a cache partition must not rest on that
+# one claim staying unique, and none of these change when a token is reissued.
+_IDENTITY_CLAIMS = ("iss", "sub", "owner_id", "project_id", "environment")
+
+
+def _identity_from_claims(claims: Mapping[str, Any]) -> str:
+    """Reduce the verified identity claims to one opaque, stable digest.
+
+    A single identity is issued many tokens over time, because a token is a
+    signature over the identity plus an expiry, so the token itself is not a
+    usable identity. These claims are what survive a reissue.
+    """
+    if not isinstance(claims.get("sub"), str) or not claims.get("sub"):
+        raise VercelOidcVerificationError("token has no 'sub' claim")
+    raw_audience = claims.get("aud")
+    if isinstance(raw_audience, str):
+        audiences = [raw_audience]
+    elif isinstance(raw_audience, (list, tuple)):
+        # Sorted: audience order is not part of the identity.
+        audiences = sorted(str(entry) for entry in raw_audience)
+    else:
+        audiences = []
+    identity: dict[str, Any] = {name: claims.get(name) for name in _IDENTITY_CLAIMS}
+    identity["aud"] = audiences
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _resolve_expectations(
@@ -362,7 +434,6 @@ def _check_claims(
     project_id: str,
     environment: str,
     owner_id: str | None,
-    audience: str | Sequence[str] | None,
 ) -> None:
     token_project = claims.get("project_id")
     token_environment = claims.get("environment")
@@ -373,14 +444,10 @@ def _check_claims(
             f"token environment {token_environment!r} does not match expected {environment!r}"
         )
 
-    if project_id == _WILDCARD or token_project == _WILDCARD:
-        # A wildcard project claim authorizes every project in a team, so it is
-        # only meaningful when narrowed by an owner or an audience.
-        if owner_id is None and audience is None:
-            raise VercelOidcVerificationError(
-                "wildcard project claims require owner_id or audience to be supplied"
-            )
-    elif token_project != project_id:
+    # Compared for equality only. There is no wildcard: `"*"` is an ordinary
+    # string here, so a token claiming it matches nothing but an expectation of
+    # `"*"`, and a project expectation can never widen to "any project".
+    if token_project != project_id:
         raise VercelOidcVerificationError(
             f"token project {token_project!r} does not match expected {project_id!r}"
         )
@@ -398,10 +465,13 @@ def verify_vercel_oidc_token(
     environment: str | None = None,
     owner_id: str | None = None,
     audience: str | Sequence[str] | None = None,
-    issuer: str = VERCEL_OIDC_ISSUER,
     leeway: timedelta = DEFAULT_LEEWAY,
 ) -> dict[str, Any]:
     """Verify a Vercel OIDC token and return its claims.
+
+    The issuer is pinned to Vercel's OIDC service, which mints both
+    ``https://oidc.vercel.com`` and the team-scoped
+    ``https://oidc.vercel.com/<team>``.
 
     Args:
         token: The encoded JWT.
@@ -409,11 +479,8 @@ def verify_vercel_oidc_token(
             ``VERCEL_PROJECT_ID``.
         environment: Expected ``environment`` claim. Defaults to
             ``VERCEL_TARGET_ENV``, then ``VERCEL_ENV``.
-        owner_id: Expected ``owner_id`` claim. Required when the token's project
-            claim is the ``*`` wildcard, unless ``audience`` is supplied.
+        owner_id: Expected ``owner_id`` claim.
         audience: Expected ``aud`` claim.
-        issuer: Expected issuer. Defaults to ``https://oidc.vercel.com`` and
-            should not normally be changed.
         leeway: Clock-skew allowance for time-based claims.
 
     Returns:
@@ -424,21 +491,13 @@ def verify_vercel_oidc_token(
             not match, or the expected project and environment cannot be
             resolved.
     """
-    url = _jwks_url(issuer)
     expected_project, expected_environment = _resolve_expectations(project_id, environment)
-    kid = _unverified_kid(token)
-
-    key = _resolve_key_sync(url, kid)
-    if key is None:
-        raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
-
-    claims = _decode(token, key, issuer=issuer, audience=audience, leeway=leeway)
+    claims = _verified_claims_sync(token, audience=audience, leeway=leeway)
     _check_claims(
         claims,
         project_id=expected_project,
         environment=expected_environment,
         owner_id=owner_id,
-        audience=audience,
     )
     return claims
 
@@ -450,10 +509,13 @@ async def verify_vercel_oidc_token_async(
     environment: str | None = None,
     owner_id: str | None = None,
     audience: str | Sequence[str] | None = None,
-    issuer: str = VERCEL_OIDC_ISSUER,
     leeway: timedelta = DEFAULT_LEEWAY,
 ) -> dict[str, Any]:
     """Verify a Vercel OIDC token and return its claims.
+
+    The issuer is pinned to Vercel's OIDC service, which mints both
+    ``https://oidc.vercel.com`` and the team-scoped
+    ``https://oidc.vercel.com/<team>``.
 
     Args:
         token: The encoded JWT.
@@ -461,10 +523,8 @@ async def verify_vercel_oidc_token_async(
             ``VERCEL_PROJECT_ID``.
         environment: Expected ``environment`` claim. Defaults to
             ``VERCEL_TARGET_ENV``, then ``VERCEL_ENV``.
-        owner_id: Expected ``owner_id`` claim. Required when the token's project
-            claim is the ``*`` wildcard, unless ``audience`` is supplied.
+        owner_id: Expected ``owner_id`` claim.
         audience: Expected ``aud`` claim.
-        issuer: Expected issuer. Defaults to ``https://oidc.vercel.com``.
         leeway: Clock-skew allowance for time-based claims.
 
     Returns:
@@ -475,23 +535,65 @@ async def verify_vercel_oidc_token_async(
             not match, or the expected project and environment cannot be
             resolved.
     """
-    url = _jwks_url(issuer)
     expected_project, expected_environment = _resolve_expectations(project_id, environment)
-    kid = _unverified_kid(token)
-
-    key = await _resolve_key_async(url, kid)
-    if key is None:
-        raise VercelOidcVerificationError(f"no signing key matches kid {kid!r}")
-
-    claims = _decode(token, key, issuer=issuer, audience=audience, leeway=leeway)
+    claims = await _verified_claims_async(token, audience=audience, leeway=leeway)
     _check_claims(
         claims,
         project_id=expected_project,
         environment=expected_environment,
         owner_id=owner_id,
-        audience=audience,
     )
     return claims
+
+
+def verify_vercel_oidc_token_identity(token: str, *, leeway: timedelta = DEFAULT_LEEWAY) -> str:
+    """Return a verified, stable identity for a Vercel OIDC token.
+
+    The signature, the issuer and the expiry are verified, and the identity
+    claims are then reduced to an opaque digest. A deployment identity is issued
+    a new token whenever the previous one nears expiry, and every one of those
+    tokens yields the same identity, so this is what a client should key
+    identity-scoped state on rather than the token itself.
+
+    This is deliberately **not** an authorization check: it returns no claims and
+    does not verify the project, environment, owner or audience, so it must not
+    be used to decide whether a request is allowed. Use
+    `verify_vercel_oidc_token` for that.
+
+    Args:
+        token: The encoded JWT.
+        leeway: Clock-skew allowance for time-based claims.
+
+    Returns:
+        An opaque digest of the token's identity claims. It carries no credential
+        and is safe to log.
+
+    Raises:
+        VercelOidcVerificationError: If the token does not verify, or carries no
+            subject.
+    """
+    return _identity_from_claims(_verified_claims_sync(token, audience=None, leeway=leeway))
+
+
+async def verify_vercel_oidc_token_identity_async(
+    token: str, *, leeway: timedelta = DEFAULT_LEEWAY
+) -> str:
+    """Return a verified, stable identity for a Vercel OIDC token.
+
+    See `verify_vercel_oidc_token_identity`. This is not an authorization check.
+
+    Args:
+        token: The encoded JWT.
+        leeway: Clock-skew allowance for time-based claims.
+
+    Returns:
+        An opaque digest of the token's identity claims.
+
+    Raises:
+        VercelOidcVerificationError: If the token does not verify, or carries no
+            subject.
+    """
+    return _identity_from_claims(await _verified_claims_async(token, audience=None, leeway=leeway))
 
 
 def extract_bearer_token(headers: Mapping[str, str]) -> str:
@@ -537,10 +639,13 @@ def clear_jwks_cache() -> None:
 
 __all__ = [
     "ALLOWED_ALGORITHMS",
+    "JWKS_URL",
     "VERCEL_OIDC_ISSUER",
     "VercelOidcVerificationError",
     "clear_jwks_cache",
     "extract_bearer_token",
     "verify_vercel_oidc_token",
     "verify_vercel_oidc_token_async",
+    "verify_vercel_oidc_token_identity",
+    "verify_vercel_oidc_token_identity_async",
 ]

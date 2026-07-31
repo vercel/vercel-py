@@ -49,19 +49,37 @@ Whose authority the credential carries:
 ambient authority. `user` preserves the provider's own permission model per
 person and names them in the provider's audit log, at the cost of a consent flow.
 
-Subjects are frozen dataclasses rather than plain strings because three of the
-four carry their own fields, so `subject="user"` could not say *which* user:
+Subjects are typed values rather than plain strings because three of the four
+carry their own fields, so `subject="user"` could not say *which* user:
 
 ```python
 ConnectUserTokenSubject(id="u_123", issuer="https://idp.example.com")
 ConnectJwtBearerTokenSubject(sub="u_123", additional_claims={"tenant": "acme"})
 ```
 
-Frozen dataclasses specifically, matching `SandboxSource` and `SandboxQuery` in
-`vercel-sandbox`: you get runtime validation, autocompletion on construction,
-exact `match`/`case` narrowing, and immutability, so a subject cannot be mutated
-after a credential has been cached against it. The cost is the empty `()` on the
-app subject, which is the common case.
+## Value types
+
+Every type on this surface is a frozen Pydantic model, so you get validation on
+construction, autocompletion, exact `match`/`case` narrowing, `model_dump()` for
+logging, and immutability, which means a subject cannot be mutated after a
+credential has been cached against it:
+
+```python
+detail = ConnectGitHubAppInstallationAuthorizationDetail(permissions=["contents:read"])
+detail.model_dump()                    # {'org': None, 'permissions': ('contents:read',), ...}
+detail.permissions = ["admin"]         # ConnectValidationError: frozen
+```
+
+Construction is by keyword, a misspelled field is an error rather than a silently
+dropped value, and every rejection raises `ConnectValidationError`, so you never
+need to catch Pydantic's own error type. Containers of strings accept any
+container and store a tuple; a bare string is rejected rather than expanded into
+one entry per character:
+
+```python
+get_token(..., scopes="repo:read")     # ConnectValidationError, and a type error
+get_token(..., scopes=["repo:read"])   # correct
+```
 
 ## Examples
 
@@ -104,8 +122,9 @@ from vercel.connect import verify_connect_webhook
 claims = await verify_connect_webhook(request.headers)
 ```
 
-Verification pins the issuer to `https://oidc.vercel.com`, allows only RS256, and
-fails closed when the expected project and environment cannot be resolved. It
+Verification pins the issuer to Vercel's OIDC service, accepting both
+`https://oidc.vercel.com` and the team-scoped `https://oidc.vercel.com/<team>`,
+allows only RS256, and fails closed when the expected project and environment cannot be resolved. It
 accepts any valid Vercel OIDC token for this project and environment; it is not
 pinned to a specific connector or deployment.
 

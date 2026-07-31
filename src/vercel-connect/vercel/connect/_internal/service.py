@@ -10,16 +10,17 @@ import warnings
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlsplit
 
 from vercel._internal.core.time import coerce_duration
 from vercel.connect._internal.api_client import ConnectApiClient
+from vercel.connect._internal.base import ConnectModel, StringContainer
 from vercel.connect._internal.cache import TokenCache, build_cache_key
 from vercel.connect._internal.errors import (
     ConnectCredentialsError,
     ConnectValidationError,
     ConnectWebhookVerificationError,
 )
+from vercel.connect._internal.identity import IdentityResolver
 from vercel.connect._internal.models import (
     ConnectAuthorizationDetail,
     ConnectAuthorizationResponse,
@@ -43,9 +44,11 @@ from vercel.connect._internal.single_flight import (
     SyncSingleFlight,
 )
 from vercel.connect._internal.state import (
+    ConnectAuthorizationRequest,
     ConnectAuthorizationState,
     ConnectorMetadataState,
     ConnectorRefState,
+    ConnectTokenRequest,
     ConnectTokenState,
 )
 
@@ -54,46 +57,6 @@ if TYPE_CHECKING:
 
 _SECOND = coerce_duration(1, __import__("datetime").timedelta(seconds=1))
 _DETACHED_ENV = "VERCEL_CONNECT_INTERACTIVE_AUTH_MODE"
-_LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]", "::1")
-_DEFAULT_SCOPES_SENTINEL = "*"
-
-
-def _normalize_scopes(scopes: Sequence[str] | None) -> Sequence[str] | None:
-    """Collapse the two spellings of "the connector's defaults" into one.
-
-    `None` and `["*"]` request the same credential, so they must serialize the
-    same way and share one cache entry.
-    """
-    if scopes is None:
-        return None
-    resolved = list(scopes)
-    if resolved == [_DEFAULT_SCOPES_SENTINEL]:
-        return None
-    return resolved
-
-
-def _is_local_host(host: str) -> bool:
-    host = host.lower()
-    return host in _LOCAL_HOSTS or host.endswith(".localhost")
-
-
-def _validate_return_url(url: str) -> str:
-    """Allow https anywhere, and http only on a loopback host."""
-    parts = urlsplit(url)
-    if parts.scheme == "https" and parts.hostname:
-        return url
-    if parts.scheme == "http" and parts.hostname and _is_local_host(parts.hostname):
-        return url
-    raise ConnectValidationError(
-        f"return_url must be https, or http on localhost, *.localhost or 127.0.0.1; got {url!r}"
-    )
-
-
-def _validate_webhook_url(url: str) -> str:
-    parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.hostname:
-        raise ConnectValidationError(f"webhook must be an https URL; got {url!r}")
-    return url
 
 
 def is_detached_interactive_auth() -> bool:
@@ -159,6 +122,17 @@ def _connector_metadata(state: ConnectorMetadataState) -> ConnectorMetadata:
     )
 
 
+class OidcEntryPoints(ConnectModel):
+    """The `vercel.oidc` calls this service makes, bound to a session's mode.
+
+    Each returns a value or an awaitable depending on the mode, and is resolved
+    per call so tests can substitute it.
+    """
+
+    verify: Callable[..., Any]
+    identity: Callable[[str], Any]
+
+
 class ConnectService:
     """Orchestrates credential minting, caching, and authorization flows."""
 
@@ -170,7 +144,7 @@ class ConnectService:
         cache: TokenCache,
         single_flight: SingleFlight,
         ensure_open: Callable[[], None],
-        verify_oidc_token: Callable[..., Any],
+        oidc: OidcEntryPoints,
         credentials_factory: ConnectCredentialsFactory,
     ) -> None:
         self._api_client = api_client
@@ -179,7 +153,8 @@ class ConnectService:
         self._credentials_factory = credentials_factory
         self._single_flight = single_flight
         self._ensure_open = ensure_open
-        self._verify_oidc_token = verify_oidc_token
+        self._oidc = oidc
+        self._identities = IdentityResolver(resolve_identity=oidc.identity)
 
     async def _identity(self, options: ConnectOptions | None) -> str:
         supplied = options.vercel_token if options is not None else None
@@ -213,30 +188,31 @@ class ConnectService:
         connector: str,
         *,
         subject: ConnectTokenSubject,
-        scopes: Sequence[str] | None = None,
+        scopes: StringContainer | None = None,
         installation_id: str | None = None,
-        audience: Sequence[str] | None = None,
-        resources: Sequence[str] | None = None,
+        audience: StringContainer | None = None,
+        resources: StringContainer | None = None,
         authorization_details: Sequence[ConnectAuthorizationDetail] | None = None,
         options: ConnectOptions | None = None,
     ) -> ConnectTokenResponse:
         self._ensure_open()
         buffer_seconds = self._validity_buffer_seconds(options)
-        identity = await self._identity(options)
-        scopes = _normalize_scopes(scopes)
+        token = await self._identity(options)
         no_cache = options.no_cache if options is not None else False
         force_refresh = options.force_refresh if options is not None else False
 
-        key = build_cache_key(
-            connector,
+        request = ConnectTokenRequest(
+            connector=connector,
             subject=subject,
-            vercel_token=identity,
             scopes=scopes,
             installation_id=installation_id,
             audience=audience,
             resources=resources,
             authorization_details=authorization_details,
         )
+        # Keyed by the identity the token names, not the token: a refresh hands the
+        # same identity a new token, and must not orphan its cached credentials.
+        key = build_cache_key(request, identity=await self._identities.resolve(token))
 
         async def load() -> ConnectTokenState:
             # Registered so a concurrent revoke can cancel this load even though
@@ -244,16 +220,7 @@ class ConnectService:
             # already running, so a load started after the revoke still caches.
             epoch = self._cache.begin_load(key)
             try:
-                state = await self._api_client.create_token(
-                    connector,
-                    subject=subject,
-                    vercel_token=identity,
-                    scopes=scopes,
-                    installation_id=installation_id,
-                    audience=audience,
-                    resources=resources,
-                    authorization_details=authorization_details,
-                )
+                state = await self._api_client.create_token(request, vercel_token=token)
                 if not no_cache:
                     # Dropped when an invalidation landed while this was in flight.
                     self._cache.set(key, state, epoch=epoch)
@@ -296,14 +263,14 @@ class ConnectService:
             installation_id=installation_id,
         )
         # Scoped, not global: revoking one subject must not evict the others.
-        self._cache.delete_by_identity(connector, subject=subject, installation_id=installation_id)
+        self._cache.delete_by_subject(connector, subject=subject, installation_id=installation_id)
 
     async def start_authorization(
         self,
         connector: str,
         *,
         subject: ConnectTokenSubject,
-        scopes: Sequence[str] | None = None,
+        scopes: StringContainer | None = None,
         installation_id: str | None = None,
         return_url: str | None = None,
         webhook: str | None = None,
@@ -312,11 +279,6 @@ class ConnectService:
         options: ConnectOptions | None = None,
     ) -> ConnectAuthorizationResponse:
         self._ensure_open()
-        if return_url is not None:
-            _validate_return_url(return_url)
-        if webhook is not None:
-            _validate_webhook_url(webhook)
-
         if device_code is None and is_detached_interactive_auth():
             device_code = True
             if return_url is not None:
@@ -329,18 +291,18 @@ class ConnectService:
                 )
                 return_url = None
 
-        identity = await self._identity(options)
-        state = await self._api_client.create_authorization(
-            connector,
+        request = ConnectAuthorizationRequest(
+            connector=connector,
             subject=subject,
-            vercel_token=identity,
-            scopes=_normalize_scopes(scopes),
+            scopes=scopes,
             installation_id=installation_id,
             return_url=return_url,
             webhook=webhook,
             device_code=device_code,
             expires_in=None if expires_in is None else coerce_duration(expires_in, _SECOND),
         )
+        identity = await self._identity(options)
+        state = await self._api_client.create_authorization(request, vercel_token=identity)
         return _authorization_response(state)
 
     async def get_connector_metadata(
@@ -383,13 +345,12 @@ class ConnectService:
             raise ConnectWebhookVerificationError(str(exc)) from exc
 
         try:
-            result = self._verify_oidc_token(
+            result = self._oidc.verify(
                 token,
                 project_id=project_id,
                 environment=environment,
                 owner_id=owner_id,
                 audience=audience,
-                issuer=self._options.oidc_issuer,
             )
             claims = await result if inspect.isawaitable(result) else result
         except oidc_verify.VercelOidcTokenError as exc:
@@ -422,7 +383,7 @@ class ConnectService:
         subject: ConnectTokenSubject,
         installation_id: str | None = None,
     ) -> None:
-        self._cache.delete_by_identity(connector, subject=subject, installation_id=installation_id)
+        self._cache.delete_by_subject(connector, subject=subject, installation_id=installation_id)
 
     def clear_token_cache(self) -> None:
         self._cache.clear()
@@ -437,12 +398,15 @@ def get_connect_service(session: "SdkSession | SyncSdkSession") -> ConnectServic
         is_sync = isinstance(session, SyncSdkSession)
         from vercel.oidc import verify as oidc_verify
 
-        def verify_oidc_token(token: str, **kwargs: Any) -> Any:
-            # Resolved per call so the mode-appropriate implementation is used,
-            # and so tests can substitute it.
+        def verify(token: str, **kwargs: Any) -> Any:
             if is_sync:
                 return oidc_verify.verify_vercel_oidc_token(token, **kwargs)
             return oidc_verify.verify_vercel_oidc_token_async(token, **kwargs)
+
+        def identity(token: str) -> Any:
+            if is_sync:
+                return oidc_verify.verify_vercel_oidc_token_identity(token)
+            return oidc_verify.verify_vercel_oidc_token_identity_async(token)
 
         credentials_factory = options.credentials_factory or (
             _default_sync_credentials_factory if is_sync else _default_async_credentials_factory
@@ -458,7 +422,7 @@ def get_connect_service(session: "SdkSession | SyncSdkSession") -> ConnectServic
             cache=TokenCache(max_size=options.token_cache_size),
             single_flight=SyncSingleFlight() if is_sync else AsyncSingleFlight(),
             ensure_open=session.check_open,
-            verify_oidc_token=verify_oidc_token,
+            oidc=OidcEntryPoints(verify=verify, identity=identity),
             credentials_factory=credentials_factory,
         )
 

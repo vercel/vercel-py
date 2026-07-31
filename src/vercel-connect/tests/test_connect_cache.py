@@ -35,6 +35,7 @@ from vercel.connect import (
 )
 from vercel.connect._internal.cache import build_cache_key
 from vercel.connect._internal.service import get_connect_service
+from vercel.connect._internal.state import ConnectTokenRequest
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 TOKEN_URL = f"{TEST_BASE_URL}/v1/connect/token/slack%2Fmy-bot"
@@ -199,20 +200,24 @@ async def test_token_exchange_subject_keys_by_inbound_token(mock_env_clear: None
 async def test_cache_key_is_order_independent(mock_env_clear: None) -> None:
     """The TypeScript key is `JSON.stringify`, so field order changes the key."""
     first = build_cache_key(
-        "slack/my-bot",
-        subject=ConnectAppTokenSubject(),
-        vercel_token="oidc-token",
-        scopes=["a", "b"],
-        installation_id="T1",
-        audience=["aud"],
+        ConnectTokenRequest(
+            connector="slack/my-bot",
+            subject=ConnectAppTokenSubject(),
+            scopes=["a", "b"],
+            installation_id="T1",
+            audience=["aud"],
+        ),
+        identity="oidc-token",
     )
     second = build_cache_key(
-        "slack/my-bot",
-        audience=["aud"],
-        installation_id="T1",
-        scopes=["a", "b"],
-        vercel_token="oidc-token",
-        subject=ConnectAppTokenSubject(),
+        ConnectTokenRequest(
+            connector="slack/my-bot",
+            audience=["aud"],
+            installation_id="T1",
+            scopes=["b", "a"],
+            subject=ConnectAppTokenSubject(),
+        ),
+        identity="oidc-token",
     )
 
     assert first == second
@@ -221,11 +226,10 @@ async def test_cache_key_is_order_independent(mock_env_clear: None) -> None:
 
 async def test_cache_key_excludes_validity_buffer(mock_env_clear: None) -> None:
     """Read-time policy must not fragment the cache."""
-    common: dict[str, Any] = {
-        "subject": ConnectAppTokenSubject(),
-        "vercel_token": "oidc-token",
-    }
-    assert build_cache_key("slack/my-bot", **common) == build_cache_key("slack/my-bot", **common)
+    request = ConnectTokenRequest(connector="slack/my-bot", subject=ConnectAppTokenSubject())
+    assert build_cache_key(request, identity="oidc-token") == build_cache_key(
+        request, identity="oidc-token"
+    )
 
 
 async def test_cache_key_separates_platform_identities(mock_env_clear: None) -> None:
@@ -234,19 +238,17 @@ async def test_cache_key_separates_platform_identities(mock_env_clear: None) -> 
     The TypeScript key omits `options.vercelToken`, so a caller overriding it can
     be served a credential minted for a different identity.
     """
-    one = build_cache_key(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="identity-one"
-    )
-    two = build_cache_key(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="identity-two"
-    )
+    request = ConnectTokenRequest(connector="slack/my-bot", subject=ConnectAppTokenSubject())
+    one = build_cache_key(request, identity="identity-one")
+    two = build_cache_key(request, identity="identity-two")
 
     assert one != two
 
 
 async def test_cache_key_does_not_leak_the_identity_token(mock_env_clear: None) -> None:
     key = build_cache_key(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="super-secret"
+        ConnectTokenRequest(connector="slack/my-bot", subject=ConnectAppTokenSubject()),
+        identity="super-secret",
     )
     assert "super-secret" not in repr(key)
 
@@ -722,15 +724,13 @@ async def test_default_scopes_spellings_share_one_entry(mock_env_clear: None) ->
 
 
 async def test_default_scopes_spellings_build_one_cache_key(mock_env_clear: None) -> None:
-    from vercel.connect._internal.service import _normalize_scopes
+    def key_for(scopes: list[str] | None) -> Any:
+        request = ConnectTokenRequest(
+            connector="slack/my-bot", subject=ConnectAppTokenSubject(), scopes=scopes
+        )
+        return build_cache_key(request, identity="oidc-token")
 
-    common: dict[str, Any] = {
-        "subject": ConnectAppTokenSubject(),
-        "vercel_token": "oidc-token",
-    }
-    assert build_cache_key(
-        "slack/my-bot", scopes=_normalize_scopes(None), **common
-    ) == build_cache_key("slack/my-bot", scopes=_normalize_scopes(["*"]), **common)
+    assert key_for(None) == key_for(["*"])
 
 
 @time_machine.travel(NOW, tick=False)
@@ -866,9 +866,11 @@ async def test_exchange_credentials_are_not_stored_in_cache_keys(
     from vercel.connect import ConnectTokenExchangeSubject
 
     key = build_cache_key(
-        "slack/my-bot",
-        subject=ConnectTokenExchangeSubject(token="xoxb-INBOUND-SECRET"),
-        vercel_token="identity-secret",
+        ConnectTokenRequest(
+            connector="slack/my-bot",
+            subject=ConnectTokenExchangeSubject(token="xoxb-INBOUND-SECRET"),
+        ),
+        identity="identity-secret",
     )
 
     assert "xoxb-INBOUND-SECRET" not in repr(key)
@@ -876,9 +878,10 @@ async def test_exchange_credentials_are_not_stored_in_cache_keys(
     assert "identity-secret" not in repr(key)
     # Distinct inbound credentials must still key separately.
     other = build_cache_key(
-        "slack/my-bot",
-        subject=ConnectTokenExchangeSubject(token="xoxb-OTHER"),
-        vercel_token="identity-secret",
+        ConnectTokenRequest(
+            connector="slack/my-bot", subject=ConnectTokenExchangeSubject(token="xoxb-OTHER")
+        ),
+        identity="identity-secret",
     )
     assert key != other
 
@@ -900,9 +903,10 @@ def test_single_flight_locks_do_not_accumulate() -> None:
 
     for index in range(50):
         key = build_cache_key(
-            "slack/my-bot",
-            subject=ConnectUserTokenSubject(id=f"u_{index}"),
-            vercel_token=f"rotating-token-{index}",
+            ConnectTokenRequest(
+                connector="slack/my-bot", subject=ConnectUserTokenSubject(id=f"u_{index}")
+            ),
+            identity=f"rotating-token-{index}",
         )
         iter_coroutine(flight.run(key, read=lambda: None, load=load))
 
@@ -1062,26 +1066,18 @@ async def test_stray_detail_type_does_not_split_the_cache_key(mock_env_clear: No
     """The wire drops a stray `type`, so the key must too or they diverge."""
     from vercel.connect import ConnectCustomAuthorizationDetail
 
-    common: dict[str, Any] = {
-        "subject": ConnectAppTokenSubject(),
-        "vercel_token": "oidc-token",
-    }
-    without = build_cache_key(
-        "oauth/thing",
-        authorization_details=[
-            ConnectCustomAuthorizationDetail(type="payment", details={"amount": "1.00"})
-        ],
-        **common,
-    )
-    with_stray = build_cache_key(
-        "oauth/thing",
-        authorization_details=[
-            ConnectCustomAuthorizationDetail(
-                type="payment", details={"amount": "1.00", "type": "ignored"}
-            )
-        ],
-        **common,
-    )
+    def key_for(details: dict[str, str]) -> Any:
+        request = ConnectTokenRequest(
+            connector="oauth/thing",
+            subject=ConnectAppTokenSubject(),
+            authorization_details=[
+                ConnectCustomAuthorizationDetail(type="payment", details=details)
+            ],
+        )
+        return build_cache_key(request, identity="oidc-token")
+
+    without = key_for({"amount": "1.00"})
+    with_stray = key_for({"amount": "1.00", "type": "ignored"})
 
     assert without == with_stray
 
@@ -1208,7 +1204,8 @@ def test_finish_load_without_a_matching_begin_is_a_no_op() -> None:
 
     cache = TokenCache(max_size=4)
     key = build_cache_key(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
+        ConnectTokenRequest(connector="slack/my-bot", subject=ConnectAppTokenSubject()),
+        identity="oidc-token",
     )
 
     cache.finish_load(key)  # must not raise

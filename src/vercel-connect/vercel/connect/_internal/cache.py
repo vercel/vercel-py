@@ -12,14 +12,11 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Iterable
 from typing import Any
 
-from vercel.connect._internal.models import (
-    ConnectAuthorizationDetail,
-    ConnectTokenSubject,
-)
-from vercel.connect._internal.state import ConnectTokenState
+from vercel.connect._internal.models import ConnectTokenSubject
+from vercel.connect._internal.state import ConnectTokenRequest, ConnectTokenState
 from vercel.connect._internal.wire import (
     serialize_authorization_detail,
     serialize_subject,
@@ -45,13 +42,13 @@ class TokenCacheKey:
     """Canonical, order-independent identity of a token request.
 
     Includes the connector, the subject, the installation, and every field that
-    changes which credential the server would mint, plus a SHA-256 of the
-    effective platform identity token so two identities can never share an entry.
-    Excludes read-time policy such as the validity buffer.
+    changes which credential the server would mint, plus a digest of the platform
+    identity so two identities can never share an entry. Excludes read-time policy
+    such as the validity buffer.
 
-    Credentials are never embedded verbatim: both the platform identity token and
-    an inbound token-exchange credential are reduced to digests, so a key is safe
-    to log.
+    Credentials are never embedded verbatim: both the platform identity and an
+    inbound token-exchange credential are reduced to digests, so a key is safe to
+    log.
     """
 
     __slots__ = ("_value", "_connector", "_subject_key", "_installation_id")
@@ -128,30 +125,28 @@ def _subject_key(subject: ConnectTokenSubject) -> str:
     return json.dumps(_canonical_subject(subject), sort_keys=True, separators=(",", ":"))
 
 
-def build_cache_key(
-    connector: str,
-    *,
-    subject: ConnectTokenSubject,
-    vercel_token: str,
-    scopes: Sequence[str] | None = None,
-    installation_id: str | None = None,
-    audience: Sequence[str] | None = None,
-    resources: Sequence[str] | None = None,
-    authorization_details: Sequence[ConnectAuthorizationDetail] | None = None,
-) -> TokenCacheKey:
-    """Build a canonical cache key. Permuted inputs must produce equal keys."""
+def _sorted(values: Iterable[str] | None) -> list[str] | None:
+    return None if values is None else sorted(values)
+
+
+def build_cache_key(request: ConnectTokenRequest, *, identity: str) -> TokenCacheKey:
+    """Build a canonical cache key. Permuted inputs must produce equal keys.
+
+    Every field of `request` participates, so a field added there cannot reach the
+    wire without also partitioning the cache.
+    """
     payload = {
-        "connector": connector,
-        "subject": _canonical_subject(subject),
-        "installationId": installation_id,
-        # Scope order does not change which credential is minted, so it must not
-        # change the key either.
-        "scopes": None if scopes is None else sorted(scopes),
-        "audience": None if audience is None else sorted(audience),
-        "resources": None if resources is None else sorted(resources),
+        "connector": request.connector,
+        "subject": _canonical_subject(request.subject),
+        "installationId": request.installation_id,
+        # Order does not change which credential is minted, so it must not change
+        # the key either.
+        "scopes": _sorted(request.scopes),
+        "audience": _sorted(request.audience),
+        "resources": _sorted(request.resources),
         "authorizationDetails": (
             None
-            if authorization_details is None
+            if request.authorization_details is None
             else sorted(
                 # Keyed by the wire form: two requests the server cannot tell
                 # apart must not occupy separate cache entries.
@@ -160,19 +155,18 @@ def build_cache_key(
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-                for detail in authorization_details
+                for detail in request.authorization_details
             )
         ),
-        # Hash, never store: two platform identities must never share an entry,
-        # and the raw token must not be retrievable from the cache.
-        "identity": hashlib.sha256(vercel_token.encode()).hexdigest(),
+        # Digested even though callers pass an already-opaque identity, so nothing
+        # credential-shaped can reach a key by mistake.
+        "identity": _digest(identity),
     }
-    value = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return TokenCacheKey(
-        value,
-        connector=connector,
-        subject_key=_subject_key(subject),
-        installation_id=installation_id,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        connector=request.connector,
+        subject_key=_subject_key(request.subject),
+        installation_id=request.installation_id,
     )
 
 
@@ -252,7 +246,7 @@ class TokenCache:
                 pending.epoch += 1
             return removed
 
-    def delete_by_identity(
+    def delete_by_subject(
         self,
         connector: str,
         *,
@@ -260,6 +254,10 @@ class TokenCache:
         installation_id: str | None = None,
     ) -> int:
         """Drop every entry for a connector and subject.
+
+        Deliberately not scoped to one platform identity: an upstream grant is
+        revoked for everyone who holds it, so every identity's cached copy has to
+        go. Over-deleting costs a re-mint, under-deleting serves a dead credential.
 
         `installation_id=None` means every installation, matching the server's
         revocation semantics, rather than only entries cached without one.

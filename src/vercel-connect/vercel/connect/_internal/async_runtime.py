@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 
+from vercel.connect._internal.base import StringContainer
 from vercel.connect._internal.models import (
     ConnectAuthorizationDetail,
     ConnectAuthorizationResponse,
@@ -20,10 +21,10 @@ async def get_token(
     connector: str,
     *,
     subject: ConnectTokenSubject,
-    scopes: Sequence[str] | None = None,
+    scopes: StringContainer | None = None,
     installation_id: str | None = None,
-    audience: Sequence[str] | None = None,
-    resources: Sequence[str] | None = None,
+    audience: StringContainer | None = None,
+    resources: StringContainer | None = None,
     authorization_details: Sequence[ConnectAuthorizationDetail] | None = None,
     options: ConnectOptions | None = None,
 ) -> str:
@@ -45,10 +46,10 @@ async def get_token_response(
     connector: str,
     *,
     subject: ConnectTokenSubject,
-    scopes: Sequence[str] | None = None,
+    scopes: StringContainer | None = None,
     installation_id: str | None = None,
-    audience: Sequence[str] | None = None,
-    resources: Sequence[str] | None = None,
+    audience: StringContainer | None = None,
+    resources: StringContainer | None = None,
     authorization_details: Sequence[ConnectAuthorizationDetail] | None = None,
     options: ConnectOptions | None = None,
 ) -> ConnectTokenResponse:
@@ -85,7 +86,7 @@ async def start_authorization(
     connector: str,
     *,
     subject: ConnectTokenSubject,
-    scopes: Sequence[str] | None = None,
+    scopes: StringContainer | None = None,
     installation_id: str | None = None,
     return_url: str | None = None,
     webhook: str | None = None,

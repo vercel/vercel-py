@@ -8,6 +8,7 @@ vector before the happy path is exercised at all.
 import base64
 import json
 import time
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -16,8 +17,11 @@ import respx
 from conftest import ISSUER, JWKS_URL, KID, b64url, claims, forge_hs256, jwks_for, sign
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from vercel.oidc import verify_vercel_oidc_token
-from vercel.oidc.aio import verify_vercel_oidc_token as verify_vercel_oidc_token_async
+from vercel.oidc import verify_vercel_oidc_token, verify_vercel_oidc_token_identity
+from vercel.oidc.aio import (
+    verify_vercel_oidc_token as verify_vercel_oidc_token_async,
+    verify_vercel_oidc_token_identity as verify_vercel_oidc_token_identity_async,
+)
 from vercel.oidc.verify import (
     FETCH_WAIT_TIMEOUT,
     VercelOidcVerificationError,
@@ -133,10 +137,38 @@ def test_rejects_a_tampered_payload(signing_key: rsa.RSAPrivateKey) -> None:
         verify_vercel_oidc_token(tampered, project_id="prj_attacker", environment="production")
 
 
+@pytest.mark.parametrize(
+    "issuer",
+    [
+        "https://evil.example.com",
+        # Lookalike host: the accepted prefix must include the host, or a
+        # registrable suffix attack passes.
+        "https://oidc.vercel.com.evil.example",
+        "https://oidc.vercel.com.evil.example/acme",
+        # Prefix without the separator.
+        "https://oidc.vercel.comevil",
+        # More than one path segment, and traversal back off the service.
+        "https://oidc.vercel.com/acme/extra",
+        "https://oidc.vercel.com/../evil",
+        "https://oidc.vercel.com/",
+        # Scheme downgrade on the right host.
+        "http://oidc.vercel.com",
+        "http://oidc.vercel.com/acme",
+    ],
+)
 @respx.mock
-def test_rejects_a_wrong_issuer(signing_key: rsa.RSAPrivateKey) -> None:
+def test_rejects_a_wrong_issuer(signing_key: rsa.RSAPrivateKey, issuer: str) -> None:
     jwks_route(signing_key)
-    token = sign(signing_key, claims(iss="https://evil.example.com"))
+    token = sign(signing_key, claims(iss=issuer))
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(token, **EXPECTATIONS)
+
+
+@respx.mock
+def test_rejects_a_missing_issuer(signing_key: rsa.RSAPrivateKey) -> None:
+    jwks_route(signing_key)
+    token = sign(signing_key, claims(iss=None))
 
     with pytest.raises(VercelOidcVerificationError):
         verify_vercel_oidc_token(token, **EXPECTATIONS)
@@ -202,12 +234,18 @@ def test_fails_closed_when_expectations_cannot_be_resolved(
 
 
 @respx.mock
-def test_wildcard_project_requires_owner_or_audience(signing_key: rsa.RSAPrivateKey) -> None:
+def test_a_wildcard_project_claim_is_not_a_wildcard(signing_key: rsa.RSAPrivateKey) -> None:
+    """`"*"` is an ordinary string, so it must not authorize another project."""
     jwks_route(signing_key)
     token = sign(signing_key, claims(project_id="*"))
 
     with pytest.raises(VercelOidcVerificationError):
-        verify_vercel_oidc_token(token, project_id="*", environment="production")
+        verify_vercel_oidc_token(token, project_id="prj_123", environment="production")
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(
+            token, project_id="prj_123", environment="production", owner_id="team_123"
+        )
 
 
 @pytest.mark.parametrize(
@@ -227,14 +265,6 @@ def test_rejects_malformed_tokens(signing_key: rsa.RSAPrivateKey, token: str) ->
 
     with pytest.raises(VercelOidcVerificationError):
         verify_vercel_oidc_token(token, **EXPECTATIONS)
-
-
-@respx.mock
-def test_rejects_a_non_https_jwks_issuer(signing_key: rsa.RSAPrivateKey) -> None:
-    token = sign(signing_key)
-
-    with pytest.raises(VercelOidcVerificationError):
-        verify_vercel_oidc_token(token, issuer="http://oidc.vercel.com", **EXPECTATIONS)
 
 
 @respx.mock
@@ -274,6 +304,47 @@ async def test_verifies_a_valid_token_async(signing_key: rsa.RSAPrivateKey) -> N
     assert verified["project_id"] == "prj_123"
 
 
+@pytest.mark.parametrize(
+    "issuer",
+    [
+        ISSUER,
+        f"{ISSUER}/team1",
+        f"{ISSUER}/acme-team_2",
+    ],
+)
+@respx.mock
+def test_accepts_the_root_and_team_scoped_issuers(
+    signing_key: rsa.RSAPrivateKey, issuer: str
+) -> None:
+    """Vercel mints both forms, signed by one global key.
+
+    `https://oidc.vercel.com/.well-known/openid-configuration` declares the root
+    issuer, and `.../<team>/.well-known/openid-configuration` declares a
+    team-scoped one, both advertising the same `kid`. Pinning `iss` by equality
+    rejected every team-scoped token.
+    """
+    jwks_route(signing_key)
+    token = sign(signing_key, claims(iss=issuer))
+
+    assert verify_vercel_oidc_token(token, **EXPECTATIONS)["iss"] == issuer
+
+
+@respx.mock
+def test_team_scoped_issuer_still_uses_the_pinned_jwks_url(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """A team-scoped `iss` must not redirect key resolution to a derived URL."""
+    root = jwks_route(signing_key)
+    scoped = respx.get(f"{ISSUER}/team1/.well-known/jwks").mock(
+        return_value=httpx.Response(500, text="must not be called")
+    )
+
+    verify_vercel_oidc_token(sign(signing_key, claims(iss=f"{ISSUER}/team1")), **EXPECTATIONS)
+
+    assert root.call_count == 1
+    assert scoped.call_count == 0
+
+
 @respx.mock
 def test_reads_expectations_from_the_environment(
     signing_key: rsa.RSAPrivateKey,
@@ -311,21 +382,7 @@ def test_accepts_a_matching_audience(signing_key: rsa.RSAPrivateKey) -> None:
 
 
 @respx.mock
-def test_wildcard_project_accepted_with_owner_id(signing_key: rsa.RSAPrivateKey) -> None:
-    jwks_route(signing_key)
-    token = sign(signing_key, claims(project_id="*"))
-
-    verified = verify_vercel_oidc_token(
-        token, project_id="*", environment="production", owner_id="team_123"
-    )
-
-    assert verified["owner_id"] == "team_123"
-
-
-@respx.mock
 def test_clock_skew_leeway_is_applied(signing_key: rsa.RSAPrivateKey) -> None:
-    from datetime import timedelta
-
     jwks_route(signing_key)
     now = int(time.time())
     token = sign(signing_key, claims(exp=now - 10))
@@ -334,6 +391,135 @@ def test_clock_skew_leeway_is_applied(signing_key: rsa.RSAPrivateKey) -> None:
         verify_vercel_oidc_token(token, leeway=timedelta(0), **EXPECTATIONS)
 
     assert verify_vercel_oidc_token(token, leeway=timedelta(seconds=60), **EXPECTATIONS)
+
+
+# --------------------------------------------------------------------------
+# Token identity
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+def test_identity_is_stable_across_a_reissued_token(signing_key: rsa.RSAPrivateKey) -> None:
+    """A refreshed token names the same identity, so it must digest the same."""
+    jwks_route(signing_key)
+    now = int(time.time())
+    first = sign(signing_key, claims(iat=now - 1800, exp=now + 1800))
+    second = sign(signing_key, claims(iat=now, exp=now + 3600, jti="other"))
+
+    assert first != second
+    assert verify_vercel_oidc_token_identity(first) == verify_vercel_oidc_token_identity(second)
+
+
+@respx.mock
+async def test_identity_is_stable_across_a_reissued_token_async(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    jwks_route(signing_key)
+    now = int(time.time())
+    first = sign(signing_key, claims(exp=now + 1800))
+    second = sign(signing_key, claims(exp=now + 3600))
+
+    identity = await verify_vercel_oidc_token_identity_async(first)
+
+    assert identity == await verify_vercel_oidc_token_identity_async(second)
+    assert identity == verify_vercel_oidc_token_identity(second)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sub": "owner:acme:project:other-app:environment:production"},
+        {"iss": f"{ISSUER}/other-team"},
+        {"aud": "https://vercel.com/other"},
+    ],
+)
+@respx.mock
+def test_identity_separates_distinct_identities(
+    signing_key: rsa.RSAPrivateKey, overrides: dict[str, Any]
+) -> None:
+    jwks_route(signing_key)
+
+    baseline = verify_vercel_oidc_token_identity(sign(signing_key))
+
+    assert verify_vercel_oidc_token_identity(sign(signing_key, claims(**overrides))) != baseline
+
+
+@respx.mock
+def test_identity_ignores_audience_order(signing_key: rsa.RSAPrivateKey) -> None:
+    jwks_route(signing_key)
+    forward = sign(signing_key, claims(aud=["https://vercel.com/a", "https://vercel.com/b"]))
+    reversed_ = sign(signing_key, claims(aud=["https://vercel.com/b", "https://vercel.com/a"]))
+
+    assert verify_vercel_oidc_token_identity(forward) == verify_vercel_oidc_token_identity(
+        reversed_
+    )
+
+
+@respx.mock
+def test_identity_rejects_an_unverifiable_token(
+    signing_key: rsa.RSAPrivateKey,
+    other_signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """Unverified claims must never yield an identity, or a forged token could be
+    handed the state cached under a real one."""
+    jwks_route(signing_key)
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token_identity(sign(other_signing_key))
+
+
+@respx.mock
+def test_identity_rejects_a_foreign_issuer(signing_key: rsa.RSAPrivateKey) -> None:
+    jwks_route(signing_key)
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token_identity(sign(signing_key, claims(iss="https://evil.example.com")))
+
+
+@respx.mock
+def test_identity_rejects_an_expired_token(signing_key: rsa.RSAPrivateKey) -> None:
+    jwks_route(signing_key)
+    now = int(time.time())
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token_identity(
+            sign(signing_key, claims(exp=now - 3600)), leeway=timedelta(0)
+        )
+
+
+@respx.mock
+def test_identity_rejects_a_token_without_a_subject(signing_key: rsa.RSAPrivateKey) -> None:
+    jwks_route(signing_key)
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token_identity(sign(signing_key, claims(sub=None)))
+
+
+@respx.mock
+def test_identity_needs_no_project_or_environment_expectations(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """Identity is not authorization, so it must work where `VERCEL_PROJECT_ID`
+    and `VERCEL_ENV` are unset, which is the normal local-development case."""
+    jwks_route(signing_key)
+    token = sign(signing_key)
+
+    with pytest.raises(VercelOidcVerificationError):
+        verify_vercel_oidc_token(token)
+
+    assert verify_vercel_oidc_token_identity(token)
+
+
+@respx.mock
+def test_identity_carries_no_credential(signing_key: rsa.RSAPrivateKey) -> None:
+    jwks_route(signing_key)
+    token = sign(signing_key)
+
+    identity = verify_vercel_oidc_token_identity(token)
+
+    assert len(identity) == 64 and all(c in "0123456789abcdef" for c in identity)
+    for part in token.split("."):
+        assert part not in identity
 
 
 # --------------------------------------------------------------------------

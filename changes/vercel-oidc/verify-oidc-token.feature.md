@@ -6,6 +6,22 @@ RS256, and checking the project, environment, owner, and audience claims.
 Verification fails closed: when the expected project or environment cannot be
 resolved from the arguments or the environment, every token is rejected.
 
+Claims are compared for equality only. There is no project wildcard: `"*"` is an
+ordinary string, so a token cannot widen its own scope to every project in a
+team.
+
+The issuer is pinned to Vercel's OIDC service and is not configurable. Both the
+root issuer `https://oidc.vercel.com` and the team-scoped
+`https://oidc.vercel.com/<team>` are accepted, since Vercel mints both and one
+global key signs them; the JWKS URL is a constant, so a token can never
+influence where signing keys come from.
+
+`vercel.oidc.verify_vercel_oidc_token_identity`, and its async twin, return a verified,
+opaque, stable identity for a token. A token is a signature over an identity plus
+an expiry, so one identity is issued many tokens over time; this is what to key
+identity-scoped client state on. It verifies the signature, issuer and expiry and
+returns no claims, so it is not an authorization check.
+
 This requires the new `verify` extra, which pulls in `pyjwt[crypto]`:
 
     pip install "vercel-oidc[verify]"

@@ -1,25 +1,16 @@
-"""Public value types for the Connect SDK surface."""
+"""Public value types for the Connect SDK surface.
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+Every type is a frozen pydantic model: constructed by keyword, validated on
+construction, and immutable afterwards.
+"""
+
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal, TypeAlias
 
-from vercel.connect._internal.errors import ConnectValidationError
+from pydantic import Field
 
-
-def _validate_string_sequence(name: str, value: object) -> None:
-    """Reject a bare string where a sequence of strings is required.
-
-    `str` satisfies `Sequence[str]`, so `permissions="contents:read"` type-checks
-    and then serializes as one entry per character.
-    """
-    if isinstance(value, str):
-        raise ConnectValidationError(
-            f"{name} must be a sequence of strings, not a single string; "
-            f"pass [{value!r}] for one value"
-        )
-
+from vercel.connect._internal.base import ConnectModel, StringContainer, StringField
 
 DurationInput: TypeAlias = int | float | timedelta
 """A duration accepted at the public boundary: seconds as a number, or a timedelta."""
@@ -28,8 +19,7 @@ JSONValue: TypeAlias = Any
 JSONObject: TypeAlias = Mapping[str, JSONValue]
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectAppTokenSubject:
+class ConnectAppTokenSubject(ConnectModel):
     """Authority of the integration itself, scoped to one installation.
 
     One shared credential per installation. Always available once a connector is
@@ -40,8 +30,7 @@ class ConnectAppTokenSubject:
     type: Literal["app"] = "app"
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectUserTokenSubject:
+class ConnectUserTokenSubject(ConnectModel):
     """Authority of one named end user, requiring that user's consent.
 
     Preserves the upstream provider's own permission model per person and names
@@ -53,8 +42,7 @@ class ConnectUserTokenSubject:
     type: Literal["user"] = "user"
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectJwtBearerTokenSubject:
+class ConnectJwtBearerTokenSubject(ConnectModel):
     """Authority of a user asserted by your app (RFC 7523), with no consent screen.
 
     Requires trust to be pre-established with the upstream provider. `iss`
@@ -68,8 +56,7 @@ class ConnectJwtBearerTokenSubject:
     type: Literal["jwt-bearer"] = "jwt-bearer"
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectTokenExchangeSubject:
+class ConnectTokenExchangeSubject(ConnectModel):
     """A credential you already hold, exchanged for an upstream credential."""
 
     token: str
@@ -84,26 +71,20 @@ ConnectTokenSubject: TypeAlias = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectGitHubAppInstallationAuthorizationDetail:
+class ConnectGitHubAppInstallationAuthorizationDetail(ConnectModel):
     """A GitHub App installation authorization detail (RFC 9396)."""
 
     org: str | None = None
-    permissions: Sequence[str] | None = None
-    repositories: Sequence[str] | None = None
+    permissions: StringField | None = None
+    repositories: StringField | None = None
     type: str = "github_app_installation"
 
-    def __post_init__(self) -> None:
-        _validate_string_sequence("permissions", self.permissions)
-        _validate_string_sequence("repositories", self.repositories)
 
-
-@dataclass(frozen=True, slots=True)
-class ConnectCustomAuthorizationDetail:
+class ConnectCustomAuthorizationDetail(ConnectModel):
     """An open-ended authorization detail (RFC 9396) for any other type."""
 
     type: str
-    details: JSONObject = field(default_factory=dict)
+    details: JSONObject = Field(default_factory=dict)
 
 
 ConnectAuthorizationDetail: TypeAlias = (
@@ -111,8 +92,7 @@ ConnectAuthorizationDetail: TypeAlias = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectorRef:
+class ConnectorRef(ConnectModel):
     """Identity of the connector that issued or owns a response."""
 
     id: str
@@ -123,8 +103,7 @@ class ConnectorRef:
     service_name: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectTokenResponse:
+class ConnectTokenResponse(ConnectModel):
     """A minted upstream credential and the metadata worth logging."""
 
     token: str
@@ -139,8 +118,7 @@ class ConnectTokenResponse:
     claims: JSONObject | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectAuthorizationResponse:
+class ConnectAuthorizationResponse(ConnectModel):
     """A started end-user authorization request.
 
     Send the user to `url`. `request` and `verifier` are returned for parity with
@@ -157,8 +135,7 @@ class ConnectAuthorizationResponse:
     connector: ConnectorRef | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectorMetadata:
+class ConnectorMetadata(ConnectModel):
     """Connector identity and configuration.
 
     Only the documented fields are typed. Every other top-level field the API
@@ -174,12 +151,11 @@ class ConnectorMetadata:
     client_url: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
-    vendor: JSONObject = field(default_factory=dict)
-    extra: JSONObject = field(default_factory=dict)
+    vendor: JSONObject = Field(default_factory=dict)
+    extra: JSONObject = Field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class ConnectWebhookClaims:
+class ConnectWebhookClaims(ConnectModel):
     """Verified claims from a Connect trigger's Vercel OIDC token."""
 
     issuer: str
@@ -187,7 +163,7 @@ class ConnectWebhookClaims:
     project_id: str | None
     environment: str | None
     owner_id: str | None
-    audience: Sequence[str]
+    audience: list[str]
     issued_at: datetime | None
     expires_at: datetime | None
     claims: JSONObject
@@ -210,4 +186,5 @@ __all__ = [
     "DurationInput",
     "JSONObject",
     "JSONValue",
+    "StringContainer",
 ]

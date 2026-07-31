@@ -3,7 +3,7 @@
 import platform
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, TypeVar
@@ -28,15 +28,16 @@ from vercel.connect._internal.errors import (
     UserAuthorizationRequiredError,
 )
 from vercel.connect._internal.models import (
-    ConnectAuthorizationDetail,
     ConnectTokenSubject,
     JSONObject,
 )
 from vercel.connect._internal.options import ConnectCredentialsFactory
 from vercel.connect._internal.state import (
+    ConnectAuthorizationRequest,
     ConnectAuthorizationState,
     ConnectorMetadataState,
     ConnectorRefState,
+    ConnectTokenRequest,
     ConnectTokenState,
 )
 from vercel.connect._internal.wire import (
@@ -294,35 +295,26 @@ class ConnectApiClient:
         self._timeout = timeout
 
     async def create_token(
-        self,
-        connector: str,
-        *,
-        subject: ConnectTokenSubject,
-        vercel_token: str,
-        scopes: Sequence[str] | None = None,
-        installation_id: str | None = None,
-        audience: Sequence[str] | None = None,
-        resources: Sequence[str] | None = None,
-        authorization_details: Sequence[ConnectAuthorizationDetail] | None = None,
+        self, request: ConnectTokenRequest, *, vercel_token: str
     ) -> ConnectTokenState:
         """POST /v1/connect/token/:connector."""
-        body: dict[str, Any] = {"subject": _serialize_subject(subject)}
-        if scopes is not None:
-            body["scopes"] = list(scopes)
-        if installation_id is not None:
-            body["installationId"] = installation_id
-        if audience is not None:
-            body["audience"] = list(audience)
-        if resources is not None:
-            body["resources"] = list(resources)
-        if authorization_details is not None:
+        body: dict[str, Any] = {"subject": _serialize_subject(request.subject)}
+        if request.scopes is not None:
+            body["scopes"] = list(request.scopes)
+        if request.installation_id is not None:
+            body["installationId"] = request.installation_id
+        if request.audience is not None:
+            body["audience"] = list(request.audience)
+        if request.resources is not None:
+            body["resources"] = list(request.resources)
+        if request.authorization_details is not None:
             body["authorizationDetails"] = [
-                _serialize_authorization_detail(detail) for detail in authorization_details
+                _serialize_authorization_detail(detail) for detail in request.authorization_details
             ]
 
         response = await self._request(
             "POST",
-            f"/v1/connect/token/{_encode_connector(connector)}",
+            f"/v1/connect/token/{_encode_connector(request.connector)}",
             vercel_token=vercel_token,
             body=JSONBody(body),
         )
@@ -350,36 +342,26 @@ class ConnectApiClient:
         )
 
     async def create_authorization(
-        self,
-        connector: str,
-        *,
-        subject: ConnectTokenSubject,
-        vercel_token: str,
-        scopes: Sequence[str] | None = None,
-        installation_id: str | None = None,
-        return_url: str | None = None,
-        webhook: str | None = None,
-        device_code: bool | None = None,
-        expires_in: timedelta | None = None,
+        self, request: ConnectAuthorizationRequest, *, vercel_token: str
     ) -> ConnectAuthorizationState:
         """POST /v1/connect/authorize/:connector."""
-        body: dict[str, Any] = {"subject": _serialize_subject(subject)}
-        if scopes is not None:
-            body["scopes"] = list(scopes)
-        if installation_id is not None:
-            body["installationId"] = installation_id
-        if return_url is not None:
-            body["returnUrl"] = return_url
-        if webhook is not None:
-            body["webhook"] = webhook
-        if device_code is not None:
-            body["deviceCode"] = device_code
-        if expires_in is not None:
-            body["expiresInMs"] = to_ms_int(expires_in)
+        body: dict[str, Any] = {"subject": _serialize_subject(request.subject)}
+        if request.scopes is not None:
+            body["scopes"] = list(request.scopes)
+        if request.installation_id is not None:
+            body["installationId"] = request.installation_id
+        if request.return_url is not None:
+            body["returnUrl"] = request.return_url
+        if request.webhook is not None:
+            body["webhook"] = request.webhook
+        if request.device_code is not None:
+            body["deviceCode"] = request.device_code
+        if request.expires_in is not None:
+            body["expiresInMs"] = to_ms_int(request.expires_in)
 
         response = await self._request(
             "POST",
-            f"/v1/connect/authorize/{_encode_connector(connector)}",
+            f"/v1/connect/authorize/{_encode_connector(request.connector)}",
             vercel_token=vercel_token,
             body=JSONBody(body),
         )

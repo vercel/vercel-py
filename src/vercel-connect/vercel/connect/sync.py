@@ -39,6 +39,7 @@ from vercel.connect._internal.models import (
     ConnectUserTokenSubject,
     ConnectWebhookClaims,
     DurationInput,
+    StringContainer,
 )
 from vercel.connect._internal.options import (
     ConnectOptions,
@@ -65,10 +66,10 @@ def get_token(
     connector: str,
     *,
     subject: ConnectTokenSubject,
-    scopes: Sequence[str] | None = None,
+    scopes: StringContainer | None = None,
     installation_id: str | None = None,
-    audience: Sequence[str] | None = None,
-    resources: Sequence[str] | None = None,
+    audience: StringContainer | None = None,
+    resources: StringContainer | None = None,
     authorization_details: Sequence[ConnectAuthorizationDetail] | None = None,
     options: ConnectOptions | None = None,
 ) -> str:
@@ -115,10 +116,10 @@ def get_token_response(
     connector: str,
     *,
     subject: ConnectTokenSubject,
-    scopes: Sequence[str] | None = None,
+    scopes: StringContainer | None = None,
     installation_id: str | None = None,
-    audience: Sequence[str] | None = None,
-    resources: Sequence[str] | None = None,
+    audience: StringContainer | None = None,
+    resources: StringContainer | None = None,
     authorization_details: Sequence[ConnectAuthorizationDetail] | None = None,
     options: ConnectOptions | None = None,
 ) -> ConnectTokenResponse:
@@ -196,7 +197,7 @@ def start_authorization(
     connector: str,
     *,
     subject: ConnectTokenSubject,
-    scopes: Sequence[str] | None = None,
+    scopes: StringContainer | None = None,
     installation_id: str | None = None,
     return_url: str | None = None,
     webhook: str | None = None,
@@ -294,10 +295,11 @@ def verify_connect_webhook(
     Trust boundary: this accepts *any* valid Vercel OIDC token for this project
     and environment. It is not pinned to a specific connector or deployment.
 
-    Verification pins the issuer to `https://oidc.vercel.com`, allows only RS256,
-    and resolves the signing key by `kid` from Vercel's JWKS. It **fails closed**:
-    if the expected project or environment cannot be determined from the
-    arguments or the environment, every request is rejected.
+    Verification pins the issuer to Vercel's OIDC service, accepting both
+    `https://oidc.vercel.com` and the team-scoped `https://oidc.vercel.com/<team>`,
+    allows only RS256, and resolves the signing key by `kid` from Vercel's JWKS.
+    It **fails closed**: if the expected project or environment cannot be
+    determined from the arguments or the environment, every request is rejected.
 
     Args:
         headers: Inbound request headers, or any request object exposing a
@@ -306,8 +308,7 @@ def verify_connect_webhook(
         project_id: Expected project. Defaults to `VERCEL_PROJECT_ID`.
         environment: Expected environment. Defaults to `VERCEL_TARGET_ENV`, then
             `VERCEL_ENV`.
-        owner_id: Expected team owner, required when the token's project claim is
-            a wildcard.
+        owner_id: Expected team owner. Checked only when supplied.
         audience: Expected audience.
 
     Returns:
@@ -414,6 +415,7 @@ __all__ = [
     "ConnectorMetadata",
     "ConnectorRef",
     "DurationInput",
+    "StringContainer",
     "NoValidTokenError",
     "UserAuthorizationRequiredError",
     "VercelTokenInput",

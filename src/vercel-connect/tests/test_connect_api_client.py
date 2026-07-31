@@ -7,6 +7,7 @@ every endpoint: the TypeScript suite never tests it.
 
 import json
 from datetime import timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from vercel.connect import (
     ConnectUserTokenSubject,
 )
 from vercel.connect._internal.api_client import ConnectApiClient
+from vercel.connect._internal.state import ConnectAuthorizationRequest, ConnectTokenRequest
 
 
 class FakeTransport(BaseTransport):
@@ -73,6 +75,16 @@ def client(*responses: httpx.Response) -> tuple[ConnectApiClient, FakeTransport]
     return api_client, transport
 
 
+def app_request(connector: str = "slack/my-bot", **overrides: Any) -> ConnectTokenRequest:
+    return ConnectTokenRequest(connector=connector, subject=ConnectAppTokenSubject(), **overrides)
+
+
+def auth_request(connector: str = "oauth/linear", **overrides: Any) -> ConnectAuthorizationRequest:
+    return ConnectAuthorizationRequest(
+        connector=connector, subject=ConnectAppTokenSubject(), **overrides
+    )
+
+
 def token_response() -> httpx.Response:
     return httpx.Response(
         200,
@@ -99,9 +111,7 @@ def token_response() -> httpx.Response:
 async def test_create_token_percent_encodes_the_connector(connector: str, expected: str) -> None:
     api_client, transport = client(token_response())
 
-    await api_client.create_token(
-        connector, subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
-    )
+    await api_client.create_token(app_request(connector), vercel_token="oidc-token")
 
     assert transport.requests[0].url.raw_path.decode() == f"/v1/connect/token/{expected}"
 
@@ -123,9 +133,7 @@ async def test_create_authorization_percent_encodes_the_connector() -> None:
         httpx.Response(200, json={"url": "https://c.example", "request": "sca_1", "verifier": "v"})
     )
 
-    await api_client.create_authorization(
-        "oauth/linear", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
-    )
+    await api_client.create_authorization(auth_request(), vercel_token="oidc-token")
 
     assert transport.requests[0].url.raw_path.decode() == "/v1/connect/authorize/oauth%2Flinear"
 
@@ -145,9 +153,7 @@ async def test_get_connector_percent_encodes_the_connector() -> None:
 async def test_requests_send_the_identity_and_user_agent() -> None:
     api_client, transport = client(token_response())
 
-    await api_client.create_token(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="explicit-identity"
-    )
+    await api_client.create_token(app_request(), vercel_token="explicit-identity")
 
     headers = transport.requests[0].headers
     assert headers["authorization"] == "Bearer explicit-identity"
@@ -160,13 +166,15 @@ async def test_token_body_uses_camel_case_keys() -> None:
     api_client, transport = client(token_response())
 
     await api_client.create_token(
-        "slack/my-bot",
-        subject=ConnectUserTokenSubject(id="u_1"),
+        ConnectTokenRequest(
+            connector="slack/my-bot",
+            subject=ConnectUserTokenSubject(id="u_1"),
+            scopes=["read"],
+            installation_id="T1",
+            audience=["aud"],
+            resources=["res"],
+        ),
         vercel_token="oidc-token",
-        scopes=["read"],
-        installation_id="T1",
-        audience=["aud"],
-        resources=["res"],
     )
 
     assert json.loads(transport.requests[0].content) == {
@@ -181,9 +189,7 @@ async def test_token_body_uses_camel_case_keys() -> None:
 async def test_token_body_omits_unset_fields() -> None:
     api_client, transport = client(token_response())
 
-    await api_client.create_token(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
-    )
+    await api_client.create_token(app_request(), vercel_token="oidc-token")
 
     assert json.loads(transport.requests[0].content) == {"subject": {"type": "app"}}
 
@@ -194,13 +200,13 @@ async def test_authorization_body_uses_camel_case_keys() -> None:
     )
 
     await api_client.create_authorization(
-        "oauth/linear",
-        subject=ConnectAppTokenSubject(),
+        auth_request(
+            return_url="https://myapp.com/cb",
+            webhook="https://myapp.com/hook",
+            device_code=True,
+            expires_in=timedelta(minutes=5),
+        ),
         vercel_token="oidc-token",
-        return_url="https://myapp.com/cb",
-        webhook="https://myapp.com/hook",
-        device_code=True,
-        expires_in=timedelta(minutes=5),
     )
 
     assert json.loads(transport.requests[0].content) == {
@@ -248,9 +254,7 @@ async def test_malformed_token_success_body_raises_response_error(body: bytes) -
     api_client, _ = client(httpx.Response(200, content=body))
 
     with pytest.raises(ConnectResponseError):
-        await api_client.create_token(
-            "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
-        )
+        await api_client.create_token(app_request(), vercel_token="oidc-token")
 
 
 @pytest.mark.parametrize(
@@ -261,9 +265,7 @@ async def test_malformed_authorization_success_body_raises_response_error(body: 
     api_client, _ = client(httpx.Response(200, content=body))
 
     with pytest.raises(ConnectResponseError):
-        await api_client.create_authorization(
-            "oauth/linear", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
-        )
+        await api_client.create_authorization(auth_request(), vercel_token="oidc-token")
 
 
 @pytest.mark.parametrize("body", [b"not json", b"[]", b'{"uid": "oauth/linear"}'])
@@ -277,9 +279,7 @@ async def test_malformed_metadata_success_body_raises_response_error(body: bytes
 async def test_returned_state_is_neutral_of_wire_concerns() -> None:
     api_client, _ = client(token_response())
 
-    state = await api_client.create_token(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
-    )
+    state = await api_client.create_token(app_request(), vercel_token="oidc-token")
 
     assert state.token == "upstream"
     assert state.expires_at.tzinfo is not None
@@ -298,8 +298,6 @@ async def test_base_url_trailing_slash_is_normalized() -> None:
         transport=transport,
         timeout=timedelta(seconds=30),
     )
-    await api_client.create_token(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
-    )
+    await api_client.create_token(app_request(), vercel_token="oidc-token")
 
     assert str(transport.requests[0].url) == "https://connect.test/v1/connect/token/slack%2Fmy-bot"

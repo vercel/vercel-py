@@ -5,11 +5,13 @@ from .token import (
 )
 from .verify import (
     verify_vercel_oidc_token_async as verify_vercel_oidc_token,
+    verify_vercel_oidc_token_identity_async as verify_vercel_oidc_token_identity,
 )
 
 __all__ = [
     "get_vercel_oidc_token",
     "refresh_token",
     "fetch_vercel_oidc_token",
+    "verify_vercel_oidc_token_identity",
     "verify_vercel_oidc_token",
 ]

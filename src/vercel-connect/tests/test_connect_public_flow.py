@@ -11,6 +11,7 @@ from vercel.api import session
 from vercel.connect import (
     ConnectAppTokenSubject,
     ConnectServiceOptions,
+    ConnectValidationError,
     get_token,
     sync as connect_sync,
 )
@@ -39,7 +40,6 @@ def test_default_service_options_target_the_public_api() -> None:
     assert options.base_url == "https://api.vercel.com"
     assert options.token_cache_size == 100
     assert options.validity_buffer.total_seconds() == 30
-    assert options.oidc_issuer == "https://oidc.vercel.com"
 
 
 def test_service_options_are_overridable() -> None:
@@ -60,8 +60,8 @@ def test_service_options_are_overridable() -> None:
 def test_service_options_are_frozen() -> None:
     options = ConnectServiceOptions()
 
-    with pytest.raises((AttributeError, TypeError)):
-        options.base_url = "https://elsewhere.example.com"  # type: ignore[misc]
+    with pytest.raises(ConnectValidationError, match="frozen"):
+        options.base_url = "https://elsewhere.example.com"
 
 
 @respx.mock
