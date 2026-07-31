@@ -106,6 +106,40 @@ except UserAuthorizationRequiredError:
     return redirect(authorization.url)
 ```
 
+A CLI or headless process has nowhere to redirect to, so it asks for a device
+code and polls. Each outcome is its own error, so the loop never inspects an
+error code:
+
+```python
+import anyio
+from vercel.connect import (
+    AuthorizationDeniedError,
+    AuthorizationExpiredError,
+    AuthorizationPendingError,
+    ConnectOptions,
+)
+
+authorization = await start_authorization(
+    "linear/my-app", subject=subject, device_code=True
+)
+print(f"Enter {authorization.device_code} at {authorization.url}")
+
+while True:
+    try:
+        token = await get_token(
+            "linear/my-app", subject=subject, options=ConnectOptions(force_refresh=True)
+        )
+        break
+    except AuthorizationPendingError:
+        await anyio.sleep(5)
+    except (AuthorizationDeniedError, AuthorizationExpiredError):
+        raise  # terminal: nothing to wait for
+```
+
+`force_refresh=True` is what makes the poll reach the server; without it a cached
+credential would be returned. `slow_down` is reported as
+`AuthorizationPendingError` too, so a fixed interval stays correct.
+
 ## Inbound triggers
 
 A connector with triggers enabled forwards provider webhooks to your project with
