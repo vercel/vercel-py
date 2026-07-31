@@ -34,6 +34,9 @@ from vercel.connect.sync import ConnectAppTokenSubject, get_token
 token = get_token("github/my-app", subject=ConnectAppTokenSubject())
 ```
 
+Use a plain `with` block and `vercel.connect.sync` together; mixing an async call
+into a sync session, or the reverse, is rejected.
+
 ## Subjects
 
 Whose authority the credential carries:
@@ -81,13 +84,6 @@ get_token(..., scopes="repo:read")     # ConnectValidationError, and a type erro
 get_token(..., scopes=["repo:read"])   # correct
 ```
 
-## Examples
-
-Runnable scripts for each surface live in [`examples/`](examples/), covering token
-minting, the consent flow, cache behaviour, connector introspection, the sync
-surface, and webhook verification. Start with
-[`connect_01_app_token.py`](examples/connect_01_app_token.py).
-
 ## Authorization as control flow
 
 The two "required" errors are not bugs, they are states with a remedy:
@@ -130,7 +126,8 @@ pinned to a specific connector or deployment.
 
 ## Configuration
 
-`ConnectServiceOptions` is the configuration and test seam:
+To configure advanced options, use a `session` context manager, and pass
+`ConnectServiceOptions`:
 
 ```python
 from vercel.api import session
@@ -153,6 +150,3 @@ vercel env pull    # writes VERCEL_OIDC_TOKEN into .env.local
 
 The connector must be attached to your project and enabled for the target
 environment, or every call fails.
-
-Use a plain `with` block and `vercel.connect.sync` together; mixing an async call
-into a sync session (or the reverse) is rejected.
