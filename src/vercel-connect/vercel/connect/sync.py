@@ -14,13 +14,18 @@ from typing import Any
 
 from vercel._internal.core.session import get_active_sync_session
 from vercel.connect._internal.errors import (
+    AuthorizationDeniedError,
+    AuthorizationExpiredError,
+    AuthorizationPendingError,
     ConnectApiError,
     ConnectCredentialsError,
     ConnectError,
+    ConnectNotFoundError,
     ConnectorInstallationRequiredError,
     ConnectResponseError,
     ConnectValidationError,
     ConnectWebhookVerificationError,
+    InvalidGrantError,
     NoValidTokenError,
     UserAuthorizationRequiredError,
 )
@@ -97,6 +102,13 @@ def get_token(
             for the target tenant.
         NoValidTokenError: If the grant exists but no usable credential can be
             issued.
+        AuthorizationPendingError: If a device-code authorization is still
+            waiting on the user. Keep polling.
+        AuthorizationDeniedError: If the user refused the request.
+        AuthorizationExpiredError: If the device code expired before consent.
+        InvalidGrantError: If the upstream provider rejected the stored grant, so
+            the subject must authorize again.
+        ConnectNotFoundError: If the connector does not exist.
         ConnectApiError: For any other Connect API failure.
     """
     return _get_token(
@@ -412,6 +424,11 @@ __all__ = [
     "ConnectWebhookClaims",
     "ConnectWebhookVerificationError",
     "ConnectorInstallationRequiredError",
+    "AuthorizationDeniedError",
+    "AuthorizationExpiredError",
+    "AuthorizationPendingError",
+    "ConnectNotFoundError",
+    "InvalidGrantError",
     "ConnectorMetadata",
     "ConnectorRef",
     "DurationInput",

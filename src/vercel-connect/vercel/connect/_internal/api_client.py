@@ -1,7 +1,6 @@
 """Internal Connect API client."""
 
 import platform
-import re
 import sys
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -21,9 +20,14 @@ from vercel._internal.core.http import (
 )
 from vercel._internal.core.time import to_ms_int
 from vercel.connect._internal.errors import (
+    AuthorizationDeniedError,
+    AuthorizationExpiredError,
+    AuthorizationPendingError,
     ConnectApiError,
+    ConnectNotFoundError,
     ConnectorInstallationRequiredError,
     ConnectResponseError,
+    InvalidGrantError,
     NoValidTokenError,
     UserAuthorizationRequiredError,
 )
@@ -60,16 +64,36 @@ USER_AGENT = (
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
-# Server error codes are machine tokens such as `user_authorization_required`.
-# A prose sentence in the same field is a message, not a code.
-_ERROR_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
-
 _ERROR_CLASSES: Mapping[str, type[ConnectApiError]] = {
     "no_token": NoValidTokenError,
     "user_authorization_required": UserAuthorizationRequiredError,
     "client_installation_required": ConnectorInstallationRequiredError,
     "connector_installation_required": ConnectorInstallationRequiredError,
+    "not_found": ConnectNotFoundError,
+    "authorization_pending": AuthorizationPendingError,
+    "slow_down": AuthorizationPendingError,
+    "access_denied": AuthorizationDeniedError,
+    "expired_token": AuthorizationExpiredError,
+    "invalid_grant": InvalidGrantError,
 }
+
+# Standard OAuth codes that carry no distinct class, listed so the ambiguous flat
+# `error` field is still recognized as a code rather than read as prose.
+# RFC 6749 section 5.2 and RFC 8628 section 3.5.
+_OAUTH_ERROR_CODES = frozenset(
+    {
+        "invalid_request",
+        "invalid_client",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "unsupported_response_type",
+        "invalid_scope",
+        "invalid_target",
+        "server_error",
+        "temporarily_unavailable",
+    }
+)
+_RECOGNIZED_CODES = frozenset(_ERROR_CLASSES) | _OAUTH_ERROR_CODES
 
 
 class _ApiModel(BaseModel):
@@ -233,12 +257,12 @@ def _error_message(data: object) -> str | None:
             message = candidate.get(name)
             if isinstance(message, str) and message:
                 return message
-    # `error` is ambiguous: a code-shaped value is read as the code, and anything
-    # else in that field is prose meant for a human.
+    # `error` is ambiguous: OAuth puts a code there, other services put a sentence.
+    # Anything not recognized as a code is prose meant for a human.
     if isinstance(data, Mapping):
         for name in ("error", "err"):
             message = data.get(name)
-            if isinstance(message, str) and message and not _ERROR_CODE_PATTERN.match(message):
+            if isinstance(message, str) and message and message not in _RECOGNIZED_CODES:
                 return message
     return None
 
@@ -249,13 +273,19 @@ def _error_code(data: object) -> str | None:
         code = envelope.get("code")
         if isinstance(code, str) and code:
             return code
+    if not isinstance(data, Mapping):
+        return None
+    # A field named `code` says what it holds, so an unrecognized value there is
+    # still a code: the server may have added one this release does not model.
+    code = data.get("code")
+    if isinstance(code, str) and code:
+        return code
     # OAuth-shaped bodies put the code directly in `error`, and without reading it
     # every such failure degrades to the base class.
-    if isinstance(data, Mapping):
-        for name in ("error", "err", "code"):
-            code = data.get(name)
-            if isinstance(code, str) and _ERROR_CODE_PATTERN.match(code):
-                return code
+    for name in ("error", "err"):
+        code = data.get(name)
+        if isinstance(code, str) and code in _RECOGNIZED_CODES:
+            return code
     return None
 
 

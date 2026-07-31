@@ -15,10 +15,15 @@ from conftest import TEST_BASE_URL, session_options
 
 from vercel.api import session
 from vercel.connect import (
+    AuthorizationDeniedError,
+    AuthorizationExpiredError,
+    AuthorizationPendingError,
     ConnectApiError,
     ConnectAppTokenSubject,
     ConnectError,
+    ConnectNotFoundError,
     ConnectorInstallationRequiredError,
+    InvalidGrantError,
     NoValidTokenError,
     UserAuthorizationRequiredError,
     get_token,
@@ -42,8 +47,13 @@ def error_response(status: int, body: Any, **headers: str) -> httpx.Response:
         ("user_authorization_required", UserAuthorizationRequiredError),
         ("client_installation_required", ConnectorInstallationRequiredError),
         ("connector_installation_required", ConnectorInstallationRequiredError),
+        ("not_found", ConnectNotFoundError),
+        ("authorization_pending", AuthorizationPendingError),
+        ("slow_down", AuthorizationPendingError),
+        ("access_denied", AuthorizationDeniedError),
+        ("expired_token", AuthorizationExpiredError),
+        ("invalid_grant", InvalidGrantError),
         ("forbidden", ConnectApiError),
-        ("not_found", ConnectApiError),
         ("something_new_from_the_server", ConnectApiError),
     ],
 )
@@ -343,7 +353,15 @@ async def test_top_level_message_body_renders_status_once(mock_env_clear: None) 
             {"error": "connector_installation_required", "error_description": "install"},
             ConnectorInstallationRequiredError,
         ),
-        ({"error": "invalid_grant", "error_description": "nope"}, ConnectApiError),
+        ({"error": "invalid_grant", "error_description": "nope"}, InvalidGrantError),
+        (
+            {"error": "authorization_pending", "error_description": "waiting"},
+            AuthorizationPendingError,
+        ),
+        ({"error": "slow_down", "error_description": "back off"}, AuthorizationPendingError),
+        ({"error": "access_denied", "error_description": "refused"}, AuthorizationDeniedError),
+        ({"error": "expired_token", "error_description": "too late"}, AuthorizationExpiredError),
+        ({"error": "server_error", "error_description": "upstream"}, ConnectApiError),
     ],
 )
 @respx.mock
@@ -366,7 +384,7 @@ async def test_oauth_shaped_error_bodies_map_to_the_taxonomy(
 
 @respx.mock
 async def test_prose_error_string_is_a_message_not_a_code(mock_env_clear: None) -> None:
-    """Some services put a sentence in `error`. A code is a machine token."""
+    """Some services put a sentence in `error`, so only a known code is a code."""
     respx.post(TOKEN_URL).mock(
         return_value=error_response(403, {"error": "Something went wrong, please try again later"})
     )
@@ -379,6 +397,61 @@ async def test_prose_error_string_is_a_message_not_a_code(mock_env_clear: None) 
     assert error.code is None
     assert type(error) is ConnectApiError
     assert str(error) == "Something went wrong, please try again later (status=403)"
+
+
+@respx.mock
+async def test_unrecognized_flat_error_string_is_read_as_prose(mock_env_clear: None) -> None:
+    """The flat `error` field is ambiguous, so it is only a code when recognized.
+
+    A code the taxonomy does not list is still reported when the server puts it in
+    a field that says so, which `test_unmodelled_code_field_is_still_a_code` covers.
+    """
+    respx.post(TOKEN_URL).mock(return_value=error_response(400, {"error": "widget_exploded"}))
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    assert exc_info.value.code is None
+    assert "widget_exploded" in str(exc_info.value)
+
+
+@respx.mock
+async def test_unmodelled_code_field_is_still_a_code(mock_env_clear: None) -> None:
+    """`code` names what it holds, so a server may add one without a release here."""
+    respx.post(TOKEN_URL).mock(
+        return_value=error_response(429, {"code": "rate_limited", "message": "slow down"})
+    )
+
+    async with session(service_options=session_options()):
+        with pytest.raises(ConnectApiError) as exc_info:
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+
+    assert exc_info.value.code == "rate_limited"
+    assert str(exc_info.value) == "slow down (code=rate_limited, status=429)"
+
+
+@respx.mock
+async def test_device_code_polling_distinguishes_pending_from_terminal(
+    mock_env_clear: None,
+) -> None:
+    """A poll loop has to tell "keep waiting" from "stop", which is why these
+    authorization codes carry their own classes."""
+    bodies = [
+        {"error": "authorization_pending"},
+        {"error": "slow_down"},
+        {"error": "expired_token"},
+    ]
+    respx.post(TOKEN_URL).mock(
+        side_effect=[error_response(400, body) for body in bodies],
+    )
+
+    async with session(service_options=session_options()):
+        for _ in range(2):
+            with pytest.raises(AuthorizationPendingError):
+                await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
+        with pytest.raises(AuthorizationExpiredError):
+            await get_token("slack/my-bot", subject=ConnectAppTokenSubject())
 
 
 @respx.mock

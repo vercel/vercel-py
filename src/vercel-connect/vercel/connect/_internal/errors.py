@@ -87,6 +87,47 @@ class ConnectorInstallationRequiredError(ConnectApiError):
     """
 
 
+class ConnectNotFoundError(ConnectApiError):
+    """Raised when the connector, installation, or token named does not exist.
+
+    Server code `not_found`. Usually a wrong connector id or UID.
+    """
+
+
+class AuthorizationPendingError(ConnectApiError):
+    """Raised while a device-code authorization is still awaiting the user.
+
+    OAuth codes `authorization_pending` and `slow_down`. Expected during polling:
+    keep calling `get_token` with `force_refresh=True`, and back off on
+    `slow_down`, which is reported as this same class.
+    """
+
+
+class AuthorizationDeniedError(ConnectApiError):
+    """Raised when the user refused the authorization request.
+
+    OAuth code `access_denied`. Terminal: stop polling. Starting a new
+    authorization is the only way forward.
+    """
+
+
+class AuthorizationExpiredError(ConnectApiError):
+    """Raised when a device code expired before the user completed consent.
+
+    OAuth code `expired_token`. Terminal: stop polling and call
+    `start_authorization` again for a fresh code.
+    """
+
+
+class InvalidGrantError(ConnectApiError):
+    """Raised when the stored grant is no longer valid.
+
+    OAuth code `invalid_grant`. The upstream provider rejected the credential
+    Connect holds, typically because the user revoked access or it expired, so the
+    subject must authorize again.
+    """
+
+
 class ConnectResponseError(ConnectError):
     """Raised when a successful Connect API response is malformed."""
 
@@ -116,13 +157,18 @@ class ConnectWebhookVerificationError(ConnectError):
 
 
 __all__ = [
+    "AuthorizationDeniedError",
+    "AuthorizationExpiredError",
+    "AuthorizationPendingError",
     "ConnectApiError",
     "ConnectCredentialsError",
     "ConnectError",
+    "ConnectNotFoundError",
     "ConnectResponseError",
     "ConnectValidationError",
     "ConnectWebhookVerificationError",
     "ConnectorInstallationRequiredError",
+    "InvalidGrantError",
     "NoValidTokenError",
     "UserAuthorizationRequiredError",
 ]
