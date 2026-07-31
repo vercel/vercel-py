@@ -1,7 +1,26 @@
 from __future__ import annotations
 
 from vercel.client import AsyncVercel, Vercel
-from vercel.project_routes import AsyncProjectRoutesClient, ProjectRoutesClient
+from vercel.project_routes import AsyncProjectRoutesClient, ProjectRoutesClient, RewriteRoute
+
+
+def test_rewrite_route_serializes_to_api_shape() -> None:
+    route = RewriteRoute(
+        name="Rewrite /old to /new",
+        source="/old",
+        destination="/new",
+        source_syntax="equals",
+        description="Keep old links working",
+        enabled=False,
+    )
+
+    assert route.to_route_input() == {
+        "name": "Rewrite /old to /new",
+        "description": "Keep old links working",
+        "enabled": False,
+        "srcSyntax": "equals",
+        "route": {"src": "/old", "dest": "/new"},
+    }
 
 
 def test_root_clients_expose_project_routes() -> None:

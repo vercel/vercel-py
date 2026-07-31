@@ -10,6 +10,7 @@ from vercel.client import AsyncVercel, Vercel
 from vercel.project_routes import (
     AddRouteRequestBody,
     ProjectRoutesError,
+    RewriteRoute,
     RouteInput,
     StageRoutesRequestBody,
     get_routes,
@@ -148,29 +149,42 @@ def test_sync_client_supports_every_project_routes_operation() -> None:
         team_id="team_123",
     )
     staged = client.project_routes.stage_routes(
-        project_id="prj_123", body=STAGE_BODY, team_id="team_123"
+        project_id="prj_123",
+        routes=STAGE_BODY["routes"],
+        overwrite=True,
+        team_id="team_123",
     )
-    added = client.project_routes.add_route(project_id="prj_123", body=ADD_BODY, team_id="team_123")
+    added = client.project_routes.add_route(
+        project_id="prj_123",
+        route=RewriteRoute(
+            name="Rewrite /old to /new",
+            source="/old",
+            destination="/new",
+            source_syntax="equals",
+        ),
+        team_id="team_123",
+    )
     deleted = client.project_routes.delete_routes(
         project_id="prj_123",
-        body={"routeIds": ["route_123"]},
+        route_ids=["route_123"],
         team_id="team_123",
     )
     edited = client.project_routes.edit_route(
         project_id="prj_123",
         route_id="route_123",
-        body={"restore": True},
+        restore=True,
         team_id="team_123",
     )
     generated = client.project_routes.generate_route(
         project_id="prj_123",
-        body={"prompt": "Rewrite /old to /new"},
+        prompt="Rewrite /old to /new",
         team_id="team_123",
     )
     versions = client.project_routes.get_route_versions(project_id="prj_123", team_id="team_123")
     updated = client.project_routes.update_route_versions(
         project_id="prj_123",
-        body={"id": "version_123", "action": "promote"},
+        version_id="version_123",
+        action="promote",
         team_id="team_123",
     )
 
@@ -200,25 +214,28 @@ async def test_async_client_supports_every_project_routes_operation() -> None:
         team_id="team_123",
     )
     staged = await client.project_routes.stage_routes(
-        project_id="prj_123", body=STAGE_BODY, team_id="team_123"
+        project_id="prj_123",
+        routes=STAGE_BODY["routes"],
+        overwrite=True,
+        team_id="team_123",
     )
     added = await client.project_routes.add_route(
-        project_id="prj_123", body=ADD_BODY, team_id="team_123"
+        project_id="prj_123", route=ROUTE_INPUT, team_id="team_123"
     )
     deleted = await client.project_routes.delete_routes(
         project_id="prj_123",
-        body={"routeIds": ["route_123"]},
+        route_ids=["route_123"],
         team_id="team_123",
     )
     edited = await client.project_routes.edit_route(
         project_id="prj_123",
         route_id="route_123",
-        body={"restore": True},
+        restore=True,
         team_id="team_123",
     )
     generated = await client.project_routes.generate_route(
         project_id="prj_123",
-        body={"prompt": "Rewrite /old to /new"},
+        prompt="Rewrite /old to /new",
         team_id="team_123",
     )
     versions = await client.project_routes.get_route_versions(
@@ -226,7 +243,8 @@ async def test_async_client_supports_every_project_routes_operation() -> None:
     )
     updated = await client.project_routes.update_route_versions(
         project_id="prj_123",
-        body={"id": "version_123", "action": "promote"},
+        version_id="version_123",
+        action="promote",
         team_id="team_123",
     )
 

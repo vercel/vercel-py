@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias, TypedDict
 
 if sys.version_info >= (3, 11):
@@ -73,6 +74,32 @@ class _RouteInputOptional(TypedDict, total=False):
 class RouteInput(_RouteInputOptional):
     name: str
     route: RouteDefinition
+
+
+@dataclass(frozen=True, slots=True)
+class RewriteRoute:
+    """A project route that rewrites one path to another."""
+
+    name: str
+    source: str
+    destination: str
+    source_syntax: SrcSyntax | None = None
+    description: str | None = None
+    enabled: bool | None = None
+
+    def to_route_input(self) -> RouteInput:
+        """Return the request representation expected by the Vercel API."""
+        result: RouteInput = {
+            "name": self.name,
+            "route": {"src": self.source, "dest": self.destination},
+        }
+        if self.source_syntax is not None:
+            result["srcSyntax"] = self.source_syntax
+        if self.description is not None:
+            result["description"] = self.description
+        if self.enabled is not None:
+            result["enabled"] = self.enabled
+        return result
 
 
 class StagedRouteInput(RouteInput):
@@ -306,6 +333,7 @@ __all__ = [
     "RouteTransform",
     "RouteType",
     "RouteVersion",
+    "RewriteRoute",
     "SrcSyntax",
     "StageRoutesRequestBody",
     "StageRoutesResponse",

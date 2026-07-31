@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import timedelta
 from typing import TypeVar
 
@@ -16,18 +16,30 @@ from vercel.project_routes.types import (
     DeleteRoutesRequestBody,
     DeleteRoutesResponse,
     EditRouteRequestBody,
+    GenerateRouteCurrent,
     GenerateRouteRequestBody,
     GenerateRouteResponse,
     GetRoutesResponse,
     GetRouteVersionsResponse,
+    Position,
+    RewriteRoute,
     RouteDiff,
     RouteFilter,
+    RouteInput,
+    StagedRouteInput,
     StageRoutesRequestBody,
     UpdateRouteVersionsRequestBody,
+    VersionAction,
     VersionResponse,
 )
 
 _T = TypeVar("_T")
+
+
+def _route_input(route: RewriteRoute | RouteInput) -> RouteInput:
+    if isinstance(route, RewriteRoute):
+        return route.to_route_input()
+    return route
 
 
 def _run_sync(
@@ -108,7 +120,8 @@ async def get_routes_async(
 def stage_routes(
     *,
     project_id: str,
-    body: StageRoutesRequestBody | None = None,
+    routes: Sequence[StagedRouteInput] | None = None,
+    overwrite: bool | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -116,10 +129,15 @@ def stage_routes(
     timeout: float = 30.0,
 ) -> VersionResponse:
     """Stage routing rules, merging by ID unless ``overwrite`` is true."""
+    body: StageRoutesRequestBody = {}
+    if routes is not None:
+        body["routes"] = list(routes)
+    if overwrite is not None:
+        body["overwrite"] = overwrite
     return _run_sync(
         lambda client: client.stage_routes(
             project_id=project_id,
-            body=body,
+            body=body or None,
             team_id=team_id,
             slug=slug,
         ),
@@ -132,7 +150,8 @@ def stage_routes(
 async def stage_routes_async(
     *,
     project_id: str,
-    body: StageRoutesRequestBody | None = None,
+    routes: Sequence[StagedRouteInput] | None = None,
+    overwrite: bool | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -140,6 +159,11 @@ async def stage_routes_async(
     timeout: float = 30.0,
 ) -> VersionResponse:
     """Asynchronously stage routing rules."""
+    body: StageRoutesRequestBody = {}
+    if routes is not None:
+        body["routes"] = list(routes)
+    if overwrite is not None:
+        body["overwrite"] = overwrite
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -147,7 +171,7 @@ async def stage_routes_async(
     ) as client:
         return await client.stage_routes(
             project_id=project_id,
-            body=body,
+            body=body or None,
             team_id=team_id,
             slug=slug,
         )
@@ -156,7 +180,8 @@ async def stage_routes_async(
 def add_route(
     *,
     project_id: str,
-    body: AddRouteRequestBody,
+    route: RewriteRoute | RouteInput,
+    position: Position | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -164,6 +189,9 @@ def add_route(
     timeout: float = 30.0,
 ) -> AddRouteResponse:
     """Add one routing rule and stage the resulting version."""
+    body: AddRouteRequestBody = {"route": _route_input(route)}
+    if position is not None:
+        body["position"] = position
     return _run_sync(
         lambda client: client.add_route(
             project_id=project_id,
@@ -180,7 +208,8 @@ def add_route(
 async def add_route_async(
     *,
     project_id: str,
-    body: AddRouteRequestBody,
+    route: RewriteRoute | RouteInput,
+    position: Position | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -188,6 +217,9 @@ async def add_route_async(
     timeout: float = 30.0,
 ) -> AddRouteResponse:
     """Asynchronously add one routing rule."""
+    body: AddRouteRequestBody = {"route": _route_input(route)}
+    if position is not None:
+        body["position"] = position
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -204,7 +236,7 @@ async def add_route_async(
 def delete_routes(
     *,
     project_id: str,
-    body: DeleteRoutesRequestBody,
+    route_ids: Sequence[str],
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -212,6 +244,7 @@ def delete_routes(
     timeout: float = 30.0,
 ) -> DeleteRoutesResponse:
     """Delete routing rules by ID and stage the resulting version."""
+    body: DeleteRoutesRequestBody = {"routeIds": list(route_ids)}
     return _run_sync(
         lambda client: client.delete_routes(
             project_id=project_id,
@@ -228,7 +261,7 @@ def delete_routes(
 async def delete_routes_async(
     *,
     project_id: str,
-    body: DeleteRoutesRequestBody,
+    route_ids: Sequence[str],
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -236,6 +269,7 @@ async def delete_routes_async(
     timeout: float = 30.0,
 ) -> DeleteRoutesResponse:
     """Asynchronously delete routing rules by ID."""
+    body: DeleteRoutesRequestBody = {"routeIds": list(route_ids)}
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -253,7 +287,8 @@ def edit_route(
     *,
     project_id: str,
     route_id: str,
-    body: EditRouteRequestBody,
+    route: RewriteRoute | RouteInput | None = None,
+    restore: bool | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -261,6 +296,11 @@ def edit_route(
     timeout: float = 30.0,
 ) -> AddRouteResponse:
     """Replace a routing rule or restore its production value."""
+    body: EditRouteRequestBody = {}
+    if route is not None:
+        body["route"] = _route_input(route)
+    if restore is not None:
+        body["restore"] = restore
     return _run_sync(
         lambda client: client.edit_route(
             project_id=project_id,
@@ -279,7 +319,8 @@ async def edit_route_async(
     *,
     project_id: str,
     route_id: str,
-    body: EditRouteRequestBody,
+    route: RewriteRoute | RouteInput | None = None,
+    restore: bool | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -287,6 +328,11 @@ async def edit_route_async(
     timeout: float = 30.0,
 ) -> AddRouteResponse:
     """Asynchronously replace or restore a routing rule."""
+    body: EditRouteRequestBody = {}
+    if route is not None:
+        body["route"] = _route_input(route)
+    if restore is not None:
+        body["restore"] = restore
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -304,7 +350,8 @@ async def edit_route_async(
 def generate_route(
     *,
     project_id: str,
-    body: GenerateRouteRequestBody,
+    prompt: str,
+    current_route: GenerateRouteCurrent | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -312,6 +359,9 @@ def generate_route(
     timeout: float = 30.0,
 ) -> GenerateRouteResponse:
     """Generate a routing-rule suggestion from natural language."""
+    body: GenerateRouteRequestBody = {"prompt": prompt}
+    if current_route is not None:
+        body["currentRoute"] = current_route
     return _run_sync(
         lambda client: client.generate_route(
             project_id=project_id,
@@ -328,7 +378,8 @@ def generate_route(
 async def generate_route_async(
     *,
     project_id: str,
-    body: GenerateRouteRequestBody,
+    prompt: str,
+    current_route: GenerateRouteCurrent | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -336,6 +387,9 @@ async def generate_route_async(
     timeout: float = 30.0,
 ) -> GenerateRouteResponse:
     """Asynchronously generate a routing-rule suggestion."""
+    body: GenerateRouteRequestBody = {"prompt": prompt}
+    if current_route is not None:
+        body["currentRoute"] = current_route
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -396,7 +450,8 @@ async def get_route_versions_async(
 def update_route_versions(
     *,
     project_id: str,
-    body: UpdateRouteVersionsRequestBody,
+    version_id: str,
+    action: VersionAction,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -404,6 +459,7 @@ def update_route_versions(
     timeout: float = 30.0,
 ) -> VersionResponse:
     """Promote, restore, or discard a routing-rule version."""
+    body: UpdateRouteVersionsRequestBody = {"id": version_id, "action": action}
     return _run_sync(
         lambda client: client.update_route_versions(
             project_id=project_id,
@@ -420,7 +476,8 @@ def update_route_versions(
 async def update_route_versions_async(
     *,
     project_id: str,
-    body: UpdateRouteVersionsRequestBody,
+    version_id: str,
+    action: VersionAction,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
@@ -428,6 +485,7 @@ async def update_route_versions_async(
     timeout: float = 30.0,
 ) -> VersionResponse:
     """Asynchronously promote, restore, or discard a version."""
+    body: UpdateRouteVersionsRequestBody = {"id": version_id, "action": action}
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,

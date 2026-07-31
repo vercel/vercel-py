@@ -5,25 +5,26 @@ available through synchronous and asynchronous clients.
 
 ```python
 from vercel.client import Vercel
+from vercel.project_routes import RewriteRoute
 
 vercel = Vercel(access_token="...")
 
 staged = vercel.project_routes.add_route(
     project_id="prj_123",
     team_id="team_123",
-    body={
-        "route": {
-            "name": "Rewrite /old to /new",
-            "srcSyntax": "equals",
-            "route": {"src": "/old", "dest": "/new"},
-        }
-    },
+    route=RewriteRoute(
+        name="Rewrite /old to /new",
+        source="/old",
+        destination="/new",
+        source_syntax="equals",
+    ),
 )
 
 vercel.project_routes.update_route_versions(
     project_id="prj_123",
     team_id="team_123",
-    body={"id": staged["version"]["id"], "action": "promote"},
+    version_id=staged["version"]["id"],
+    action="promote",
 )
 ```
 

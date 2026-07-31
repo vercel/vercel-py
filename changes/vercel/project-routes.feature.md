@@ -1,1 +1,2 @@
-Add sync and async clients for managing project-level routing rules and versions.
+Add sync and async clients with typed models for managing project-level routing
+rules and versions.
