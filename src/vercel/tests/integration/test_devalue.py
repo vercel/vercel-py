@@ -59,7 +59,7 @@ _TYPED_ARRAY_TAGS = frozenset(_BYTES_PER_ELEMENT)
 # Pins the npm fallback used when VERCEL_DEVALUE_JS is not set. It has no
 # bearing on an explicit checkout, which is deliberately free to be any
 # version — testing against a different one is the point of the override.
-DEVALUE_VERSION = "5.8.2"
+DEVALUE_VERSION = "5.9.0"
 
 _IS_CI = bool(os.getenv("CI"))
 
