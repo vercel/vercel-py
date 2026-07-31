@@ -15,6 +15,9 @@ import pytest
 
 from vercel._internal.devalue import (
     DevalueError,
+    Hole,
+    JsBigInt,
+    JsRegExp,
     Undefined,
     parse,
     stringify,
@@ -422,15 +425,14 @@ class TestParseBasics:
 
     def test_regex(self):
         result = parse('[["RegExp","regexp","gim"]]')
-        assert isinstance(result, re.Pattern)
-        assert result.pattern == "regexp"
-        assert result.flags & re.IGNORECASE
-        assert result.flags & re.MULTILINE
+        assert result == JsRegExp("regexp", "gim")
+        # `g` has no Python counterpart but survives the round trip.
+        assert result.flags == "gim"
+        assert result.compile().flags & re.IGNORECASE
 
     def test_regex_no_flags(self):
         result = parse('[["RegExp","test"]]')
-        assert isinstance(result, re.Pattern)
-        assert result.pattern == "test"
+        assert result == JsRegExp("test", "")
 
     def test_array(self):
         assert parse('[[1,2,3],"a","b","c"]') == ["a", "b", "c"]
@@ -442,16 +444,16 @@ class TestParseBasics:
         json_str = f'[[{HOLE},1,{HOLE}],"b"]'
         result = parse(json_str)
         assert len(result) == 3
-        assert result[0] is Undefined
+        assert result[0] is Hole
         assert result[1] == "b"
-        assert result[2] is Undefined
+        assert result[2] is Hole
 
     def test_very_sparse_array(self):
         json_str = f'[[{SPARSE},1000001,1000000,1],"x"]'
         result = parse(json_str)
         assert len(result) == 1000001
         assert result[1000000] == "x"
-        assert result[0] is Undefined
+        assert result[0] is Hole
 
     def test_object(self):
         assert parse('[{"foo":1,"x-y":2},"bar","z"]') == {
@@ -562,7 +564,7 @@ class TestParseRepetition:
     def test_regex_repetition(self):
         result = parse('[[1,1],["RegExp","regexp"]]')
         assert result[0] is result[1]
-        assert isinstance(result[0], re.Pattern)
+        assert isinstance(result[0], JsRegExp)
 
     def test_date_repetition(self):
         result = parse('[[1,1],["Date","2001-09-09T01:46:40.000Z"]]')
@@ -815,11 +817,12 @@ class TestRoundTrip:
         assert result == dt
 
     def test_regex(self):
+        # A Python pattern is accepted on the way out but lands as the
+        # lossless container, not as a `re.Pattern` again.
         p = re.compile("foo.*bar", re.IGNORECASE)
         result = parse(stringify(p))
-        assert isinstance(result, re.Pattern)
-        assert result.pattern == p.pattern
-        assert result.flags & re.IGNORECASE
+        assert result == JsRegExp("foo.*bar", "i")
+        assert result.compile().flags & re.IGNORECASE
 
     def test_bytes(self):
         data = b"\x00\x01\x02\xff"
@@ -870,7 +873,7 @@ class TestSparseArray:
         assert isinstance(result, list)
         assert len(result) == 3
         assert result[0] == "a"
-        assert result[1] is Undefined
+        assert result[1] is Hole
         assert result[2] == "c"
 
     def test_very_sparse_multiple_values(self):
@@ -879,7 +882,7 @@ class TestSparseArray:
         assert len(result) == 21
         assert result[10] == "a"
         assert result[20] == "b"
-        assert result[0] is Undefined
+        assert result[0] is Hole
 
     def test_array_with_negative_zero_after_zero(self):
         result = parse(f"[[1,{NEGATIVE_ZERO}],0]")
@@ -1018,17 +1021,27 @@ class TestOutOfRangeIndex:
     def test_index_past_end(self):
         assert parse("[[9],1]") == [Undefined]
 
-    def test_non_integral_index(self):
-        assert parse("[[1.5],1]") == [Undefined]
-
-    def test_integral_float_index_still_resolves(self):
-        assert parse('[[1.0],"a"]') == ["a"]
+    @pytest.mark.parametrize("index", ["1.5", "1.0"])
+    def test_float_index_addresses_no_slot(self, index):
+        # JS would resolve `1.0` (it has no int/float split) but nothing emits
+        # a float index, and upstream only ever tests that floats are refused.
+        assert parse(f'[[{index}],"a"]') == [Undefined]
 
 
 class TestSparseArrayLimits:
-    def test_integral_float_length_accepted(self):
-        # JSON `3.0` is an integer to `Number.isInteger`, so JS accepts it.
-        assert parse(f'[[{SPARSE},3.0,0,1],"a"]') == ["a", Undefined, Undefined]
+    # `[[SPARSE,1.5]]` and `[[SPARSE,5,1.5,1]]` are upstream's own cases and
+    # live in TestParseErrors. These are the integral-float forms, where the
+    # port is deliberately stricter: `Number.isInteger(3.0)` is true so JS
+    # happens to accept them, but nothing emits a float here and upstream only
+    # ever asserts the rejections, so accepting it would be matching an
+    # implementation accident.
+    @pytest.mark.parametrize(
+        "payload",
+        [f'[[{SPARSE},3.0,0,1],"a"]', f'[[{SPARSE},5,3.0,1],"a"]'],
+    )
+    def test_integral_float_length_and_index_are_rejected(self, payload):
+        with pytest.raises(ValueError, match="Invalid input"):
+            parse(payload)
 
     def test_length_at_materialization_cap_allocates(self):
         result = parse(f"[[{SPARSE},{MAX_SPARSE_ARRAY_LENGTH},0,1],1]")
@@ -1109,3 +1122,140 @@ class TestLargeIntegers:
 
     def test_nested_large_integer(self):
         assert parse(stringify({"n": 2**70})) == {"n": 2**70}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# lossless containers for JS-only distinctions
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestJsRegExp:
+    """A JS RegExp is kept as source + flags rather than compiled.
+
+    `re` rejects patterns JS accepts, and silently changes the meaning of
+    others, so compiling would both crash on valid payloads and misrepresent
+    them.
+    """
+
+    @pytest.mark.parametrize(
+        "source",
+        [r"(?<year>\d{4})", r"\p{Letter}", r"\cJ", "[]", r"\u{1F600}"],
+    )
+    def test_patterns_python_cannot_compile_still_parse(self, source):
+        payload = json.dumps([["RegExp", source]])
+        assert parse(payload) == JsRegExp(source, "")
+        with pytest.raises(re.error):
+            parse(payload).compile()
+
+    def test_js_only_flags_survive(self):
+        result = parse('[["RegExp","a+","gimsuy"]]')
+        assert result.flags == "gimsuy"
+        # Only i/m/s have Python counterparts; g/u/y are dropped on compile.
+        assert result.compile().flags & (re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+    def test_round_trips_verbatim(self):
+        original = JsRegExp(r"(?<y>\d+)", "gu")
+        assert parse(stringify(original)) == original
+
+    def test_equality_is_by_source_and_flags(self):
+        assert JsRegExp("a", "g") == JsRegExp("a", "g")
+        assert JsRegExp("a", "g") != JsRegExp("a", "")
+        assert JsRegExp("a", "g") != JsRegExp("b", "g")
+
+
+class TestJsBigInt:
+    """`bigint` is a distinct JS type, not just a large integer."""
+
+    def test_parses_to_jsbigint(self):
+        assert parse('[["BigInt","1"]]') == JsBigInt(1)
+        assert isinstance(parse('[["BigInt","1"]]'), JsBigInt)
+
+    def test_behaves_like_an_int(self):
+        assert JsBigInt(6) + 1 == 7
+        assert isinstance(JsBigInt(6), int)
+
+    def test_small_bigint_keeps_its_tag(self):
+        # A plain `1` would come back as a JS number, losing the distinction.
+        assert stringify(JsBigInt(1)) == '[["BigInt","1"]]'
+        assert stringify(1) == "[1]"
+
+    def test_not_deduplicated_against_a_plain_int(self):
+        # JS Map keys use SameValueZero, where `1n !== 1`.
+        assert stringify([JsBigInt(1), 1]) == '[[1,2],["BigInt","1"],1]'
+
+
+class TestHole:
+    """An array hole is distinct from a slot holding `undefined`."""
+
+    def test_hole_and_undefined_parse_differently(self):
+        assert parse(f"[[{HOLE},1],1]") == [Hole, 1]
+        assert parse(f"[[{UNDEFINED},1],1]") == [Undefined, 1]
+
+    def test_hole_round_trips_as_a_hole(self):
+        assert stringify([Hole, 1]) == f"[[{HOLE},1],1]"
+        assert stringify([Undefined, 1]) == f"[[{UNDEFINED},1],1]"
+
+    def test_hole_outside_an_array_is_rejected(self):
+        with pytest.raises(DevalueError, match="hole outside an array"):
+            stringify(Hole)
+        with pytest.raises(DevalueError, match="hole outside an array"):
+            stringify({"a": Hole})
+
+
+class TestBoxedSentinels:
+    """`["Object", <negative sentinel>]` is a valid payload.
+
+    Regression: the Object branch did its own raw `values[...]` lookup, so a
+    boxed NaN/Infinity/-0 raised IndexError instead of unboxing. Found by
+    running upstream's own fixtures.
+    """
+
+    @pytest.mark.parametrize(
+        ("payload", "check"),
+        [
+            (f'[["Object",{NAN}]]', lambda v: math.isnan(v)),
+            (f'[["Object",{POSITIVE_INFINITY}]]', lambda v: v == float("inf")),
+            (f'[["Object",{NEGATIVE_INFINITY}]]', lambda v: v == float("-inf")),
+            (f'[["Object",{NEGATIVE_ZERO}]]', lambda v: math.copysign(1, v) < 0),
+            (f'[["Object",{UNDEFINED}]]', lambda v: v is Undefined),
+        ],
+    )
+    def test_boxed_sentinel_unboxes(self, payload, check):
+        assert check(parse(payload))
+
+
+class TestMapLimitations:
+    """A JS ``Map`` lands as a ``dict``, which is lossier than it looks.
+
+    Insertion order is fine — ``dict`` has preserved it since 3.7 — but key
+    identity is not: ``dict`` uses ``__hash__``/``__eq__`` where JS uses
+    SameValueZero, and it cannot hold an unhashable key at all. Recorded here
+    because two of these lose data with no error at all.
+    """
+
+    def test_string_keys_lose_only_the_map_tag(self):
+        result = parse('[["Map",1,2,3,4],"a",1,"b",2]')
+        assert result == {"a": 1, "b": 2}
+        # Re-encodes as a plain object, so the far side no longer sees a Map.
+        assert stringify(result) == '[{"a":1,"b":2},1,2]'
+
+    def test_insertion_order_is_preserved(self):
+        assert list(parse('[["Map",1,2,3,4],"z",1,"a",2]')) == ["z", "a"]
+
+    def test_bool_and_int_keys_collapse_silently(self):
+        # `Map([[1, "one"], [true, "true"]])` has two entries in JS, but
+        # `True == 1` and `hash(True) == hash(1)`, so one value is destroyed
+        # without any error being raised.
+        result = parse('[["Map",1,2,3,4],1,"one",true,"true"]')
+        assert result == {1: "true"}
+        assert "one" not in result.values()
+
+    def test_non_string_keys_cannot_be_re_encoded(self):
+        result = parse('[["Map",1,2],1,"a"]')
+        assert result == {1: "a"}
+        with pytest.raises(DevalueError, match="non-string keys"):
+            stringify(result)
+
+    def test_unhashable_keys_cannot_be_parsed(self):
+        with pytest.raises(TypeError, match="unhashable"):
+            parse('[["Map",1,3],{"id":2},1,"v"]')

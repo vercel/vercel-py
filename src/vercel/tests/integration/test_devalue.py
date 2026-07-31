@@ -41,10 +41,24 @@ from typing import Any
 
 import pytest
 
-from vercel._internal.devalue import Undefined, parse, stringify
+from vercel._internal.devalue import Hole, JsBigInt, JsRegExp, Undefined, parse, stringify
+from vercel._internal.devalue.constants import (
+    HOLE,
+    NAN,
+    NEGATIVE_INFINITY,
+    NEGATIVE_ZERO,
+    POSITIVE_INFINITY,
+    SPARSE,
+    UNDEFINED,
+)
+from vercel._internal.devalue.parse import _BYTES_PER_ELEMENT
 
-# The version fetched from npm when VERCEL_DEVALUE_JS is not set.  Keep this in
-# step with the upstream release the port is written against.
+# Every tag devalue uses for an array view; all of them land as plain bytes.
+_TYPED_ARRAY_TAGS = frozenset(_BYTES_PER_ELEMENT)
+
+# Pins the npm fallback used when VERCEL_DEVALUE_JS is not set. It has no
+# bearing on an explicit checkout, which is deliberately free to be any
+# version — testing against a different one is the point of the override.
 DEVALUE_VERSION = "5.8.2"
 
 _IS_CI = bool(os.getenv("CI"))
@@ -314,22 +328,48 @@ ROUND_TRIP_CASES: list[Case] = [
         'new Date("1970-01-01T00:00:00.000Z")',
         datetime(1970, 1, 1, tzinfo=timezone.utc),
     ),
-    Case("regex_no_flags", "/a+b/", re.compile("a+b")),
-    Case("regex_ignorecase", "/a+b/i", re.compile("a+b", re.IGNORECASE)),
+    # A Python pattern is accepted going out, but lands as the container.
+    Case("regex_no_flags", "/a+b/", re.compile("a+b"), expected=JsRegExp("a+b", "")),
+    Case(
+        "regex_ignorecase",
+        "/a+b/i",
+        re.compile("a+b", re.IGNORECASE),
+        expected=JsRegExp("a+b", "i"),
+    ),
     Case(
         "regex_multiline_dotall",
         "/a.b/ms",
         re.compile("a.b", re.MULTILINE | re.DOTALL),
+        expected=JsRegExp("a.b", "ms"),
     ),
+    # Flags and syntax with no Python counterpart: compiling these would
+    # drop `gu` and raise outright on the named group and \p{...}.
+    Case("regex_js_only_flags", "/a+/gu", JsRegExp("a+", "gu")),
+    Case("regex_named_group", r"/(?<y>\d{4})/", JsRegExp(r"(?<y>\d{4})", "")),
+    Case("regex_unicode_property", r"/\p{Letter}/u", JsRegExp(r"\p{Letter}", "u")),
     Case("bytes", "new Uint8Array([0,1,255]).buffer", b"\x00\x01\xff"),
     Case("bytes_empty", "new Uint8Array([]).buffer", b""),
     Case("bytearray", "new Uint8Array([1,2]).buffer", bytearray(b"\x01\x02"), expected=b"\x01\x02"),
     # ── integers across the JS safe boundary ───────────────────────────────
     Case("safe_int_max", "9007199254740991", 2**53 - 1),
     Case("safe_int_min", "-9007199254740991", -(2**53) + 1),
-    Case("unsafe_int_positive", "9007199254740993n", 2**53 + 1),
-    Case("unsafe_int_negative", "-9007199254740993n", -(2**53) - 1),
-    Case("unsafe_int_huge", "123456789012345678901234567890n", 123456789012345678901234567890),
+    # A plain int beyond the safe range has to come back as a bigint.
+    Case("unsafe_int_positive", "9007199254740993n", 2**53 + 1, expected=JsBigInt(2**53 + 1)),
+    Case(
+        "unsafe_int_negative",
+        "-9007199254740993n",
+        -(2**53) - 1,
+        expected=JsBigInt(-(2**53) - 1),
+    ),
+    Case(
+        "unsafe_int_huge",
+        "123456789012345678901234567890n",
+        123456789012345678901234567890,
+        expected=JsBigInt(123456789012345678901234567890),
+    ),
+    # An explicit bigint keeps its tag however small it is.
+    Case("bigint_small", "1n", JsBigInt(1)),
+    Case("bigint_zero", "0n", JsBigInt(0)),
     # ── graph shape ────────────────────────────────────────────────────────
     Case(
         "cycle_dict",
@@ -398,14 +438,19 @@ JS_ORIGIN_CASES: list[Case] = [
     Case(
         "js_array_with_holes",
         '(() => { const a = [, "a", ,]; return a; })()',
-        expected=[Undefined, "a", Undefined],
+        expected=[Hole, "a", Hole],
     ),
     Case(
         "js_sparse_array",
         '(() => { const a = []; a[5] = "x"; return a; })()',
-        expected=[Undefined] * 5 + ["x"],
+        expected=[Hole] * 5 + ["x"],
     ),
-    Case("js_bigint", "123456789012345678901234567890n", expected=123456789012345678901234567890),
+    Case("js_explicit_undefined", "[undefined, 1]", expected=[Undefined, 1]),
+    Case(
+        "js_bigint",
+        "123456789012345678901234567890n",
+        expected=JsBigInt(123456789012345678901234567890),
+    ),
     Case("js_negative_zero_nested", "[0, -0]", expected=[0, -0.0]),
 ]
 
@@ -590,7 +635,306 @@ class TestHarness:
         assert not deep_equal(True, 1)
         assert not deep_equal(1, 1.0)
         assert not deep_equal(Undefined, None)
+        assert not deep_equal(Hole, Undefined)
+        assert not deep_equal([Hole], [Undefined])
+        assert not deep_equal(JsBigInt(1), 1)
+        assert not deep_equal(JsRegExp("a", "g"), JsRegExp("a", ""))
+        assert deep_equal(JsBigInt(1), JsBigInt(1))
+        assert deep_equal([Hole], [Hole])
         assert not deep_equal(re.compile("a"), re.compile("a", re.I))
         assert not deep_equal([1, 2], [1, 3])
         assert deep_equal(float("nan"), float("nan"))
         assert deep_equal(_cyclic_dict(), _cyclic_dict())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# upstream's own corpus
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The cases above are ones we thought of. Upstream's fixtures encode edge cases
+# someone else thought of, which is the more valuable half. Each fixture ships
+# the exact wire string devalue produces, so the assertion is: parse it, encode
+# it again, and have JS confirm the two strings denote the same value.
+#
+# The npm tarball ships no `test/`, so this needs a devalue *checkout* via
+# VERCEL_DEVALUE_JS and skips otherwise. Nothing is lost by running the whole
+# suite against a checkout: every file the tarball actually ships for execution
+# (`index.js` and `src/`) is byte-identical to the tag.
+
+# Constants upstream interpolates into its expected wire strings.
+_CORPUS_SUBSTITUTIONS = {
+    "consts.UNDEFINED": str(UNDEFINED),
+    "consts.HOLE": str(HOLE),
+    "consts.NAN": str(NAN),
+    "consts.POSITIVE_INFINITY": str(POSITIVE_INFINITY),
+    "consts.NEGATIVE_INFINITY": str(NEGATIVE_INFINITY),
+    "consts.NEGATIVE_ZERO": str(NEGATIVE_ZERO),
+    "consts.SPARSE": str(SPARSE),
+    "JSON.stringify('\U0001d306')": '"\U0001d306"',
+}
+
+# Wire tags whose value cannot survive a Python round trip, and why. Anything
+# NOT matching one of these must round-trip exactly; anything matching one must
+# still fail. Both directions are asserted so the inventory cannot go stale —
+# closing a gap here breaks the test until the entry is removed.
+_KNOWN_LOSSY: dict[str, str] = {
+    '["Object"': "boxed primitives are unboxed",
+    '["Map"': "Map becomes dict",
+    '["URL"': "URL becomes str",
+    '["URLSearchParams"': "URLSearchParams becomes str",
+    '["null"': "null-prototype object becomes dict",
+    '["Date",""': "an invalid Date becomes None",
+    '["DataView"': "DataView becomes bytes",
+    '["Temporal.': "Temporal values become str",
+    **{f'["{tag}"': f"{tag} becomes bytes" for tag in _TYPED_ARRAY_TAGS},
+}
+
+# Needs revivers we deliberately do not supply, or a Python container that
+# cannot hold the key at all.
+_CORPUS_SKIP = {
+    "Custom type": "exercises caller-supplied revivers",
+    "Function wrapped in custom type": "exercises caller-supplied revivers",
+    "Function in nested structure": "exercises caller-supplied revivers",
+    "Set (cyclical)": "a Python set cannot contain a set",
+    "Map key (repetition)": "Python dict cannot hold an unhashable key",
+    "Map keys (interlinked)": "Python dict cannot hold an unhashable key",
+}
+
+
+def _unescape_js_literal(text: str, quote: str) -> str:
+    """Resolve the escapes a JS source-level string literal used."""
+    if quote == "`":
+        return text
+    simple = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "0": "\0"}
+
+    def replace(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if body[0] in "ux" and len(body) > 1:
+            return chr(int(body[1:], 16))
+        return simple.get(body, body)
+
+    return re.sub(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", replace, text)
+
+
+@dataclass(frozen=True)
+class _UpstreamCase:
+    name: str
+    wire: str
+    """The exact devalue output upstream expects."""
+
+    expects_error: bool = False
+    """Upstream expects `parse` to reject this."""
+
+    message: str | None = None
+    """The expected message, when upstream states it on one line."""
+
+    needs_reviver: bool = False
+
+
+def _load_upstream_cases(test_file: Path) -> list[_UpstreamCase]:
+    """Pull every `{name, json, …}` case out of upstream's test file.
+
+    Deliberately indentation-agnostic: cases live at several depths (some
+    fixtures are built inside an IIFE, and the error array sits a level
+    shallower than `fixtures`), and keying off a fixed indent silently skipped
+    whole groups.
+    """
+    field = re.compile(r"^(\t+)(name|json|message|revivers):\s*(.*)$")
+    literal = re.compile(r"""(['"`])(.*)\1,?$""")
+
+    cases: list[_UpstreamCase] = []
+    pending: dict[str, str | bool] = {}
+    depth: str | None = None
+
+    def flush() -> None:
+        name, wire = pending.get("name"), pending.get("json")
+        if isinstance(name, str) and isinstance(wire, str):
+            for token, replacement in _CORPUS_SUBSTITUTIONS.items():
+                wire = wire.replace("${" + token + "}", replacement)
+            assert "${" not in wire, (
+                f"unmodelled interpolation in upstream case {name!r}: {wire} — add "
+                "it to _CORPUS_SUBSTITUTIONS rather than skipping the case"
+            )
+            message = pending.get("message")
+            cases.append(
+                _UpstreamCase(
+                    name=name,
+                    wire=wire,
+                    expects_error=bool(pending.get("has_message")),
+                    message=message if isinstance(message, str) else None,
+                    needs_reviver=bool(pending.get("revivers")),
+                )
+            )
+        pending.clear()
+
+    for line in test_file.read_text().split("\n"):
+        match = field.match(line)
+        if match is None:
+            continue
+        indent, key, rest = match.groups()
+        if key == "name" or indent != depth:
+            flush()
+            depth = indent
+        if key == "revivers":
+            pending["revivers"] = True
+            continue
+        if key == "message":
+            # Upstream sometimes builds the message across several lines (it
+            # varies by Node version), so presence is what marks an error case.
+            pending["has_message"] = True
+        value = literal.match(rest.rstrip())
+        if value is not None:
+            pending[key] = _unescape_js_literal(value.group(2), value.group(1))
+    flush()
+    return cases
+
+
+@pytest.fixture(scope="session")
+def upstream_corpus(devalue_entry: Path) -> list[tuple[str, str]]:
+    checkout = _corpus_checkout(devalue_entry)
+    if checkout is None:
+        pytest.skip(
+            "upstream fixtures need a devalue checkout (the npm tarball ships no "
+            "tests); point VERCEL_DEVALUE_JS at one"
+        )
+    cases = _load_upstream_cases(checkout / "test" / "index.test.js")
+    corpus = [(c.name, c.wire) for c in cases if not c.expects_error]
+    assert len(corpus) > 90, f"suspiciously few fixtures extracted: {len(corpus)}"
+    return corpus
+
+
+def _corpus_checkout(devalue_entry: Path) -> Path | None:
+    """The checkout the fixtures live in, if we are running against one."""
+    checkout = devalue_entry.parent
+    return checkout if (checkout / "test" / "index.test.js").is_file() else None
+
+
+@pytest.fixture(scope="session")
+def upstream_invalid(devalue_entry: Path) -> list[tuple[str, str, str | None, bool]]:
+    checkout = _corpus_checkout(devalue_entry)
+    if checkout is None:
+        pytest.skip("upstream error cases need a devalue checkout")
+    cases = _load_upstream_cases(checkout / "test" / "index.test.js")
+    invalid = [
+        # An error from the JSON layer rather than from devalue: the wording
+        # is language-specific, so only require that it is rejected.
+        (c.name, c.wire, None if _is_json_level(c.wire) else c.message, c.needs_reviver)
+        for c in cases
+        if c.expects_error
+    ]
+    assert len(invalid) > 25, f"suspiciously few error cases extracted: {len(invalid)}"
+    return invalid
+
+
+def _is_json_level(wire: str) -> bool:
+    try:
+        json.loads(wire)
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
+@pytest.fixture(scope="session")
+def corpus_results(
+    devalue_entry: Path, upstream_corpus: list[tuple[str, str]]
+) -> dict[str, dict[str, Any]]:
+    """Re-encode each fixture, then have JS compare the two wire strings."""
+    pairs, outcomes = [], {}
+    for name, wire in upstream_corpus:
+        if name in _CORPUS_SKIP:
+            continue
+        try:
+            outcomes[name] = {"wire": wire, "reencoded": stringify(parse(wire))}
+            pairs.append({"name": name, "a": wire, "b": outcomes[name]["reencoded"]})
+        except Exception as exc:
+            outcomes[name] = {"wire": wire, "py_error": f"{type(exc).__name__}: {exc}"}
+
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", _CORPUS_HARNESS],
+        input=json.dumps(pairs),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env={**os.environ, "DEVALUE_ENTRY": str(devalue_entry)},
+    )
+    if proc.returncode != 0:
+        pytest.fail(f"Node corpus harness failed (exit {proc.returncode}):\n{proc.stderr}")
+    for entry in json.loads(proc.stdout):
+        outcomes[entry["name"]].update(entry)
+    return outcomes
+
+
+_CORPUS_HARNESS = """
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+const { parse } = await import(pathToFileURL(process.env.DEVALUE_ENTRY).href);
+const results = [];
+
+for (const { name, a, b } of JSON.parse(readFileSync(0, 'utf8'))) {
+  const result = { name };
+  try {
+    assert.deepStrictEqual(parse(b), parse(a));
+    result.equal = true;
+  } catch (error) {
+    result.equal = false;
+    result.detail = (error.message || String(error)).split('\\n').slice(0, 4).join(' | ');
+  }
+  results.push(result);
+}
+
+process.stdout.write(JSON.stringify(results));
+"""
+
+
+def _lossy_reason(wire: str) -> str | None:
+    for tag, reason in _KNOWN_LOSSY.items():
+        if tag in wire:
+            return reason
+    return None
+
+
+class TestUpstreamCorpus:
+    def test_corpus_was_extracted(self, upstream_corpus):
+        assert len(upstream_corpus) > 50
+
+    def test_every_fixture_round_trips_unless_known_lossy(self, corpus_results):
+        unexpected_loss, unexpected_success, errors = [], [], []
+        for name, outcome in corpus_results.items():
+            reason = _lossy_reason(outcome["wire"])
+            if "py_error" in outcome:
+                if reason is None:
+                    errors.append(f"{name}: {outcome['py_error']}  ({outcome['wire'][:60]})")
+                continue
+            if outcome["equal"] and reason is not None:
+                unexpected_success.append(f"{name}: no longer lossy ({reason}) — drop it")
+            elif not outcome["equal"] and reason is None:
+                unexpected_loss.append(
+                    f"{name}: {outcome['wire'][:52]} -> {outcome['reencoded'][:52]}"
+                    f"  [{outcome.get('detail', '')[:70]}]"
+                )
+        assert not errors, "parse/stringify raised on upstream fixtures:\n  " + "\n  ".join(errors)
+        assert not unexpected_loss, "fixtures stopped round-tripping:\n  " + "\n  ".join(
+            unexpected_loss
+        )
+        assert not unexpected_success, "_KNOWN_LOSSY is stale:\n  " + "\n  ".join(
+            unexpected_success
+        )
+
+    def test_upstream_error_cases_are_rejected(self, upstream_invalid):
+        """Rejecting malformed input the same way matters as much as accepting
+        well-formed input: several of these cases came from upstream security
+        fixes, so the list grows and is worth tracking rather than copying."""
+        wrong = []
+        for name, wire, message, needs_reviver in upstream_invalid:
+            revivers = {"Custom": lambda value: value} if needs_reviver else None
+            try:
+                parse(wire, revivers)
+            except Exception as exc:  # noqa: BLE001 - any rejection is enough
+                if message is not None and message not in str(exc):
+                    wrong.append(f"{name}: expected {message!r}, got {str(exc)[:60]!r}")
+                continue
+            wrong.append(f"{name}: accepted {wire[:50]!r} but upstream rejects it")
+        assert not wrong, "upstream error cases handled differently:\n  " + "\n  ".join(wrong)

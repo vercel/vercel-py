@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import re as re_module
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -19,7 +18,14 @@ from .constants import (
     SPARSE,
     UNDEFINED,
 )
-from .utils import Undefined, is_js_integer, is_valid_array_index, is_valid_array_len
+from .utils import (
+    Hole,
+    JsBigInt,
+    JsRegExp,
+    Undefined,
+    is_valid_array_index,
+    is_valid_array_len,
+)
 
 
 def parse(serialized: str, revivers: dict[str, Callable] | None = None) -> Any:
@@ -69,13 +75,11 @@ def unflatten(parsed: Any, revivers: dict[str, Callable] | None = None) -> Any:
         if standalone or not isinstance(index, (int, float)) or isinstance(index, bool):
             raise ValueError("Invalid input")
 
-        # A non-integral index can never address a slot; JS reads `undefined`
-        # from the gap rather than truncating towards one.  Checked before the
-        # cache because such an index resolves to `Undefined` either way.
-        if not is_js_integer(index):
+        # A float index addresses no slot; JS reads `undefined` from the gap
+        # rather than truncating towards one. Checked before the cache
+        # because such an index resolves to `Undefined` either way.
+        if not isinstance(index, int):
             return Undefined
-
-        index = int(index)
 
         if index in hydrated:
             return hydrated[index]
@@ -180,12 +184,18 @@ def unflatten(parsed: Any, revivers: dict[str, Callable] | None = None) -> Any:
         elif type_name == "RegExp":
             pattern = value[1]
             flags_str = value[2] if len(value) > 2 else ""
-            py_flags = _js_flags_to_py(flags_str)
-            hydrated[index] = re_module.compile(pattern, py_flags)
+            hydrated[index] = JsRegExp(pattern, flags_str)
 
         elif type_name == "Object":
             wrapped_index = value[1]
-            wrapped_raw = values[wrapped_index] if isinstance(wrapped_index, int) else None
+            # A boxed special value carries a negative sentinel here (`-3` for
+            # NaN, `-6` for -0, …), and JS reads an out-of-range index as
+            # `undefined` rather than wrapping around to a real element.
+            wrapped_raw = (
+                values[wrapped_index]
+                if isinstance(wrapped_index, int) and 0 <= wrapped_index < len(values)
+                else None
+            )
             if isinstance(wrapped_raw, (dict, list)) and not (
                 isinstance(wrapped_raw, list)
                 and len(wrapped_raw) > 0
@@ -195,7 +205,7 @@ def unflatten(parsed: Any, revivers: dict[str, Callable] | None = None) -> Any:
             hydrated[index] = hydrate(wrapped_index)
 
         elif type_name == "BigInt":
-            hydrated[index] = int(value[1])
+            hydrated[index] = JsBigInt(value[1])
 
         elif type_name == "null":
             obj: dict[str, Any] = {}
@@ -290,11 +300,10 @@ def _hydrate_sparse(
     hydrated: dict,
 ) -> None:
     """Hydrate a sparse-array encoding ``[SPARSE, length, idx, val, …]``."""
-    raw_length = value[1]
-    if not is_valid_array_len(raw_length):
+    length = value[1]
+    if not is_valid_array_len(length):
         raise ValueError("Invalid input")
 
-    length = int(raw_length)
     if length > MAX_SPARSE_ARRAY_LENGTH:
         # `length` comes from the input rather than being bounded by it, so
         # honouring it would let a few bytes of payload allocate arbitrary
@@ -304,13 +313,13 @@ def _hydrate_sparse(
             f"Sparse array length {length} exceeds the maximum of {MAX_SPARSE_ARRAY_LENGTH}"
         )
 
-    array: list[Any] = [Undefined] * length
+    array: list[Any] = [Hole] * length
     hydrated[index] = array
     for i in range(2, len(value), 2):
         idx = value[i]
         if not is_valid_array_index(idx) or idx >= length:
             raise ValueError("Invalid input")
-        array[int(idx)] = hydrate(value[i + 1])
+        array[idx] = hydrate(value[i + 1])
 
 
 def _hydrate_dense(
@@ -320,11 +329,11 @@ def _hydrate_dense(
     hydrated: dict,
 ) -> None:
     """Hydrate a dense array (may contain ``HOLE`` sentinels)."""
-    array: list[Any] = [Undefined] * len(value)
+    array: list[Any] = [Hole] * len(value)
     hydrated[index] = array
     for i, n in enumerate(value):
         if n == HOLE:
-            continue  # leave as Undefined
+            continue  # leave as Hole
         array[i] = hydrate(n)
 
 
@@ -333,17 +342,3 @@ def _parse_iso_date(s: str) -> datetime:
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     return datetime.fromisoformat(s)
-
-
-def _js_flags_to_py(flags_str: str) -> int:
-    """Convert a JS regex flag string (e.g. ``"gim"``) to Python ``re`` flags."""
-    result = 0
-    for c in flags_str:
-        if c == "i":
-            result |= re_module.IGNORECASE
-        elif c == "m":
-            result |= re_module.MULTILINE
-        elif c == "s":
-            result |= re_module.DOTALL
-        # 'g', 'u', 'y', 'd' have no Python equivalent — silently ignored
-    return result

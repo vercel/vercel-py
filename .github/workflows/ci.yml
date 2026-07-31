@@ -42,6 +42,19 @@ jobs:
         with:
           node-version: '22'
 
+      # The interop tests fall back to `npm install devalue` when pointed at
+      # nothing, but here we use a pinned checkout: it also carries the test
+      # fixtures the tarball omits, and it keeps npm out of CI. `index.js` and
+      # `src/` are byte-identical to the published package, so this ref is what
+      # the port is actually verified against.
+      - name: Checkout devalue
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: sveltejs/devalue
+          ref: v5.8.2
+          path: .devalue-upstream
+          persist-credentials: false
+
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
@@ -53,6 +66,8 @@ jobs:
 
       - name: Test
         run: ./scripts/test.sh
+        env:
+          VERCEL_DEVALUE_JS: ${{ github.workspace }}/.devalue-upstream
 
       - name: Build package
         run: ./scripts/build.sh

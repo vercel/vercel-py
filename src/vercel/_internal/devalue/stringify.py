@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .constants import (
+    HOLE,
     MAX_SAFE_INTEGER,
     NAN,
     NEGATIVE_INFINITY,
@@ -17,7 +18,16 @@ from .constants import (
     POSITIVE_INFINITY,
     UNDEFINED,
 )
-from .utils import DevalueError, Undefined, stringify_key, stringify_string
+from .utils import (
+    DevalueError,
+    Hole,
+    JsBigInt,
+    JsRegExp,
+    Undefined,
+    py_flags_to_js,
+    stringify_key,
+    stringify_string,
+)
 
 
 def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
@@ -61,6 +71,8 @@ def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
             return ("n",)
         if thing is Undefined:
             return ("u",)
+        if isinstance(thing, JsBigInt):
+            return ("bigint", int(thing))
         if isinstance(thing, int):
             return ("i", thing)
         if isinstance(thing, float):
@@ -75,6 +87,9 @@ def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
         # --- special values → negative sentinel constants ---
         if thing is Undefined:
             return UNDEFINED
+        if thing is Hole:
+            # Only an array slot can be a hole; the array branch handles it.
+            raise DevalueError("Cannot stringify a hole outside an array", keys, thing, value)
         if isinstance(thing, float):
             if math.isnan(thing):
                 return NAN
@@ -119,6 +134,9 @@ def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
             for i, item in enumerate(thing):
                 if i > 0:
                     parts.append(",")
+                if item is Hole:
+                    parts.append(str(HOLE))
+                    continue
                 keys.append(f"[{i}]")
                 parts.append(str(flatten(item)))
                 keys.pop()
@@ -176,10 +194,15 @@ def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
             stringified[index] = f'["Date","{iso}"]'
             return index
 
-        # --- re.Pattern → RegExp ---
-        if isinstance(thing, re_module.Pattern):
-            source = thing.pattern
-            flags_str = _py_re_flags_to_js(thing.flags)
+        # --- JsRegExp / re.Pattern → RegExp ---
+        if isinstance(thing, (JsRegExp, re_module.Pattern)):
+            if isinstance(thing, JsRegExp):
+                source, flags_str = thing.source, thing.flags
+            else:
+                # Best effort: a Python pattern is not a JS one, so this can
+                # produce a source the far side refuses to compile.
+                source = thing.pattern
+                flags_str = py_flags_to_js(thing.flags)
             if flags_str:
                 stringified[index] = f'["RegExp",{stringify_string(source)},"{flags_str}"]'
             else:
@@ -236,6 +259,8 @@ def _stringify_primitive(thing: Any) -> str:
     # bool MUST be checked before int (bool is a subclass of int)
     if isinstance(thing, bool):
         return "true" if thing else "false"
+    if isinstance(thing, JsBigInt):
+        return f'["BigInt","{int(thing)}"]'
     if isinstance(thing, int):
         # A JS `number` cannot hold these exactly, so emitting a bare JSON
         # number would silently round-trip as a different value.  Any integer
@@ -247,15 +272,3 @@ def _stringify_primitive(thing: Any) -> str:
         # NaN / Inf / -Inf / -0 are handled before reaching here
         return repr(thing)
     return str(thing)  # pragma: no cover
-
-
-def _py_re_flags_to_js(flags: int) -> str:
-    """Convert Python regex flags to a JS-style flag string (e.g. ``"gim"``)."""
-    result = ""
-    if flags & re_module.IGNORECASE:
-        result += "i"
-    if flags & re_module.MULTILINE:
-        result += "m"
-    if flags & re_module.DOTALL:
-        result += "s"
-    return result

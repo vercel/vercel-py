@@ -7,10 +7,13 @@ vice-versa.
 
 from .parse import parse, unflatten
 from .stringify import stringify
-from .utils import DevalueError, Undefined
+from .utils import DevalueError, Hole, JsBigInt, JsRegExp, Undefined
 
 __all__ = [
     "DevalueError",
+    "Hole",
+    "JsBigInt",
+    "JsRegExp",
     "Undefined",
     "parse",
     "stringify",
