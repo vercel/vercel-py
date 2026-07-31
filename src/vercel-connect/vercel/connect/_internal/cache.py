@@ -17,10 +17,6 @@ from typing import Any
 
 from vercel.connect._internal.models import ConnectTokenSubject
 from vercel.connect._internal.state import ConnectTokenRequest, ConnectTokenState
-from vercel.connect._internal.wire import (
-    serialize_authorization_detail,
-    serialize_subject,
-)
 
 
 class _PendingLoad:
@@ -113,7 +109,7 @@ def _canonical_subject(subject: ConnectTokenSubject) -> Any:
     credential: it has to participate in the key so two inbound tokens never
     share an entry, but it must not be stored, so only its digest is kept.
     """
-    canonical = _canonical(serialize_subject(subject))
+    canonical = _canonical(subject.to_wire())
     if isinstance(canonical, dict) and "token" in canonical:
         token = canonical["token"]
         canonical = {name: value for name, value in canonical.items() if name != "token"}
@@ -151,7 +147,7 @@ def build_cache_key(request: ConnectTokenRequest, *, identity: str) -> TokenCach
                 # Keyed by the wire form: two requests the server cannot tell
                 # apart must not occupy separate cache entries.
                 json.dumps(
-                    _canonical(serialize_authorization_detail(detail)),
+                    _canonical(detail.to_wire()),
                     sort_keys=True,
                     separators=(",", ":"),
                 )

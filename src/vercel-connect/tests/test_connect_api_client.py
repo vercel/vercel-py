@@ -20,7 +20,11 @@ from vercel.connect import (
     ConnectUserTokenSubject,
 )
 from vercel.connect._internal.api_client import ConnectApiClient
-from vercel.connect._internal.state import ConnectAuthorizationRequest, ConnectTokenRequest
+from vercel.connect._internal.state import (
+    ConnectAuthorizationRequest,
+    ConnectRevokeRequest,
+    ConnectTokenRequest,
+)
 
 
 class FakeTransport(BaseTransport):
@@ -120,7 +124,8 @@ async def test_revoke_token_percent_encodes_the_connector() -> None:
     api_client, transport = client(httpx.Response(204, content=b""))
 
     await api_client.revoke_token(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
+        ConnectRevokeRequest(connector="slack/my-bot", subject=ConnectAppTokenSubject()),
+        vercel_token="oidc-token",
     )
 
     request = transport.requests[0]
@@ -222,7 +227,8 @@ async def test_revoke_accepts_an_empty_success_body() -> None:
     api_client, transport = client(httpx.Response(204, content=b""))
 
     await api_client.revoke_token(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
+        ConnectRevokeRequest(connector="slack/my-bot", subject=ConnectAppTokenSubject()),
+        vercel_token="oidc-token",
     )
 
     assert len(transport.requests) == 1
@@ -232,7 +238,8 @@ async def test_revoke_accepts_a_json_success_body() -> None:
     api_client, transport = client(httpx.Response(200, json={"revoked": 2}))
 
     await api_client.revoke_token(
-        "slack/my-bot", subject=ConnectAppTokenSubject(), vercel_token="oidc-token"
+        ConnectRevokeRequest(connector="slack/my-bot", subject=ConnectAppTokenSubject()),
+        vercel_token="oidc-token",
     )
 
     assert len(transport.requests) == 1

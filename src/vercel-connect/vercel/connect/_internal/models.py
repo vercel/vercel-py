@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any, Literal, TypeAlias
 
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from vercel.connect._internal.base import ConnectModel, StringContainer, StringField
 
@@ -52,7 +52,9 @@ class ConnectJwtBearerTokenSubject(ConnectModel):
     sub: str
     iss: str | None = None
     aud: str | None = None
-    additional_claims: JSONObject | None = None
+    additional_claims: JSONObject | None = Field(
+        default=None, serialization_alias="additionalClaims"
+    )
     type: Literal["jwt-bearer"] = "jwt-bearer"
 
 
@@ -85,6 +87,12 @@ class ConnectCustomAuthorizationDetail(ConnectModel):
 
     type: str
     details: JSONObject = Field(default_factory=dict)
+
+    @model_serializer
+    def _to_wire(self) -> dict[str, Any]:
+        # `details` is spread, and `type` is written last so a stray "type" key in
+        # it cannot silently change which kind of authorization is requested.
+        return {**dict(self.details), "type": self.type}
 
 
 ConnectAuthorizationDetail: TypeAlias = (

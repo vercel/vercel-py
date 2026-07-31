@@ -8,10 +8,9 @@ import inspect
 import os
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, cast
 
-from vercel._internal.core.time import coerce_duration
+from vercel._internal.core.time import coerce_duration, parse_epoch_seconds
 from vercel.connect._internal.api_client import ConnectApiClient
 from vercel.connect._internal.base import ConnectModel, StringContainer
 from vercel.connect._internal.cache import TokenCache, build_cache_key
@@ -48,6 +47,7 @@ from vercel.connect._internal.state import (
     ConnectAuthorizationState,
     ConnectorMetadataState,
     ConnectorRefState,
+    ConnectRevokeRequest,
     ConnectTokenRequest,
     ConnectTokenState,
 )
@@ -62,12 +62,6 @@ _DETACHED_ENV = "VERCEL_CONNECT_INTERACTIVE_AUTH_MODE"
 def is_detached_interactive_auth() -> bool:
     """Whether device-code authorization is the configured default."""
     return os.environ.get(_DETACHED_ENV, "").strip().lower() == "detached"
-
-
-def _from_epoch(value: Any) -> datetime | None:
-    if not isinstance(value, (int, float)):
-        return None
-    return datetime.fromtimestamp(value, tz=timezone.utc)
 
 
 def _connector_ref(state: ConnectorRefState) -> ConnectorRef:
@@ -257,10 +251,10 @@ class ConnectService:
         self._ensure_open()
         identity = await self._identity(options)
         await self._api_client.revoke_token(
-            connector,
-            subject=subject,
+            ConnectRevokeRequest(
+                connector=connector, subject=subject, installation_id=installation_id
+            ),
             vercel_token=identity,
-            installation_id=installation_id,
         )
         # Scoped, not global: revoking one subject must not evict the others.
         self._cache.delete_by_subject(connector, subject=subject, installation_id=installation_id)
@@ -371,8 +365,8 @@ class ConnectService:
             environment=claims.get("environment"),
             owner_id=claims.get("owner_id"),
             audience=resolved_audience,
-            issued_at=_from_epoch(claims.get("iat")),
-            expires_at=_from_epoch(claims.get("exp")),
+            issued_at=parse_epoch_seconds(claims.get("iat")),
+            expires_at=parse_epoch_seconds(claims.get("exp")),
             claims=claims,
         )
 

@@ -2,10 +2,12 @@
 
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Any
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_serializer, field_validator
 
+from vercel._internal.core.time import to_ms_int
 from vercel.connect._internal.base import ConnectModel, StringField, reject_bool
 from vercel.connect._internal.errors import ConnectValidationError
 from vercel.connect._internal.models import (
@@ -23,13 +25,26 @@ def _is_local_host(host: str) -> bool:
     return host in _LOCAL_HOSTS or host.endswith(".localhost")
 
 
-class _ConnectorRequest(ConnectModel):
-    """What every credential request names: a connector, a subject, and scopes."""
+class _SubjectRequest(ConnectModel):
+    """What every credential request names: a connector and a subject."""
 
     connector: str
     subject: ConnectTokenSubject = Field(discriminator="type")
+    installation_id: str | None = Field(default=None, serialization_alias="installationId")
+
+    def to_api_body(self) -> dict[str, Any]:
+        """Render the request body. `connector` names the path, not the body."""
+        return self.model_dump(mode="json", by_alias=True, exclude_none=True, exclude={"connector"})
+
+
+class ConnectRevokeRequest(_SubjectRequest):
+    """A grant to revoke."""
+
+
+class _ScopedRequest(_SubjectRequest):
+    """A credential request that can narrow what the credential may do."""
+
     scopes: StringField | None = None
-    installation_id: str | None = None
 
     @field_validator("scopes")
     @classmethod
@@ -41,7 +56,7 @@ class _ConnectorRequest(ConnectModel):
         )
 
 
-class ConnectTokenRequest(_ConnectorRequest):
+class ConnectTokenRequest(_ScopedRequest):
     """Everything that decides which credential the server mints.
 
     One value serves both the request body and the cache key, so a field cannot
@@ -50,16 +65,22 @@ class ConnectTokenRequest(_ConnectorRequest):
 
     audience: StringField | None = None
     resources: StringField | None = None
-    authorization_details: Sequence[ConnectAuthorizationDetail] | None = None
+    authorization_details: Sequence[ConnectAuthorizationDetail] | None = Field(
+        default=None, serialization_alias="authorizationDetails"
+    )
 
 
-class ConnectAuthorizationRequest(_ConnectorRequest):
+class ConnectAuthorizationRequest(_ScopedRequest):
     """An end-user consent flow to start."""
 
-    return_url: str | None = None
+    return_url: str | None = Field(default=None, serialization_alias="returnUrl")
     webhook: str | None = None
-    device_code: bool | None = None
-    expires_in: timedelta | None = None
+    device_code: bool | None = Field(default=None, serialization_alias="deviceCode")
+    expires_in: timedelta | None = Field(default=None, serialization_alias="expiresInMs")
+
+    @field_serializer("expires_in")
+    def _serialize_expires_in(self, expires_in: timedelta | None) -> int | None:
+        return None if expires_in is None else to_ms_int(expires_in)
 
     @field_validator("return_url")
     @classmethod
@@ -148,6 +169,7 @@ class ConnectorMetadataState(ConnectModel):
 __all__ = [
     "ConnectAuthorizationRequest",
     "ConnectAuthorizationState",
+    "ConnectRevokeRequest",
     "ConnectTokenRequest",
     "ConnectTokenState",
     "ConnectorMetadataState",

@@ -83,6 +83,16 @@ class ConnectModel(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    def to_wire(self) -> dict[str, Any]:
+        """Render this value the way the Connect API expects it.
+
+        The one wire form, so the request body and the cache key can never disagree
+        about what a request means. They diverged once: a stray `type` key inside a
+        custom authorization detail was dropped from the body but still split the
+        cache.
+        """
+        return self.model_dump(mode="json", by_alias=True, exclude_none=True)
+
     def __init__(self, **data: Any) -> None:
         try:
             super().__init__(**data)

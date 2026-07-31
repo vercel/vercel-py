@@ -488,13 +488,11 @@ async def test_bare_string_scopes_are_rejected_by_start_authorization(
 
 
 def test_sequence_permissions_are_accepted() -> None:
-    from vercel.connect._internal.wire import serialize_authorization_detail
-
     detail = ConnectGitHubAppInstallationAuthorizationDetail(
         org="acme", permissions=["contents:read"], repositories=("web",)
     )
 
-    assert serialize_authorization_detail(detail) == {
+    assert detail.to_wire() == {
         "type": "github_app_installation",
         "org": "acme",
         "permissions": ["contents:read"],

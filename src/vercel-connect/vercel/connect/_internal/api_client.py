@@ -3,7 +3,7 @@
 import platform
 import sys
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, TypeVar
 from urllib.parse import quote
@@ -18,7 +18,7 @@ from vercel._internal.core.http import (
     RequestBody,
     extract_structured_error,
 )
-from vercel._internal.core.time import to_ms_int
+from vercel._internal.core.time import from_epoch_ms
 from vercel.connect._internal.errors import (
     AuthorizationDeniedError,
     AuthorizationExpiredError,
@@ -32,7 +32,6 @@ from vercel.connect._internal.errors import (
     UserAuthorizationRequiredError,
 )
 from vercel.connect._internal.models import (
-    ConnectTokenSubject,
     JSONObject,
 )
 from vercel.connect._internal.options import ConnectCredentialsFactory
@@ -41,12 +40,9 @@ from vercel.connect._internal.state import (
     ConnectAuthorizationState,
     ConnectorMetadataState,
     ConnectorRefState,
+    ConnectRevokeRequest,
     ConnectTokenRequest,
     ConnectTokenState,
-)
-from vercel.connect._internal.wire import (
-    serialize_authorization_detail as _serialize_authorization_detail,
-    serialize_subject as _serialize_subject,
 )
 
 try:
@@ -134,7 +130,7 @@ class _TokenResponseModel(_ApiModel):
     def to_state(self) -> ConnectTokenState:
         return ConnectTokenState(
             token=self.token,
-            expires_at=_from_epoch_ms(self.expires_at),
+            expires_at=from_epoch_ms(self.expires_at),
             connector=self.connector.to_state(),
             token_id=self.token_id,
             name=self.name,
@@ -160,7 +156,7 @@ class _AuthorizationResponseModel(_ApiModel):
             request=self.request,
             verifier=self.verifier,
             device_code=self.device_code,
-            expires_at=None if self.expires_at is None else _from_epoch_ms(self.expires_at),
+            expires_at=None if self.expires_at is None else from_epoch_ms(self.expires_at),
             connector=None if self.connector is None else self.connector.to_state(),
         )
 
@@ -193,15 +189,11 @@ class _ConnectorMetadataModel(_ApiModel):
             name=self.name,
             service=self.service,
             client_url=self.client_url,
-            created_at=None if self.created_at is None else _from_epoch_ms(self.created_at),
-            updated_at=None if self.updated_at is None else _from_epoch_ms(self.updated_at),
+            created_at=None if self.created_at is None else from_epoch_ms(self.created_at),
+            updated_at=None if self.updated_at is None else from_epoch_ms(self.updated_at),
             vendor=dict(self.data or {}),
             extra=extra,
         )
-
-
-def _from_epoch_ms(value: int) -> datetime:
-    return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
 
 
 def _encode_connector(connector: str) -> str:
@@ -328,72 +320,33 @@ class ConnectApiClient:
         self, request: ConnectTokenRequest, *, vercel_token: str
     ) -> ConnectTokenState:
         """POST /v1/connect/token/:connector."""
-        body: dict[str, Any] = {"subject": _serialize_subject(request.subject)}
-        if request.scopes is not None:
-            body["scopes"] = list(request.scopes)
-        if request.installation_id is not None:
-            body["installationId"] = request.installation_id
-        if request.audience is not None:
-            body["audience"] = list(request.audience)
-        if request.resources is not None:
-            body["resources"] = list(request.resources)
-        if request.authorization_details is not None:
-            body["authorizationDetails"] = [
-                _serialize_authorization_detail(detail) for detail in request.authorization_details
-            ]
-
         response = await self._request(
             "POST",
             f"/v1/connect/token/{_encode_connector(request.connector)}",
             vercel_token=vercel_token,
-            body=JSONBody(body),
+            body=JSONBody(request.to_api_body()),
         )
         return self._parse(response, _TokenResponseModel).to_state()
 
-    async def revoke_token(
-        self,
-        connector: str,
-        *,
-        subject: ConnectTokenSubject,
-        vercel_token: str,
-        installation_id: str | None = None,
-    ) -> None:
+    async def revoke_token(self, request: ConnectRevokeRequest, *, vercel_token: str) -> None:
         """DELETE /v1/connect/connectors/:connector/tokens."""
-        body: dict[str, Any] = {"subject": _serialize_subject(subject)}
-        if installation_id is not None:
-            body["installationId"] = installation_id
-
         # Revocation may answer with an empty body, so nothing is parsed.
         await self._request(
             "DELETE",
-            f"/v1/connect/connectors/{_encode_connector(connector)}/tokens",
+            f"/v1/connect/connectors/{_encode_connector(request.connector)}/tokens",
             vercel_token=vercel_token,
-            body=JSONBody(body),
+            body=JSONBody(request.to_api_body()),
         )
 
     async def create_authorization(
         self, request: ConnectAuthorizationRequest, *, vercel_token: str
     ) -> ConnectAuthorizationState:
         """POST /v1/connect/authorize/:connector."""
-        body: dict[str, Any] = {"subject": _serialize_subject(request.subject)}
-        if request.scopes is not None:
-            body["scopes"] = list(request.scopes)
-        if request.installation_id is not None:
-            body["installationId"] = request.installation_id
-        if request.return_url is not None:
-            body["returnUrl"] = request.return_url
-        if request.webhook is not None:
-            body["webhook"] = request.webhook
-        if request.device_code is not None:
-            body["deviceCode"] = request.device_code
-        if request.expires_in is not None:
-            body["expiresInMs"] = to_ms_int(request.expires_in)
-
         response = await self._request(
             "POST",
             f"/v1/connect/authorize/{_encode_connector(request.connector)}",
             vercel_token=vercel_token,
-            body=JSONBody(body),
+            body=JSONBody(request.to_api_body()),
         )
         return self._parse(response, _AuthorizationResponseModel).to_state()
 
