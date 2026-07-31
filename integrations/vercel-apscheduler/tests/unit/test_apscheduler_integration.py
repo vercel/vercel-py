@@ -161,9 +161,10 @@ class FakeDriver:
         self,
         now: datetime,
         *,
+        idle_timeout_seconds: int | None = None,
         takeover_allowed: bool = False,
     ) -> StartDecision:
-        del now
+        del now, idle_timeout_seconds
         with self.lock:
             foreign = (
                 self.owner_deployment_value is not None

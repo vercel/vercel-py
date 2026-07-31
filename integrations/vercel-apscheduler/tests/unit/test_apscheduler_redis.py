@@ -21,7 +21,7 @@ from vercel.integrations.apscheduler import (
     install_vercel_apscheduler_integration,
 )
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
-from vercel.integrations.apscheduler._driver import RedisDriver
+from vercel.integrations.apscheduler._driver import RedisDriver, StartDecision
 
 UTC = timezone.utc
 REDIS_URL = environ.get("APSCHEDULER_TEST_REDIS_URL")
@@ -781,6 +781,106 @@ def test_real_redis_takeover_reconciles_declared_jobs(
         client.delete(*keys)
 
 
+def test_real_redis_preview_idle_deadline_is_atomic_and_respects_pause() -> None:
+    assert REDIS_URL is not None
+    client = Redis.from_url(REDIS_URL)
+    driver = RedisDriver(
+        client,
+        scope="dpl_preview_idle_test",
+        scheduler_id="scheduler",
+        deployment="dpl_preview_idle_test",
+    )
+    client.delete(driver.key)
+    try:
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+
+        def activate(_: int) -> StartDecision:
+            return driver.auto_activate(
+                now,
+                idle_timeout_seconds=30 * 60,
+            )
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            starts = list(executor.map(activate, range(100)))
+        assert sum(decision.changed for decision in starts) == 1
+        assert {decision.generation for decision in starts} == {1}
+        assert {decision.state for decision in starts} == {"running"}
+
+        renewed = driver.auto_activate(
+            now + timedelta(minutes=5),
+            idle_timeout_seconds=30 * 60,
+        )
+        assert not renewed.changed
+        assert renewed.generation == 1
+
+        assert driver.claim_start(1, "old-owner", now).state == "claimed"
+        assert driver.renew("old-owner", now + timedelta(minutes=25))
+        restarted = driver.auto_activate(
+            now + timedelta(minutes=36),
+            idle_timeout_seconds=30 * 60,
+        )
+        assert restarted.changed
+        assert restarted.generation == 2
+        assert (
+            driver.claim_start(
+                2,
+                "new-owner",
+                now + timedelta(minutes=36),
+            ).state
+            == "busy"
+        )
+        old_finish = driver.finish_start(
+            1,
+            "old-owner",
+            now + timedelta(hours=1),
+            now + timedelta(minutes=36),
+        )
+        assert old_finish.state == "fenced"
+        assert (
+            driver.claim_start(
+                2,
+                "new-owner",
+                now + timedelta(minutes=36),
+            ).state
+            == "claimed"
+        )
+        driver.release("new-owner")
+
+        assert driver.pause(now + timedelta(minutes=37))
+        paused = driver.auto_activate(
+            now + timedelta(hours=2),
+            idle_timeout_seconds=30 * 60,
+        )
+        assert not paused.changed
+        assert paused.state == "paused"
+        assert paused.generation == 2
+        assert driver.snapshot().state == "paused"
+
+        resumed = driver.start(
+            now + timedelta(hours=2),
+            idle_timeout_seconds=30 * 60,
+        )
+        assert resumed.generation == 3
+        assert (
+            driver.claim_start(
+                3,
+                "expiring-owner",
+                now + timedelta(hours=2),
+            ).state
+            == "claimed"
+        )
+        expired_finish = driver.finish_start(
+            3,
+            "expiring-owner",
+            now + timedelta(hours=3),
+            now + timedelta(hours=2, minutes=31),
+        )
+        assert expired_finish.state == "fenced"
+        assert driver.snapshot().state == "inactive"
+    finally:
+        client.delete(driver.key)
+
+
 @pytest.mark.skipif(
     REDIS_URL is None,
     reason="requires a disposable Redis server",
@@ -904,3 +1004,78 @@ def test_real_redis_quarantine_sidelines_unloadable_jobs(
         assert client.hexists(store.jobs_key, "broken")
     finally:
         client.delete(*keys)
+
+
+def test_real_redis_manual_start_renews_a_lapsed_preview_deadline() -> None:
+    assert REDIS_URL is not None
+    client = Redis.from_url(REDIS_URL)
+    driver = RedisDriver(
+        client,
+        scope="dpl_preview_restart_test",
+        scheduler_id="scheduler",
+        deployment="dpl_preview_restart_test",
+    )
+    client.delete(driver.key)
+    try:
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+        driver.auto_activate(now, idle_timeout_seconds=60)
+
+        # The deadline lapsed; a manual start must renew it, or the new
+        # generation would be demoted before its start message could claim.
+        restarted = driver.start(
+            now + timedelta(minutes=10),
+            idle_timeout_seconds=60,
+        )
+        assert restarted.changed
+        assert restarted.generation == 2
+        assert restarted.state == "running"
+        assert (
+            driver.claim_start(
+                2,
+                "start-owner",
+                now + timedelta(minutes=10),
+            ).state
+            == "claimed"
+        )
+        assert driver.snapshot().state == "running"
+    finally:
+        client.delete(driver.key)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_expired_preview_wake_cannot_run() -> None:
+    assert REDIS_URL is not None
+    client = Redis.from_url(REDIS_URL)
+    driver = RedisDriver(
+        client,
+        scope="dpl_preview_wake_test",
+        scheduler_id="scheduler",
+        deployment="dpl_preview_wake_test",
+    )
+    client.delete(driver.key)
+    try:
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+        driver.auto_activate(now, idle_timeout_seconds=60)
+        assert driver.claim_start(1, "start-owner", now).state == "claimed"
+        finished = driver.finish_start(
+            1,
+            "start-owner",
+            now + timedelta(minutes=5),
+            now,
+        )
+        wake = finished.wake
+        assert wake is not None
+
+        claim = driver.claim_wake(
+            wake,
+            "wake-owner",
+            now + timedelta(minutes=2),
+        )
+        assert claim.state == "stale"
+        assert driver.snapshot().state == "inactive"
+        assert driver.snapshot().current_wake is None
+    finally:
+        client.delete(driver.key)

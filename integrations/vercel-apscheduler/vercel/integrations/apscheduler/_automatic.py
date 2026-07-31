@@ -20,10 +20,12 @@ from ._options import (
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
+PREVIEW_IDLE_TIMEOUT_ENV = "VERCEL_APSCHEDULER_PREVIEW_IDLE_TIMEOUT_SECONDS"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 ACTIVATION_HOOK_NAME = "vercel-apscheduler:auto-activate"
-# Activation is idempotent; the periodic re-run is what notices and heals a
-# wake whose queue message died (for example stranded by a rollback).
+MAX_PREVIEW_RENEW_INTERVAL_SECONDS = 5 * 60
+# Activation is idempotent; the periodic re-run renews preview deadlines and
+# heals a wake whose queue message died (for example stranded by a rollback).
 HEAL_SWEEP_INTERVAL_SECONDS = 5 * 60
 
 
@@ -34,6 +36,15 @@ def register_automatic_activation() -> None:
     if is_discovery_runtime() or is_queue_serving_runtime():
         return
 
+    timeout = _preview_idle_timeout()
+    interval = (
+        min(
+            float(MAX_PREVIEW_RENEW_INTERVAL_SECONDS),
+            timeout / 3,
+        )
+        if timeout is not None
+        else float(HEAL_SWEEP_INTERVAL_SECONDS)
+    )
     try:
         from vercel_runtime.invocation_hooks import (  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
             run_on_next_invocation,
@@ -47,12 +58,15 @@ def register_automatic_activation() -> None:
     run_on_next_invocation(
         ACTIVATION_HOOK_NAME,
         _automatic_activation_hook,
-        repeat_after_seconds=HEAL_SWEEP_INTERVAL_SECONDS,
+        repeat_after_seconds=interval,
     )
 
 
 def _automatic_activation_hook() -> None:
-    _activate_configured_schedulers(takeover_allowed=_request_is_alias_routed())
+    _activate_configured_schedulers(
+        _preview_idle_timeout(),
+        takeover_allowed=_request_is_alias_routed(),
+    )
 
 
 def _request_is_alias_routed() -> bool:
@@ -104,16 +118,46 @@ def _automatic_environment() -> bool:
 
     Named environments (production and custom environments) share one durable
     chain that must start and take over without a manual call, so they always
-    activate. The resolution must match ``resolve_state_scope``: a custom
-    environment reports ``VERCEL_ENV=preview`` but is a named environment.
+    activate. Previews activate only when idling is configured, so a preview
+    chain cannot outlive its usefulness. The resolution must match
+    ``resolve_state_scope``: a custom environment reports
+    ``VERCEL_ENV=preview`` but is a named environment.
     """
     if not is_vercel_runtime() or not environ.get(SUBSCRIBERS_ENV):
         return False
     environment = resolve_environment().casefold()
-    return environment not in {"", "development", "preview"}
+    if environment in {"", "development"}:
+        return False
+    if environment == "preview":
+        return PREVIEW_IDLE_TIMEOUT_ENV in environ
+    return True
 
 
-def _activate_configured_schedulers(*, takeover_allowed: bool) -> None:
+def _preview_idle_timeout() -> int | None:
+    """The idle deadline for previews; named environments never idle."""
+    if resolve_environment().casefold() != "preview":
+        return None
+    raw = environ.get(PREVIEW_IDLE_TIMEOUT_ENV)
+    if raw is None:
+        return None
+    try:
+        timeout = int(raw)
+    except ValueError as exc:
+        raise APSchedulerConfigurationError(
+            f"{PREVIEW_IDLE_TIMEOUT_ENV} must be a positive integer"
+        ) from exc
+    if timeout <= 0:
+        raise APSchedulerConfigurationError(
+            f"{PREVIEW_IDLE_TIMEOUT_ENV} must be a positive integer"
+        )
+    return timeout
+
+
+def _activate_configured_schedulers(
+    idle_timeout_seconds: int | None,
+    *,
+    takeover_allowed: bool,
+) -> None:
     from ._adapter import get_adapter
 
     for scheduler in _configured_schedulers():
@@ -122,7 +166,10 @@ def _activate_configured_schedulers(*, takeover_allowed: bool) -> None:
             raise APSchedulerConfigurationError(
                 "configured APScheduler subscriber was not adopted by the integration"
             )
-        adapter.auto_activate(takeover_allowed=takeover_allowed)
+        adapter.auto_activate(
+            idle_timeout_seconds=idle_timeout_seconds,
+            takeover_allowed=takeover_allowed,
+        )
 
 
 def _configured_schedulers() -> list[BaseScheduler]:
