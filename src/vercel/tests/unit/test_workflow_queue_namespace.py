@@ -119,6 +119,27 @@ def test_queue_names_accept_explicit_namespace() -> None:
     assert w.get_queue_name("step", "example", "python2") == "__python2_wkf_step_example"
 
 
+def test_physical_topic_keeps_the_wkf_prefix_intact() -> None:
+    # `@workflow/world-vercel` publishes the logical queue name with only
+    # non-[A-Za-z0-9-_] characters replaced by "-". Running it through
+    # `vqs.sanitize_name` instead would double the underscores and push the
+    # result outside the `__wkf_*` prefix that the builder's trigger pattern
+    # and platform service resolution key on.
+    assert w.get_physical_topic("__wkf_workflow_") == "__wkf_workflow_"
+    assert w.get_physical_topic("__python2_wkf_step_") == "__python2_wkf_step_"
+    assert (
+        w.get_physical_topic(f"__wkf_workflow_{WORKFLOW_NAME}")
+        == "__wkf_workflow_workflow--tests-example"
+    )
+
+
+def test_queue_consumer_group_is_stable() -> None:
+    # The builder copies this into the generated trigger, and dispatch is keyed
+    # on (consumer_group, topic), so it has to stay put across refactors —
+    # deriving it from the handler's qualname would move it silently.
+    assert str(w.QUEUE_CONSUMER_GROUP) == "default"
+
+
 @pytest.mark.parametrize("namespace", ["", "123abc", "Custom", "my-framework", "my_namespace"])
 def test_invalid_queue_namespaces_are_rejected(namespace: str) -> None:
     with pytest.raises(ValueError, match="Invalid queue namespace"):
