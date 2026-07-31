@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2 - 2026-07-31
+
+### Bug Fixes
+
+- Don't require `VERCEL_DEPLOYMENT_ID` to be set when running against a `vercel dev` queue broker. (#211)
+- This will allow us to revert `vc dev` setting `VERCEL_DEPLOYMENT_ID`. (#211)
+
 ## 0.7.1 - 2026-07-16
 
 - No changes.
