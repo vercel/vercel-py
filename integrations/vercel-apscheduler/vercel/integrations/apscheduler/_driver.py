@@ -119,7 +119,8 @@ if state ~= "running" then
     KEYS[1],
     "activation_time",
     "current_logical_time",
-    "current_status"
+    "current_status",
+    "dirty_logical_time"
   )
 end
 
@@ -233,6 +234,10 @@ then
 end
 
 local logical_time = ARGV[3]
+local dirty_time = redis.call("HGET", KEYS[1], "dirty_logical_time")
+if dirty_time and (logical_time == "" or dirty_time < logical_time) then
+  logical_time = dirty_time
+end
 redis.call(
   "HSET",
   KEYS[1],
@@ -257,7 +262,8 @@ redis.call(
   "active_owner",
   "active_kind",
   "active_generation",
-  "active_lease_until"
+  "active_lease_until",
+  "dirty_logical_time"
 )
 return {"advanced", logical_time ~= "" and "1" or "", logical_time}
 """
@@ -350,6 +356,10 @@ then
 end
 
 local logical_time = ARGV[5]
+local dirty_time = redis.call("HGET", KEYS[1], "dirty_logical_time")
+if dirty_time and (logical_time == "" or dirty_time < logical_time) then
+  logical_time = dirty_time
+end
 local next_sequence = tonumber(ARGV[2])
 if logical_time ~= "" then
   next_sequence = next_sequence + 1
@@ -377,7 +387,8 @@ redis.call(
   "active_kind",
   "active_generation",
   "active_sequence",
-  "active_lease_until"
+  "active_lease_until",
+  "dirty_logical_time"
 )
 return {
   "advanced",
