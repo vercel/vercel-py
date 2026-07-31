@@ -35,6 +35,27 @@ jobs:
         with:
           enable-cache: false
 
+      # The devalue interop tests run the real JS package against the Python
+      # port. They skip when node is absent locally, but are mandatory here.
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      # The interop tests fall back to `npm install devalue` when pointed at
+      # nothing, but here we use a pinned checkout: it also carries the test
+      # fixtures the tarball omits, and it keeps npm out of CI. `index.js` and
+      # `src/` are byte-identical to the published package, so this ref is what
+      # the port is actually verified against.
+      #
+      # Cloned outside the workspace deliberately. `actions/checkout` can only
+      # write inside it, and a copy there puts devalue's own workflows under
+      # our linters, where zizmor reports findings against them.
+      - name: Checkout devalue
+        run: >-
+          git clone --depth 1 --branch v5.9.0
+          https://github.com/sveltejs/devalue.git "$RUNNER_TEMP/devalue"
+
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
@@ -46,6 +67,8 @@ jobs:
 
       - name: Test
         run: ./scripts/test.sh
+        env:
+          VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
 
       - name: Build package
         run: ./scripts/build.sh
