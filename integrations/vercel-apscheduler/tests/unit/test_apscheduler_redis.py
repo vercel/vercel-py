@@ -8,13 +8,11 @@ from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
 from redis import Redis
 
-from vercel.integrations.apscheduler import (
-    VercelRedisJobStore,
-    install_vercel_apscheduler_integration,
-)
+from vercel.integrations.apscheduler import install_vercel_apscheduler_integration
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
 from vercel.integrations.apscheduler._driver import RedisDriver, StartDecision
 
@@ -26,6 +24,20 @@ TEST_SCHEDULER_ID = "scheduler"
 
 def durable_test_job() -> None:
     return
+
+
+_replacement_run_date: dict[str, datetime] = {}
+
+
+def replace_sibling_job() -> None:
+    scheduler = modules[TEST_SCHEDULER_MODULE].__dict__["scheduler"]
+    scheduler.add_job(
+        durable_test_job,
+        "date",
+        run_date=_replacement_run_date["target"],
+        id="target",
+        replace_existing=True,
+    )
 
 
 @pytest.mark.skipif(
@@ -187,7 +199,10 @@ def test_real_redis_preview_idle_deadline_is_atomic_and_respects_pause() -> None
         assert paused.generation == 2
         assert driver.snapshot().state == "paused"
 
-        resumed = driver.start(now + timedelta(hours=2))
+        resumed = driver.start(
+            now + timedelta(hours=2),
+            idle_timeout_seconds=30 * 60,
+        )
         assert resumed.generation == 3
         assert (
             driver.claim_start(
@@ -205,6 +220,45 @@ def test_real_redis_preview_idle_deadline_is_atomic_and_respects_pause() -> None
         )
         assert expired_finish.state == "fenced"
         assert driver.snapshot().state == "inactive"
+    finally:
+        client.delete(driver.key)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_manual_start_renews_a_lapsed_preview_deadline() -> None:
+    assert REDIS_URL is not None
+    client = Redis.from_url(REDIS_URL)
+    driver = RedisDriver(
+        client,
+        deployment="dpl_preview_restart_test",
+        scheduler_id="scheduler",
+    )
+    client.delete(driver.key)
+    try:
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+        driver.auto_activate(now, idle_timeout_seconds=60)
+
+        # The deadline lapsed; a manual start must renew it, or the new
+        # generation would be demoted before its start message could claim.
+        restarted = driver.start(
+            now + timedelta(minutes=10),
+            idle_timeout_seconds=60,
+        )
+        assert restarted.changed
+        assert restarted.generation == 2
+        assert restarted.state == "running"
+        assert (
+            driver.claim_start(
+                2,
+                "start-owner",
+                now + timedelta(minutes=10),
+            ).state
+            == "claimed"
+        )
+        assert driver.snapshot().state == "running"
     finally:
         client.delete(driver.key)
 
@@ -336,7 +390,7 @@ def test_real_redis_cold_declaration_rearms_an_already_dormant_driver(
         _activate_dormant_scheduler(first_scheduler, first_adapter)
 
         assert REDIS_URL is not None
-        second_store = VercelRedisJobStore(url=REDIS_URL)
+        second_store = _redis_job_store(REDIS_URL)
         monkeypatch.delenv("VERCEL")
         second_scheduler = BlockingScheduler(
             timezone=UTC,
@@ -423,6 +477,53 @@ def test_real_redis_mutation_during_owner_is_folded_into_successor(
         assert finish.wake.logical_time == earlier_time
     finally:
         client.delete(*keys)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_in_job_add_replaces_persisted_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler, adapter, client, keys = _real_scheduler(
+        monkeypatch,
+        deployment="dpl_in_job_replace_test",
+    )
+    try:
+        _activate_dormant_scheduler(scheduler, adapter)
+        now = datetime.now(UTC)
+        writer_time = now + timedelta(minutes=5)
+        original_time = now + timedelta(hours=2)
+        replacement_time = now + timedelta(minutes=30)
+        _replacement_run_date["target"] = replacement_time
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="wake",
+        ):
+            scheduler.add_job(
+                durable_test_job,
+                "date",
+                run_date=original_time,
+                id="target",
+            )
+            scheduler.add_job(
+                replace_sibling_job,
+                "date",
+                run_date=writer_time,
+                id="writer",
+            )
+
+        result = adapter.process_wakeup(writer_time, now=writer_time)
+
+        assert result.due_job_ids == ("writer",)
+        persisted = adapter.coordinator.store.lookup_job("target")
+        assert persisted is not None
+        assert persisted.next_run_time == replacement_time
+        assert result.next_wakeup_time == replacement_time
+    finally:
+        client.delete(*keys)
+        _replacement_run_date.clear()
 
 
 @pytest.mark.skipif(
@@ -526,7 +627,7 @@ def _real_scheduler(
     )
     monkeypatch.delenv("VERCEL", raising=False)
     install_vercel_apscheduler_integration(register_queues=False)
-    store = VercelRedisJobStore(url=REDIS_URL)
+    store = _redis_job_store(REDIS_URL)
     scheduler = BlockingScheduler(
         timezone=UTC,
         jobstores={"default": store},
@@ -541,6 +642,10 @@ def _real_scheduler(
     keys = adapter.coordinator.keys
     store.redis.delete(*keys)
     return scheduler, adapter, store.redis, keys
+
+
+def _redis_job_store(url: str) -> RedisJobStore:
+    return RedisJobStore(connection_pool=Redis.from_url(url).connection_pool)
 
 
 def _activate_dormant_scheduler(

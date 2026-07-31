@@ -20,13 +20,19 @@ entrypoint = "scheduler:scheduler"
 ```
 
 ```python
-from apscheduler.schedulers.blocking import BlockingScheduler
+from os import environ
 
-from vercel.integrations.apscheduler import VercelRedisJobStore
+from apscheduler.jobstores.redis import RedisJobStore
+from apscheduler.schedulers.blocking import BlockingScheduler
+from redis import ConnectionPool
 
 scheduler = BlockingScheduler(
     timezone="UTC",
-    jobstores={"default": VercelRedisJobStore()},
+    jobstores={
+        "default": RedisJobStore(
+            connection_pool=ConnectionPool.from_url(environ["REDIS_URL"]),
+        )
+    },
 )
 
 
@@ -206,6 +212,11 @@ An opted-in preview stores `idle_expires_at` in the same Redis driver hash.
 The first request starts the preview generation. Later requests renew the
 deadline without changing the generation.
 
+A manual `start()` renews the deadline in the same atomic transition that
+starts the generation. Without that renewal, a `start()` issued after the
+deadline lapsed would create a generation whose own start message is already
+stale. Outside an opted-in preview, activation clears any stored deadline.
+
 Start and wake claims check the deadline atomically before acquiring ownership.
 Start and wake completion check it again atomically before reserving a
 successor. If it expired, the transition sets the driver to `inactive`, clears
@@ -256,6 +267,11 @@ updates or removes it only if the revision it read is still current. A
 concurrent runtime mutation therefore wins instead of being overwritten or
 resurrected by a late handler.
 
+Executing jobs may also mutate the store through the same APIs. An in-job
+`add_job()` of an existing id honors `replace_existing=True` by updating the
+persisted job, and the finishing wake reads the store again, so the change is
+reflected in the successor it reserves.
+
 Automatic activation establishes the boundary before an opted-in request
 reaches the application. Without automatic activation, every cold Function
 instance that performs a runtime mutation must first call the idempotent
@@ -266,11 +282,12 @@ because they bypass atomic wake rearming and revision checks.
 The no-heartbeat design has one deliberate liveness contract: `start()` and
 mutation calls are durable after they return successfully. If a process dies
 after committing Redis but before publishing Queue, an idempotent `start()`
-republishes the pending token. The caller must determine whether an interrupted
-job mutation committed before repeating that mutation. A completely dormant
-scheduler does not wake periodically to repair an otherwise unobserved
-ambiguous failure. A delayed repair can pass a job's default misfire window;
-jobs whose occurrence must remain eligible should set an appropriate
+republishes the pending token. Repeating an interrupted mutation is also safe:
+a retried mutation republishes the pending wake even when the retry itself
+fails, for example on a conflicting job id. A completely dormant scheduler
+does not wake periodically to repair an otherwise unobserved ambiguous
+failure. A delayed repair can pass a job's default misfire window; jobs whose
+occurrence must remain eligible should set an appropriate
 `misfire_grace_time` or `None`.
 
 ## Pausing and resuming
@@ -316,6 +333,8 @@ is skipped, rather than replayed as a burst.
 | preview idle deadline expires while work runs | current work may finish; no successor |
 | request arrives after preview expiry | one new generation; inactive time is skipped |
 | request arrives after explicit pause | idle deadline renews but state remains paused |
+| `start()` after the preview deadline lapsed | deadline renews; the new generation is claimable |
+| retried mutation fails on a conflicting id | the pending wake is still republished |
 
 These properties prevent parallel logical chains. They do not provide
 exactly-once job side effects. If a process dies after an external side effect
@@ -324,14 +343,12 @@ execute it again. Jobs must be idempotent.
 
 ## Redis and execution requirements
 
-v1 supports exactly one job store named `default`. It must be APScheduler
-`RedisJobStore`, including `VercelRedisJobStore`, and it is also the lifecycle
-coordinator.
-
-`VercelRedisJobStore()` reads `REDIS_URL`; an explicit URL can be passed:
+v1 supports exactly one job store named `default`. It must be APScheduler's
+standard `RedisJobStore`, and its configured Redis client is also used for
+lifecycle coordination. For a Redis URL:
 
 ```python
-VercelRedisJobStore(url="redis://user:password@example:6379/0")
+RedisJobStore(connection_pool=ConnectionPool.from_url("redis://user:password@example:6379/0"))
 ```
 
 Runtime Cache is not suitable. It is evictable and cannot provide the durable

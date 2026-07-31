@@ -9,10 +9,10 @@ The subscriber is declared in `pyproject.toml`:
 entrypoint = "scheduler:scheduler"
 ```
 
-`scheduler.py` configures `VercelRedisJobStore()`, which reads `REDIS_URL`.
-The Python builder derives the scheduler identity from the subscriber
-entrypoint and extracts its internal Queue subscriptions automatically. No
-topic or trigger configuration is needed.
+`scheduler.py` configures APScheduler's standard `RedisJobStore` with
+`REDIS_URL`. The Python builder derives the scheduler identity from the
+subscriber entrypoint and extracts its internal Queue subscriptions
+automatically. No topic or trigger configuration is needed.
 
 Set `REDIS_URL` and `APSCHEDULER_ADMIN_SECRET`, then deploy:
 

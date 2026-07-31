@@ -183,6 +183,16 @@ class SchedulerAdapter:
     def is_runtime_mutation(self) -> bool:
         return self._runtime_mutation_depth > 0 and not self._suppress_wakeup
 
+    @property
+    def is_wake_mutation(self) -> bool:
+        """Whether an executing job is mutating the store from its own wake.
+
+        Cold-start declarations also run with wakeups suppressed, but they
+        dispatch while the scheduler is still stopped; only wake processing
+        runs suppressed in a locally running scheduler.
+        """
+        return self._suppress_wakeup and self.scheduler.state == STATE_RUNNING
+
     def _adopt_instance_methods(self) -> None:
         self.scheduler.wakeup = MethodType(  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
             lambda scheduler: self.wakeup(),
@@ -213,7 +223,10 @@ class SchedulerAdapter:
             self.driver.pause(now)
             self._pause_local()
             return
-        decision = self.driver.start(now)
+        decision = self.driver.start(
+            now,
+            idle_timeout_seconds=self._preview_idle_timeout_seconds(),
+        )
         self._publish_start_if_needed(decision, now=now)
         if (
             not decision.changed
@@ -264,6 +277,11 @@ class SchedulerAdapter:
     def resume(self) -> None:
         """Resume by creating one new durable generation."""
         self.start()
+
+    def _preview_idle_timeout_seconds(self) -> int | None:
+        from ._automatic import _preview_idle_timeout
+
+        return _preview_idle_timeout()
 
     def _publish_start_if_needed(
         self,
@@ -365,6 +383,19 @@ class SchedulerAdapter:
         self._runtime_mutation_depth += 1
         try:
             yield
+        except BaseException:
+            # A retried mutation can fail (for example with a conflicting job
+            # id) after an interrupted earlier attempt armed a wake it never
+            # published. Repair that pending wake so retrying a mutation is
+            # always safe, even when the retry itself errors.
+            if self._runtime_mutation_depth == 1:
+                try:
+                    self.publish_pending_wakeup()
+                except Exception:
+                    self._logger.exception(
+                        "Could not repair the pending wake after a failed runtime mutation"
+                    )
+            raise
         finally:
             self._runtime_mutation_depth -= 1
             self._current_add_explicit = prior_explicit
@@ -499,7 +530,7 @@ class SchedulerAdapter:
             raise APSchedulerConfigurationError(
                 f'job "{job.id}" already exists in Redis; declare it with replace_existing=True'
             )
-        if self.is_runtime_mutation:
+        if self.is_runtime_mutation or self.is_wake_mutation:
             return True
         job._jobstore_alias = jobstore_alias
         return False

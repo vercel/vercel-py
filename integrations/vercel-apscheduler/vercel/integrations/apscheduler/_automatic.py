@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import importlib
@@ -19,7 +20,7 @@ from ._options import (
 ENVIRONMENT_ENV = "VERCEL_ENV"
 PREVIEW_IDLE_TIMEOUT_ENV = "VERCEL_APSCHEDULER_PREVIEW_IDLE_TIMEOUT_SECONDS"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
-REQUEST_TASK_NAME = "vercel-apscheduler:auto-activate"
+ACTIVATION_HOOK_NAME = "vercel-apscheduler:auto-activate"
 MAX_PREVIEW_RENEW_INTERVAL_SECONDS = 5 * 60
 
 
@@ -40,19 +41,26 @@ def register_automatic_activation() -> None:
         else None
     )
     try:
-        from vercel_runtime.request_tasks import (  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
-            register_request_task,
+        from vercel_runtime.invocation_hooks import (  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
+            register_invocation_hook,
         )
     except ImportError as exc:
         raise APSchedulerConfigurationError(
             "automatic APScheduler activation requires a Vercel Python Runtime "
-            "with request task support"
+            "with invocation hook support"
         ) from exc
 
-    register_request_task(
-        REQUEST_TASK_NAME,
-        lambda: _activate_configured_schedulers(timeout),
+    register_invocation_hook(
+        ACTIVATION_HOOK_NAME,
+        _automatic_activation_hook,
         min_interval_seconds=interval,
+    )
+
+
+async def _automatic_activation_hook() -> None:
+    await asyncio.to_thread(
+        _activate_configured_schedulers,
+        _preview_idle_timeout(),
     )
 
 
@@ -70,8 +78,10 @@ def _preview_idle_timeout() -> int | None:
     if environment != "preview":
         return None
     raw = environ.get(PREVIEW_IDLE_TIMEOUT_ENV)
+    if raw is None:
+        return None
     try:
-        timeout = int(raw) if raw is not None else 0
+        timeout = int(raw)
     except ValueError as exc:
         raise APSchedulerConfigurationError(
             f"{PREVIEW_IDLE_TIMEOUT_ENV} must be a positive integer"

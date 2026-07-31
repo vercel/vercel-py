@@ -18,7 +18,6 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from vercel.integrations.apscheduler import (
     APSchedulerConfigurationError,
-    VercelRedisJobStore,
     install_vercel_apscheduler_integration,
 )
 from vercel.integrations.apscheduler._adapter import get_adapter
@@ -116,8 +115,13 @@ class FakeDriver:
         self.last_sequence = 0
         self.owner: str | None = None
 
-    def start(self, now: datetime) -> StartDecision:
-        del now
+    def start(
+        self,
+        now: datetime,
+        *,
+        idle_timeout_seconds: int | None = None,
+    ) -> StartDecision:
+        del now, idle_timeout_seconds
         with self.lock:
             changed = self.state != "running"
             if changed:
@@ -474,21 +478,6 @@ def test_scheduler_lifecycle_remains_native_outside_vercel(
         scheduler.shutdown()
 
 
-def test_vercel_redis_job_store_requires_an_explicit_connection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("REDIS_URL", raising=False)
-
-    with pytest.raises(
-        APSchedulerConfigurationError,
-        match="requires REDIS_URL",
-    ):
-        VercelRedisJobStore()
-
-    store = VercelRedisJobStore(host="redis.example")
-    assert store.redis.connection_pool.connection_kwargs["host"] == "redis.example"
-
-
 def test_runtime_registry_binds_the_loaded_subscriber_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -679,6 +668,66 @@ def test_runtime_add_rearms_dormant_chain_with_monotonic_sequence() -> None:
     assert second is not None
     assert second.sequence == 2
     assert send.call_count == 1
+
+
+def test_failed_runtime_mutation_retry_repairs_pending_wake() -> None:
+    scheduler, _adapter, driver = scheduler_with_driver()
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+    start_subscription.func(
+        message(
+            start_payload,
+            message_id="start",
+            topic=start_subscription.topic,
+            consumer_group=start_subscription.consumer_group,
+        )
+    )
+
+    # The add commits durably and arms a wake, but every publish fails.
+    run_date = datetime.now(UTC) + timedelta(minutes=5)
+    with (
+        patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            side_effect=ConnectionError("queue unavailable"),
+        ),
+        pytest.raises(ConnectionError),
+    ):
+        scheduler.add_job(
+            lambda: None,
+            "date",
+            run_date=run_date,
+            id="repair",
+        )
+    armed = driver.current
+    assert armed is not None
+    assert armed.status == "pending"
+
+    # Retrying the same add fails on the conflicting id, but the retry must
+    # still publish the wake armed by the interrupted first attempt.
+    with (
+        patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="wake-repaired",
+        ) as send,
+        pytest.raises(APSchedulerConfigurationError, match="already exists"),
+    ):
+        scheduler.add_job(
+            lambda: None,
+            "date",
+            run_date=run_date,
+            id="repair",
+        )
+    assert send.call_count == 1
+    repaired = driver.current
+    assert repaired is not None
+    assert repaired.status == "published"
 
 
 def test_runtime_mutation_requires_lifecycle_activation() -> None:

@@ -98,46 +98,11 @@ class DriverSnapshot:
     current_wake: WakeToken | None
 
 
-_START_SCRIPT = """
--- vercel-apscheduler-v1:start
-local state = redis.call("HGET", KEYS[1], "state")
-local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")
-local changed = 0
-
-if state ~= "running" then
-  generation = generation + 1
-  changed = 1
-  redis.call(
-    "HSET",
-    KEYS[1],
-    "state", "running",
-    "generation", tostring(generation),
-    "start_status", "pending",
-    "updated_at", ARGV[1]
-  )
-  redis.call(
-    "HDEL",
-    KEYS[1],
-    "activation_time",
-    "current_logical_time",
-    "current_status",
-    "dirty_logical_time"
-  )
-  redis.call("HSET", KEYS[1], "current_sequence", "0")
-end
-
-return {
-  tostring(changed),
-  tostring(generation),
-  redis.call("HGET", KEYS[1], "start_status") or "",
-  redis.call("HGET", KEYS[1], "current_sequence") or "",
-  redis.call("HGET", KEYS[1], "current_logical_time") or "",
-  redis.call("HGET", KEYS[1], "current_status") or ""
-}
-"""
-
-_AUTO_ACTIVATE_SCRIPT = """
--- vercel-apscheduler-v1:auto-activate
+_ACTIVATE_SCRIPT = """
+-- vercel-apscheduler-v1:activate
+-- ARGV[1] now (unix timestamp), ARGV[2] now (ISO-8601),
+-- ARGV[3] idle deadline (unix timestamp, "" = none),
+-- ARGV[4] "1" = manual start, which also activates a paused driver.
 local state = redis.call("HGET", KEYS[1], "state")
 local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")
 local changed = 0
@@ -162,7 +127,7 @@ else
   redis.call("HDEL", KEYS[1], "idle_expires_at")
 end
 
-if not state or state == "inactive" then
+if not state or state == "inactive" or (ARGV[4] == "1" and state ~= "running") then
   generation = generation + 1
   changed = 1
   state = "running"
@@ -617,23 +582,22 @@ class RedisDriver:
         self.scheduler_id = scheduler_id
         self.key = f"vercel:apscheduler:{{{deployment}:{scheduler_id}}}:driver"
 
-    def start(self, now: datetime) -> StartDecision:
-        """Atomically start or resume one durable generation."""
-        now_utc = as_utc(now, name="now")
-        result = self._eval(_START_SCRIPT, now_utc.isoformat())
-        if not isinstance(result, (list, tuple)) or len(result) != 6:
-            raise RuntimeError("Redis returned an invalid APScheduler start result")
-        generation = int(_text(result[1]))
-        return StartDecision(
-            generation=generation,
-            changed=bool(int(_text(result[0]))),
-            start_status=_text(result[2]),
-            current_wake=_wake_from_values(
-                generation,
-                result[3],
-                result[4],
-                result[5],
-            ),
+    def start(
+        self,
+        now: datetime,
+        *,
+        idle_timeout_seconds: int | None = None,
+    ) -> StartDecision:
+        """Atomically start or resume one durable generation.
+
+        A manual start also renews the preview idle deadline; otherwise a
+        deadline that lapsed before the start could make the new generation
+        immediately stale.
+        """
+        return self._activate(
+            now,
+            idle_timeout_seconds=idle_timeout_seconds,
+            manual=True,
         )
 
     def auto_activate(
@@ -643,6 +607,19 @@ class RedisDriver:
         idle_timeout_seconds: int | None = None,
     ) -> StartDecision:
         """Renew activity and start unless the scheduler was explicitly paused."""
+        return self._activate(
+            now,
+            idle_timeout_seconds=idle_timeout_seconds,
+            manual=False,
+        )
+
+    def _activate(
+        self,
+        now: datetime,
+        *,
+        idle_timeout_seconds: int | None,
+        manual: bool,
+    ) -> StartDecision:
         if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
             raise ValueError("idle_timeout_seconds must be a positive integer")
         now_utc = as_utc(now, name="now")
@@ -650,13 +627,14 @@ class RedisDriver:
             now_utc.timestamp() + idle_timeout_seconds if idle_timeout_seconds is not None else None
         )
         result = self._eval(
-            _AUTO_ACTIVATE_SCRIPT,
+            _ACTIVATE_SCRIPT,
             str(now_utc.timestamp()),
             now_utc.isoformat(),
             str(expires_at) if expires_at is not None else "",
+            "1" if manual else "",
         )
         if not isinstance(result, (list, tuple)) or len(result) != 7:
-            raise RuntimeError("Redis returned an invalid APScheduler auto-activation result")
+            raise RuntimeError("Redis returned an invalid APScheduler activation result")
         generation = int(_text(result[1]))
         state_raw = _text(result[2])
         if state_raw not in {"running", "paused", "inactive"}:

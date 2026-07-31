@@ -40,7 +40,8 @@ def test_cleanup_example_uses_pyproject_subscriber_contract() -> None:
     scheduler_source = (EXAMPLE_ROOT / SCHEDULER_PATH).read_text(encoding="utf-8")
     assert "VercelAPSchedulerOptions" not in scheduler_source
     assert "install_vercel_apscheduler_integration" not in scheduler_source
-    assert "VercelRedisJobStore()" in scheduler_source
+    assert "from apscheduler.jobstores.redis import RedisJobStore" in scheduler_source
+    assert "RedisJobStore(" in scheduler_source
 
     app_source = (EXAMPLE_ROOT / "main.py").read_text(encoding="utf-8")
     assert "scheduler.start()" in app_source

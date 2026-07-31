@@ -7,9 +7,6 @@ from typing import TYPE_CHECKING, Any
 import pickle
 from collections.abc import Callable
 from datetime import datetime, timezone
-from os import environ
-
-from redis import Redis
 
 from apscheduler.jobstores.base import (  # type: ignore[import-untyped]
     ConflictingIdError,
@@ -19,17 +16,15 @@ from apscheduler.util import (  # type: ignore[import-untyped]
     datetime_to_utc_timestamp,
 )
 
-from ._driver import APSchedulerConfigurationError
 from ._imports import RedisJobStore
 
 if TYPE_CHECKING:
     from ._adapter import SchedulerAdapter
     from ._driver import RedisDriver
 
-DEFAULT_REDIS_URL_ENV = "REDIS_URL"
 UTC = timezone.utc
 
-__all__ = ["RedisJobCoordinator", "VercelRedisJobStore"]
+__all__ = ["RedisJobCoordinator"]
 
 
 _ADD_JOB_SCRIPT = """
@@ -200,33 +195,6 @@ return 1
 """
 
 
-class VercelRedisJobStore(RedisJobStore):
-    """APScheduler RedisJobStore that defaults to ``REDIS_URL``."""
-
-    def __init__(
-        self,
-        url: str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        resolved_url = url or environ.get(DEFAULT_REDIS_URL_ENV)
-        explicit_connection = any(
-            name in kwargs
-            for name in (
-                "connection_pool",
-                "host",
-                "unix_socket_path",
-            )
-        )
-        if not resolved_url and not explicit_connection:
-            raise APSchedulerConfigurationError(
-                "VercelRedisJobStore requires REDIS_URL, url=, host=, "
-                "unix_socket_path=, or connection_pool="
-            )
-        super().__init__(**kwargs)
-        if resolved_url:
-            self.redis = Redis.from_url(resolved_url)
-
-
 class RedisJobCoordinator:
     """Atomically couples one APScheduler Redis store to its driver."""
 
@@ -274,8 +242,12 @@ class RedisJobCoordinator:
         result = self._write(_ADD_JOB_SCRIPT, job)
         # Code declarations are materialized insert-if-absent. Concurrent cold
         # starts must retain the first durable value instead of replacing a
-        # runtime mutation with a stale declaration.
-        if _text(result[0]) == "conflict" and self.adapter.is_runtime_mutation:
+        # runtime mutation with a stale declaration. Runtime and in-wake adds
+        # raise instead, so APScheduler's replace_existing fallback can update
+        # the persisted job.
+        if _text(result[0]) == "conflict" and (
+            self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
+        ):
             raise ConflictingIdError(job.id)
 
     def update_job(self, job: Any) -> None:

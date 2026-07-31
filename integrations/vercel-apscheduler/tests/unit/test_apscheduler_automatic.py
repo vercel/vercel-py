@@ -29,9 +29,9 @@ def test_registers_request_driven_automatic_activation(
     expected_interval: float | None,
 ) -> None:
     registered: list[tuple[str, Any, float | None]] = []
-    request_tasks = ModuleType("vercel_runtime.request_tasks")
+    invocation_hooks = ModuleType("vercel_runtime.invocation_hooks")
 
-    def register_request_task(
+    def register_invocation_hook(
         name: str,
         callback: Any,
         *,
@@ -41,12 +41,12 @@ def test_registers_request_driven_automatic_activation(
 
     runtime = ModuleType("vercel_runtime")
     runtime.__path__ = []  # type: ignore[attr-defined]
-    request_tasks.__dict__["register_request_task"] = register_request_task
+    invocation_hooks.__dict__["register_invocation_hook"] = register_invocation_hook
     monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
     monkeypatch.setitem(
         sys.modules,
-        "vercel_runtime.request_tasks",
-        request_tasks,
+        "vercel_runtime.invocation_hooks",
+        invocation_hooks,
     )
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_ENV", environment)
@@ -65,8 +65,9 @@ def test_registers_request_driven_automatic_activation(
     _automatic.register_automatic_activation()
 
     assert len(registered) == 1
-    name, _, interval = registered[0]
-    assert name == _automatic.REQUEST_TASK_NAME
+    name, callback, interval = registered[0]
+    assert name == _automatic.ACTIVATION_HOOK_NAME
+    assert callback is _automatic._automatic_activation_hook
     assert interval == expected_interval
 
 
@@ -90,20 +91,20 @@ def test_preview_automatic_activation_is_opt_in(
 def test_subscriber_request_does_not_register_automatic_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    request_tasks = ModuleType("vercel_runtime.request_tasks")
+    invocation_hooks = ModuleType("vercel_runtime.invocation_hooks")
 
-    def register_request_task(*args: Any, **kwargs: Any) -> None:
+    def register_invocation_hook(*args: Any, **kwargs: Any) -> None:
         del args, kwargs
         pytest.fail("subscriber requests must not register automatic activation")
 
     runtime = ModuleType("vercel_runtime")
     runtime.__path__ = []  # type: ignore[attr-defined]
-    request_tasks.__dict__["register_request_task"] = register_request_task
+    invocation_hooks.__dict__["register_invocation_hook"] = register_invocation_hook
     monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
     monkeypatch.setitem(
         sys.modules,
-        "vercel_runtime.request_tasks",
-        request_tasks,
+        "vercel_runtime.invocation_hooks",
+        invocation_hooks,
     )
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_ENV", "preview")
@@ -116,6 +117,24 @@ def test_subscriber_request_does_not_register_automatic_activation(
 
     assert is_queue_serving_runtime()
     _automatic.register_automatic_activation()
+
+
+@pytest.mark.asyncio
+async def test_automatic_activation_hook_runs_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int | None] = []
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.setenv(_automatic.PREVIEW_IDLE_TIMEOUT_ENV, "120")
+    monkeypatch.setattr(
+        _automatic,
+        "_activate_configured_schedulers",
+        calls.append,
+    )
+
+    await _automatic._automatic_activation_hook()
+
+    assert calls == [120]
 
 
 def test_automatic_activation_calls_every_adapter(

@@ -5,16 +5,26 @@ Redis as the durable job store and lifecycle coordinator.
 
 ## Configure the scheduler
 
-Use `VercelRedisJobStore`, which reads `REDIS_URL` by default:
+Use APScheduler's standard Redis job store:
 
 ```python
-from apscheduler.schedulers.blocking import BlockingScheduler
+from os import environ
 
-from vercel.integrations.apscheduler import VercelRedisJobStore
+from apscheduler.jobstores.redis import RedisJobStore
+from apscheduler.schedulers.blocking import BlockingScheduler
+from redis import ConnectionPool
 
 scheduler = BlockingScheduler(
     timezone="UTC",
-    jobstores={"default": VercelRedisJobStore()},
+    jobstores={
+        "default": RedisJobStore(
+            connection_pool=ConnectionPool.from_url(
+                environ["REDIS_URL"],
+                socket_connect_timeout=5,
+                socket_timeout=5,
+            ),
+        )
+    },
 )
 
 
@@ -39,9 +49,16 @@ installs the integration, and extracts its internal Queue subscriptions from
 the same registry used by Celery and Dramatiq. Topic names, consumer groups,
 scheduler IDs, and installation hooks are not application configuration.
 
-`VercelRedisJobStore(url="redis://...")` accepts an explicit URL. A stock
-APScheduler `RedisJobStore` also works. v1 requires exactly one job store,
-named `default`, and it must be Redis-backed.
+No Vercel-specific job store is required. v1 requires exactly one job store,
+named `default`, and it must be APScheduler's Redis-backed `RedisJobStore`.
+The integration uses that store's configured Redis client for its internal
+lifecycle coordination. A missing `REDIS_URL` fails the import with a
+`KeyError`, which is intended: there is no implicit localhost fallback.
+
+Set explicit socket timeouts on the connection pool, as shown above. The
+runtime performs its automatic-activation Redis work before handling a
+request, bounded by a fixed wait; without socket timeouts an unreachable
+Redis holds that entire bound instead of failing fast.
 
 ## Automatic activation
 
