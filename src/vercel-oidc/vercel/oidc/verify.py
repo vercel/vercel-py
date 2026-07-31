@@ -29,13 +29,22 @@ import os
 import re
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
-from typing import Any
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import httpx
 
 from .token import VercelOidcTokenError
+
+if TYPE_CHECKING:
+    # Only for annotations: `cryptography` ships in the `verify` extra, so it must
+    # not be imported when the extra is absent.
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+
+JwksDocument: TypeAlias = dict[str, Any]
+"""A parsed JWKS document. JSON, so its values stay dynamic."""
 
 VERCEL_OIDC_ISSUER = "https://oidc.vercel.com"
 JWKS_PATH = "/.well-known/jwks"
@@ -54,7 +63,7 @@ _JWKS_TIMEOUT_SECONDS = 10.0
 _JWKS_TIMEOUT = httpx.Timeout(_JWKS_TIMEOUT_SECONDS)
 
 _jwks_lock = threading.Lock()
-_jwks_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_jwks_cache: dict[str, tuple[float, JwksDocument]] = {}
 # Set only by an *unproductive* fetch: one that failed, or that returned a document
 # still missing the requested `kid`. A productive fetch clears it, so a rotation is
 # picked up immediately while an attacker cycling unknown `kid` values, or an
@@ -80,7 +89,7 @@ class VercelOidcVerificationError(VercelOidcTokenError):
     """
 
 
-def _require_pyjwt() -> Any:
+def _require_pyjwt() -> ModuleType:
     try:
         import jwt
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised by packaging
@@ -93,7 +102,7 @@ def _require_pyjwt() -> Any:
     return jwt
 
 
-def _cached_jwks(url: str) -> dict[str, Any] | None:
+def _cached_jwks(url: str) -> JwksDocument | None:
     with _jwks_lock:
         entry = _jwks_cache.get(url)
         if entry is None:
@@ -104,7 +113,7 @@ def _cached_jwks(url: str) -> dict[str, Any] | None:
         return document
 
 
-def _store_jwks(url: str, document: dict[str, Any]) -> None:
+def _store_jwks(url: str, document: JwksDocument) -> None:
     with _jwks_lock:
         _jwks_cache[url] = (time.monotonic(), document)
 
@@ -123,7 +132,7 @@ def _allow_fetches(url: str) -> None:
         _jwks_throttled_until.pop(url, None)
 
 
-def _parse_jwks(payload: object) -> dict[str, Any]:
+def _parse_jwks(payload: object) -> JwksDocument:
     if not isinstance(payload, dict) or not isinstance(payload.get("keys"), list):
         raise VercelOidcVerificationError("JWKS document is malformed")
     return payload
@@ -156,7 +165,7 @@ def _fetch_is_in_progress(url: str) -> bool:
         return url in _jwks_fetch_in_progress
 
 
-def _select_and_record(url: str, kid: str, document: dict[str, Any]) -> Any:
+def _select_and_record(url: str, kid: str, document: JwksDocument) -> RSAPublicKey | None:
     """Select the key and record whether the fetch was productive."""
     key = _select_key(document, kid)
     if key is None:
@@ -166,7 +175,9 @@ def _select_and_record(url: str, kid: str, document: dict[str, Any]) -> Any:
     return key
 
 
-def _record_fetch_outcome(url: str, kid: str, fetch: Any) -> Any:
+def _record_fetch_outcome(
+    url: str, kid: str, fetch: Callable[[str], JwksDocument]
+) -> RSAPublicKey | None:
     try:
         document = fetch(url)
     except Exception:
@@ -176,7 +187,7 @@ def _record_fetch_outcome(url: str, kid: str, fetch: Any) -> Any:
     return _select_and_record(url, kid, document)
 
 
-async def _fetch_or_throttle_async(url: str) -> dict[str, Any]:
+async def _fetch_or_throttle_async(url: str) -> JwksDocument:
     try:
         return await _fetch_jwks_async(url)
     except Exception:
@@ -184,12 +195,12 @@ async def _fetch_or_throttle_async(url: str) -> dict[str, Any]:
         raise
 
 
-def _cached_key(url: str, kid: str) -> Any:
+def _cached_key(url: str, kid: str) -> RSAPublicKey | None:
     document = _cached_jwks(url)
     return None if document is None else _select_key(document, kid)
 
 
-def _resolve_key_sync(url: str, kid: str) -> Any:
+def _resolve_key_sync(url: str, kid: str) -> RSAPublicKey | None:
     """Find the signing key for `kid`, refreshing the JWKS when it is unknown."""
     key = _cached_key(url, kid)
     if key is not None:
@@ -210,7 +221,7 @@ def _resolve_key_sync(url: str, kid: str) -> Any:
     return _cached_key(url, kid)
 
 
-def _fetch_jwks_sync_uncached(url: str) -> dict[str, Any]:
+def _fetch_jwks_sync_uncached(url: str) -> JwksDocument:
     try:
         with httpx.Client(timeout=_JWKS_TIMEOUT) as client:
             response = client.get(url)
@@ -228,7 +239,7 @@ def _fetch_jwks_sync_uncached(url: str) -> dict[str, Any]:
         _end_fetch(url)
 
 
-async def _resolve_key_async(url: str, kid: str) -> Any:
+async def _resolve_key_async(url: str, kid: str) -> RSAPublicKey | None:
     """Async twin of `_resolve_key_sync`.
 
     Coordination is through the shared atomic claim rather than an async lock, so
@@ -254,7 +265,7 @@ async def _resolve_key_async(url: str, kid: str) -> Any:
     return _cached_key(url, kid)
 
 
-async def _fetch_jwks_async(url: str) -> dict[str, Any]:
+async def _fetch_jwks_async(url: str) -> JwksDocument:
     try:
         async with httpx.AsyncClient(timeout=_JWKS_TIMEOUT) as client:
             response = await client.get(url)
@@ -285,7 +296,7 @@ def _unverified_kid(token: str) -> str:
     return kid
 
 
-def _select_key(document: Mapping[str, Any], kid: str) -> Any:
+def _select_key(document: Mapping[str, Any], kid: str) -> RSAPublicKey | None:
     jwt = _require_pyjwt()
     for candidate in document.get("keys", []):
         if not isinstance(candidate, dict) or candidate.get("kid") != kid:
@@ -300,13 +311,21 @@ def _select_key(document: Mapping[str, Any], kid: str) -> Any:
                 f"signing key {kid!r} declares algorithm {algorithm!r}"
             )
         try:
-            return jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(candidate))
+            # pyjwt is untyped here; the JWKS carries public keys only, and a
+            # non-RSA `kty` was rejected above.
+            return cast("RSAPublicKey", jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(candidate)))
         except Exception as exc:
             raise VercelOidcVerificationError(f"signing key {kid!r} is unusable", exc) from exc
     return None
 
 
-def _decode(token: str, key: Any, *, audience: Any, leeway: timedelta) -> dict[str, Any]:
+def _decode(
+    token: str,
+    key: RSAPublicKey,
+    *,
+    audience: str | Sequence[str] | None,
+    leeway: timedelta,
+) -> dict[str, Any]:
     jwt = _require_pyjwt()
     try:
         return dict(
@@ -357,7 +376,9 @@ def _check_issuer(claims: Mapping[str, Any]) -> None:
     )
 
 
-def _verified_claims_sync(token: str, *, audience: Any, leeway: timedelta) -> dict[str, Any]:
+def _verified_claims_sync(
+    token: str, *, audience: str | Sequence[str] | None, leeway: timedelta
+) -> dict[str, Any]:
     """Resolve the signing key, verify the signature, and pin the issuer."""
     kid = _unverified_kid(token)
     key = _resolve_key_sync(JWKS_URL, kid)
@@ -368,7 +389,9 @@ def _verified_claims_sync(token: str, *, audience: Any, leeway: timedelta) -> di
     return claims
 
 
-async def _verified_claims_async(token: str, *, audience: Any, leeway: timedelta) -> dict[str, Any]:
+async def _verified_claims_async(
+    token: str, *, audience: str | Sequence[str] | None, leeway: timedelta
+) -> dict[str, Any]:
     kid = _unverified_kid(token)
     key = await _resolve_key_async(JWKS_URL, kid)
     if key is None:
