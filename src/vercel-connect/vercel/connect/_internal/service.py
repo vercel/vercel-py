@@ -405,8 +405,8 @@ def get_connect_service(session: "SdkSession | SyncSdkSession") -> ConnectServic
 
         def identity(token: str) -> Any:
             if is_sync:
-                return oidc_verify.verify_vercel_oidc_token_identity(token)
-            return oidc_verify.verify_vercel_oidc_token_identity_async(token)
+                return oidc_verify.resolve_vercel_oidc_token_identity(token)
+            return oidc_verify.resolve_vercel_oidc_token_identity_async(token)
 
         credentials_factory = options.credentials_factory or (
             _default_sync_credentials_factory if is_sync else _default_async_credentials_factory

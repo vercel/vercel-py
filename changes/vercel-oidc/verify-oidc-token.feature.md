@@ -16,11 +16,12 @@ root issuer `https://oidc.vercel.com` and the team-scoped
 global key signs them; the JWKS URL is a constant, so a token can never
 influence where signing keys come from.
 
-`vercel.oidc.verify_vercel_oidc_token_identity`, and its async twin, return a verified,
+`vercel.oidc.resolve_vercel_oidc_token_identity`, and its async twin, return an
 opaque, stable identity for a token. A token is a signature over an identity plus
 an expiry, so one identity is issued many tokens over time; this is what to key
-identity-scoped client state on. It verifies the signature, issuer and expiry and
-returns no claims, so it is not an authorization check.
+identity-scoped client state on. The signature, issuer and expiry are verified
+before anything is read, but no claim is checked and none is returned, so it is
+not an authorization check.
 
 This requires the new `verify` extra, which pulls in `pyjwt[crypto]`:
 

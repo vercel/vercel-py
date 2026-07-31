@@ -546,19 +546,21 @@ async def verify_vercel_oidc_token_async(
     return claims
 
 
-def verify_vercel_oidc_token_identity(token: str, *, leeway: timedelta = DEFAULT_LEEWAY) -> str:
-    """Return a verified, stable identity for a Vercel OIDC token.
+def resolve_vercel_oidc_token_identity(token: str, *, leeway: timedelta = DEFAULT_LEEWAY) -> str:
+    """Verify a Vercel OIDC token and return the stable identity it names.
 
-    The signature, the issuer and the expiry are verified, and the identity
-    claims are then reduced to an opaque digest. A deployment identity is issued
-    a new token whenever the previous one nears expiry, and every one of those
-    tokens yields the same identity, so this is what a client should key
-    identity-scoped state on rather than the token itself.
+    The signature, the issuer and the expiry are verified before anything is read,
+    and the identity claims are then reduced to an opaque digest.
 
-    This is deliberately **not** an authorization check: it returns no claims and
-    does not verify the project, environment, owner or audience, so it must not
-    be used to decide whether a request is allowed. Use
-    `verify_vercel_oidc_token` for that.
+    A deployment identity is issued a new token whenever the previous one nears
+    expiry, and every one of those tokens yields the same identity, so this is
+    what a client should key identity-scoped state on rather than the token
+    itself.
+
+    What it deliberately does **not** do is authorize: it returns no claims and
+    does not check the project, environment, owner or audience, so it must not be
+    used to decide whether a request is allowed. Use `verify_vercel_oidc_token`
+    for that.
 
     Args:
         token: The encoded JWT.
@@ -575,12 +577,12 @@ def verify_vercel_oidc_token_identity(token: str, *, leeway: timedelta = DEFAULT
     return _identity_from_claims(_verified_claims_sync(token, audience=None, leeway=leeway))
 
 
-async def verify_vercel_oidc_token_identity_async(
+async def resolve_vercel_oidc_token_identity_async(
     token: str, *, leeway: timedelta = DEFAULT_LEEWAY
 ) -> str:
-    """Return a verified, stable identity for a Vercel OIDC token.
+    """Verify a Vercel OIDC token and return the stable identity it names.
 
-    See `verify_vercel_oidc_token_identity`. This is not an authorization check.
+    See `resolve_vercel_oidc_token_identity`. This is not an authorization check.
 
     Args:
         token: The encoded JWT.
@@ -646,6 +648,6 @@ __all__ = [
     "extract_bearer_token",
     "verify_vercel_oidc_token",
     "verify_vercel_oidc_token_async",
-    "verify_vercel_oidc_token_identity",
-    "verify_vercel_oidc_token_identity_async",
+    "resolve_vercel_oidc_token_identity",
+    "resolve_vercel_oidc_token_identity_async",
 ]

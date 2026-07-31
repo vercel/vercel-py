@@ -17,10 +17,10 @@ import respx
 from conftest import ISSUER, JWKS_URL, KID, b64url, claims, forge_hs256, jwks_for, sign
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from vercel.oidc import verify_vercel_oidc_token, verify_vercel_oidc_token_identity
+from vercel.oidc import resolve_vercel_oidc_token_identity, verify_vercel_oidc_token
 from vercel.oidc.aio import (
+    resolve_vercel_oidc_token_identity as resolve_vercel_oidc_token_identity_async,
     verify_vercel_oidc_token as verify_vercel_oidc_token_async,
-    verify_vercel_oidc_token_identity as verify_vercel_oidc_token_identity_async,
 )
 from vercel.oidc.verify import (
     FETCH_WAIT_TIMEOUT,
@@ -407,7 +407,7 @@ def test_identity_is_stable_across_a_reissued_token(signing_key: rsa.RSAPrivateK
     second = sign(signing_key, claims(iat=now, exp=now + 3600, jti="other"))
 
     assert first != second
-    assert verify_vercel_oidc_token_identity(first) == verify_vercel_oidc_token_identity(second)
+    assert resolve_vercel_oidc_token_identity(first) == resolve_vercel_oidc_token_identity(second)
 
 
 @respx.mock
@@ -419,10 +419,10 @@ async def test_identity_is_stable_across_a_reissued_token_async(
     first = sign(signing_key, claims(exp=now + 1800))
     second = sign(signing_key, claims(exp=now + 3600))
 
-    identity = await verify_vercel_oidc_token_identity_async(first)
+    identity = await resolve_vercel_oidc_token_identity_async(first)
 
-    assert identity == await verify_vercel_oidc_token_identity_async(second)
-    assert identity == verify_vercel_oidc_token_identity(second)
+    assert identity == await resolve_vercel_oidc_token_identity_async(second)
+    assert identity == resolve_vercel_oidc_token_identity(second)
 
 
 @pytest.mark.parametrize(
@@ -439,9 +439,9 @@ def test_identity_separates_distinct_identities(
 ) -> None:
     jwks_route(signing_key)
 
-    baseline = verify_vercel_oidc_token_identity(sign(signing_key))
+    baseline = resolve_vercel_oidc_token_identity(sign(signing_key))
 
-    assert verify_vercel_oidc_token_identity(sign(signing_key, claims(**overrides))) != baseline
+    assert resolve_vercel_oidc_token_identity(sign(signing_key, claims(**overrides))) != baseline
 
 
 @respx.mock
@@ -450,7 +450,7 @@ def test_identity_ignores_audience_order(signing_key: rsa.RSAPrivateKey) -> None
     forward = sign(signing_key, claims(aud=["https://vercel.com/a", "https://vercel.com/b"]))
     reversed_ = sign(signing_key, claims(aud=["https://vercel.com/b", "https://vercel.com/a"]))
 
-    assert verify_vercel_oidc_token_identity(forward) == verify_vercel_oidc_token_identity(
+    assert resolve_vercel_oidc_token_identity(forward) == resolve_vercel_oidc_token_identity(
         reversed_
     )
 
@@ -465,7 +465,7 @@ def test_identity_rejects_an_unverifiable_token(
     jwks_route(signing_key)
 
     with pytest.raises(VercelOidcVerificationError):
-        verify_vercel_oidc_token_identity(sign(other_signing_key))
+        resolve_vercel_oidc_token_identity(sign(other_signing_key))
 
 
 @respx.mock
@@ -473,7 +473,9 @@ def test_identity_rejects_a_foreign_issuer(signing_key: rsa.RSAPrivateKey) -> No
     jwks_route(signing_key)
 
     with pytest.raises(VercelOidcVerificationError):
-        verify_vercel_oidc_token_identity(sign(signing_key, claims(iss="https://evil.example.com")))
+        resolve_vercel_oidc_token_identity(
+            sign(signing_key, claims(iss="https://evil.example.com"))
+        )
 
 
 @respx.mock
@@ -482,7 +484,7 @@ def test_identity_rejects_an_expired_token(signing_key: rsa.RSAPrivateKey) -> No
     now = int(time.time())
 
     with pytest.raises(VercelOidcVerificationError):
-        verify_vercel_oidc_token_identity(
+        resolve_vercel_oidc_token_identity(
             sign(signing_key, claims(exp=now - 3600)), leeway=timedelta(0)
         )
 
@@ -492,7 +494,7 @@ def test_identity_rejects_a_token_without_a_subject(signing_key: rsa.RSAPrivateK
     jwks_route(signing_key)
 
     with pytest.raises(VercelOidcVerificationError):
-        verify_vercel_oidc_token_identity(sign(signing_key, claims(sub=None)))
+        resolve_vercel_oidc_token_identity(sign(signing_key, claims(sub=None)))
 
 
 @respx.mock
@@ -507,7 +509,7 @@ def test_identity_needs_no_project_or_environment_expectations(
     with pytest.raises(VercelOidcVerificationError):
         verify_vercel_oidc_token(token)
 
-    assert verify_vercel_oidc_token_identity(token)
+    assert resolve_vercel_oidc_token_identity(token)
 
 
 @respx.mock
@@ -515,7 +517,7 @@ def test_identity_carries_no_credential(signing_key: rsa.RSAPrivateKey) -> None:
     jwks_route(signing_key)
     token = sign(signing_key)
 
-    identity = verify_vercel_oidc_token_identity(token)
+    identity = resolve_vercel_oidc_token_identity(token)
 
     assert len(identity) == 64 and all(c in "0123456789abcdef" for c in identity)
     for part in token.split("."):

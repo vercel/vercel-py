@@ -56,13 +56,14 @@ many tokens over time. To key client-side state on the identity rather than on
 the token, use:
 
 ```python
-from vercel.oidc import verify_vercel_oidc_token_identity
+from vercel.oidc import resolve_vercel_oidc_token_identity
 
-identity = verify_vercel_oidc_token_identity(token)  # stable across a refresh
+identity = resolve_vercel_oidc_token_identity(token)  # stable across a refresh
 ```
 
-The signature, issuer and expiry are verified, and `iss`, `aud` and `sub` are
-reduced to an opaque digest that carries no credential and is safe to log. This
-is **not** an authorization check — it returns no claims and does not check the
-project, environment, owner or audience. Use `verify_vercel_oidc_token()` for
-that.
+The token is verified first — signature, issuer and expiry — and only then are its
+identity claims reduced to an opaque digest that carries no credential and is safe
+to log.
+
+What it does **not** do is authorize: it returns no claims and does not check the
+project, environment, owner or audience. Use `verify_vercel_oidc_token()` for that.
