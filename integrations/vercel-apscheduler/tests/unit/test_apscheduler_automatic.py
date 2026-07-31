@@ -11,6 +11,7 @@ from vercel.integrations.apscheduler import _adapter, _automatic
 from vercel.integrations.apscheduler._driver import (
     APSchedulerConfigurationError,
 )
+from vercel.integrations.apscheduler._options import is_queue_serving_runtime
 
 
 @pytest.mark.parametrize(
@@ -40,7 +41,7 @@ def test_registers_request_driven_automatic_activation(
 
     runtime = ModuleType("vercel_runtime")
     runtime.__path__ = []  # type: ignore[attr-defined]
-    request_tasks.register_request_task = register_request_task  # type: ignore[attr-defined]
+    request_tasks.__dict__["register_request_task"] = register_request_task
     monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
     monkeypatch.setitem(
         sys.modules,
@@ -84,6 +85,37 @@ def test_preview_automatic_activation_is_opt_in(
     )
 
     assert not _automatic._automatic_environment()
+
+
+def test_subscriber_request_does_not_register_automatic_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_tasks = ModuleType("vercel_runtime.request_tasks")
+
+    def register_request_task(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        pytest.fail("subscriber requests must not register automatic activation")
+
+    runtime = ModuleType("vercel_runtime")
+    runtime.__path__ = []  # type: ignore[attr-defined]
+    request_tasks.__dict__["register_request_task"] = register_request_task
+    monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
+    monkeypatch.setitem(
+        sys.modules,
+        "vercel_runtime.request_tasks",
+        request_tasks,
+    )
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "scheduler_scheduler")
+    monkeypatch.setenv(
+        _automatic.SUBSCRIBERS_ENV,
+        '[{"id":"scheduler_scheduler","entrypoint":"scheduler:scheduler"}]',
+    )
+    monkeypatch.setenv(_automatic.PREVIEW_IDLE_TIMEOUT_ENV, "60")
+
+    assert is_queue_serving_runtime()
+    _automatic.register_automatic_activation()
 
 
 def test_automatic_activation_calls_every_adapter(

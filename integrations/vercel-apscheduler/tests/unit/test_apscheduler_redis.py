@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from os import environ
+from sys import modules
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +20,8 @@ from vercel.integrations.apscheduler._driver import RedisDriver, StartDecision
 
 UTC = timezone.utc
 REDIS_URL = environ.get("APSCHEDULER_TEST_REDIS_URL")
+TEST_SCHEDULER_MODULE = "test_redis_scheduler"
+TEST_SCHEDULER_ID = "scheduler"
 
 
 def durable_test_job() -> None:
@@ -338,6 +342,7 @@ def test_real_redis_cold_declaration_rearms_an_already_dormant_driver(
             timezone=UTC,
             jobstores={"default": second_store},
         )
+        modules[TEST_SCHEDULER_MODULE].__dict__["scheduler"] = second_scheduler
         monkeypatch.setenv("VERCEL", "1")
 
         second_scheduler.add_job(
@@ -514,7 +519,11 @@ def _real_scheduler(
 ) -> tuple[BlockingScheduler, SchedulerAdapter, Redis, tuple[str, ...]]:
     assert REDIS_URL is not None
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", deployment)
-    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "scheduler")
+    monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
+    monkeypatch.setenv(
+        "VERCEL_APSCHEDULER_SUBSCRIBERS",
+        (f'[{{"id":"{TEST_SCHEDULER_ID}","entrypoint":"{TEST_SCHEDULER_MODULE}:scheduler"}}]'),
+    )
     monkeypatch.delenv("VERCEL", raising=False)
     install_vercel_apscheduler_integration(register_queues=False)
     store = VercelRedisJobStore(url=REDIS_URL)
@@ -522,6 +531,9 @@ def _real_scheduler(
         timezone=UTC,
         jobstores={"default": store},
     )
+    module = ModuleType(TEST_SCHEDULER_MODULE)
+    module.__dict__["scheduler"] = scheduler
+    monkeypatch.setitem(modules, TEST_SCHEDULER_MODULE, module)
     monkeypatch.setenv("VERCEL", "1")
     adapter = get_adapter(scheduler)
     assert adapter is not None

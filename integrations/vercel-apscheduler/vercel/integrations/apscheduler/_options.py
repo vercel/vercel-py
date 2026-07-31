@@ -51,6 +51,8 @@ def is_discovery_runtime() -> bool:
 
 
 def is_queue_serving_runtime() -> bool:
+    if environ.get(SUBSCRIBER_ID_ENV):
+        return True
     if _truthy(environ.get("VERCEL_DEV_QUEUE_SERVING")):
         return True
     service_type = (environ.get("VERCEL_SERVICE_TYPE") or "").strip().casefold()

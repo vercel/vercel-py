@@ -42,6 +42,8 @@ from vercel.queue import (
 from vercel.queue.testing import clear_subscriptions
 
 UTC = timezone.utc
+TEST_SCHEDULER_MODULE = "test_scheduler"
+TEST_SCHEDULER_ID = "scheduler_scheduler"
 
 
 def durable_noop_job() -> None:
@@ -333,15 +335,24 @@ class FakeDriver:
 def runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_test")
-    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "scheduler_scheduler")
+    monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
+    monkeypatch.setenv(
+        "VERCEL_APSCHEDULER_SUBSCRIBERS",
+        (f'[{{"id":"{TEST_SCHEDULER_ID}","entrypoint":"{TEST_SCHEDULER_MODULE}:scheduler"}}]'),
+    )
     monkeypatch.delenv("VERCEL_APSCHEDULER_DISCOVERY", raising=False)
     monkeypatch.delenv("VERCEL_SERVICE_TYPE", raising=False)
     monkeypatch.delenv("VERCEL_SERVICE_TRIGGER", raising=False)
     monkeypatch.delenv("VERCEL_DEV_QUEUE_SERVING", raising=False)
+    monkeypatch.setitem(modules, TEST_SCHEDULER_MODULE, ModuleType(TEST_SCHEDULER_MODULE))
     clear_subscriptions()
     install_vercel_apscheduler_integration(register_queues=False)
     yield
     clear_subscriptions()
+
+
+def bind_test_scheduler(scheduler: BlockingScheduler) -> None:
+    modules[TEST_SCHEDULER_MODULE].__dict__["scheduler"] = scheduler
 
 
 def scheduler_with_driver() -> tuple[BlockingScheduler, Any, FakeDriver]:
@@ -349,6 +360,7 @@ def scheduler_with_driver() -> tuple[BlockingScheduler, Any, FakeDriver]:
         timezone=UTC,
         jobstores={"default": InMemoryRedisJobStore()},
     )
+    bind_test_scheduler(scheduler)
     adapter = get_adapter(scheduler)
     assert adapter is not None
     adapter._bind_runtime()
@@ -419,6 +431,7 @@ def test_far_future_wakes_bridge_without_an_idle_poll() -> None:
 
 def test_memory_job_store_is_rejected() -> None:
     scheduler = BlockingScheduler(timezone=UTC)
+    bind_test_scheduler(scheduler)
 
     with pytest.raises(
         APSchedulerConfigurationError,
@@ -479,7 +492,7 @@ def test_vercel_redis_job_store_requires_an_explicit_connection(
 def test_runtime_registry_binds_the_loaded_subscriber_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID")
+    monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
     monkeypatch.setenv(
         "VERCEL_APSCHEDULER_SUBSCRIBERS",
         (
@@ -500,6 +513,26 @@ def test_runtime_registry_binds_the_loaded_subscriber_object(
     adapter._bind_runtime()
 
     assert adapter.identity.scheduler_id == "scheduler_scheduler"
+
+
+def test_subscriber_runtime_ignores_web_lifecycle_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler, _, driver = scheduler_with_driver()
+    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", TEST_SCHEDULER_ID)
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        scheduler.pause()
+        scheduler.resume()
+
+    send.assert_not_called()
+    assert driver.state == "paused"
+    assert driver.generation == 0
+    assert scheduler.state == 0
 
 
 def test_repeated_start_publishes_one_generation() -> None:
@@ -672,6 +705,7 @@ def test_multiple_job_stores_are_rejected() -> None:
             "secondary": InMemoryRedisJobStore(),
         },
     )
+    bind_test_scheduler(scheduler)
 
     with pytest.raises(
         APSchedulerConfigurationError,
