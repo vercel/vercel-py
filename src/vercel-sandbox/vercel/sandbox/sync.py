@@ -65,6 +65,7 @@ from vercel.sandbox._internal.sync_runtime import (
     SyncSnapshot,
     _ManagedSyncSandbox,
     create_sandbox as _create_sandbox,
+    get_or_create_sandbox as _get_or_create_sandbox,
     get_sandbox as _get_sandbox,
     get_snapshot as _get_snapshot,
     query_sandboxes as _query_sandboxes,
@@ -144,6 +145,54 @@ def create_sandbox(
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
         destroy=destroy,
+    )
+
+
+def get_or_create_sandbox(
+    *,
+    name: str,
+    project_id: str | None = None,
+    resume: bool = True,
+    include_system_routes: bool | None = None,
+    runtime: str | None = None,
+    source: SandboxSource | None = None,
+    ports: list[int] | None = None,
+    execution_time_limit: DurationInput = None,
+    resources: SandboxResources | None = None,
+    persistent: bool | None = None,
+    network_policy: NetworkPolicy | None = None,
+    env: Mapping[str, str] | None = None,
+    tags: Mapping[str, str] | None = None,
+    snapshot_expiration: SnapshotExpirationInput = None,
+    snapshot_retention: SnapshotRetention | None = None,
+) -> tuple[SyncSandbox, bool]:
+    """Get a named sandbox or create it when it does not exist.
+
+    The existing-sandbox lookup resumes by default. If its latest snapshot is
+    missing, the stale named sandbox is destroyed and recreated.
+
+    Returns:
+        A ``(sandbox, created)`` tuple. ``created`` is true when this call
+        created or recreated the sandbox, and false when it returned an
+        existing sandbox.
+    """
+    return _get_or_create_sandbox(
+        _service(),
+        name=name,
+        project_id=project_id,
+        resume=resume,
+        include_system_routes=include_system_routes,
+        runtime=runtime,
+        source=source,
+        ports=ports,
+        execution_time_limit=execution_time_limit,
+        resources=resources,
+        persistent=persistent,
+        network_policy=network_policy,
+        env=env,
+        tags=tags,
+        snapshot_expiration=snapshot_expiration,
+        snapshot_retention=snapshot_retention,
     )
 
 
@@ -362,6 +411,7 @@ __all__ = [
     "TarballSource",
     "SyncTextReader",
     "create_sandbox",
+    "get_or_create_sandbox",
     "get_sandbox",
     "get_snapshot",
     "query_sandboxes",
