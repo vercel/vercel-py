@@ -55,9 +55,22 @@ The integration uses that store's configured Redis client for its internal
 lifecycle coordination. A missing `REDIS_URL` fails the import with a
 `KeyError`, which is intended: there is no implicit localhost fallback.
 
-Set explicit socket timeouts on the connection pool, as shown above, so an
-unreachable Redis fails fast instead of stalling lifecycle calls and Queue
-deliveries.
+Set explicit socket timeouts on the connection pool, as shown above. The
+runtime performs its automatic-activation Redis work around request handling,
+bounded by a fixed wait; without socket timeouts an unreachable Redis holds
+that entire bound instead of failing fast.
+
+## Automatic activation
+
+Production deployments activate automatically on their first real request.
+The integration is registered while the application imports, but the Redis
+transition and first Queue send are deferred until the runtime has installed
+that request's OIDC credentials. Builds never enqueue messages.
+
+An explicit `pause()` remains paused across later requests; automatic
+activation never overrides it. A deployment that has never received a request
+cannot start automatically because it has not received request-scoped OIDC
+credentials. Preview deployments do not activate automatically.
 
 ## Start, pause, and resume
 
@@ -111,9 +124,11 @@ heartbeat. `add_job()`, `modify_job()`, `reschedule_job()`, `pause_job()`,
 `resume_job()`, and removals update Redis and rearm the one current wake as
 needed.
 
-Call `scheduler.start()` first in each Function instance that changes jobs;
-before that boundary, `add_job()` calls are treated as module-level
-declarations. The call is idempotent:
+Automatic activation establishes the runtime-mutation boundary before the
+user application handles a production request. In environments without
+automatic activation, call `scheduler.start()` first in each Function
+instance that changes jobs; before that boundary, `add_job()` calls are
+treated as module-level declarations. The call is idempotent:
 
 ```python
 @app.post("/jobs")
@@ -156,6 +171,8 @@ previews. This gives the driver the following guarantees:
   are inert.
 - A wake whose queue message died is presumed lost once it is well past due
   with no live owner, and republished by the owner.
+- Concurrent first requests converge on one automatic generation and one
+  start identity.
 
 The scheduler's durable identity derives from its `RedisJobStore` `jobs_key`,
 so renaming variables or moving modules never orphans state. Two schedulers
@@ -190,8 +207,8 @@ retry without running unfenced work.
 - Jobs declared in code need explicit stable IDs.
 - When the same ID already exists in Redis, declare it with
   `replace_existing=True`. `scheduled_job()` already enables replacement.
-- Runtime mutation APIs require a prior idempotent `scheduler.start()` in
-  that Function instance.
+- Runtime mutation APIs require prior activation in that Function instance,
+  either automatically on the request or through `scheduler.start()`.
 - Job execution is at-least-once.
 
 See [SCHEDULER.md](SCHEDULER.md) for the state machine and failure model. A

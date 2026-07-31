@@ -67,6 +67,10 @@ class StartDecision:
     changed: bool
     start_status: str
     current_wake: WakeToken | None
+    state: LifecycleState = "running"
+    # False when another deployment owns the chain and the caller was not
+    # allowed to take it; every action besides serving must then be skipped.
+    owned: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,28 +107,52 @@ class DriverSnapshot:
     current_wake: WakeToken | None
 
 
-_START_SCRIPT = """
--- vercel-apscheduler-v1:start
--- ARGV[1] now (ISO-8601), ARGV[2] this deployment.
--- A different owner means another deployment drives this chain; starting
--- here is a takeover: one new generation fences every message and handler
--- of the previous owner, exactly like resuming from a pause.
+_ACTIVATE_SCRIPT = """
+-- vercel-apscheduler-v1:activate
+-- ARGV[1] now (ISO-8601), ARGV[2] "1" = manual start, ARGV[3] this
+-- deployment, ARGV[4] "1" = may take the chain from another deployment.
+-- A manual start also activates a paused driver and always may take over.
+-- Taking over opens one new generation, fencing every message and handler
+-- of the previous owner, exactly like resuming from a pause. An automatic
+-- activation never overrides an explicit pause, not even during takeover.
 local state = redis.call("HGET", KEYS[1], "state")
 local owner = redis.call("HGET", KEYS[1], "owner_deployment")
 local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")
 local changed = 0
+local foreign = owner and owner ~= ARGV[3]
 
-if state ~= "running" or (owner and owner ~= ARGV[2]) then
+local function report(owned)
+  return {
+    tostring(changed),
+    tostring(generation),
+    state or "",
+    redis.call("HGET", KEYS[1], "start_status") or "",
+    redis.call("HGET", KEYS[1], "current_sequence") or "",
+    redis.call("HGET", KEYS[1], "current_logical_time") or "",
+    redis.call("HGET", KEYS[1], "current_status") or "",
+    owned
+  }
+end
+
+if foreign and ARGV[4] ~= "1" then
+  return report("")
+end
+if foreign and ARGV[2] ~= "1" and state == "paused" then
+  return report("")
+end
+
+if not state or foreign or (ARGV[2] == "1" and state ~= "running") then
   generation = generation + 1
   changed = 1
+  state = "running"
   redis.call(
     "HSET",
     KEYS[1],
-    "state", "running",
+    "state", state,
     "generation", tostring(generation),
     "start_status", "pending",
     "current_sequence", "0",
-    "owner_deployment", ARGV[2]
+    "owner_deployment", ARGV[3]
   )
   redis.call(
     "HDEL",
@@ -135,18 +163,11 @@ if state ~= "running" or (owner and owner ~= ARGV[2]) then
     "dirty_logical_time"
   )
 elseif not owner then
-  redis.call("HSET", KEYS[1], "owner_deployment", ARGV[2])
+  redis.call("HSET", KEYS[1], "owner_deployment", ARGV[3])
 end
 
 redis.call("HSET", KEYS[1], "updated_at", ARGV[1])
-return {
-  tostring(changed),
-  tostring(generation),
-  redis.call("HGET", KEYS[1], "start_status") or "",
-  redis.call("HGET", KEYS[1], "current_sequence") or "",
-  redis.call("HGET", KEYS[1], "current_logical_time") or "",
-  redis.call("HGET", KEYS[1], "current_status") or ""
-}
+return report("1")
 """
 
 _PAUSE_SCRIPT = """
@@ -510,21 +531,50 @@ class RedisDriver:
 
     def start(self, now: datetime) -> StartDecision:
         """Atomically start, resume, or take over one durable generation."""
+        return self._activate(now, manual=True, takeover_allowed=True)
+
+    def auto_activate(
+        self,
+        now: datetime,
+        *,
+        takeover_allowed: bool = False,
+    ) -> StartDecision:
+        """Start on request activity unless the scheduler was explicitly paused."""
+        return self._activate(now, manual=False, takeover_allowed=takeover_allowed)
+
+    def _activate(
+        self,
+        now: datetime,
+        *,
+        manual: bool,
+        takeover_allowed: bool,
+    ) -> StartDecision:
         now_utc = as_utc(now, name="now")
-        result = self._eval(_START_SCRIPT, now_utc.isoformat(), self.deployment)
-        if not isinstance(result, (list, tuple)) or len(result) != 6:
-            raise RuntimeError("Redis returned an invalid APScheduler start result")
+        result = self._eval(
+            _ACTIVATE_SCRIPT,
+            now_utc.isoformat(),
+            "1" if manual else "",
+            self.deployment,
+            "1" if takeover_allowed else "",
+        )
+        if not isinstance(result, (list, tuple)) or len(result) != 8:
+            raise RuntimeError("Redis returned an invalid APScheduler activation result")
         generation = int(_text(result[1]))
+        state_raw = _text(result[2])
+        if state_raw not in {"running", "paused"}:
+            raise RuntimeError("Redis returned an unknown APScheduler lifecycle state")
         return StartDecision(
             generation=generation,
             changed=bool(int(_text(result[0]))),
-            start_status=_text(result[2]),
+            state=cast("LifecycleState", state_raw),
+            start_status=_text(result[3]),
             current_wake=_wake_from_values(
                 generation,
-                result[3],
                 result[4],
                 result[5],
+                result[6],
             ),
+            owned=bool(_text(result[7])),
         )
 
     def pause(self, now: datetime) -> bool:

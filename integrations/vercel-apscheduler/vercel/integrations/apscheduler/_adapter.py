@@ -323,6 +323,27 @@ class SchedulerAdapter:
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
 
+    def auto_activate(self) -> None:
+        """Activate on request activity without overriding an explicit pause."""
+        self._bind_runtime()
+        self._validate_durable_configuration()
+        self._lifecycle_called = True
+        self.ensure_local_started()
+        now = datetime.now(UTC)
+        decision = self.driver.auto_activate(now)
+        if decision.state != "running":
+            self._pause_local()
+            return
+        self._publish_start_if_needed(decision, now=now)
+        if (
+            not decision.changed
+            and decision.start_status == "active"
+            and decision.current_wake is not None
+            and decision.current_wake.status == "pending"
+        ):
+            self.publish_wakeup(decision.current_wake, now=now)
+        self._resume_local_if_paused()
+
     def pause(self) -> None:
         """Durably fence the current generation."""
         self._lifecycle_called = True
@@ -1159,6 +1180,9 @@ def install_vercel_apscheduler_integration(
         _PATCH_STATE.default_options = VercelAPSchedulerOptions.from_value(options)
     _PATCH_STATE.register_queues = _PATCH_STATE.register_queues or register_queues
     if _PATCH_STATE.installed:
+        from ._automatic import register_automatic_activation
+
+        register_automatic_activation()
         return
 
     _PATCH_STATE.originals = {
@@ -1187,3 +1211,6 @@ def install_vercel_apscheduler_integration(
     BaseScheduler.resume = _patched_lifecycle("resume")  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
     _patch_start_methods()
     _PATCH_STATE.installed = True
+    from ._automatic import register_automatic_activation
+
+    register_automatic_activation()
