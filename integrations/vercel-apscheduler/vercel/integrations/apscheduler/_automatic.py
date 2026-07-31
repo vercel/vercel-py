@@ -30,7 +30,7 @@ def register_automatic_activation() -> None:
 
     try:
         from vercel_runtime.invocation_hooks import (  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
-            register_invocation_hook,
+            run_on_next_invocation,
         )
     except ImportError as exc:
         raise APSchedulerConfigurationError(
@@ -38,7 +38,7 @@ def register_automatic_activation() -> None:
             "with invocation hook support"
         ) from exc
 
-    register_invocation_hook(
+    run_on_next_invocation(
         ACTIVATION_HOOK_NAME,
         _automatic_activation_hook,
     )

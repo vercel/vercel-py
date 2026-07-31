@@ -17,12 +17,12 @@ def test_registers_request_driven_automatic_activation(
     registered: list[tuple[str, Any]] = []
     invocation_hooks = ModuleType("vercel_runtime.invocation_hooks")
 
-    def register_invocation_hook(name: str, callback: Any) -> None:
+    def run_on_next_invocation(name: str, callback: Any) -> None:
         registered.append((name, callback))
 
     runtime = ModuleType("vercel_runtime")
     runtime.__path__ = []  # type: ignore[attr-defined]
-    invocation_hooks.__dict__["register_invocation_hook"] = register_invocation_hook
+    invocation_hooks.__dict__["run_on_next_invocation"] = run_on_next_invocation
     monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
     monkeypatch.setitem(
         sys.modules,
@@ -64,13 +64,13 @@ def test_subscriber_request_does_not_register_automatic_activation(
 ) -> None:
     invocation_hooks = ModuleType("vercel_runtime.invocation_hooks")
 
-    def register_invocation_hook(*args: Any, **kwargs: Any) -> None:
+    def run_on_next_invocation(*args: Any, **kwargs: Any) -> None:
         del args, kwargs
         pytest.fail("subscriber requests must not register automatic activation")
 
     runtime = ModuleType("vercel_runtime")
     runtime.__path__ = []  # type: ignore[attr-defined]
-    invocation_hooks.__dict__["register_invocation_hook"] = register_invocation_hook
+    invocation_hooks.__dict__["run_on_next_invocation"] = run_on_next_invocation
     monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
     monkeypatch.setitem(
         sys.modules,
