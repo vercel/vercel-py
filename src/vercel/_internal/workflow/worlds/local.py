@@ -555,7 +555,7 @@ class LocalWorld(w.World):
 
         elif data.event_type == "step_created" and hasattr(data, "event_data"):
             step_data = data.event_data
-            assert isinstance(step_data.input, list)
+            assert isinstance(step_data.input, bytes)
             step = w.NonFinalWorkflowStep(
                 runId=effective_run_id,
                 stepId=data.correlation_id,

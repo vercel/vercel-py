@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import functools
-import json
 import random as _random
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
@@ -174,14 +173,13 @@ class BaseHook:
             raise RuntimeError("cannot call resume() inside workflow")
 
         if isinstance(self, pydantic.BaseModel):
-            json_str = self.model_dump_json(**kwargs)
+            payload = self.model_dump(**{"mode": "python", **kwargs})
         elif dataclasses.is_dataclass(self):
-            obj = dataclasses.asdict(self, dict_factory=kwargs.pop("dict_factory", dict))
-            json_str = json.dumps(obj, **kwargs)
+            payload = dataclasses.asdict(self, **kwargs)
         else:
             raise TypeError("resume only supports pydantic models or dataclasses")
 
-        return await runtime.resume_hook(token_or_hook, json_str)
+        return await runtime.resume_hook(token_or_hook, payload)
 
 
 class Workflows:

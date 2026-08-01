@@ -7,17 +7,15 @@ as an idempotency key for non-idempotent side effects.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from vercel._internal.workflow import runtime, world as w
+from vercel._internal.workflow import runtime, serialization as ser, world as w
 from vercel._internal.workflow.worlds.local import LocalWorld
 from vercel.workflow import StepInfo, Workflows, get_step_metadata
 
 
-def _encode(args: list, kwargs: dict) -> list[bytes]:
-    return [b"json" + json.dumps([args, kwargs]).encode()]
+def _encode(args: list, kwargs: dict) -> bytes:
+    return ser.dehydrate([args, kwargs])
 
 
 class _RecordingLocalWorld(LocalWorld):

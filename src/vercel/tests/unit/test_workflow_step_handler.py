@@ -17,7 +17,7 @@ import pytest
 import respx
 
 from vercel._internal.core.polyfills import UTC
-from vercel._internal.workflow import core, runtime, world as w
+from vercel._internal.workflow import core, runtime, serialization as ser, world as w
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 RUN_ID = "wrun_test"
@@ -35,7 +35,7 @@ def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
         createdAt=NOW,
         updatedAt=NOW,
         startedAt=NOW,
-        input=[b"json[[], {}]"],
+        input=ser.dehydrate([[], {}]),
     )
 
 
@@ -260,7 +260,7 @@ async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) 
         createdAt=NOW,
         updatedAt=NOW,
         retryAfter=future,
-        input=[b"json[[], {}]"],
+        input=ser.dehydrate([[], {}]),
     )
     local_mod.write_json(world.data_dir / "steps" / f"{RUN_ID}-{STEP_ID}.json", step.model_dump())
 

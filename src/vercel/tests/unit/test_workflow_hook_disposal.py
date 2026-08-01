@@ -9,7 +9,7 @@ EntityConflictError instead of double-deleting and writing a duplicate event.
 
 from __future__ import annotations
 
-from vercel._internal.workflow import world as w
+from vercel._internal.workflow import serialization as ser, world as w
 from vercel._internal.workflow.worlds import local as local_mod
 
 RUN_ID = "wrun_test"
@@ -39,7 +39,7 @@ async def test_redispose_raises_hook_not_found(tmp_path, monkeypatch) -> None:
 
 async def test_hook_received_for_missing_hook_raises_hook_not_found(tmp_path, monkeypatch) -> None:
     world = _world(tmp_path, monkeypatch)
-    data = w.HookReceivedEventData(payload=[b"json{}"])
+    data = w.HookReceivedEventData(payload=ser.dehydrate({}))
 
     try:
         await world.events_create(RUN_ID, data.into_event("hook_unknown"))
