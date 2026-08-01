@@ -71,6 +71,7 @@ dev-mode-dirs = [".."]
 only-include = [
     "/_internal/auth.py",
     "/_internal/blob",
+    "/_internal/devalue",
     "/_internal/fs.py",
     "/_internal/pagination.py",
     "/_internal/workflow",
