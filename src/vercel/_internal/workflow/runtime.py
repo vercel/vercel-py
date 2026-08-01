@@ -258,9 +258,8 @@ class WorkflowOrchestratorContext:
         wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input:
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
-        args, kwargs = ser.hydrate(
-            workflow_run.input, what=f"the input of run {workflow_run.run_id}"
-        )
+        what = f"the input of run {workflow_run.run_id}"
+        kwargs = ser.keyword_arguments(ser.hydrate(workflow_run.input, what=what), what=what)
 
         with workflow_sandbox(policy=self.registry._sandbox_policy):
             mod = importlib.import_module(wf.module)
@@ -272,7 +271,7 @@ class WorkflowOrchestratorContext:
                 obj = getattr(obj, attr)
 
             async def inner():
-                self._fut = asyncio.ensure_future(obj.func(*args, **kwargs))
+                self._fut = asyncio.ensure_future(obj.func(**kwargs))
                 self.resume_wrapper()  # arm the resume callback
                 await self._fut
 
@@ -284,8 +283,11 @@ class WorkflowOrchestratorContext:
             assert self._fut
             return self._fut.result()
 
+    # `args` is always empty: `Step.__call__` refuses a positional call before
+    # forwarding, and only spells one because a ParamSpec has to carry both
+    # halves.
     async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
-        input_data = ser.dehydrate([list(args), kwargs])
+        input_data = ser.dehydrate(ser.step_arguments(kwargs))
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
         return await sus.future
@@ -887,7 +889,8 @@ async def step_handler(
         # Deserialize step input
         if not step_run.input:
             raise RuntimeError(f"Step '{req.step_id}' has no input")
-        args, kwargs = ser.hydrate(step_run.input, what=f"the input of step {req.step_id}")
+        what = f"the input of step {req.step_id}"
+        kwargs = ser.step_keyword_arguments(ser.hydrate(step_run.input, what=what), what=what)
 
         logger.debug(
             "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
@@ -906,7 +909,7 @@ async def step_handler(
         )
         # Execute the step function
         try:
-            result = await step.func(*args, **kwargs)
+            result = await step.func(**kwargs)
         finally:
             _step_ctx.reset(token)
 
@@ -1126,10 +1129,15 @@ class Run:
 
 
 async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
+    # See `Step.__call__` on why a keyword-only call still spells `*args`.
+    if args:
+        raise TypeError(
+            f"{wf.workflow_id} takes keyword arguments only; got {len(args)} positional argument(s)"
+        )
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = ser.dehydrate([list(args), kwargs])
+    input_data = ser.dehydrate(ser.argument_array(kwargs))
     data = w.RunCreatedEventData(
         deploymentId=deployment_id,
         workflowName=wf.workflow_id,

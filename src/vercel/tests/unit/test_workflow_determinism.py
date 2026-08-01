@@ -15,7 +15,7 @@ import pytest
 from vercel._internal.workflow import core, runtime, serialization as ser, world as w
 
 
-async def _greet(name: str) -> str:
+async def _greet(*, name: str) -> str:
     return name
 
 
@@ -33,9 +33,9 @@ def _context(
     return ctx
 
 
-def _args(*args: Any) -> bytes:
+def _args(**kwargs: Any) -> bytes:
     """A step input payload, encoded the way the runtime encodes one."""
-    return ser.dehydrate([list(args), {}])
+    return ser.dehydrate(ser.step_arguments(kwargs))
 
 
 def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:
@@ -48,10 +48,10 @@ async def test_reordered_step_args_raise_nondeterminism() -> None:
     step = core.Step(_greet)
     cid = "step_1"
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=_args("a")).into_event(cid)
+        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event(cid)
     ]
     ctx = _context(events)
-    sus = _suspension(cid, _args("b"))
+    sus = _suspension(cid, _args(name="b"))
     ctx.suspensions[cid] = sus
 
     ctx.resume()
@@ -65,10 +65,10 @@ async def test_matching_step_does_not_raise() -> None:
     step = core.Step(_greet)
     cid = "step_1"
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=_args("a")).into_event(cid)
+        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event(cid)
     ]
     ctx = _context(events)
-    sus = _suspension(cid, _args("a"))
+    sus = _suspension(cid, _args(name="a"))
     ctx.suspensions[cid] = sus
 
     ctx.resume()
@@ -87,7 +87,7 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     """
     step = core.Step(_greet)
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=_args("a")).into_event("step_1")
+        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event("step_1")
     ]
     ctx = _context(events)
     wait = runtime.Wait(
@@ -113,7 +113,7 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
 #     runs resume() when the loop's ready queue was otherwise empty (quiescent).
 #   * resume() applies at most one recorded event (single-step), or parks.
 
-_ARGS = _args("a")
+_ARGS = _args(name="a")
 
 
 def _created(step: "core.Step[Any, Any]", cid: str) -> w.Event:

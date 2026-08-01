@@ -76,3 +76,55 @@ def hydrate(data: Any, *, what: str) -> Any:
             f"{what} uses the {prefix.decode()!r} format, which this SDK cannot read"
         )
     raise SerializationError(f"{what} has an unknown serialization format: {prefix!r}")
+
+
+def argument_array(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+    """The positional-argument array a call is recorded as.
+
+    `@workflow/core` records a call as the array of its positional arguments
+    and spreads it back into the callee (`workflowFn(...args)`). Workflows and
+    steps here take keyword arguments only, so that array is a single object —
+    which is exactly what `start(wf, {…})` writes on the TypeScript side, and
+    the object argument a JavaScript callee expects. A call with no arguments
+    records the empty array TS writes for one, rather than an empty object a
+    JavaScript callee would receive as a stray parameter.
+    """
+    return [kwargs] if kwargs else []
+
+
+def keyword_arguments(args: Any, *, what: str) -> dict[str, Any]:
+    """Read an argument array back, the inverse of :func:`argument_array`.
+
+    Anything else in the array is a real positional argument, which can only
+    have come from a JavaScript caller — so the error names the convention
+    rather than letting the mismatch surface as a ``TypeError`` inside the
+    user's function.
+    """
+    if not isinstance(args, list):
+        raise SerializationError(f"{what} is not an argument array: {type(args).__name__}")
+    if not args:
+        return {}
+    if len(args) == 1 and isinstance(args[0], dict) and all(isinstance(k, str) for k in args[0]):
+        return args[0]
+    raise SerializationError(
+        f"{what} carries {len(args)} positional argument(s); Python workflows and "
+        f"steps are called with keyword arguments only, so a caller has to pass "
+        f"a single object"
+    )
+
+
+def step_arguments(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The object `@workflow/core` records a *step* call as.
+
+    A step's arguments are wrapped where a workflow's are not. TS puts
+    ``closureVars`` and ``thisVal`` in the same object, neither of which has a
+    Python analogue; its reader defaults both when they are absent.
+    """
+    return {"args": argument_array(kwargs)}
+
+
+def step_keyword_arguments(data: Any, *, what: str) -> dict[str, Any]:
+    """Read a step's recorded call back, the inverse of :func:`step_arguments`."""
+    if not isinstance(data, dict):
+        raise SerializationError(f"{what} is not a step argument object: {type(data).__name__}")
+    return keyword_arguments(data.get("args"), what=what)

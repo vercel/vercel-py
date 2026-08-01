@@ -12,6 +12,7 @@ be read is otherwise noticed several frames away from its cause.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
@@ -23,7 +24,7 @@ def test_payload_is_devl_plus_devalue() -> None:
     # The exact bytes `@workflow/core`'s client codec produces:
     # `encodeWithFormatPrefix(DEVALUE_V1, encoder.encode(stringify(value)))`.
     assert ser.dehydrate("charged 42") == b'devl["charged 42"]'
-    value = [[21], {}]
+    value = [{"amount": 21}]
     assert ser.dehydrate(value) == b"devl" + devalue.stringify(value).encode()
 
 
@@ -33,7 +34,7 @@ def test_payload_is_devl_plus_devalue() -> None:
         None,
         42,
         "unicode 你好",
-        [[21], {"tier": "pro"}],
+        [{"amount": 21, "tier": "pro"}],
         {"nested": {"list": [1, 2.5, True, None]}},
         datetime(2026, 7, 30, 17, 6, 33, tzinfo=timezone.utc),
         b"\x00\xff\x80",
@@ -104,12 +105,12 @@ def test_a_stored_payload_loads_as_binary_not_text() -> None:
     pydantic's lax coercion would happily put a payload in the ``str`` arm --
     where it fails much later, at the point of use, rather than here.
     """
-    payload = ser.dehydrate([[21], {}])
+    payload = ser.dehydrate([{"amount": 21}])
 
     run = w.WorkflowRunAdaptor.validate_python(_run_row(input=payload))
 
     assert run.input == payload
-    assert ser.hydrate(run.input, what="the input of run wrun_1") == [[21], {}]
+    assert ser.hydrate(run.input, what="the input of run wrun_1") == [{"amount": 21}]
 
 
 def test_the_circular_marker_still_loads_as_text() -> None:
@@ -117,3 +118,62 @@ def test_the_circular_marker_still_loads_as_text() -> None:
     run = w.WorkflowRunAdaptor.validate_python(_run_row(input="[Circular]"))
 
     assert run.input == "[Circular]"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# the argument array
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_call_is_recorded_as_ts_records_a_one_object_call() -> None:
+    # `start(wf, {amount: 21})` on the TypeScript side writes exactly this.
+    assert ser.argument_array({"amount": 21}) == [{"amount": 21}]
+    # ...and a call with no arguments writes the empty array TS writes, not an
+    # empty object a JavaScript callee would receive as a stray parameter.
+    assert ser.argument_array({}) == []
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"amount": 21}, {"amount": 21, "tier": "pro"}])
+def test_arguments_round_trip(kwargs) -> None:
+    assert ser.keyword_arguments(ser.argument_array(kwargs), what="a call") == kwargs
+
+
+def test_a_step_call_is_wrapped_the_way_ts_wraps_one() -> None:
+    # A step's arguments live under `args`, where a workflow's are the payload
+    # itself. TS's reader takes `.args` and defaults the siblings it also
+    # writes (`closureVars`, `thisVal`), so those are left out.
+    assert ser.step_arguments({"amount": 21}) == {"args": [{"amount": 21}]}
+    assert ser.step_arguments({}) == {"args": []}
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"amount": 21}])
+def test_step_arguments_round_trip(kwargs) -> None:
+    recorded = ser.step_arguments(kwargs)
+    assert ser.step_keyword_arguments(recorded, what="a step call") == kwargs
+
+
+def test_a_ts_written_step_input_is_read_through_its_args() -> None:
+    # The siblings TS writes are ignored rather than rejected.
+    data: dict[str, Any] = {"args": [{"amount": 21}], "closureVars": {}, "thisVal": None}
+
+    assert ser.step_keyword_arguments(data, what="a step call") == {"amount": 21}
+
+
+def test_a_step_input_that_is_not_an_object_is_reported() -> None:
+    with pytest.raises(ser.SerializationError, match="not a step argument object"):
+        ser.step_keyword_arguments([{"amount": 21}], what="the input of step step_1")
+
+
+def test_a_javascript_positional_call_is_reported_as_such() -> None:
+    # What a JS caller of a Python step writes if it passes its arguments
+    # positionally. Without this the mismatch surfaces as a TypeError inside
+    # the user's function, naming neither side.
+    with pytest.raises(ser.SerializationError, match="2 positional argument"):
+        ser.keyword_arguments([21, "usd"], what="the input of step step_1")
+    with pytest.raises(ser.SerializationError, match="1 positional argument"):
+        ser.keyword_arguments([21], what="the input of step step_1")
+
+
+def test_a_non_array_argument_payload_is_rejected() -> None:
+    with pytest.raises(ser.SerializationError, match="not an argument array"):
+        ser.keyword_arguments({"amount": 21}, what="the input of run wrun_1")

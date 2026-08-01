@@ -35,7 +35,7 @@ def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
         createdAt=NOW,
         updatedAt=NOW,
         startedAt=NOW,
-        input=ser.dehydrate([[], {}]),
+        input=ser.dehydrate(ser.step_arguments({})),
     )
 
 
@@ -260,7 +260,7 @@ async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) 
         createdAt=NOW,
         updatedAt=NOW,
         retryAfter=future,
-        input=ser.dehydrate([[], {}]),
+        input=ser.dehydrate(ser.step_arguments({})),
     )
     local_mod.write_json(world.data_dir / "steps" / f"{RUN_ID}-{STEP_ID}.json", step.model_dump())
 
