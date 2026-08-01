@@ -23,3 +23,7 @@ for package in "${packages[@]}"; do
         uv run python scripts/bundle_release.py build --package "$package" --out-dir "$dist_dir"
     fi
 done
+
+# A wheel's requirements are whatever the build backend wrote; nothing above
+# resolves them. Install each one before it can reach an index.
+uv run python scripts/verify_dist.py --dist-dir "$dist_dir"

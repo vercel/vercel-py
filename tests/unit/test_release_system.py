@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 
-from scripts import bundle_release, clogedit, hatch_build, release, workspace
+from scripts import bundle_release, clogedit, hatch_build, release, verify_dist, workspace
 
 
 def _derived_vendoring_config(include: str) -> bundle_release.VendoringConfig:
@@ -337,6 +337,42 @@ path = "version.py"
     assert metadata["dependencies"] == [
         'lib>=0.8.0,<2 ; python_version >= "3.10"',
         "httpx>=0.27,<1",
+    ]
+
+
+def test_verify_dist_skips_bundles_and_metadata(tmp_path: Path) -> None:
+    """Only the wheels `uv publish` uploads from this directory are checked.
+
+    Bundle wheels carry vendored copies of their dependencies and are meant to
+    be installed side by side, so resolving one alone says nothing; they have
+    their own check in `bundle_release.test-wheel`.
+    """
+    for name in (
+        "vercel-0.8.0-py3-none-any.whl",
+        "vercel-0.8.0-py3-none-any.whl.metadata",
+        "vercel_sandbox-0.3.0-py3-none-any.whl",
+        "vercel_bundle-0.8.0-py3-none-any.whl",
+        "vercel_internal_shared_vendored_deps-1.0.0-py3-none-any.whl",
+        "vercel-0.8.0.tar.gz",
+    ):
+        (tmp_path / name).write_text("", encoding="utf-8")
+
+    assert [path.name for path in verify_dist.wheels(tmp_path)] == [
+        "vercel-0.8.0-py3-none-any.whl",
+        "vercel_sandbox-0.3.0-py3-none-any.whl",
+    ]
+
+
+def test_verify_dist_package_filter_matches_the_distribution_name(tmp_path: Path) -> None:
+    # `vercel-sandbox` must not select the `vercel` wheel, and vice versa.
+    for name in ("vercel-0.8.0-py3-none-any.whl", "vercel_sandbox-0.3.0-py3-none-any.whl"):
+        (tmp_path / name).write_text("", encoding="utf-8")
+
+    assert [p.name for p in verify_dist.wheels(tmp_path, package="vercel")] == [
+        "vercel-0.8.0-py3-none-any.whl"
+    ]
+    assert [p.name for p in verify_dist.wheels(tmp_path, package="vercel-sandbox")] == [
+        "vercel_sandbox-0.3.0-py3-none-any.whl"
     ]
 
 
