@@ -141,6 +141,80 @@ dependencies = ["vercel-internal-core>=0.1.0,<0.2.0"]
     assert metadata["dependencies"] == ["vercel-internal-core>=0.1.7,<0.2.0"]
 
 
+def _workspace_with_bound(root: Path, *, declared: str, sibling_version: str) -> Path:
+    """A two-package workspace whose dependent declares *declared* on the sibling."""
+    core_root = root / "src/vercel-internal-core"
+    sandbox_root = root / "src/vercel-sandbox"
+    core_root.mkdir(parents=True)
+    sandbox_root.mkdir(parents=True)
+    (root / "pyproject.toml").write_text(
+        "[tool.uv.workspace]\nmembers = ['src/*']\n", encoding="utf-8"
+    )
+    (core_root / "pyproject.toml").write_text(
+        '[project]\nname = "vercel-internal-core"\n\n[tool.hatch.version]\npath = "version.py"\n',
+        encoding="utf-8",
+    )
+    (core_root / "version.py").write_text(f'__version__ = "{sibling_version}"\n', encoding="utf-8")
+    (sandbox_root / "pyproject.toml").write_text(
+        f"""
+[project]
+name = "vercel-sandbox"
+
+[tool.uv.sources]
+vercel-internal-core = {{ workspace = true }}
+
+[tool.vercel.release.dependencies]
+dependencies = ["{declared}"]
+""".strip(),
+        encoding="utf-8",
+    )
+    return sandbox_root
+
+
+def test_metadata_hook_rejects_a_bound_the_sibling_has_reached(tmp_path: Path) -> None:
+    """The generated lower bound and the declared upper bound can collide.
+
+    `vercel` 0.8.0 shipped `vercel-sandbox<0.3.0,>=0.3.0` this way and could
+    not be installed at all: the sibling reached 0.3.0 while the hand-written
+    upper bound stayed behind. Nothing downstream rejects an empty version
+    range, so the build is the last place to catch it.
+    """
+    package_root = _workspace_with_bound(
+        tmp_path, declared="vercel-internal-core>=0.1.0,<0.2.0", sibling_version="0.2.0"
+    )
+    hook = hatch_build.WorkspaceDependenciesMetadataHook(str(package_root), {})
+
+    with pytest.raises(RuntimeError, match=r"vercel-internal-core>=0.2.0,<0.2.0"):
+        hook.update({})
+
+
+def test_metadata_hook_rejection_says_which_bound_to_raise(tmp_path: Path) -> None:
+    package_root = _workspace_with_bound(
+        tmp_path, declared="vercel-internal-core>=0.1.0,<0.2.0", sibling_version="0.2.0"
+    )
+    hook = hatch_build.WorkspaceDependenciesMetadataHook(str(package_root), {})
+
+    with pytest.raises(RuntimeError) as error:
+        hook.update({})
+
+    message = str(error.value)
+    assert "vercel-sandbox declares" in message
+    assert "is at 0.2.0 in the workspace" in message
+    assert "[tool.vercel.release.dependencies]" in message
+
+
+def test_metadata_hook_accepts_a_prerelease_sibling(tmp_path: Path) -> None:
+    """A prerelease version satisfies its own generated lower bound."""
+    package_root = _workspace_with_bound(
+        tmp_path, declared="vercel-internal-core>=0.1.0,<0.2.0", sibling_version="0.1.9b1"
+    )
+    metadata: dict[str, object] = {}
+
+    hatch_build.WorkspaceDependenciesMetadataHook(str(package_root), {}).update(metadata)
+
+    assert metadata["dependencies"] == ["vercel-internal-core>=0.1.9b1,<0.2.0"]
+
+
 def test_compute_releases_force_bumps_all_packages(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
