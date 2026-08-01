@@ -64,3 +64,37 @@ async def wait_for_approval() -> bool:
 ```
 
 `BaseHook` supports dataclasses and Pydantic models for external resume events.
+
+## Serializing your own types
+
+Workflow inputs, step results and hook payloads travel in the devalue format
+`@workflow/core` uses, which carries `datetime`, `bytes`, `set` and repeated
+references natively. `Decimal`, `UUID`, `date`, `time`, `timedelta` and `Path`
+are registered on top of that; anything else needs a registration:
+
+```python
+import enum
+
+from vercel.workflow import serializable
+
+
+@serializable
+class Point:
+    def __init__(self, x: int, y: int) -> None:
+        self.x, self.y = x, y
+
+    def __workflow_serialize__(self) -> dict[str, int]:
+        return {"x": self.x, "y": self.y}
+
+    @classmethod
+    def __workflow_deserialize__(cls, data: dict[str, int]) -> "Point":
+        return cls(**data)
+
+
+@serializable          # an Enum needs no methods
+class Tier(enum.Enum):
+    PRO = "pro"
+```
+
+`register_serializable()` is the function form, for classes you cannot
+decorate.

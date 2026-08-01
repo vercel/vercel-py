@@ -10,9 +10,11 @@ way ``resume()`` in the runtime does it.
 from __future__ import annotations
 
 import dataclasses
+import decimal
 from datetime import datetime, timezone
 
 import pydantic
+import pytest
 
 from vercel._internal.workflow import runtime, serialization as ser, world as w
 from vercel._internal.workflow.worlds.local import LocalWorld
@@ -31,6 +33,20 @@ class Approval(BaseHook, pydantic.BaseModel):
 class Signoff(BaseHook):
     approved: bool
     reviewer: str
+
+
+class Refund(BaseHook, pydantic.BaseModel):
+    amount: decimal.Decimal
+
+
+class _Book:
+    """A class no one has registered for the wire."""
+
+
+class Ledger(BaseHook, pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    book: _Book
 
 
 class _RecordingLocalWorld(LocalWorld):
@@ -113,6 +129,32 @@ async def test_json_mode_is_the_way_back_to_json_shaped_values(tmp_path, monkeyp
 
     payload = _received_payload((await world.events_list(run_id)).data)
     assert ser.hydrate(payload, what="the payload")["at"] == "2026-07-30T17:06:33Z"
+
+
+async def test_a_registered_stdlib_field_survives_python_mode(tmp_path, monkeypatch) -> None:
+    # `Decimal` survives `model_dump(mode="python")` as a `Decimal`, which
+    # devalue only carries because of the built-in `Instance` registration.
+    world = _RecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    run_id = await _run_with_hook(world)
+
+    await Refund(amount=decimal.Decimal("1.50")).resume(TOKEN)
+
+    payload = _received_payload((await world.events_list(run_id)).data)
+    assert ser.hydrate(payload, what="the payload") == {"amount": decimal.Decimal("1.50")}
+
+
+async def test_an_uncarryable_field_names_the_class_to_register(tmp_path, monkeypatch) -> None:
+    # A class nothing has registered. The field it sits in is named too, since
+    # a hook can have several and the codec-level message alone locates none.
+    world = _RecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    await _run_with_hook(world)
+
+    with pytest.raises(
+        ser.SerializationError, match=r"at \.book.*Register _Book with @serializable"
+    ):
+        await Ledger(book=_Book()).resume(TOKEN)
 
 
 def _future():

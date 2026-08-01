@@ -8,12 +8,14 @@ from vercel._internal.workflow.core import (
     time_ns,
 )
 from vercel._internal.workflow.runtime import Run, StepInfo, get_step_metadata, start
+from vercel._internal.workflow.serde import register_serializable, serializable
 
 from . import sandbox
 from .errors import (
     EntityConflictError,
     HookNotFoundError,
     RunExpiredError,
+    SerializationError,
     ThrottleError,
     TooEarlyError,
     WorkflowWorldError,
@@ -32,9 +34,12 @@ __all__ = [
     "HookEvent",
     "get_step_metadata",
     "StepInfo",
+    "serializable",
+    "register_serializable",
     "EntityConflictError",
     "HookNotFoundError",
     "RunExpiredError",
+    "SerializationError",
     "ThrottleError",
     "TooEarlyError",
     "WorkflowWorldError",

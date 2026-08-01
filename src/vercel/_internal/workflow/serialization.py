@@ -18,6 +18,8 @@ from typing import Any
 
 from vercel._internal import devalue
 
+from . import serde
+
 FORMAT_PREFIX_LENGTH = 4
 
 DEVALUE_V1 = b"devl"
@@ -42,10 +44,16 @@ class SerializationError(RuntimeError):
 def dehydrate(value: Any) -> bytes:
     """Encode *value* as a ``devl``-prefixed devalue payload."""
     try:
-        return DEVALUE_V1 + devalue.stringify(value).encode()
+        return DEVALUE_V1 + devalue.stringify(value, serde.REDUCERS).encode()
     except devalue.DevalueError as error:
         at = f" at {error.path}" if error.path else ""
-        raise SerializationError(f"Cannot serialize value{at}: {error}") from error
+        raise SerializationError(
+            f"Cannot serialize value{at}: {error}.{serde.registration_hint(error.value)}"
+        ) from error
+    except (ValueError, TypeError) as error:
+        # A registered serializer failed. `serde` has already named the class,
+        # so this only puts the codec-level frame behind a typed error.
+        raise SerializationError(f"Cannot serialize value: {error}") from error
 
 
 def hydrate(data: Any, *, what: str) -> Any:
@@ -68,7 +76,7 @@ def hydrate(data: Any, *, what: str) -> Any:
     prefix, payload = data[:FORMAT_PREFIX_LENGTH], data[FORMAT_PREFIX_LENGTH:]
     if prefix == DEVALUE_V1:
         try:
-            return devalue.parse(payload.decode())
+            return devalue.parse(payload.decode(), serde.REVIVERS)
         except (devalue.DevalueError, ValueError, TypeError) as error:
             raise SerializationError(f"Cannot deserialize {what}: {error}") from error
     if prefix in KNOWN_FORMATS:
