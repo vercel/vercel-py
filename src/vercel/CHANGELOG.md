@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 - 2026-08-02
+
+### Bug Fixes
+
+- Fix the `vercel-sandbox` dependency bound, which `vercel` 0.8.0 published as `vercel-sandbox<0.3.0,>=0.3.0` — a range no version can satisfy, so that release could not be installed at all. (#222)
+
 ## 0.8.0 - 2026-07-31
 
 ### Breaking Changes
