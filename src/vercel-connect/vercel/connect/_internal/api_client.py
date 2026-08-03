@@ -1,0 +1,401 @@
+"""Internal Connect API client."""
+
+import platform
+import sys
+from collections.abc import Mapping
+from datetime import timedelta
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from typing import Any, TypeVar
+from urllib.parse import quote
+
+from httpx import Response
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from vercel._internal.core.http import (
+    BaseTransport,
+    JSONBody,
+    ReadResponsePolicy,
+    RequestBody,
+    extract_structured_error,
+)
+from vercel._internal.core.time import from_epoch_ms
+from vercel.connect._internal.errors import (
+    AuthorizationDeniedError,
+    AuthorizationExpiredError,
+    AuthorizationPendingError,
+    ConnectApiError,
+    ConnectNotFoundError,
+    ConnectorInstallationRequiredError,
+    ConnectResponseError,
+    InvalidGrantError,
+    NoValidTokenError,
+    UserAuthorizationRequiredError,
+)
+from vercel.connect._internal.models import (
+    JSONObject,
+)
+from vercel.connect._internal.options import ConnectCredentialsFactory
+from vercel.connect._internal.state import (
+    ConnectAuthorizationRequest,
+    ConnectAuthorizationState,
+    ConnectorMetadataState,
+    ConnectorRefState,
+    ConnectRevokeRequest,
+    ConnectTokenRequest,
+    ConnectTokenState,
+)
+
+try:
+    VERSION = _pkg_version("vercel-connect")
+except PackageNotFoundError:  # pragma: no cover - bundled distribution
+    try:
+        VERSION = _pkg_version("vercel-connect-bundle")
+    except PackageNotFoundError:
+        VERSION = "development"
+
+PLATFORM = platform.uname()
+USER_AGENT = (
+    f"vercel-connect/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
+)
+
+ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
+
+_ERROR_CLASSES: Mapping[str, type[ConnectApiError]] = {
+    "no_token": NoValidTokenError,
+    "user_authorization_required": UserAuthorizationRequiredError,
+    "client_installation_required": ConnectorInstallationRequiredError,
+    "connector_installation_required": ConnectorInstallationRequiredError,
+    "not_found": ConnectNotFoundError,
+    "authorization_pending": AuthorizationPendingError,
+    "slow_down": AuthorizationPendingError,
+    "access_denied": AuthorizationDeniedError,
+    "expired_token": AuthorizationExpiredError,
+    "invalid_grant": InvalidGrantError,
+}
+
+# Standard OAuth codes that carry no distinct class, listed so the ambiguous flat
+# `error` field is still recognized as a code rather than read as prose.
+# RFC 6749 section 5.2 and RFC 8628 section 3.5.
+_OAUTH_ERROR_CODES = frozenset(
+    {
+        "invalid_request",
+        "invalid_client",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "unsupported_response_type",
+        "invalid_scope",
+        "invalid_target",
+        "server_error",
+        "temporarily_unavailable",
+    }
+)
+_RECOGNIZED_CODES = frozenset(_ERROR_CLASSES) | _OAUTH_ERROR_CODES
+
+
+class _ApiModel(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
+
+
+class _ConnectorRefModel(_ApiModel):
+    id: str
+    uid: str
+    type: str
+    name: str | None = None
+    service: str | None = None
+    service_name: str | None = Field(default=None, alias="serviceName")
+
+    def to_state(self) -> ConnectorRefState:
+        return ConnectorRefState(
+            id=self.id,
+            uid=self.uid,
+            type=self.type,
+            name=self.name,
+            service=self.service,
+            service_name=self.service_name,
+        )
+
+
+class _TokenResponseModel(_ApiModel):
+    token: str
+    expires_at: int = Field(alias="expiresAt")
+    connector: _ConnectorRefModel
+    token_id: str | None = Field(default=None, alias="tokenId")
+    name: str | None = None
+    installation_id: str | None = Field(default=None, alias="installationId")
+    tenant_id: str | None = Field(default=None, alias="tenantId")
+    external_subject: str | None = Field(default=None, alias="externalSubject")
+    metadata: JSONObject | None = None
+    claims: JSONObject | None = None
+
+    def to_state(self) -> ConnectTokenState:
+        return ConnectTokenState(
+            token=self.token,
+            expires_at=from_epoch_ms(self.expires_at),
+            connector=self.connector.to_state(),
+            token_id=self.token_id,
+            name=self.name,
+            installation_id=self.installation_id,
+            tenant_id=self.tenant_id,
+            external_subject=self.external_subject,
+            metadata=self.metadata,
+            claims=self.claims,
+        )
+
+
+class _AuthorizationResponseModel(_ApiModel):
+    url: str
+    request: str
+    verifier: str
+    device_code: str | None = Field(default=None, alias="deviceCode")
+    expires_at: int | None = Field(default=None, alias="expiresAt")
+    connector: _ConnectorRefModel | None = None
+
+    def to_state(self) -> ConnectAuthorizationState:
+        return ConnectAuthorizationState(
+            url=self.url,
+            request=self.request,
+            verifier=self.verifier,
+            device_code=self.device_code,
+            expires_at=None if self.expires_at is None else from_epoch_ms(self.expires_at),
+            connector=None if self.connector is None else self.connector.to_state(),
+        )
+
+
+class _ConnectorMetadataModel(_ApiModel):
+    model_config = ConfigDict(extra="allow", frozen=True, populate_by_name=True)
+
+    id: str
+    uid: str
+    type: str
+    name: str | None = None
+    service: str | None = None
+    client_url: str | None = Field(default=None, alias="clientUrl")
+    created_at: int | None = Field(default=None, alias="createdAt")
+    updated_at: int | None = Field(default=None, alias="updatedAt")
+    data: JSONObject | None = None
+
+    def to_state(self) -> ConnectorMetadataState:
+        # Unknown top-level fields are preserved rather than dropped: the server
+        # returns more than the documented subset, including the connector
+        # capabilities callers are told to read instead of hardcoding.
+        declared = {"clientUrl", "createdAt", "updatedAt", "data"}
+        extra = {
+            name: value for name, value in (self.model_extra or {}).items() if name not in declared
+        }
+        return ConnectorMetadataState(
+            id=self.id,
+            uid=self.uid,
+            type=self.type,
+            name=self.name,
+            service=self.service,
+            client_url=self.client_url,
+            created_at=None if self.created_at is None else from_epoch_ms(self.created_at),
+            updated_at=None if self.updated_at is None else from_epoch_ms(self.updated_at),
+            vendor=dict(self.data or {}),
+            extra=extra,
+        )
+
+
+def _encode_connector(connector: str) -> str:
+    # Connector UIDs contain `/`, so every reserved character must be escaped
+    # rather than merging into the path.
+    return quote(connector, safe="")
+
+
+def _raise_api_error(response: Response) -> None:
+    # The shared extractor embeds the status and code in its message, and
+    # `ConnectApiError.__str__` renders both itself, so only the bare provider
+    # message is passed on. Its text is kept purely as a fallback for bodies the
+    # envelope parser cannot read.
+    fallback, data = extract_structured_error(response)
+    if isinstance(data, Mapping):
+        fallback = response.reason_phrase or fallback
+    else:
+        fallback = fallback.removeprefix(f"HTTP {response.status_code}: ")
+    code = _error_code(data)
+    error_class = _ERROR_CLASSES.get(code or "", ConnectApiError)
+    raise error_class(
+        response,
+        _error_message(data) or fallback,
+        code=code,
+        vendor=_error_vendor(data),
+        data=data,
+    )
+
+
+def _error_envelope(data: object) -> Mapping[str, Any] | None:
+    if not isinstance(data, Mapping):
+        return None
+    # The key is `error` or `err` depending on the endpoint.
+    for name in ("error", "err"):
+        envelope = data.get(name)
+        if isinstance(envelope, Mapping):
+            return envelope
+    return None
+
+
+def _error_message(data: object) -> str | None:
+    # Envelope first, then top level: a body like `{"message": "Forbidden"}` has no
+    # envelope at all.
+    candidates = [_error_envelope(data)]
+    if isinstance(data, Mapping):
+        candidates.append(data)
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        # These fields are unambiguously prose, even when the text is a single
+        # word that happens to look code-shaped.
+        for name in ("message", "msg", "error_description"):
+            message = candidate.get(name)
+            if isinstance(message, str) and message:
+                return message
+    # `error` is ambiguous: OAuth puts a code there, other services put a sentence.
+    # Anything not recognized as a code is prose meant for a human.
+    if isinstance(data, Mapping):
+        for name in ("error", "err"):
+            message = data.get(name)
+            if isinstance(message, str) and message and message not in _RECOGNIZED_CODES:
+                return message
+    return None
+
+
+def _error_code(data: object) -> str | None:
+    envelope = _error_envelope(data)
+    if envelope is not None:
+        code = envelope.get("code")
+        if isinstance(code, str) and code:
+            return code
+    if not isinstance(data, Mapping):
+        return None
+    # A field named `code` says what it holds, so an unrecognized value there is
+    # still a code: the server may have added one this release does not model.
+    code = data.get("code")
+    if isinstance(code, str) and code:
+        return code
+    # OAuth-shaped bodies put the code directly in `error`, and without reading it
+    # every such failure degrades to the base class.
+    for name in ("error", "err"):
+        code = data.get(name)
+        if isinstance(code, str) and code in _RECOGNIZED_CODES:
+            return code
+    return None
+
+
+def _error_vendor(data: object) -> JSONObject | None:
+    envelope = _error_envelope(data)
+    # `vendor` appears at `error.vendor`, `error.meta.vendor`, or the top level.
+    if envelope is not None:
+        vendor = envelope.get("vendor")
+        if isinstance(vendor, Mapping):
+            return dict(vendor)
+        meta = envelope.get("meta")
+        if isinstance(meta, Mapping) and isinstance(meta.get("vendor"), Mapping):
+            return dict(meta["vendor"])
+    if isinstance(data, Mapping) and isinstance(data.get("vendor"), Mapping):
+        return dict(data["vendor"])
+    return None
+
+
+class ConnectApiClient:
+    """Wire-level access to the Vercel Connect API.
+
+    Owns request/response models, camelCase aliasing, the user agent, and the
+    mapping of non-2xx responses onto the `ConnectApiError` taxonomy.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        credentials_factory: ConnectCredentialsFactory,
+        transport: BaseTransport,
+        timeout: timedelta,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._credentials_factory = credentials_factory
+        self._transport = transport
+        self._timeout = timeout
+
+    async def create_token(
+        self, request: ConnectTokenRequest, *, vercel_token: str
+    ) -> ConnectTokenState:
+        """POST /v1/connect/token/:connector."""
+        response = await self._request(
+            "POST",
+            f"/v1/connect/token/{_encode_connector(request.connector)}",
+            vercel_token=vercel_token,
+            body=JSONBody(request.to_api_body()),
+        )
+        return self._parse(response, _TokenResponseModel).to_state()
+
+    async def revoke_token(self, request: ConnectRevokeRequest, *, vercel_token: str) -> None:
+        """DELETE /v1/connect/connectors/:connector/tokens."""
+        # Revocation may answer with an empty body, so nothing is parsed.
+        await self._request(
+            "DELETE",
+            f"/v1/connect/connectors/{_encode_connector(request.connector)}/tokens",
+            vercel_token=vercel_token,
+            body=JSONBody(request.to_api_body()),
+        )
+
+    async def create_authorization(
+        self, request: ConnectAuthorizationRequest, *, vercel_token: str
+    ) -> ConnectAuthorizationState:
+        """POST /v1/connect/authorize/:connector."""
+        response = await self._request(
+            "POST",
+            f"/v1/connect/authorize/{_encode_connector(request.connector)}",
+            vercel_token=vercel_token,
+            body=JSONBody(request.to_api_body()),
+        )
+        return self._parse(response, _AuthorizationResponseModel).to_state()
+
+    async def get_connector(
+        self,
+        connector: str,
+        *,
+        vercel_token: str,
+    ) -> ConnectorMetadataState:
+        """GET /v1/connect/connectors/:connector."""
+        response = await self._request(
+            "GET",
+            f"/v1/connect/connectors/{_encode_connector(connector)}",
+            vercel_token=vercel_token,
+        )
+        return self._parse(response, _ConnectorMetadataModel).to_state()
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        vercel_token: str,
+        body: RequestBody = None,
+    ) -> Response:
+        response = await self._transport.send(
+            method,
+            f"{self._base_url}{path}",
+            token=vercel_token,
+            body=body,
+            headers={"user-agent": USER_AGENT},
+            timeout=self._timeout,
+            read_response=ReadResponsePolicy.ALWAYS,
+        )
+        if not response.is_success:
+            _raise_api_error(response)
+        return response
+
+    def _parse(self, response: Response, model: type[ResponseModelT]) -> ResponseModelT:
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise ConnectResponseError("Connect API returned a non-JSON success response") from exc
+        try:
+            return model.model_validate(payload)
+        except ValidationError as exc:
+            raise ConnectResponseError(
+                "Connect API returned a malformed success response", data=payload
+            ) from exc
+
+
+__all__ = ["ConnectApiClient", "USER_AGENT"]

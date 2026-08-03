@@ -78,10 +78,27 @@ def _member_dependency_names(
     for name, member_id in ids_by_name.items():
         record = resolution.get(member_id, {})
         for dep in record.get("dependencies", []):
-            dep_name = names_by_id.get(dep.get("id"))
+            dep_id = dep.get("id")
+            dep_name = names_by_id.get(dep_id)
+            if dep_name is None and isinstance(dep_id, str):
+                # A dependency requested with extras resolves to an id of the form
+                # `name[extra]@source`, which never equals the member's own
+                # `name@source`. Without stripping the extras the workspace edge
+                # is silently dropped, and build and release ordering would place
+                # the consumer before the package it depends on.
+                dep_name = names_by_id.get(_strip_extras(dep_id))
             if dep_name is not None:
                 edges[name].add(dep_name)
     return edges
+
+
+def _strip_extras(dependency_id: str) -> str:
+    """Remove an extras marker from a resolved dependency id."""
+    name, separator, source = dependency_id.partition("@")
+    bracket = name.find("[")
+    if bracket != -1:
+        name = name[:bracket]
+    return f"{name}{separator}{source}"
 
 
 def _fallback_dependency_names(path: Path, members: dict[str, Path]) -> set[str]:

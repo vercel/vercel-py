@@ -1851,3 +1851,33 @@ def test_vendored_nested_namespace_rewrite_deduplicates_vendor_prefix(tmp_path: 
     bundle_release._rewrite_nested_vendor_namespace(plan, tmp_path / "pkg")  # noqa: SLF001
 
     assert path.read_text(encoding="utf-8") == "from vercel.queue._vendor import httpcore\n"
+
+
+def test_workspace_dependency_edge_survives_extras() -> None:
+    """A workspace dep requested with extras resolves to `name[extra]@source`.
+
+    Without stripping the extras the edge is dropped, and build and release
+    ordering would place a consumer before the package it depends on.
+    """
+    _strip_extras = workspace._strip_extras
+
+    assert (
+        _strip_extras("vercel-oidc[verify]@editable+/repo/src/vercel-oidc")
+        == "vercel-oidc@editable+/repo/src/vercel-oidc"
+    )
+    assert (
+        _strip_extras("vercel-oidc[verify,extra]@editable+/repo/src/vercel-oidc")
+        == "vercel-oidc@editable+/repo/src/vercel-oidc"
+    )
+    assert (
+        _strip_extras("vercel-oidc@editable+/repo/src/vercel-oidc")
+        == "vercel-oidc@editable+/repo/src/vercel-oidc"
+    )
+
+
+def test_connect_depends_on_oidc_in_the_workspace_graph() -> None:
+    resolved = workspace.packages()
+    assert "vercel-oidc" in resolved["vercel-connect"].dependencies
+
+    order = workspace.topological_names(resolved)
+    assert order.index("vercel-oidc") < order.index("vercel-connect")
