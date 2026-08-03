@@ -177,6 +177,13 @@ jobs:
             rm -rf dist-publish
             if [ "$http_status" = "404" ] && [ "$is_shared_vendored_deps" != "true" ]; then
               uv build --package "$package" --no-sources --out-dir dist-publish
+              # Install it before it is uploaded. `dist-verify` accumulates
+              # every wheel built by this run, so a package is resolved
+              # against the sibling versions it is being released with rather
+              # than whatever is already on the index.
+              mkdir -p dist-verify
+              cp dist-publish/*.whl dist-verify/
+              python scripts/verify_dist.py --dist-dir dist-verify --package "$package"
             fi
             if python scripts/bundle_release.py plan --package "$package" > /tmp/bundle-plan.txt 2>/dev/null; then
               cat /tmp/bundle-plan.txt

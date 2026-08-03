@@ -8,6 +8,7 @@ from typing import Any
 
 from hatchling.metadata.plugin.interface import MetadataHookInterface
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 
 try:
     import tomllib
@@ -29,8 +30,10 @@ class WorkspaceDependenciesMetadataHook(MetadataHookInterface):
         }
         workspace_root = _find_workspace_root(Path(self.root))
 
+        package = pyproject.get("project", {}).get("name", str(self.root))
+
         metadata["dependencies"] = [
-            _rewrite_dependency(requirement, workspace_names, workspace_root)
+            _rewrite_dependency(requirement, workspace_names, workspace_root, package)
             for requirement in dependency_table.get("dependencies", [])
         ]
 
@@ -55,22 +58,54 @@ def _rewrite_dependency(
     requirement: str,
     workspace_names: set[str],
     workspace_root: Path | None,
+    package: str,
 ) -> str:
     parsed = Requirement(requirement)
     normalized = parsed.name.lower().replace("_", "-")
     if normalized not in workspace_names or workspace_root is None:
         return requirement
-    return _with_lower_bound(parsed, _read_workspace_version(workspace_root, normalized))
+    version = _read_workspace_version(workspace_root, normalized)
+    return _with_lower_bound(parsed, version, requirement, package)
 
 
-def _with_lower_bound(requirement: Requirement, version: str) -> str:
+def _with_lower_bound(requirement: Requirement, version: str, declared: str, package: str) -> str:
     extras = f"[{','.join(sorted(requirement.extras))}]" if requirement.extras else ""
     specifiers = [
         str(specifier) for specifier in requirement.specifier if specifier.operator != ">="
     ]
     specifier_text = ",".join([f">={version}", *specifiers])
+    _reject_unsatisfiable(package, requirement.name, declared, specifier_text, version)
     marker = f" ; {requirement.marker}" if requirement.marker else ""
     return f"{requirement.name}{extras}{specifier_text}{marker}"
+
+
+def _reject_unsatisfiable(
+    package: str, dependency: str, declared: str, specifier_text: str, version: str
+) -> None:
+    """Refuse to publish a bound that no version of *dependency* can satisfy.
+
+    The lower bound is generated from the sibling's current version while the
+    rest of the specifier is whatever the package declared, so a hand-written
+    upper bound that the sibling has since reached produces something like
+    ``>=0.3.0,<0.3.0``. Nothing rejects that later: the wheel builds, uploads,
+    and only fails when someone tries to install it. Fail the build instead --
+    CI builds every package, so the bump that crosses the bound is caught by
+    its own pull request.
+
+    The test is that the sibling version *being released* satisfies the bound,
+    which is narrower than the range being non-empty: `>=0.7.1,!=0.7.1` leaves
+    room for a later version, but says the release under way is unusable.
+    """
+    # `prereleases=True` so a workspace version like `0.4.0b1` is judged
+    # against its own bound rather than excluded for being a prerelease.
+    if SpecifierSet(specifier_text).contains(version, prereleases=True):
+        return
+    raise RuntimeError(
+        f"{package} declares {declared!r}, but {dependency} is at {version} in "
+        f"the workspace, so publishing would pin {dependency}{specifier_text} — "
+        f"which excludes {version} itself, the version being released. "
+        f"Raise the upper bound in [tool.vercel.release.dependencies] of {package}."
+    )
 
 
 def _read_workspace_version(workspace_root: Path, package_name: str) -> str:
