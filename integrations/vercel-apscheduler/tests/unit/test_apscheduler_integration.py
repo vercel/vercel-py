@@ -19,6 +19,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from vercel.integrations.apscheduler import (
     APSchedulerConfigurationError,
     install_vercel_apscheduler_integration,
+    is_scheduler_subscriber,
 )
 from vercel.integrations.apscheduler._adapter import get_adapter
 from vercel.integrations.apscheduler._driver import (
@@ -719,6 +720,18 @@ def test_failed_runtime_mutation_retry_repairs_pending_wake() -> None:
     repaired = driver.current
     assert repaired is not None
     assert repaired.status == "published"
+
+
+def test_is_scheduler_subscriber_classifies_declared_objects() -> None:
+    scheduler, _adapter, _driver = scheduler_with_driver()
+    del scheduler
+
+    assert is_scheduler_subscriber(TEST_SCHEDULER_MODULE, "scheduler")
+    assert not is_scheduler_subscriber(TEST_SCHEDULER_MODULE, "missing")
+    assert not is_scheduler_subscriber("not_imported_module", "scheduler")
+
+    modules[TEST_SCHEDULER_MODULE].__dict__["plain"] = object()
+    assert not is_scheduler_subscriber(TEST_SCHEDULER_MODULE, "plain")
 
 
 def test_runtime_mutation_requires_lifecycle_activation() -> None:

@@ -733,6 +733,17 @@ def _resolve_identity(scheduler: BaseScheduler) -> _SchedulerIdentity:
     return _SchedulerIdentity.from_subscriber_id(matches[0])
 
 
+def is_scheduler_subscriber(module_name: str, variable_name: str) -> bool:
+    """Whether the imported module declares a scheduler adopted by this integration.
+
+    The Vercel Python builder calls this during subscriber introspection to
+    classify declared entrypoints without depending on internal topic names.
+    """
+    module = modules.get(module_name)
+    candidate = getattr(module, variable_name, None) if module is not None else None
+    return get_adapter(candidate) is not None
+
+
 def adopt_scheduler(
     scheduler: BaseScheduler,
     options: VercelAPSchedulerOptions | dict[str, Any] | None = None,
