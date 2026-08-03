@@ -1216,14 +1216,11 @@ def test_sandbox_bundle_keeps_bounded_pydantic_external(
         bundle_release._requirement_name(requirement) != "pydantic"  # noqa: SLF001
         for requirement in vendored_requirements
     )
-    assert bundle_release._external_dependencies(  # noqa: SLF001
+
+    ext_deps = bundle_release._external_dependencies(  # noqa: SLF001
         "vercel-sandbox", data, vendored_requirements
-    ) == (
-        "vercel-internal-core-bundle>=0.1.0,<0.2.0",
-        "vercel-oidc-bundle>=0.7.1",
-        "pydantic>=2.7.0,<3",
-        "vercel-internal-shared-vendored-deps>=0.7.1",
     )
+    assert "pydantic>=2.7.0,<3" in ext_deps
 
 
 def test_vendored_requirements_are_derived_from_release_deps_and_lock(

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.8.1 - 2026-08-02
+
+### Bug Fixes
+
+- Fix the `vercel-sandbox` dependency bound, which `vercel` 0.8.0 published as `vercel-sandbox<0.3.0,>=0.3.0` — a range no version can satisfy, so that release could not be installed at all. (#222)
+
+## 0.8.0 - 2026-07-31
+
+### Breaking Changes
+
+- `vercel.sandbox` is now the promoted Sandbox API that previously lived at `vercel.unstable.sandbox`. The former `vercel.sandbox` surface, including `AsyncSandbox`, `Command`, `AsyncCommand`, and `TokenProvider`, is gone, and `vercel.unstable` has been removed. Use `vercel.sandbox` for the async API and `vercel.sandbox.sync` for the synchronous API. (#195)
+- The Sandbox implementation now ships in the separate `vercel-sandbox` distribution, which `vercel` depends on, so `vercel.sandbox` imports keep working without installing anything extra. (#195)
+- Workflow and step identifiers now use `//` between the module and qualified name to match the TypeScript SDK format. (#220)
+
+### Features
+
+- Add `vercel.functions.wait_until()` for post-response asynchronous work that remains attached to the current Python Function invocation. (#218)
+- Port from vercel-workers to vercel-queue (#184)
+
+### Internal
+
+- Move Vercel SDK tests under the package-local test suite. (#194)
+
 ## 0.7.2 - 2026-07-21
 
 ### Bug Fixes

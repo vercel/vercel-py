@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import (
     Annotated,
@@ -21,9 +22,11 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Self
 
+import httpx
 import pydantic
 
 from vercel._internal.core.polyfills import Self
+from vercel.queue import SanitizedName
 
 T = TypeVar("T")
 QueueKind: TypeAlias = Literal["workflow", "step"]
@@ -60,6 +63,37 @@ def get_queue_name(
 ) -> str:
     """Build a queue name for an optional namespace."""
     return f"{get_queue_topic_prefix(kind, namespace)}{identifier}"
+
+
+# The consumer group our subscribers register under. The Python builder
+# introspects `get_subscriptions()` and copies this into the queue trigger it
+# writes (vercel/vercel#17236), so the value only has to be stable rather than
+# match anything; `default` keeps it aligned with the trigger
+# `createWorkflowQueueTrigger` writes for the TypeScript SDK on these topics.
+#
+# Dispatch is keyed on `(consumer_group, topic)`, so a subscriber registered
+# under a group the delivery does not name is never called at all.
+QUEUE_CONSUMER_GROUP = SanitizedName("default")
+
+
+def get_physical_topic(queue_name: str) -> SanitizedName:
+    """Map a logical queue name onto the VQS topic it is published to.
+
+    Mirrors `@workflow/world-vercel`: replace anything outside
+    ``[A-Za-z0-9-_]`` with ``-`` and leave the rest — notably the underscores
+    in ``__wkf_workflow_`` — alone. ``sanitize_name()`` must not be used here.
+    Its reversible encoding is meant for arbitrary user-supplied names and
+    doubles underscores; ours are already VQS-safe, and encoding them would
+    put the result outside the ``__wkf_*`` prefix that both the builder's
+    trigger pattern and platform-side service resolution recognize as a
+    workflow topic.
+    """
+    return SanitizedName(
+        "".join(
+            char if char.isascii() and (char.isalnum() or char in "-_") else "-"
+            for char in queue_name
+        )
+    )
 
 
 class BaseModel(pydantic.BaseModel):
@@ -639,11 +673,12 @@ class EventResult(BaseModel):
 
 
 class HTTPRequest(metaclass=abc.ABCMeta):
+    @property
     @abc.abstractmethod
-    def get_header(self, name: str) -> str | None: ...
+    def headers(self) -> httpx.Headers: ...
 
     @abc.abstractmethod
-    async def get_body(self) -> bytes: ...
+    def aiter_bytes(self, chunk_size: int | None = None) -> AsyncIterator[bytes]: ...
 
 
 @dataclasses.dataclass

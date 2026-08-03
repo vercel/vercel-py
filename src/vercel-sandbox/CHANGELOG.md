@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 - 2026-07-31
+
+### Features
+
+- Add `get_or_create_sandbox` to retrieve a named sandbox or create it when it does not exist, for both async and synchronous APIs. (#220)
+
 ## 0.2.0 - 2026-07-22
 
 ### Features
