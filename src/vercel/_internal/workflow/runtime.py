@@ -19,12 +19,11 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, nanoid, serialization as ser, ulid, world as w
+from . import core, loop, nanoid, serialization as ser, ulid, world as w
 from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
 T = TypeVar("T")
-SUSPENDED_MESSAGE = "<WORKFLOW SUSPENDED>"
 logger = logging.getLogger("vercel.workflow")
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -47,6 +46,10 @@ def _wait_continuation_dispatch(
     delay = min(timeout_seconds, WAIT_CONTINUATION_MAX_DELAY_SECONDS)
     key = wait_correlation_id if hop == 1 else f"{wait_correlation_id}:hop-{hop}"
     return delay, key
+
+
+class _SuspendException(BaseException):
+    """Raised to trigger suspending of the workflow."""
 
 
 class NondeterminismError(Exception):
@@ -202,26 +205,23 @@ else:
                 loop.close()
 
 
-def _run_in_default_loop(coro: Coroutine[Any, Any, T]) -> T:
-    return _run_in_loop(coro, loop_factory=asyncio.SelectorEventLoop)
-
-
-def _run_isolated(coro: Coroutine[Any, Any, T]) -> T:
+def _run_isolated(
+    coro: Coroutine[Any, Any, T],
+    *,
+    loop_factory: Callable[[], asyncio.AbstractEventLoop],
+) -> T:
     # The workflow is async, but it is not actually allowed to perform
     # any IO-full operations, and resume/resume_wrapper require that it
     # run in an isolated loop.
     #
-    # So hide our existing loop and run everything in a fresh loop. We
-    # explicitly specify a factory because we look at ._ready, which
-    # might not exist in uvloop etc.
-    # TODO: Use a custom loop implementation.
+    # So hide our existing loop and run everything in a fresh loop.
     old_loop = asyncio.get_running_loop()
     current_task = asyncio.current_task()
     if current_task:
         asyncio._leave_task(old_loop, current_task)
     asyncio._set_running_loop(None)
     try:
-        return _run_in_default_loop(coro)
+        return _run_in_loop(coro, loop_factory=loop_factory)
     finally:
         asyncio._set_running_loop(old_loop)
         if current_task:
@@ -243,11 +243,8 @@ class WorkflowOrchestratorContext:
         self.generate_ulid = functools.partial(ulid.monotonic_factory(prng.random), started_at)
         self.generate_nanoid = nanoid.custom_random(nanoid.URL_ALPHABET, 21, prng.random)
         self._user_random = random.Random(f"{seed}:random")
-        self._fut: asyncio.Future[Any] | None = None
         self.suspensions: dict[str, BaseSuspension] = {}
         self.hooks: dict[str, Hook] = {}
-        self.resume_handle: asyncio.Handle | None = None
-        self._suspended = False
         self.registry = registry
 
     @classmethod
@@ -272,18 +269,16 @@ class WorkflowOrchestratorContext:
             what = f"the input of run {workflow_run.run_id}"
             kwargs = ser.keyword_arguments(ser.hydrate(workflow_run.input, what=what), what=what)
 
-            async def inner():
-                self._fut = asyncio.ensure_future(obj.func(**kwargs))
-                self.resume_wrapper()  # arm the resume callback
-                await self._fut
-
             token = self._ctx.set(self)
             try:
-                _run_isolated(inner())
+                return ser.dehydrate(
+                    _run_isolated(
+                        obj.func(**kwargs),
+                        loop_factory=lambda: loop.WorkflowLoop(idle_hook=self.resume),
+                    )
+                )
             finally:
                 self._ctx.reset(token)
-            assert self._fut
-            return ser.dehydrate(self._fut.result())
 
     # `args` is always empty: `Step.__call__` refuses a positional call before
     # forwarding, and only spells one because a ParamSpec has to carry both
@@ -357,21 +352,6 @@ class WorkflowOrchestratorContext:
         elif isinstance(sus, (Suspension, Wait)) and not sus.future.done():
             sus.future.set_exception(exc)
 
-    def resume_wrapper(self) -> None:
-        """Make sure that resume() runs on an empty event loop ready queue."""
-
-        loop = asyncio.get_running_loop()
-        is_ready = bool(loop._ready)  # type: ignore[attr-defined]
-        self.resume_handle = loop.call_soon(self.resume_wrapper)
-        # We only want to resume() when all of the workflow tasks have
-        # suspended, so if anything else is running or ready to run,
-        # we defer. Our resume_handle callback will be at the back of
-        # the _ready queue, so everything else will go first.
-        if is_ready:
-            return
-
-        self.resume()
-
     def resume(self) -> None:
         """Run over the the event log and try to apply an event.
 
@@ -389,9 +369,6 @@ class WorkflowOrchestratorContext:
         If the event log is exhausted, cancel the future and suspend
         the workflow.
         """
-
-        if self._fut is None:
-            return
 
         # NOTE: resume() does single-step delivery, so we resolve at most
         # one suspension per invocation of resume().
@@ -490,13 +467,7 @@ class WorkflowOrchestratorContext:
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
                     assert isinstance(sus, Suspension)
-                    try:
-                        result = ser.hydrate(
-                            data, what=f"the result of step {event.correlation_id}"
-                        )
-                    except ser.SerializationError as error:
-                        self._fut.cancel(str(error))
-                        return
+                    result = ser.hydrate(data, what=f"the result of step {event.correlation_id}")
                     sus.future.set_result(result)
 
                 case w.WaitCompletedEvent():
@@ -523,13 +494,7 @@ class WorkflowOrchestratorContext:
                 case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
                     hook = self.suspensions[event.correlation_id]
                     assert isinstance(hook, Hook)
-                    try:
-                        result = ser.hydrate(
-                            data, what=f"the payload of hook {event.correlation_id}"
-                        )
-                    except ser.SerializationError as error:
-                        self._fut.cancel(str(error))
-                        return
+                    result = ser.hydrate(data, what=f"the payload of hook {event.correlation_id}")
                     hook.set_result(result)
                     if not hook.futures:
                         self.suspensions.pop(event.correlation_id)
@@ -546,10 +511,7 @@ class WorkflowOrchestratorContext:
         # event log exhausted without doing any work.
         # Suspend.
         else:
-            self._suspended = True
-            self._fut.cancel(SUSPENDED_MESSAGE)
-            if self.resume_handle:
-                self.resume_handle.cancel()
+            raise _SuspendException()
 
 
 async def workflow_handler(
@@ -656,26 +618,23 @@ async def workflow_handler(
     )
     try:
         output = context.run_workflow(workflow_run)
-    except BaseException as e:
-        if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
-            # Workflow suspended, continue outside the try..except block
-            pass
-        elif isinstance(e, Exception):
-            error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
-            logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
-            try:
-                await world.events_create(
-                    run_id,
-                    w.RunFailedEventData(
-                        error={"message": error_message, "stack": traceback.format_exc()},
-                        code=type(e).__name__,
-                    ).into_event(),
-                )
-            except w.EntityConflictError:
-                logger.warning(f"Workflow run {run_id} was already completed")
-            return None
-        else:
-            raise
+    except _SuspendException:
+        # Workflow suspended, continue outside the try..except block.
+        pass
+    except Exception as e:
+        error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
+        logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
+        try:
+            await world.events_create(
+                run_id,
+                w.RunFailedEventData(
+                    error={"message": error_message, "stack": traceback.format_exc()},
+                    code=type(e).__name__,
+                ).into_event(),
+            )
+        except w.EntityConflictError:
+            logger.warning(f"Workflow run {run_id} was already completed")
+        return None
     else:
         try:
             await world.events_create(
@@ -765,7 +724,7 @@ async def workflow_handler(
                 events_created = True
 
     if not context.suspensions and events_created:
-        # We captured a SUSPENDED_MESSAGE but there is no suspension - this is likely caused
+        # We captured a _SuspendException but there is no suspension - this is likely caused
         # by a disposed hook that cleared its suspensions. Just retry if event log changed.
         return await workflow_handler(
             message,
