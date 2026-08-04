@@ -14,6 +14,25 @@ import pytest
 from vercel._internal.workflow import runtime
 
 
+def test_run_in_loop_cleans_up_tasks() -> None:
+    background_cancelled = False
+
+    async def background() -> None:
+        nonlocal background_cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            background_cancelled = True
+
+    async def body() -> None:
+        asyncio.create_task(background())
+        await asyncio.sleep(0)
+
+    runtime._run_in_loop(body(), loop_factory=asyncio.SelectorEventLoop)
+
+    assert background_cancelled
+
+
 async def test_run_isolated_returns_result() -> None:
     async def body() -> int:
         return 41 + 1

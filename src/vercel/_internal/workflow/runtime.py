@@ -11,7 +11,7 @@ import re
 import sys
 import traceback
 from collections import deque
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
@@ -150,23 +150,61 @@ def get_step_metadata() -> StepInfo:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
 
 
-def _run_in_default_loop(coro: Coroutine[Any, Any, T]) -> T:
-    if sys.version_info >= (3, 11):
-        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+if sys.version_info >= (3, 11):
+
+    def _run_in_loop(
+        coro: Coroutine[Any, Any, T],
+        *,
+        loop_factory: Callable[[], asyncio.AbstractEventLoop],
+    ) -> T:
+        with asyncio.Runner(loop_factory=loop_factory) as runner:
             return runner.run(coro)
-    else:
-        # Python 3.10 doesn't support asyncio.Runner or the
-        # loop_factory argument to asyncio.run(). I don't really want
-        # to reimplement run so instead we just warn if the loop
-        # policy is something weird.
-        pol = asyncio.get_event_loop_policy()
-        if not isinstance(pol, asyncio.DefaultEventLoopPolicy):
-            logger.warning(
-                "asyncio event loop policy %r is not the default; workflow "
-                "execution needs the stdlib event loop and may misbehave.",
-                pol,
-            )
-        return asyncio.run(coro)
+
+else:
+
+    def _cancel_all_tasks(loop: asyncio.AbstractEventLoop) -> None:
+        tasks = asyncio.all_tasks(loop)
+        if not tasks:
+            return
+
+        for task in tasks:
+            task.cancel()
+
+        loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+
+        for task in tasks:
+            if task.cancelled():
+                continue
+            exception = task.exception()
+            if exception is not None:
+                loop.call_exception_handler(
+                    {
+                        "message": "unhandled exception during workflow loop shutdown",
+                        "exception": exception,
+                        "task": task,
+                    }
+                )
+
+    def _run_in_loop(
+        coro: Coroutine[Any, Any, T],
+        *,
+        loop_factory: Callable[[], asyncio.AbstractEventLoop],
+    ) -> T:
+        """Python 3.10 backport of the lifecycle used by ``asyncio.Runner``."""
+        loop = loop_factory()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            try:
+                _cancel_all_tasks(loop)
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
+            finally:
+                loop.close()
+
+
+def _run_in_default_loop(coro: Coroutine[Any, Any, T]) -> T:
+    return _run_in_loop(coro, loop_factory=asyncio.SelectorEventLoop)
 
 
 def _run_isolated(coro: Coroutine[Any, Any, T]) -> T:
