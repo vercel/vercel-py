@@ -19,7 +19,15 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    services:
+      # The vercel-apscheduler driver tests exercise their Lua scripts against
+      # a real Redis; without this service they skip silently.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     env:
+      APSCHEDULER_TEST_REDIS_URL: redis://localhost:6379/9
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}

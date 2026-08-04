@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-apscheduler"
+dynamic = ["version"]
+description = "APScheduler integration for Vercel Queues"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+dependencies = [
+    "redis>=5,<7",
+]
+
+[tool.ruff]
+extend = "../ruff.toml"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "D",
+    "S101",
+    "SLF001",
+    "PLC2701",
+]
+"vercel/integrations/apscheduler/_payload.py" = [
+    "TRY004",  # payload parse failures are reported uniformly as ValueError.
+]
+"vercel/integrations/apscheduler/version.py" = [
+    "D100",
+]
+
+[tool.pytest.ini_options]
+addopts = "--no-header --capture=tee-sys"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "vercel/integrations/apscheduler/version.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vercel/integrations/apscheduler/**/*.py",
+    "/vercel/integrations/apscheduler/py.typed",
+    "/README.md",
+    "/SCHEDULER.md",
+    "/pyproject.toml",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/integrations/apscheduler",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
