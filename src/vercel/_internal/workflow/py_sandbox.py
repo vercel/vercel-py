@@ -279,9 +279,17 @@ class _RestrictedAsyncioPolicy(_ModulePolicy):
             proxy.__dict__["current_task"] = _current_task
 
 
+def _host_system() -> str:
+    return _host_import("platform").system()
+
+
 _RESTRICTIONS: dict[str, _ModulePolicy] = {
     "builtins": _blocklist("builtins", "open", "input", "breakpoint", "eval", "exec", "compile"),
     "datetime": _blocklist("datetime", datetime=_RestrictedDatetime, date=_RestrictedDate),
+    "platform": _allowlist(
+        "platform",
+        system=_host_system,
+    ),
     "os": _allowlist(
         "os",
         "path",
