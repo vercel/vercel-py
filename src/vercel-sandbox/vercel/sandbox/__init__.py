@@ -41,6 +41,7 @@ from vercel.sandbox._internal.errors import (
     SandboxResponseError,
     SandboxStreamError,
     SandboxTerminalStateError,
+    SandboxTimeoutError as SandboxTimeoutError,
     SandboxUploadSizeMismatchError,
 )
 from vercel.sandbox._internal.models import (

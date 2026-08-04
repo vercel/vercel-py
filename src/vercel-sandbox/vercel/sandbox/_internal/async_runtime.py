@@ -1,7 +1,9 @@
 """Async runtime handles and entry points for Sandbox operations."""
 
+import asyncio
 import signal as signal_module
 import subprocess
+import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +24,7 @@ from vercel.sandbox._internal.errors import (
     SandboxCleanupError,
     SandboxResponseError,
     SandboxTerminalStateError,
+    SandboxTimeoutError,
 )
 from vercel.sandbox._internal.filesystem_handle_common import _validate_open_options
 from vercel.sandbox._internal.filesystem_handle_core import (
@@ -41,6 +44,7 @@ from vercel.sandbox._internal.models import (
     SandboxQuery,
     SandboxResources,
     SandboxSource,
+    SandboxStatus,
     SnapshotExpiration,
     SnapshotExpirationInput,
     SnapshotRetention,
@@ -61,7 +65,10 @@ from vercel.sandbox._internal.process_output import (
     _validate_reader_destination,
 )
 from vercel.sandbox._internal.recovery import (
+    TRANSITION_POLL_INTERVAL,
+    TRANSITION_TIMEOUT,
     SandboxLifecycle,
+    SandboxRecoveryTarget,
     execute_with_sandbox_recovery,
 )
 from vercel.sandbox._internal.runtime_common import (
@@ -82,6 +89,7 @@ from vercel.sandbox._internal.state import (
     ProcessState,
     SandboxRuntimeSessionState,
     SandboxState,
+    SnapshotSessionState,
     SnapshotState,
 )
 from vercel.sandbox._internal.text_reader import TextReader, _text_readers
@@ -847,7 +855,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     ``stop`` to stop it, and ``destroy`` to permanently remove the sandbox.
     """
 
-    __slots__ = ("_service", "fs")
+    __slots__ = ("_recovery_task", "_service", "fs")
 
     def __init__(
         self,
@@ -862,21 +870,56 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             include_system_routes=include_system_routes,
         )
         self._service = service
+        self._recovery_task: asyncio.Task[None] | None = None
         self.fs = SandboxFilesystem(
             service=service,
             session_id=lambda: self.current_session_id,
             write_files_cwd=self._write_files_cwd,
         )
 
-    async def _recover(self, lifecycle: SandboxLifecycle) -> bool:
-        if lifecycle is not SandboxLifecycle.STOPPED:
-            return False
+    async def _resume_for_recovery(self) -> None:
         payload = await self._service.resume_sandbox(
             name=self.name,
             project_id=self.project_id,
             include_system_routes=self._include_system_routes,
         )
         self._apply_payload(payload)
+
+    def _clear_recovery_task(self, task: asyncio.Task[None]) -> None:
+        if self._recovery_task is task:
+            self._recovery_task = None
+        if not task.cancelled():
+            task.exception()
+
+    async def _await_shared_resume(self) -> None:
+        task = self._recovery_task
+        if task is None:
+            task = asyncio.create_task(self._resume_for_recovery())
+            self._recovery_task = task
+            task.add_done_callback(self._clear_recovery_task)
+        await asyncio.shield(task)
+
+    async def _wait_for_transition(self, target: SandboxRecoveryTarget) -> None:
+        deadline = time.monotonic() + TRANSITION_TIMEOUT
+        while True:
+            if time.monotonic() >= deadline:
+                raise SandboxTimeoutError(
+                    f"Sandbox session {target.session_id!r} did not leave a "
+                    f"transitional state within {TRANSITION_TIMEOUT}s"
+                )
+            await asyncio.sleep(TRANSITION_POLL_INTERVAL)
+            payload = await self._service.get_runtime_session(session_id=target.session_id)
+            self._apply_recovery_session_payload(target, payload)
+            if payload.status not in {
+                SandboxStatus.STOPPING,
+                SandboxStatus.SNAPSHOTTING,
+            }:
+                return
+
+    async def _recover(self, lifecycle: SandboxLifecycle, target: SandboxRecoveryTarget) -> bool:
+        if lifecycle in {SandboxLifecycle.STOPPING, SandboxLifecycle.SNAPSHOTTING}:
+            await self._wait_for_transition(target)
+        await self._await_shared_resume()
         return True
 
     async def run_process(
@@ -902,8 +945,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         )
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = await execute_with_sandbox_recovery(
-            lambda: self._service.run_process(
-                session_id=self.current_session_id,
+            lambda session_id: self._service.run_process(
+                session_id=session_id,
                 command=command,
                 args=args,
                 cwd=cwd,
@@ -954,8 +997,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         parsed_args = list(args) if args is not None else None
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = await execute_with_sandbox_recovery(
-            lambda: self._service.create_process(
-                session_id=self.current_session_id,
+            lambda session_id: self._service.create_process(
+                session_id=session_id,
                 command=command,
                 args=parsed_args,
                 cwd=cwd,
@@ -970,8 +1013,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     async def get_process(self, process_id: str, *, wait: bool = False) -> Process:
         """Get a process from the current session."""
         state = await execute_with_sandbox_recovery(
-            lambda: self._service.get_process(
-                session_id=self.current_session_id,
+            lambda session_id: self._service.get_process(
+                session_id=session_id,
                 process_id=process_id,
                 wait=wait,
             ),
@@ -982,7 +1025,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     async def query_processes(self) -> list[Process]:
         """Return handles for processes in the current session."""
         states = await execute_with_sandbox_recovery(
-            lambda: self._service.query_processes(session_id=self.current_session_id),
+            lambda session_id: self._service.query_processes(session_id=session_id),
             coordinator=self,
         )
         return [Process(payload=state, service=self._service) for state in states]
@@ -1029,38 +1072,62 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         The service rejects durations shorter than one second.
         """
         parsed_duration = parse_required_duration_seconds(duration)
-        payload = await execute_with_sandbox_recovery(
-            lambda: self._service.extend_runtime_session_timeout(
-                session_id=self.current_session_id,
+
+        async def extend(
+            session_id: str,
+        ) -> tuple[str, SandboxRuntimeSessionState]:
+            payload = await self._service.extend_runtime_session_timeout(
+                session_id=session_id,
                 duration=parsed_duration,
-            ),
-            coordinator=self,
-        )
-        return self._apply_current_session_payload(payload)
+            )
+            return session_id, payload
+
+        target_id, payload = await execute_with_sandbox_recovery(extend, coordinator=self)
+        return self._apply_current_session_payload_if_current(payload, target_id)
 
     async def update_network_policy(self, network_policy: NetworkPolicy) -> SandboxRuntimeSession:
         """Replace the current session's network policy."""
-        payload = await execute_with_sandbox_recovery(
-            lambda: self._service.update_runtime_session_network_policy(
-                session_id=self.current_session_id,
+
+        async def update(
+            session_id: str,
+        ) -> tuple[str, SandboxRuntimeSessionState]:
+            payload = await self._service.update_runtime_session_network_policy(
+                session_id=session_id,
                 network_policy=network_policy,
-            ),
-            coordinator=self,
-        )
-        return self._apply_current_session_payload(payload)
+            )
+            return session_id, payload
+
+        target_id, payload = await execute_with_sandbox_recovery(update, coordinator=self)
+        return self._apply_current_session_payload_if_current(payload, target_id)
 
     async def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> Snapshot:
         """Create a filesystem snapshot from the current session."""
         parsed_expiration = _parse_snapshot_expiration(expiration)
-        result = await execute_with_sandbox_recovery(
-            lambda: self._service.create_snapshot(
-                session_id=self.current_session_id,
+
+        async def create(session_id: str) -> tuple[str, SnapshotSessionState]:
+            result = await self._service.create_snapshot(
+                session_id=session_id,
                 expiration=parsed_expiration,
-            ),
-            coordinator=self,
-        )
-        self._apply_current_session_payload(result.session)
+            )
+            return session_id, result
+
+        target_id, result = await execute_with_sandbox_recovery(create, coordinator=self)
+        self._apply_current_session_payload_if_current(result.session, target_id)
         return Snapshot(payload=result.snapshot, service=self._service)
+
+    def _apply_current_session_payload_if_current(
+        self, payload: SandboxRuntimeSessionState, target_id: str
+    ) -> SandboxRuntimeSession:
+        """Ignore an operation reply superseded by a concurrent recovery."""
+        if target_id == self.current_session_id:
+            return self._apply_current_session_payload(payload)
+        session = self.current_session
+        if session is None:
+            raise SandboxResponseError(
+                "Sandbox current-session operation returned a different session identity",
+                data=payload,
+            )
+        return session
 
     async def stop(self) -> Self:
         """Stop the current session and return this sandbox handle."""

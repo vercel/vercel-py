@@ -1,6 +1,7 @@
 """Shared recovery policy for sandbox-level session operations."""
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, TypeVar
 
@@ -39,7 +40,7 @@ def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle |
     if isinstance(error, SandboxApiError):
         api_error = error
     elif isinstance(error, SandboxFilesystemWriteError) and isinstance(
-        error.cause, SandboxApiError
+        getattr(error, "cause", None), SandboxApiError
     ):
         api_error = error.cause
     else:
@@ -57,16 +58,28 @@ class SandboxRecoveryCoordinator(Protocol):
     recovery without changing the one-attempt/one-replay policy.
     """
 
-    async def _recover(self, lifecycle: SandboxLifecycle) -> bool:
+    def _capture_recovery_target(self) -> "SandboxRecoveryTarget":
+        """Capture the session identity and optional bound handle for an attempt."""
+        ...
+
+    async def _recover(self, lifecycle: SandboxLifecycle, target: "SandboxRecoveryTarget") -> bool:
         """Recover the current sandbox session when this runtime supports it."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxRecoveryTarget:
+    """The exact session used by an operation's first attempt."""
+
+    session_id: str
+    session: object | None
 
 
 _ResultT = TypeVar("_ResultT")
 
 
 async def execute_with_sandbox_recovery(
-    operation: Callable[[], Awaitable[_ResultT]],
+    operation: Callable[[str], Awaitable[_ResultT]],
     *,
     coordinator: SandboxRecoveryCoordinator,
 ) -> _ResultT:
@@ -76,10 +89,12 @@ async def execute_with_sandbox_recovery(
     so callers can resolve their current session ID immediately before each
     request. A replay failure is never eligible for another recovery cycle.
     """
+    target = coordinator._capture_recovery_target()
     try:
-        return await operation()
+        return await operation(target.session_id)
     except Exception as error:
         lifecycle = classify_sandbox_lifecycle_error(error)
-        if lifecycle is None or not await coordinator._recover(lifecycle):
+        if lifecycle is None or not await coordinator._recover(lifecycle, target):
             raise
-    return await operation()
+    replay_target = coordinator._capture_recovery_target()
+    return await operation(replay_target.session_id)

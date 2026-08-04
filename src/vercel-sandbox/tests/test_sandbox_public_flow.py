@@ -45,6 +45,10 @@ from vercel.sandbox import (
     TarballSource,
     sync as sandbox_sync,
 )
+from vercel.sandbox._internal import (
+    async_runtime as sandbox_async_runtime,
+    sync_runtime as sandbox_sync_runtime,
+)
 from vercel.sandbox._internal.service import get_sandbox_service
 from vercel.sandbox._internal.state import SandboxRuntimeSessionState, SandboxState
 
@@ -2371,6 +2375,44 @@ async def test_sandbox_payload_application_preserves_or_replaces_current_session
         assert handle.current_session.id == "sbx_new"
 
 
+async def test_recovery_poll_retains_a_concurrently_installed_replacement(
+    mock_env_clear: None,
+) -> None:
+    async with session(service_options=_session_options()):
+        handle = sandbox.Sandbox(
+            payload=SandboxState(
+                name="preview",
+                current_session_id="sbx_old",
+                current_session=SandboxRuntimeSessionState(
+                    id="sbx_old", status=SandboxStatus.STOPPING
+                ),
+            ),
+            service=get_sandbox_service(get_active_session()),
+        )
+        old_session = handle.current_session
+        assert old_session is not None
+        target = handle._capture_recovery_target()
+
+        handle._apply_payload(
+            SandboxState(
+                name="preview",
+                current_session_id="sbx_new",
+                current_session=SandboxRuntimeSessionState(
+                    id="sbx_new", status=SandboxStatus.RUNNING
+                ),
+            )
+        )
+        handle._apply_recovery_session_payload(
+            target,
+            SandboxRuntimeSessionState(id="sbx_old", status=SandboxStatus.STOPPED),
+        )
+
+    assert old_session.status is SandboxStatus.STOPPED
+    assert handle.current_session_id == "sbx_new"
+    assert handle.current_session is not None
+    assert handle.current_session.id == "sbx_new"
+
+
 @respx.mock
 async def test_async_sparse_sandbox_lookup_targets_current_session_without_resume(
     mock_env_clear: None,
@@ -2842,6 +2884,228 @@ async def test_async_sandbox_does_not_recover_noncovered_operations(
 
     assert exc_info.value.code == "sandbox_stopped"
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("error_code", "transition_status"),
+    [
+        ("sandbox_stopping", "stopping"),
+        ("sandbox_snapshotting", "snapshotting"),
+    ],
+)
+@respx.mock
+async def test_async_transition_recovery_polls_exact_session_then_replays(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    transition_status: str,
+) -> None:
+    events: list[str] = []
+    poll_statuses = iter([transition_status, transition_status, "stopped"])
+
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_async_runtime.asyncio, "sleep", no_delay)
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json=_sandbox_response(
+                session_id="sbx_old" if request.url.params["resume"] == "false" else "sbx_new"
+            ),
+        )
+    )
+
+    def old_operation(_request: httpx.Request) -> httpx.Response:
+        events.append("old-operation")
+        return httpx.Response(
+            409,
+            json={"error": {"code": error_code, "message": "transitioning"}},
+        )
+
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=old_operation
+    )
+
+    def poll(_request: httpx.Request) -> httpx.Response:
+        status = next(poll_statuses)
+        events.append(f"poll-{status}")
+        return httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(
+                    session_id="sbx_old", status=status, session_status=status
+                )["session"]
+            },
+        )
+
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        side_effect=poll
+    )
+    replacement_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        old_session = handle.current_session
+        assert old_session is not None
+        assert await handle.query_processes() == []
+
+    assert poll_route.call_count == 3
+    assert replacement_route.call_count == 1
+    assert old_session.status is SandboxStatus.STOPPED
+    assert handle.current_session_id == "sbx_new"
+    assert events == [
+        "old-operation",
+        f"poll-{transition_status}",
+        f"poll-{transition_status}",
+        "poll-stopped",
+    ]
+
+
+@respx.mock
+async def test_async_transition_polling_is_cancellable(
+    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    poll_waiting = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def blocked_delay(_delay: float) -> None:
+        poll_waiting.set()
+        await never_release.wait()
+
+    monkeypatch.setattr(sandbox_async_runtime.asyncio, "sleep", blocked_delay)
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
+        )
+    )
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(500)
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        operation = asyncio.create_task(handle.query_processes())
+        await poll_waiting.wait()
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+
+    assert poll_route.call_count == 0
+
+
+@respx.mock
+async def test_async_transition_poll_failure_propagates_without_resuming(
+    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_async_runtime.asyncio, "sleep", no_delay)
+    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
+        )
+    )
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(
+            503,
+            json={"error": {"code": "poll_failed", "message": "poll failed"}},
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            await handle.query_processes()
+
+    assert exc_info.value.code == "poll_failed"
+    assert poll_route.call_count == 1
+    assert sandbox_route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("error_code", "transition_status"),
+    [
+        ("sandbox_stopping", "stopping"),
+        ("sandbox_snapshotting", "snapshotting"),
+    ],
+)
+@respx.mock
+def test_sync_transition_recovery_polls_exact_session_then_replays(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    transition_status: str,
+) -> None:
+    events: list[str] = []
+    poll_statuses = iter([transition_status, transition_status, "stopped"])
+    monkeypatch.setattr(sandbox_sync_runtime.time, "sleep", lambda _delay: None)
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lambda request: httpx.Response(
+            200,
+            json=_sandbox_response(
+                session_id="sbx_old" if request.url.params["resume"] == "false" else "sbx_new"
+            ),
+        )
+    )
+
+    def old_operation(_request: httpx.Request) -> httpx.Response:
+        events.append("old-operation")
+        return httpx.Response(
+            409,
+            json={"error": {"code": error_code, "message": "transitioning"}},
+        )
+
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=old_operation
+    )
+
+    def poll(_request: httpx.Request) -> httpx.Response:
+        status = next(poll_statuses)
+        events.append(f"poll-{status}")
+        return httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(
+                    session_id="sbx_old", status=status, session_status=status
+                )["session"]
+            },
+        )
+
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        side_effect=poll
+    )
+    replacement_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        old_session = handle.current_session
+        assert old_session is not None
+        assert handle.query_processes() == []
+
+    assert poll_route.call_count == 3
+    assert replacement_route.call_count == 1
+    assert old_session.status is SandboxStatus.STOPPED
+    assert handle.current_session_id == "sbx_new"
+    assert events == [
+        "old-operation",
+        f"poll-{transition_status}",
+        f"poll-{transition_status}",
+        "poll-stopped",
+    ]
 
 
 def _run_sync_unrecovered_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:

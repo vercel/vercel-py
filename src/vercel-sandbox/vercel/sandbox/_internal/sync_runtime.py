@@ -2,8 +2,11 @@
 
 import signal as signal_module
 import subprocess
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
+from threading import Condition
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
 
@@ -15,6 +18,7 @@ from vercel.sandbox._internal.errors import (
     SandboxCleanupError,
     SandboxResponseError,
     SandboxTerminalStateError,
+    SandboxTimeoutError,
 )
 from vercel.sandbox._internal.filesystem_handle_common import _validate_open_options
 from vercel.sandbox._internal.filesystem_handle_core import (
@@ -34,6 +38,7 @@ from vercel.sandbox._internal.models import (
     SandboxQuery,
     SandboxResources,
     SandboxSource,
+    SandboxStatus,
     SnapshotExpirationInput,
     SnapshotRetention,
     SnapshotRetentionUpdate,
@@ -53,7 +58,10 @@ from vercel.sandbox._internal.process_output import (
     _validate_reader_destination,
 )
 from vercel.sandbox._internal.recovery import (
+    TRANSITION_POLL_INTERVAL,
+    TRANSITION_TIMEOUT,
     SandboxLifecycle,
+    SandboxRecoveryTarget,
     execute_with_sandbox_recovery,
 )
 from vercel.sandbox._internal.runtime_common import (
@@ -881,6 +889,12 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
 
+@dataclass(slots=True)
+class _SyncRecoveryAttempt:
+    status: Literal["in_flight", "succeeded", "failed", "abandoned"] = "in_flight"
+    error: BaseException | None = None
+
+
 class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     """Control a synchronous Vercel Sandbox.
 
@@ -890,7 +904,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     ``stop`` to stop it, and ``destroy`` to permanently remove the sandbox.
     """
 
-    __slots__ = ("_service", "fs")
+    __slots__ = ("_recovery_attempt", "_recovery_condition", "_service", "fs")
 
     def __init__(
         self,
@@ -907,21 +921,94 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             include_system_routes=include_system_routes,
         )
         self._service = service
+        self._recovery_condition = Condition()
+        self._recovery_attempt: _SyncRecoveryAttempt | None = None
         self.fs = SyncSandboxFilesystem(
             service=service,
             session_id=lambda: self.current_session_id,
             write_files_cwd=self._write_files_cwd,
         )
 
-    async def _recover(self, lifecycle: SandboxLifecycle) -> bool:
-        if lifecycle is not SandboxLifecycle.STOPPED:
-            return False
-        payload = await self._service.resume_sandbox(
-            name=self.name,
-            project_id=self.project_id,
-            include_system_routes=self._include_system_routes,
-        )
-        self._apply_payload(payload)
+    def _capture_recovery_target(self) -> SandboxRecoveryTarget:
+        with self._recovery_condition:
+            return super()._capture_recovery_target()
+
+    def _apply_recovery_session_payload(
+        self,
+        target: SandboxRecoveryTarget,
+        payload: SandboxRuntimeSessionState,
+    ) -> None:
+        with self._recovery_condition:
+            super()._apply_recovery_session_payload(target, payload)
+
+    async def _await_shared_resume(self) -> None:
+        while True:
+            with self._recovery_condition:
+                attempt = self._recovery_attempt
+                if attempt is None:
+                    attempt = _SyncRecoveryAttempt()
+                    self._recovery_attempt = attempt
+                    owns_attempt = True
+                else:
+                    owns_attempt = False
+
+                if not owns_attempt:
+                    while attempt.status == "in_flight":
+                        self._recovery_condition.wait()
+                    if attempt.status == "succeeded":
+                        return
+                    if attempt.status == "failed":
+                        assert attempt.error is not None
+                        raise attempt.error
+                    continue
+
+            outcome: Literal["succeeded", "failed", "abandoned"] = "abandoned"
+            attempt_error: BaseException | None = None
+            try:
+                payload = await self._service.resume_sandbox(
+                    name=self.name,
+                    project_id=self.project_id,
+                    include_system_routes=self._include_system_routes,
+                )
+                with self._recovery_condition:
+                    self._apply_payload(payload)
+            except Exception as error:
+                if not isinstance(error, InterruptedError):
+                    outcome = "failed"
+                    attempt_error = error
+                raise
+            else:
+                outcome = "succeeded"
+            finally:
+                with self._recovery_condition:
+                    attempt.status = outcome
+                    attempt.error = attempt_error
+                    if self._recovery_attempt is attempt:
+                        self._recovery_attempt = None
+                    self._recovery_condition.notify_all()
+            return
+
+    async def _wait_for_transition(self, target: SandboxRecoveryTarget) -> None:
+        deadline = time.monotonic() + TRANSITION_TIMEOUT
+        while True:
+            if time.monotonic() >= deadline:
+                raise SandboxTimeoutError(
+                    f"Sandbox session {target.session_id!r} did not leave a "
+                    f"transitional state within {TRANSITION_TIMEOUT}s"
+                )
+            time.sleep(TRANSITION_POLL_INTERVAL)
+            payload = await self._service.get_runtime_session(session_id=target.session_id)
+            self._apply_recovery_session_payload(target, payload)
+            if payload.status not in {
+                SandboxStatus.STOPPING,
+                SandboxStatus.SNAPSHOTTING,
+            }:
+                return
+
+    async def _recover(self, lifecycle: SandboxLifecycle, target: SandboxRecoveryTarget) -> bool:
+        if lifecycle in {SandboxLifecycle.STOPPING, SandboxLifecycle.SNAPSHOTTING}:
+            await self._wait_for_transition(target)
+        await self._await_shared_resume()
         return True
 
     def run_process(
@@ -948,8 +1035,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
             execute_with_sandbox_recovery(
-                lambda: self._service.run_process(
-                    session_id=self.current_session_id,
+                lambda session_id: self._service.run_process(
+                    session_id=session_id,
                     command=command,
                     args=args,
                     cwd=cwd,
@@ -1002,8 +1089,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
             execute_with_sandbox_recovery(
-                lambda: self._service.create_process(
-                    session_id=self.current_session_id,
+                lambda session_id: self._service.create_process(
+                    session_id=session_id,
                     command=command,
                     args=parsed_args,
                     cwd=cwd,
@@ -1020,8 +1107,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """Get a process from the current session."""
         state = iter_coroutine(
             execute_with_sandbox_recovery(
-                lambda: self._service.get_process(
-                    session_id=self.current_session_id,
+                lambda session_id: self._service.get_process(
+                    session_id=session_id,
                     process_id=process_id,
                     wait=wait,
                 ),
@@ -1034,7 +1121,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """Return handles for processes in the current session."""
         states = iter_coroutine(
             execute_with_sandbox_recovery(
-                lambda: self._service.query_processes(session_id=self.current_session_id),
+                lambda session_id: self._service.query_processes(session_id=session_id),
                 coordinator=self,
             )
         )
@@ -1082,8 +1169,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         parsed_duration = parse_required_duration_seconds(duration)
         payload = iter_coroutine(
             execute_with_sandbox_recovery(
-                lambda: self._service.extend_runtime_session_timeout(
-                    session_id=self.current_session_id,
+                lambda session_id: self._service.extend_runtime_session_timeout(
+                    session_id=session_id,
                     duration=parsed_duration,
                 ),
                 coordinator=self,
@@ -1095,8 +1182,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """Replace the current session's network policy."""
         payload = iter_coroutine(
             execute_with_sandbox_recovery(
-                lambda: self._service.update_runtime_session_network_policy(
-                    session_id=self.current_session_id,
+                lambda session_id: self._service.update_runtime_session_network_policy(
+                    session_id=session_id,
                     network_policy=network_policy,
                 ),
                 coordinator=self,
@@ -1109,8 +1196,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         parsed_expiration = _parse_snapshot_expiration(expiration)
         result = iter_coroutine(
             execute_with_sandbox_recovery(
-                lambda: self._service.create_snapshot(
-                    session_id=self.current_session_id,
+                lambda session_id: self._service.create_snapshot(
+                    session_id=session_id,
                     expiration=parsed_expiration,
                 ),
                 coordinator=self,

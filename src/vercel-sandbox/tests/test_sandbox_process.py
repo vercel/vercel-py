@@ -1,8 +1,11 @@
+import asyncio
 import io
 import json
 import signal
 import subprocess
 from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 
 import httpx
 import pytest
@@ -13,6 +16,10 @@ from vercel import sandbox
 from vercel._internal.core.options import ServiceOptions
 from vercel.api import session
 from vercel.sandbox import sync as sandbox_sync
+from vercel.sandbox._internal.state import (
+    SandboxRuntimeSessionState,
+    SandboxState,
+)
 
 
 def _sandbox_response(*, session_id: str = "sbx_1") -> dict[str, object]:
@@ -592,32 +599,6 @@ async def test_async_run_process_reads_chunked_ndjson(mock_env_clear: None) -> N
 
 
 @respx.mock
-def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    stream = _TrackingSyncStream(
-        _chunked_ndjson(
-            _process_response(),
-            {"stream": "stdout", "data": "café\n"},
-            {"stream": "stderr", "data": "雪\n"},
-            _process_response(0),
-        )
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
-        return_value=httpx.Response(200, stream=stream)
-    )
-
-    with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
-        result = box.run_process("python", capture_output=True)
-
-    assert result.stdout == "café\n"
-    assert result.stderr == "雪\n"
-    assert stream.closed
-
-
-@respx.mock
 async def test_async_run_process_replays_pre_stream_stopped_session_error(
     mock_env_clear: None,
 ) -> None:
@@ -629,7 +610,7 @@ async def test_async_run_process_replays_pre_stream_stopped_session_error(
     def old_command_handler(_request: httpx.Request) -> httpx.Response:
         events.append("old-command")
         return httpx.Response(
-            409,
+            410,
             json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
 
@@ -672,7 +653,7 @@ def test_sync_run_process_replays_pre_stream_stopped_session_error(
     def old_command_handler(_request: httpx.Request) -> httpx.Response:
         events.append("old-command")
         return httpx.Response(
-            409,
+            410,
             json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
 
@@ -701,6 +682,32 @@ def test_sync_run_process_replays_pre_stream_stopped_session_error(
     assert result.session_id == "sbx_new"
     assert result.stdout == "out\n"
     assert events == ["old-command", "resume", "replacement-command"]
+
+
+@respx.mock
+def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stream = _TrackingSyncStream(
+        _chunked_ndjson(
+            _process_response(),
+            {"stream": "stdout", "data": "café\n"},
+            {"stream": "stderr", "data": "雪\n"},
+            _process_response(0),
+        )
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, stream=stream)
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        result = box.run_process("python", capture_output=True)
+
+    assert result.stdout == "café\n"
+    assert result.stderr == "雪\n"
+    assert stream.closed
 
 
 @respx.mock
@@ -946,3 +953,472 @@ def test_sync_run_process_does_not_replay_lifecycle_stream_errors(
 
     assert exc_info.value.code == "sandbox_stopped"
     assert not resume_route.called
+
+
+def _stopped_error() -> sandbox.SandboxApiError:
+    data = {"error": {"code": "sandbox_stopped", "message": "session stopped"}}
+    return sandbox.SandboxApiError(httpx.Response(409), "session stopped", data=data)
+
+
+def _transition_error() -> sandbox.SandboxApiError:
+    data = {"error": {"code": "sandbox_stopping", "message": "sandbox stopping"}}
+    return sandbox.SandboxApiError(httpx.Response(409), "sandbox stopping", data=data)
+
+
+class _AsyncCoordinatedRecoveryService:
+    def __init__(self, *, resume_error: BaseException | None = None) -> None:
+        self.allow_resume = asyncio.Event()
+        self.resume_started = asyncio.Event()
+        self.resume_finished = asyncio.Event()
+        self.second_failure = asyncio.Event()
+        self.operation_count = 0
+        self.resume_count = 0
+        self.resume_error = resume_error
+
+    async def query_processes(self, *, session_id: str) -> list[object]:
+        self.operation_count += 1
+        if session_id == "sbx_old":
+            if self.operation_count >= 2:
+                self.second_failure.set()
+            raise _stopped_error()
+        return []
+
+    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
+        self.resume_count += 1
+        self.resume_started.set()
+        await self.allow_resume.wait()
+        if self.resume_error is not None:
+            raise self.resume_error
+        result = SandboxState(
+            name="preview",
+            current_session_id="sbx_new",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
+            ),
+        )
+        self.resume_finished.set()
+        return result
+
+
+def _async_coordinated_box(
+    service: _AsyncCoordinatedRecoveryService,
+) -> sandbox.Sandbox:
+    return sandbox.Sandbox(
+        payload=SandboxState(
+            name="preview",
+            current_session_id="sbx_old",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_old", status=sandbox.SandboxStatus.STOPPED
+            ),
+        ),
+        service=service,  # type: ignore[arg-type]
+    )
+
+
+async def test_async_recovery_shares_resume_when_initiating_waiter_is_cancelled() -> None:
+    service = _AsyncCoordinatedRecoveryService()
+    box = _async_coordinated_box(service)
+
+    initiating = asyncio.create_task(box.query_processes())
+    await service.resume_started.wait()
+    waiting = asyncio.create_task(box.query_processes())
+    await service.second_failure.wait()
+    initiating.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await initiating
+    service.allow_resume.set()
+
+    assert await waiting == []
+    assert service.resume_count == 1
+    assert box.current_session_id == "sbx_new"
+
+
+async def test_async_recovery_finishes_and_applies_state_after_all_waiters_cancel() -> None:
+    service = _AsyncCoordinatedRecoveryService()
+    box = _async_coordinated_box(service)
+
+    first = asyncio.create_task(box.query_processes())
+    await service.resume_started.wait()
+    second = asyncio.create_task(box.query_processes())
+    await service.second_failure.wait()
+    first.cancel()
+    second.cancel()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+
+    service.allow_resume.set()
+    await service.resume_finished.wait()
+    assert service.resume_count == 1
+    assert box.current_session_id == "sbx_new"
+
+
+async def test_async_recovery_shares_failure_and_clears_slot_for_retry() -> None:
+    resume_error = RuntimeError("resume failed")
+    service = _AsyncCoordinatedRecoveryService(resume_error=resume_error)
+    box = _async_coordinated_box(service)
+
+    first = asyncio.create_task(box.query_processes())
+    await service.resume_started.wait()
+    second = asyncio.create_task(box.query_processes())
+    await service.second_failure.wait()
+    service.allow_resume.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert results == [resume_error, resume_error]
+    assert service.resume_count == 1
+    service.resume_error = None
+    assert await box.query_processes() == []
+    assert service.resume_count == 2
+
+
+class _DelayedLifecycleFailureService:
+    def __init__(self) -> None:
+        self.arrived = (asyncio.Event(), asyncio.Event())
+        self.release = (asyncio.Event(), asyncio.Event())
+        self.old_operation_count = 0
+        self.resume_count = 0
+
+    async def query_processes(self, *, session_id: str) -> list[object]:
+        if session_id != "sbx_old":
+            return []
+        index = self.old_operation_count
+        self.old_operation_count += 1
+        self.arrived[index].set()
+        await self.release[index].wait()
+        raise _stopped_error()
+
+    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
+        self.resume_count += 1
+        return SandboxState(
+            name="preview",
+            current_session_id="sbx_new",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
+            ),
+        )
+
+
+async def test_delayed_async_lifecycle_failure_may_resume_again_after_slot_clears() -> None:
+    service = _DelayedLifecycleFailureService()
+    box = sandbox.Sandbox(
+        payload=SandboxState(
+            name="preview",
+            current_session_id="sbx_old",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_old", status=sandbox.SandboxStatus.STOPPED
+            ),
+        ),
+        service=service,  # type: ignore[arg-type]
+    )
+
+    first = asyncio.create_task(box.query_processes())
+    second = asyncio.create_task(box.query_processes())
+    await asyncio.gather(*(event.wait() for event in service.arrived))
+    service.release[0].set()
+    assert await first == []
+    service.release[1].set()
+    assert await second == []
+
+    assert service.resume_count == 2
+    assert box.current_session_id == "sbx_new"
+
+
+class _SyncCoordinatedRecoveryService:
+    def __init__(
+        self,
+        *,
+        interrupt_first_resume: bool = False,
+        first_resume_error: Exception | None = None,
+    ) -> None:
+        self.allow_resume = Event()
+        self.resume_returning = Event()
+        self.resume_started = Event()
+        self.second_failure = Event()
+        self._lock = Lock()
+        self._interrupt_first_resume = interrupt_first_resume
+        self.first_resume_error = first_resume_error
+        self.operation_count = 0
+        self.resume_count = 0
+
+    async def query_processes(self, *, session_id: str) -> list[object]:
+        with self._lock:
+            self.operation_count += 1
+            operation_count = self.operation_count
+        if session_id == "sbx_old":
+            if operation_count >= 2:
+                self.second_failure.set()
+            raise _stopped_error()
+        return []
+
+    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
+        with self._lock:
+            self.resume_count += 1
+            resume_count = self.resume_count
+        if resume_count == 1:
+            self.resume_started.set()
+            assert self.allow_resume.wait(timeout=5)
+            if self._interrupt_first_resume:
+                raise KeyboardInterrupt
+            if self.first_resume_error is not None:
+                raise self.first_resume_error
+        self.resume_returning.set()
+        return SandboxState(
+            name="preview",
+            current_session_id="sbx_new",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
+            ),
+        )
+
+
+def _sync_coordinated_box(
+    service: _SyncCoordinatedRecoveryService,
+) -> sandbox_sync.SyncSandbox:
+    return sandbox_sync.SyncSandbox(
+        payload=SandboxState(
+            name="preview",
+            current_session_id="sbx_old",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_old", status=sandbox.SandboxStatus.STOPPED
+            ),
+        ),
+        service=service,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.parametrize("interrupt_initiator", [False, True])
+def test_sync_recovery_shares_or_re_elects_after_initiator_interruption(
+    interrupt_initiator: bool,
+) -> None:
+    service = _SyncCoordinatedRecoveryService(interrupt_first_resume=interrupt_initiator)
+    box = _sync_coordinated_box(service)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        initiating = executor.submit(box.query_processes)
+        assert service.resume_started.wait(timeout=5)
+        waiting = executor.submit(box.query_processes)
+        assert service.second_failure.wait(timeout=5)
+        service.allow_resume.set()
+        if interrupt_initiator:
+            with pytest.raises(KeyboardInterrupt):
+                initiating.result(timeout=5)
+        else:
+            assert initiating.result(timeout=5) == []
+        assert waiting.result(timeout=5) == []
+
+    assert service.resume_count == (2 if interrupt_initiator else 1)
+    assert box.current_session_id == "sbx_new"
+
+
+def test_sync_recovery_shares_failure_and_clears_slot_for_retry() -> None:
+    resume_error = RuntimeError("resume failed")
+    service = _SyncCoordinatedRecoveryService(first_resume_error=resume_error)
+    box = _sync_coordinated_box(service)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        initiating = executor.submit(box.query_processes)
+        assert service.resume_started.wait(timeout=5)
+        waiting = executor.submit(box.query_processes)
+        assert service.second_failure.wait(timeout=5)
+        service.allow_resume.set()
+        for participant in (initiating, waiting):
+            with pytest.raises(RuntimeError) as exc_info:
+                participant.result(timeout=5)
+            assert exc_info.value is resume_error
+
+    assert service.resume_count == 1
+    service.first_resume_error = None
+    assert box.query_processes() == []
+    assert service.resume_count == 2
+
+
+class _AsyncTransitionCoordinationService:
+    def __init__(self) -> None:
+        self.allow_resume = asyncio.Event()
+        self.resume_started = asyncio.Event()
+        self.second_poll_arrived = asyncio.Event()
+        self.second_poll_returning = asyncio.Event()
+        self.operation_count = 0
+        self.poll_count = 0
+        self.resume_count = 0
+
+    async def query_processes(self, *, session_id: str) -> list[object]:
+        self.operation_count += 1
+        if session_id == "sbx_old":
+            raise _transition_error()
+        return []
+
+    async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
+        assert session_id == "sbx_old"
+        self.poll_count += 1
+        poll_number = self.poll_count
+        if poll_number == 1:
+            await self.second_poll_arrived.wait()
+        else:
+            self.second_poll_arrived.set()
+            await self.resume_started.wait()
+            self.second_poll_returning.set()
+        return SandboxRuntimeSessionState(id="sbx_old", status=sandbox.SandboxStatus.STOPPED)
+
+    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
+        self.resume_count += 1
+        self.resume_started.set()
+        await self.allow_resume.wait()
+        return SandboxState(
+            name="preview",
+            current_session_id="sbx_new",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
+            ),
+        )
+
+
+async def test_async_transition_callers_poll_independently_and_share_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_delay)
+    service = _AsyncTransitionCoordinationService()
+    box = sandbox.Sandbox(
+        payload=SandboxState(
+            name="preview",
+            current_session_id="sbx_old",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_old", status=sandbox.SandboxStatus.STOPPING
+            ),
+        ),
+        service=service,  # type: ignore[arg-type]
+    )
+
+    first = asyncio.create_task(box.query_processes())
+    second = asyncio.create_task(box.query_processes())
+    await service.second_poll_returning.wait()
+    service.allow_resume.set()
+
+    assert await asyncio.gather(first, second) == [[], []]
+    assert service.poll_count == 2
+    assert service.resume_count == 1
+    assert service.operation_count == 4
+
+
+class _SyncTransitionCoordinationService:
+    def __init__(self) -> None:
+        self.allow_resume = Event()
+        self.resume_started = Event()
+        self.second_poll_arrived = Event()
+        self.second_poll_returning = Event()
+        self._lock = Lock()
+        self.operation_count = 0
+        self.poll_count = 0
+        self.resume_count = 0
+
+    async def query_processes(self, *, session_id: str) -> list[object]:
+        with self._lock:
+            self.operation_count += 1
+        if session_id == "sbx_old":
+            raise _transition_error()
+        return []
+
+    async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
+        assert session_id == "sbx_old"
+        with self._lock:
+            self.poll_count += 1
+            poll_number = self.poll_count
+        if poll_number == 1:
+            assert self.second_poll_arrived.wait(timeout=5)
+        else:
+            self.second_poll_arrived.set()
+            assert self.resume_started.wait(timeout=5)
+            self.second_poll_returning.set()
+        return SandboxRuntimeSessionState(id="sbx_old", status=sandbox.SandboxStatus.STOPPED)
+
+    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
+        with self._lock:
+            self.resume_count += 1
+        self.resume_started.set()
+        assert self.allow_resume.wait(timeout=5)
+        return SandboxState(
+            name="preview",
+            current_session_id="sbx_new",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
+            ),
+        )
+
+
+def test_sync_transition_callers_poll_independently_and_share_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vercel.sandbox._internal.sync_runtime.time.sleep", lambda _delay: None)
+    service = _SyncTransitionCoordinationService()
+    box = sandbox_sync.SyncSandbox(
+        payload=SandboxState(
+            name="preview",
+            current_session_id="sbx_old",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_old", status=sandbox.SandboxStatus.STOPPING
+            ),
+        ),
+        service=service,  # type: ignore[arg-type]
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(box.query_processes)
+        second = executor.submit(box.query_processes)
+        assert service.second_poll_returning.wait(timeout=5)
+        service.allow_resume.set()
+        assert first.result(timeout=5) == []
+        assert second.result(timeout=5) == []
+
+    assert service.poll_count == 2
+    assert service.resume_count == 1
+    assert service.operation_count == 4
+
+
+class _SyncPollingExitService:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.operation_count = 0
+        self.poll_count = 0
+        self.resume_count = 0
+
+    async def query_processes(self, *, session_id: str) -> list[object]:
+        self.operation_count += 1
+        raise _transition_error()
+
+    async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
+        self.poll_count += 1
+        raise self.error
+
+    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
+        self.resume_count += 1
+        raise AssertionError("poll exit must not resume")
+
+
+@pytest.mark.parametrize("poll_error", [RuntimeError("poll failed"), KeyboardInterrupt()])
+def test_sync_transition_poll_failure_or_interruption_exits_without_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    poll_error: BaseException,
+) -> None:
+    monkeypatch.setattr("vercel.sandbox._internal.sync_runtime.time.sleep", lambda _delay: None)
+    service = _SyncPollingExitService(poll_error)
+    box = sandbox_sync.SyncSandbox(
+        payload=SandboxState(
+            name="preview",
+            current_session_id="sbx_old",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_old", status=sandbox.SandboxStatus.STOPPING
+            ),
+        ),
+        service=service,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(type(poll_error)) as exc_info:
+        box.query_processes()
+
+    assert exc_info.value is poll_error
+    assert service.operation_count == 1
+    assert service.poll_count == 1
+    assert service.resume_count == 0
