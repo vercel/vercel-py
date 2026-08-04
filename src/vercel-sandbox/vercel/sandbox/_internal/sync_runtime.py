@@ -3,6 +3,7 @@
 import signal as signal_module
 import subprocess
 import time
+import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
@@ -15,6 +16,7 @@ from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.errors import (
+    SandboxApiError,
     SandboxCleanupError,
     SandboxResponseError,
     SandboxTerminalStateError,
@@ -63,6 +65,7 @@ from vercel.sandbox._internal.recovery import (
     TRANSITION_TIMEOUT,
     SandboxLifecycle,
     SandboxRecoveryTarget,
+    classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
 from vercel.sandbox._internal.runtime_common import (
@@ -81,6 +84,7 @@ from vercel.sandbox._internal.runtime_common import (
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
     ProcessState,
+    RuntimeSessionStopState,
     SandboxRuntimeSessionState,
     SandboxState,
     SnapshotState,
@@ -743,15 +747,16 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         traceback: TracebackType | None,
     ) -> None:
         try:
-            payload = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
-            self._apply_payload(payload)
-        except Exception as cleanup_exc:
-            raise SandboxCleanupError(
-                f"Failed to clean up sandbox runtime session {self.id!r}",
-                resource_type="sandbox_runtime_session",
-                resource_id=self.id,
-                cause=cleanup_exc,
-            ) from cleanup_exc
+            _cleanup_exact_sync_session(self)
+        except SandboxCleanupError as cleanup_error:
+            if exc is None:
+                raise
+            warnings.warn(
+                str(cleanup_error),
+                RuntimeWarning,
+                source=cleanup_error,
+                stacklevel=2,
+            )
 
     def run_process(
         self,
@@ -888,7 +893,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 session_id=self.id, include_system_routes=include_system_routes
             )
         )
-        self._apply_payload(payload)
+        self._apply_payload_with_parent(payload)
         return self
 
     def extend_execution_time_limit(self, duration: DurationInput) -> Self:
@@ -926,9 +931,34 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
 
     def stop(self) -> Self:
         """Stop this runtime session and refresh the handle."""
-        payload = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
-        self._apply_payload(payload)
+        result = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
+        self._apply_stop_result(result)
         return self
+
+
+def _cleanup_exact_sync_session(handle: SyncSandboxRuntimeSession) -> None:
+    if handle.status == SandboxStatus.STOPPED:
+        return
+    try:
+        result = iter_coroutine(handle._service.stop_runtime_session(session_id=handle.id))
+        handle._apply_stop_result(result)
+    except SandboxApiError as error:
+        if classify_sandbox_lifecycle_error(error) is SandboxLifecycle.STOPPED:
+            handle._mark_stopped()
+            return
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox runtime session {handle.id!r}",
+            resource_type="sandbox_runtime_session",
+            resource_id=handle.id,
+            cause=error,
+        ) from error
+    except Exception as error:
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox runtime session {handle.id!r}",
+            resource_type="sandbox_runtime_session",
+            resource_id=handle.id,
+            cause=error,
+        ) from error
 
 
 @dataclass(slots=True)
@@ -941,9 +971,10 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     """Control a synchronous Vercel Sandbox.
 
     A sandbox has at most one active current session. Process and filesystem
-    operations target the session recorded by this handle. Use
-    ``sandbox.resume_sandbox`` to ensure the sandbox has an active session,
-    ``stop`` to stop it, and ``destroy`` to permanently remove the sandbox.
+    session-bound operations lazily resume when needed and update this handle's
+    canonical current session. Use ``session`` for an explicit exact-session
+    lifecycle, ``stop`` to stop the current session, and ``destroy`` to
+    permanently remove the sandbox.
     """
 
     __slots__ = ("_recovery_attempt", "_recovery_condition", "_service", "fs")
@@ -955,6 +986,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         service: SandboxService,
         include_system_routes: bool | None = None,
     ) -> None:
+        self._recovery_condition = Condition()
         super().__init__(
             payload,
             session_factory=lambda session: SyncSandboxRuntimeSession(
@@ -963,7 +995,6 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             include_system_routes=include_system_routes,
         )
         self._service = service
-        self._recovery_condition = Condition()
         self._recovery_attempt: _SyncRecoveryAttempt | None = None
         self.fs = SyncSandboxFilesystem(
             service=service,
@@ -975,6 +1006,32 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             ),
             write_files_cwd=self._write_files_cwd,
         )
+
+    def _apply_payload(self, payload: SandboxState) -> None:
+        with self._recovery_condition:
+            super()._apply_payload(payload)
+
+    def _apply_current_session_payload(
+        self, payload: SandboxRuntimeSessionState
+    ) -> SyncSandboxRuntimeSession:
+        with self._recovery_condition:
+            return super()._apply_current_session_payload(payload)
+
+    def _apply_session_payload_from_child(
+        self,
+        child: RuntimeSessionHandleBase,
+        payload: SandboxRuntimeSessionState,
+    ) -> None:
+        with self._recovery_condition:
+            super()._apply_session_payload_from_child(child, payload)
+
+    def _apply_session_stop_from_child(
+        self,
+        child: RuntimeSessionHandleBase,
+        result: RuntimeSessionStopState,
+    ) -> None:
+        with self._recovery_condition:
+            super()._apply_session_stop_from_child(child, result)
 
     def _capture_recovery_target(self) -> SandboxRecoveryTarget:
         with self._recovery_condition:
@@ -1039,6 +1096,35 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """Ensure an active current session before binding a lazy stream."""
         await self._await_shared_resume()
         return self.current_session_id
+
+    async def _acquire_session(self) -> SyncSandboxRuntimeSession:
+        target = self._capture_recovery_target()
+        try:
+            await self._await_shared_resume()
+        except Exception as error:
+            lifecycle = classify_sandbox_lifecycle_error(error)
+            if lifecycle not in {
+                SandboxLifecycle.STOPPING,
+                SandboxLifecycle.SNAPSHOTTING,
+            }:
+                raise
+            await self._wait_for_transition(target)
+            await self._await_shared_resume()
+        session = self.current_session
+        if session is None:
+            raise SandboxResponseError(
+                "Sandbox resume response is missing the current-session attachment",
+                data=self.raw,
+            )
+        return session
+
+    def session(self) -> SyncSandboxRuntimeSession:
+        """Acquire and return the canonical active runtime session eagerly.
+
+        Entering the returned handle does not reacquire it and stops only that
+        exact session identity on exit.
+        """
+        return iter_coroutine(self._acquire_session())
 
     async def _wait_for_transition(self, target: SandboxRecoveryTarget) -> None:
         deadline = time.monotonic() + TRANSITION_TIMEOUT
@@ -1260,10 +1346,23 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
 
     def stop(self) -> Self:
         """Stop the current session and return this sandbox handle."""
-        payload = iter_coroutine(
-            self._service.stop_runtime_session(session_id=self.current_session_id)
-        )
-        self._apply_current_session_payload(payload)
+        with self._recovery_condition:
+            session = self.current_session
+            target_id = self.current_session_id
+        result = iter_coroutine(self._service.stop_runtime_session(session_id=target_id))
+        if session is None:
+            with self._recovery_condition:
+                if self.current_session_id != target_id:
+                    return self
+                self._apply_current_session_payload(result.session)
+                if (
+                    result._sandbox_attached
+                    and result.sandbox is not None
+                    and result.sandbox.current_session_id == result.session.id
+                ):
+                    self._apply_payload(result.sandbox)
+        else:
+            session._apply_stop_result(result)
         return self
 
     def destroy(self) -> Self:

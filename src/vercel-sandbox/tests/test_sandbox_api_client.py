@@ -43,6 +43,27 @@ class InvalidJsonTransport(BaseTransport):
         )
 
 
+class JsonTransport(BaseTransport):
+    def __init__(self, data: object) -> None:
+        self.data = data
+
+    async def send(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
+        body: RequestBody = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
+        follow_redirects: bool | None = None,
+        stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
+    ) -> httpx.Response:
+        return httpx.Response(200, json=self.data, request=httpx.Request(method, path))
+
+
 class _CompletedResponse(StreamingResponse):
     def __init__(self, response: httpx.Response) -> None:
         self.response = response
@@ -123,3 +144,49 @@ def test_format_url_path_quotes_placeholder_values() -> None:
         name="name/with spaces",
         command_id="cmd?x=1",
     ) == ("v2/sandboxes/name%2Fwith%20spaces/cmd%3Fx%3D1")
+
+
+async def test_stop_runtime_session_retains_sparse_sandbox_metadata() -> None:
+    client = _sandbox_client(
+        JsonTransport(
+            {
+                "session": {"id": "sbx_123", "status": "stopped"},
+                "sandbox": {
+                    "name": "preview",
+                    "currentSessionId": "sbx_123",
+                    "status": "stopped",
+                },
+            }
+        )
+    )
+
+    result = await client.stop_runtime_session(session_id="sbx_123")
+
+    assert result.session.status == "stopped"
+    assert result._sandbox_attached
+    assert result.sandbox is not None
+    assert result.sandbox.current_session_id == "sbx_123"
+    assert result.sandbox.project_id == "prj_123"
+    assert result.sandbox.raw == {
+        "name": "preview",
+        "currentSessionId": "sbx_123",
+        "status": "stopped",
+    }
+    assert not result.sandbox._routes_attached
+    assert not result.sandbox._current_session_attached
+
+
+async def test_stop_runtime_session_distinguishes_omitted_metadata() -> None:
+    client = _sandbox_client(JsonTransport({"session": {"id": "sbx_123", "status": "stopped"}}))
+
+    result = await client.stop_runtime_session(session_id="sbx_123")
+
+    assert result.sandbox is None
+    assert not result._sandbox_attached
+
+
+async def test_stop_runtime_session_rejects_replacement_identity() -> None:
+    client = _sandbox_client(JsonTransport({"session": {"id": "sbx_other", "status": "stopped"}}))
+
+    with pytest.raises(SandboxResponseError, match="different session identity"):
+        await client.stop_runtime_session(session_id="sbx_123")

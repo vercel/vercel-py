@@ -21,6 +21,7 @@ from vercel.sandbox._internal.async_filesystem_handle import (
     SandboxTextWriter,
 )
 from vercel.sandbox._internal.errors import (
+    SandboxApiError,
     SandboxCleanupError,
     SandboxResponseError,
     SandboxTerminalStateError,
@@ -70,6 +71,7 @@ from vercel.sandbox._internal.recovery import (
     TRANSITION_TIMEOUT,
     SandboxLifecycle,
     SandboxRecoveryTarget,
+    classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
 from vercel.sandbox._internal.runtime_common import (
@@ -846,7 +848,7 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         payload = await self._service.get_runtime_session(
             session_id=self.id, include_system_routes=include_system_routes
         )
-        self._apply_payload(payload)
+        self._apply_payload_with_parent(payload)
         return self
 
     async def extend_execution_time_limit(self, duration: DurationInput) -> Self:
@@ -885,8 +887,8 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
 
     async def stop(self) -> Self:
         """Stop this runtime session and refresh the handle."""
-        payload = await self._service.stop_runtime_session(session_id=self.id)
-        self._apply_payload(payload)
+        result = await self._service.stop_runtime_session(session_id=self.id)
+        self._apply_stop_result(result)
         return self
 
 
@@ -894,9 +896,10 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     """Control an asynchronous Vercel Sandbox.
 
     A sandbox has at most one active current session. Process and filesystem
-    operations target the session recorded by this handle. Use
-    ``sandbox.resume_sandbox`` to ensure the sandbox has an active session,
-    ``stop`` to stop it, and ``destroy`` to permanently remove the sandbox.
+    session-bound operations lazily resume when needed and update this handle's
+    canonical current session. Use ``session`` for an explicit exact-session
+    lifecycle, ``stop`` to stop the current session, and ``destroy`` to
+    permanently remove the sandbox.
     """
 
     __slots__ = ("_recovery_task", "_service", "fs")
@@ -952,6 +955,35 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         """Ensure an active current session before binding a lazy stream."""
         await self._await_shared_resume()
         return self.current_session_id
+
+    async def _acquire_session(self) -> SandboxRuntimeSession:
+        target = self._capture_recovery_target()
+        try:
+            await self._await_shared_resume()
+        except Exception as error:
+            lifecycle = classify_sandbox_lifecycle_error(error)
+            if lifecycle not in {
+                SandboxLifecycle.STOPPING,
+                SandboxLifecycle.SNAPSHOTTING,
+            }:
+                raise
+            await self._wait_for_transition(target)
+            await self._await_shared_resume()
+        session = self.current_session
+        if session is None:
+            raise SandboxResponseError(
+                "Sandbox resume response is missing the current-session attachment",
+                data=self.raw,
+            )
+        return session
+
+    def session(self) -> "SandboxSessionOperation":
+        """Prepare an authoritative active-session acquisition operation.
+
+        Await the operation to leave the acquired session running, or enter it
+        to stop that exact session identity on exit.
+        """
+        return SandboxSessionOperation(self)
 
     async def _wait_for_transition(self, target: SandboxRecoveryTarget) -> None:
         deadline = time.monotonic() + TRANSITION_TIMEOUT
@@ -1185,8 +1217,22 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
 
     async def stop(self) -> Self:
         """Stop the current session and return this sandbox handle."""
-        payload = await self._service.stop_runtime_session(session_id=self.current_session_id)
-        self._apply_current_session_payload(payload)
+        session = self.current_session
+        target_id = self.current_session_id
+        if session is None:
+            result = await self._service.stop_runtime_session(session_id=target_id)
+            if self.current_session_id != target_id:
+                return self
+            self._apply_current_session_payload(result.session)
+            if (
+                result._sandbox_attached
+                and result.sandbox is not None
+                and result.sandbox.current_session_id == result.session.id
+            ):
+                self._apply_payload(result.sandbox)
+        else:
+            result = await self._service.stop_runtime_session(session_id=session.id)
+            session._apply_stop_result(result)
         return self
 
     async def destroy(self) -> Self:
@@ -1239,6 +1285,99 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         )
         self._apply_payload(payload)
         return self
+
+
+async def _cleanup_exact_session(handle: SandboxRuntimeSession) -> None:
+    if handle.status == SandboxStatus.STOPPED:
+        return
+    try:
+        result = await handle._service.stop_runtime_session(session_id=handle.id)
+        handle._apply_stop_result(result)
+    except SandboxApiError as error:
+        if classify_sandbox_lifecycle_error(error) is SandboxLifecycle.STOPPED:
+            handle._mark_stopped()
+            return
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox runtime session {handle.id!r}",
+            resource_type="sandbox_runtime_session",
+            resource_id=handle.id,
+            cause=error,
+        ) from error
+    except Exception as error:
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox runtime session {handle.id!r}",
+            resource_type="sandbox_runtime_session",
+            resource_id=handle.id,
+            cause=error,
+        ) from error
+
+
+def _warn_cleanup_after_block(error: SandboxCleanupError) -> None:
+    warnings.warn(str(error), RuntimeWarning, source=error, stacklevel=3)
+
+
+class SandboxSessionOperation:
+    """Acquire one sandbox session directly or as an exact-session scope.
+
+    Awaiting leaves the acquired session running. Async context management
+    stops only the session identity yielded by successful entry.
+    """
+
+    def __init__(self, handle: Sandbox) -> None:
+        self._sandbox = handle
+        self._consumed = False
+        self._handle: SandboxRuntimeSession | None = None
+
+    def _mark_consumed(self) -> None:
+        if self._consumed:
+            raise RuntimeError("Sandbox.session() operations can only be used once")
+        self._consumed = True
+
+    async def _run_once(self) -> SandboxRuntimeSession:
+        self._mark_consumed()
+        return await self._sandbox._acquire_session()
+
+    def __await__(self) -> Generator[Any, None, SandboxRuntimeSession]:
+        return self._run_once().__await__()
+
+    async def __aenter__(self) -> SandboxRuntimeSession:
+        handle = await self._run_once()
+        self._handle = handle
+        return handle
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        handle = self._handle
+        if handle is None:
+            return None
+        cleanup_task = asyncio.create_task(_cleanup_exact_session(handle))
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            try:
+                await cleanup_task
+            except SandboxCleanupError as cleanup_error:
+                _warn_cleanup_after_block(cleanup_error)
+            raise
+        except SandboxCleanupError as cleanup_error:
+            if exc is None:
+                raise
+            _warn_cleanup_after_block(cleanup_error)
+        return None
+
+    def __del__(self) -> None:
+        if self._consumed:
+            return
+        warnings.warn(
+            "Sandbox.session() operation was never awaited or entered; use "
+            "`await box.session()` or `async with box.session()` to acquire a session",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 @dataclass(frozen=True, slots=True)

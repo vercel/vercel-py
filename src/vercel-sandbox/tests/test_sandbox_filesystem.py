@@ -540,7 +540,7 @@ async def test_unsized_writer_recovers_at_publish(
     )
 
     if sync:
-        with session(service_options=_session_options()):
+        with session(service_options=_session_options(sync=True)):
             sync_box = sandbox_sync.get_sandbox(name="preview")
             with sync_box.fs.open("replay.txt", "wb") as writer:
                 writer.write(b"replayable")

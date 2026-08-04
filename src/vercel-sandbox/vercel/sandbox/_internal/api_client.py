@@ -64,6 +64,7 @@ from vercel.sandbox._internal.state import (
     CompletedProcessState,
     ProcessState,
     RuntimeSessionsPageState,
+    RuntimeSessionStopState,
     SandboxesPageState,
     SandboxRouteState,
     SandboxRuntimeSessionState,
@@ -493,6 +494,7 @@ class _CommandsResponse(_ApiModel):
 
 class _RuntimeSessionResponse(_ApiModel):
     session: _RuntimeSessionPayload | None = None
+    sandbox: _SandboxPayload | None = None
     routes: list[_SandboxRoutePayload] = Field(default_factory=list)
 
     def to_runtime_session(self) -> SandboxRuntimeSessionState:
@@ -502,6 +504,32 @@ class _RuntimeSessionResponse(_ApiModel):
                 data=self.model_dump(by_alias=True),
             )
         return _runtime_session_state(self.session)
+
+    def to_runtime_session_stop(self, *, project_id: str | None = None) -> RuntimeSessionStopState:
+        session = self.to_runtime_session()
+        sandbox = self.sandbox
+        return RuntimeSessionStopState(
+            session=session,
+            sandbox=(
+                None
+                if sandbox is None
+                else _sandbox_state(
+                    sandbox,
+                    raw=cast(
+                        JSONObject,
+                        sandbox.model_dump(
+                            by_alias=True,
+                            exclude_none=True,
+                            exclude={"routes", "current_session", "raw"},
+                        ),
+                    ),
+                    project_id=session.project_id or project_id,
+                    routes_attached=False,
+                    current_session_attached=False,
+                )
+            ),
+            _sandbox_attached="sandbox" in self.model_fields_set,
+        )
 
 
 class _RuntimeSessionsResponse(_ApiModel):
@@ -1049,7 +1077,7 @@ class SandboxApiClient:
             include_system_routes=include_system_routes,
         )
 
-    async def stop_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
+    async def stop_runtime_session(self, *, session_id: str) -> RuntimeSessionStopState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "POST",
@@ -1057,10 +1085,18 @@ class SandboxApiClient:
             credentials=credentials,
             body={},
         )
-        return _validate_response(_RuntimeSessionResponse, data).to_runtime_session()
+        result = _validate_response(_RuntimeSessionResponse, data).to_runtime_session_stop(
+            project_id=credentials.project_id
+        )
+        if result.session.id != session_id:
+            raise SandboxResponseError(
+                "Sandbox current-session operation returned a different session identity",
+                data=result.session,
+            )
+        return result
 
     async def destroy_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
-        return await self.stop_runtime_session(session_id=session_id)
+        return (await self.stop_runtime_session(session_id=session_id)).session
 
     async def get_runtime_session(
         self,

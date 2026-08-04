@@ -121,6 +121,7 @@ def test_example_scope_command_maps_root_to_internal_task() -> None:
     assert command.argv[-2:] == ("-k", "sessions_and_resume")
     assert command.parser == "pytest"
     assert command.env["WORKSPACE_POE_LOGRAIL_PROGRESS"] == "1"
+    assert command.env["WORKSPACE_POE_SCOPE_TASK"] == "test-examples"
 
 
 def test_example_scope_command_preserves_package_passthrough() -> None:
