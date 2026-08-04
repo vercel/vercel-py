@@ -118,20 +118,6 @@ def _store_jwks(url: str, document: JwksDocument) -> None:
         _jwks_cache[url] = (time.monotonic(), document)
 
 
-def _throttle_fetches(url: str) -> None:
-    """Suppress fetches for the rate-limit interval after an unproductive one."""
-    with _jwks_lock:
-        _jwks_throttled_until[url] = (
-            time.monotonic() + DEFAULT_JWKS_MIN_REFETCH_INTERVAL.total_seconds()
-        )
-
-
-def _allow_fetches(url: str) -> None:
-    """Clear the throttle after a fetch that produced the requested key."""
-    with _jwks_lock:
-        _jwks_throttled_until.pop(url, None)
-
-
 def _parse_jwks(payload: object) -> JwksDocument:
     if not isinstance(payload, dict) or not isinstance(payload.get("keys"), list):
         raise VercelOidcVerificationError("JWKS document is malformed")
@@ -155,9 +141,22 @@ def _claim_fetch(url: str) -> bool:
         return True
 
 
-def _end_fetch(url: str) -> None:
+def _end_fetch(url: str, *, productive: bool | None = None) -> None:
+    """Release the fetch claim, recording its outcome in the same critical section.
+
+    An unproductive fetch must set the throttle before the claim is released, or a
+    concurrent unknown-kid caller can claim a fresh fetch in the gap and a burst
+    fans out into repeated refetches. ``productive=None`` releases without touching
+    the throttle, for a fetch that did not run to completion.
+    """
     with _jwks_lock:
         _jwks_fetch_in_progress.discard(url)
+        if productive is True:
+            _jwks_throttled_until.pop(url, None)
+        elif productive is False:
+            _jwks_throttled_until[url] = (
+                time.monotonic() + DEFAULT_JWKS_MIN_REFETCH_INTERVAL.total_seconds()
+            )
 
 
 def _fetch_is_in_progress(url: str) -> bool:
@@ -166,12 +165,13 @@ def _fetch_is_in_progress(url: str) -> bool:
 
 
 def _select_and_record(url: str, kid: str, document: JwksDocument) -> RSAPublicKey | None:
-    """Select the key and record whether the fetch was productive."""
-    key = _select_key(document, kid)
-    if key is None:
-        _throttle_fetches(url)
-    else:
-        _allow_fetches(url)
+    """Select the key, then release the fetch claim with the outcome recorded."""
+    try:
+        key = _select_key(document, kid)
+    except BaseException:
+        _end_fetch(url, productive=False)
+        raise
+    _end_fetch(url, productive=key is not None)
     return key
 
 
@@ -182,7 +182,10 @@ def _record_fetch_outcome(
         document = fetch(url)
     except Exception:
         # A failing endpoint must not be retried by every caller.
-        _throttle_fetches(url)
+        _end_fetch(url, productive=False)
+        raise
+    except BaseException:
+        _end_fetch(url)
         raise
     return _select_and_record(url, kid, document)
 
@@ -191,7 +194,11 @@ async def _fetch_or_throttle_async(url: str) -> JwksDocument:
     try:
         return await _fetch_jwks_async(url)
     except Exception:
-        _throttle_fetches(url)
+        _end_fetch(url, productive=False)
+        raise
+    except BaseException:
+        # Cancelled mid-fetch: release the claim without recording an outcome.
+        _end_fetch(url)
         raise
 
 
@@ -227,16 +234,14 @@ def _fetch_jwks_sync_uncached(url: str) -> JwksDocument:
             response = client.get(url)
             response.raise_for_status()
             document = _parse_jwks(response.json())
-        # Stored before the marker is cleared, so a waiter that observes the fetch
-        # finishing always sees the document it produced.
+        # Stored before the caller releases the claim, so a waiter that observes
+        # the fetch finishing always sees the document it produced.
         _store_jwks(url, document)
         return document
     except VercelOidcVerificationError:
         raise
     except Exception as exc:
         raise VercelOidcVerificationError(f"could not fetch JWKS from {url}", exc) from exc
-    finally:
-        _end_fetch(url)
 
 
 async def _resolve_key_async(url: str, kid: str) -> RSAPublicKey | None:
@@ -271,15 +276,13 @@ async def _fetch_jwks_async(url: str) -> JwksDocument:
             response = await client.get(url)
             response.raise_for_status()
             document = _parse_jwks(response.json())
-        # Stored before the marker is cleared; see the sync twin.
+        # Stored before the caller releases the claim; see the sync twin.
         _store_jwks(url, document)
         return document
     except VercelOidcVerificationError:
         raise
     except Exception as exc:
         raise VercelOidcVerificationError(f"could not fetch JWKS from {url}", exc) from exc
-    finally:
-        _end_fetch(url)
 
 
 def _unverified_kid(token: str) -> str:
