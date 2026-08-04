@@ -18,6 +18,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from vercel.integrations.apscheduler import (
     APSchedulerConfigurationError,
+    _subscriber,
     install_vercel_apscheduler_integration,
     is_scheduler_subscriber,
 )
@@ -322,10 +323,17 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.delenv("VERCEL_SERVICE_TRIGGER", raising=False)
     monkeypatch.delenv("VERCEL_DEV_QUEUE_SERVING", raising=False)
     monkeypatch.setitem(modules, TEST_SCHEDULER_MODULE, ModuleType(TEST_SCHEDULER_MODULE))
-    clear_subscriptions()
+    _clear_scheduler_registrations()
     install_vercel_apscheduler_integration(register_queues=False)
     yield
+    _clear_scheduler_registrations()
+
+
+def _clear_scheduler_registrations() -> None:
     clear_subscriptions()
+    _subscriber._registered_schedulers.clear()
+    _subscriber._registered_identities.clear()
+    _subscriber._registered_callbacks.clear()
 
 
 def bind_test_scheduler(scheduler: BlockingScheduler) -> None:
@@ -517,6 +525,53 @@ def test_runtime_registry_binds_the_loaded_subscriber_object(
     adapter._bind_runtime()
 
     assert adapter.identity.scheduler_id == "scheduler_scheduler"
+
+
+def test_deliveries_route_to_the_designated_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One module defining several schedulers serves each subscriber correctly.
+
+    In a subscriber Function every constructed scheduler adopts the Function's
+    identity, and the queue runtime invokes only the first registered handler,
+    so that handler must route the delivery to the entrypoint's scheduler.
+    """
+    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "second_scheduler")
+    monkeypatch.setenv(
+        "VERCEL_APSCHEDULER_SUBSCRIBERS",
+        (
+            '[{"id":"first_scheduler","entrypoint":"test_scheduler:first"},'
+            '{"id":"second_scheduler","entrypoint":"test_scheduler:second"}]'
+        ),
+    )
+    first_scheduler, _first_adapter, first_driver = scheduler_with_driver()
+    second_scheduler, _second_adapter, second_driver = scheduler_with_driver()
+    module = modules[TEST_SCHEDULER_MODULE]
+    module.__dict__["first"] = first_scheduler
+    module.__dict__["second"] = second_scheduler
+    register_scheduler(first_scheduler)
+    register_scheduler(second_scheduler)
+
+    # The web Function durably started the second scheduler and published this.
+    second_driver.start(datetime.now(UTC))
+    start_payload = StartPayload(
+        scheduler_id="second_scheduler",
+        generation=1,
+    ).to_payload()
+
+    first_registration = get_subscriptions()[0]
+    first_registration.func(
+        message(
+            start_payload,
+            message_id="start",
+            topic=first_registration.topic,
+            consumer_group=first_registration.consumer_group,
+        )
+    )
+
+    assert second_driver.start_status == "active"
+    assert first_driver.generation == 0
+    assert first_driver.start_status is None
 
 
 def test_subscriber_runtime_ignores_web_lifecycle_calls(

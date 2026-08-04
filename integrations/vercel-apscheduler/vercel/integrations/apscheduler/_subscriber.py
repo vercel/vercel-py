@@ -2,26 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
 import logging
 from datetime import datetime, timezone
+from os import environ
+from sys import modules
 from uuid import uuid4
-from weakref import WeakKeyDictionary
 
 import vercel.queue as vqs
 
-from ._adapter import SchedulerAdapter, adopt_scheduler
+from ._adapter import (
+    SUBSCRIBERS_ENV,
+    SchedulerAdapter,
+    adopt_scheduler,
+    get_adapter,
+)
 from ._imports import BaseScheduler
-from ._options import VercelAPSchedulerOptions
+from ._options import SUBSCRIBER_ID_ENV, VercelAPSchedulerOptions
 from ._payload import StartPayload, WakeupPayload
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 UTC = timezone.utc
 BUSY_RETRY_SECONDS = 5
 
-_registered_schedulers: WeakKeyDictionary[
-    BaseScheduler,
-    SchedulerAdapter,
-] = WeakKeyDictionary()
+# Registrations live for the process: the queue registry holds only weak
+# references to handlers, and the handlers reference their scheduler anyway.
+_registered_schedulers: dict[BaseScheduler, SchedulerAdapter] = {}
+_registered_identities: set[str] = set()
 _registered_callbacks: list[Any] = []
 
 __all__ = ["register_scheduler"]
@@ -37,7 +44,18 @@ def register_scheduler(
         return existing
 
     adapter = adopt_scheduler(scheduler, options)
+    # One handler pair per identity: every scheduler constructed in a
+    # subscriber Function adopts that Function's identity, and the queue SDK
+    # rejects duplicate (topic, consumer group) registrations. Deliveries are
+    # routed to the designated scheduler in _delivery_adapter.
+    if adapter.identity.scheduler_id not in _registered_identities:
+        _subscribe_identity(adapter)
+        _registered_identities.add(adapter.identity.scheduler_id)
+    _registered_schedulers[scheduler] = adapter
+    return adapter
 
+
+def _subscribe_identity(adapter: SchedulerAdapter) -> None:
     @vqs.subscribe(
         topic=adapter.identity.start_topic,
         consumer_group=vqs.SanitizedName(adapter.identity.consumer_group),
@@ -46,7 +64,7 @@ def register_scheduler(
         max_attempts=None,
     )
     def _handle_start(message: vqs.Message[dict[str, Any]]) -> None:
-        _process_start(adapter, message)
+        _process_start(_delivery_adapter(adapter), message)
 
     @vqs.subscribe(
         topic=adapter.identity.wakeup_topic,
@@ -56,11 +74,47 @@ def register_scheduler(
         max_attempts=None,
     )
     def _handle_wakeup(message: vqs.Message[dict[str, Any]]) -> None:
-        _process_wakeup(adapter, message)
+        _process_wakeup(_delivery_adapter(adapter), message)
 
     _registered_callbacks.extend((_handle_start, _handle_wakeup))
-    _registered_schedulers[scheduler] = adapter
-    return adapter
+
+
+def _delivery_adapter(registered: SchedulerAdapter) -> SchedulerAdapter:
+    """Return the adapter of the scheduler this Function is designated to serve.
+
+    The handlers for an identity are registered by whichever scheduler the
+    module constructs first, during ``__init__``, before the entrypoint
+    variable exists. By delivery time the module is fully imported, so resolve
+    the designated scheduler here. Without this, a module defining several
+    schedulers would serve every subscriber Function with the one it defines
+    first.
+    """
+    subscriber_id = environ.get(SUBSCRIBER_ID_ENV)
+    raw = environ.get(SUBSCRIBERS_ENV)
+    if not subscriber_id or not raw:
+        return registered
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError:
+        return registered
+    if not isinstance(entries, list):
+        return registered
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("id") != subscriber_id:
+            continue
+        entrypoint = entry.get("entrypoint")
+        if not isinstance(entrypoint, str):
+            break
+        module_name, separator, variable_name = entrypoint.partition(":")
+        if not separator:
+            break
+        module = modules.get(module_name)
+        candidate = getattr(module, variable_name, None) if module is not None else None
+        designated = get_adapter(candidate)
+        if designated is not None:
+            return designated
+        break
+    return registered
 
 
 def _process_start(

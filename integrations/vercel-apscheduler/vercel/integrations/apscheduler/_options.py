@@ -97,9 +97,15 @@ class VercelAPSchedulerOptions:
 
     @classmethod
     def from_env(cls) -> VercelAPSchedulerOptions:
+        max_delay_seconds = _int_env(
+            "VERCEL_APSCHEDULER_MAX_DELAY_SECONDS",
+            DEFAULT_MAX_DELAY_SECONDS,
+        )
         retention_raw = environ.get("VERCEL_APSCHEDULER_RETENTION_SECONDS")
         try:
-            retention = int(retention_raw) if retention_raw else DEFAULT_MAX_DELAY_SECONDS + 3600
+            # Retention must outlive the longest bridged hop, so the default
+            # follows a raised max delay.
+            retention = int(retention_raw) if retention_raw else max_delay_seconds + 3600
         except ValueError as exc:
             raise ValueError(
                 "VERCEL_APSCHEDULER_RETENTION_SECONDS must be a positive integer"
@@ -107,10 +113,7 @@ class VercelAPSchedulerOptions:
         if retention <= 0:
             raise ValueError("VERCEL_APSCHEDULER_RETENTION_SECONDS must be a positive integer")
         return cls(
-            max_delay_seconds=_int_env(
-                "VERCEL_APSCHEDULER_MAX_DELAY_SECONDS",
-                DEFAULT_MAX_DELAY_SECONDS,
-            ),
+            max_delay_seconds=max_delay_seconds,
             retention_seconds=retention,
             retry_after_seconds=_int_env(
                 "VERCEL_APSCHEDULER_RETRY_AFTER_SECONDS",

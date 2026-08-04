@@ -680,15 +680,22 @@ class SchedulerAdapter:
                         )
                     )
                 if plan.next_run_time is None:
-                    self.coordinator.cas_remove_job(
+                    advanced = self.coordinator.cas_remove_job(
                         plan.job.id,
                         plan.expected_revision,
                     )
                 else:
                     plan.job._modify(next_run_time=plan.next_run_time)
-                    self.coordinator.cas_update_job(
+                    advanced = self.coordinator.cas_update_job(
                         plan.job,
                         plan.expected_revision,
+                    )
+                if not advanced:
+                    # A concurrent mutation moved the revision; its value wins
+                    # and its dirty marker keeps the chain covered.
+                    self._logger.debug(
+                        'Job "%s" was mutated during its run; keeping the newer definition',
+                        plan.job.id,
                     )
         for event in events:
             self.scheduler._dispatch_event(event)
