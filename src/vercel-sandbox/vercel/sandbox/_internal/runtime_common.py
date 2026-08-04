@@ -375,15 +375,23 @@ class RuntimeSessionHandleBase:
 
 
 class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
-    __slots__ = ("_payload", "_current_session", "_session_factory")
+    __slots__ = (
+        "_payload",
+        "_current_session",
+        "_session_factory",
+        "_handle_include_system_routes",
+    )
 
     def __init__(
         self,
         payload: SandboxState,
         session_factory: Callable[[SandboxRuntimeSessionState], RuntimeSessionHandleT],
+        *,
+        include_system_routes: bool | None = None,
     ) -> None:
         self._payload = payload
         self._session_factory = session_factory
+        self._handle_include_system_routes = include_system_routes
         self._current_session = (
             None if payload.current_session is None else session_factory(payload.current_session)
         )
@@ -391,6 +399,11 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     @property
     def current_session(self) -> RuntimeSessionHandleT | None:
         return self._current_session
+
+    @property
+    def _include_system_routes(self) -> bool | None:
+        """Return the route projection selected when this handle was created."""
+        return self._handle_include_system_routes
 
     @property
     def name(self) -> str:

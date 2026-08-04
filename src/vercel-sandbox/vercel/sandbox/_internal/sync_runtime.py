@@ -52,6 +52,10 @@ from vercel.sandbox._internal.process_output import (
     ProcessOutputRouter,
     _validate_reader_destination,
 )
+from vercel.sandbox._internal.recovery import (
+    SandboxLifecycle,
+    execute_with_sandbox_recovery,
+)
 from vercel.sandbox._internal.runtime_common import (
     RemotePath,
     RuntimeSessionHandleBase,
@@ -888,12 +892,19 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
 
     __slots__ = ("_service", "fs")
 
-    def __init__(self, *, payload: SandboxState, service: SandboxService) -> None:
+    def __init__(
+        self,
+        *,
+        payload: SandboxState,
+        service: SandboxService,
+        include_system_routes: bool | None = None,
+    ) -> None:
         super().__init__(
             payload,
             session_factory=lambda session: SyncSandboxRuntimeSession(
                 payload=session, service=service
             ),
+            include_system_routes=include_system_routes,
         )
         self._service = service
         self.fs = SyncSandboxFilesystem(
@@ -901,6 +912,17 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
             session_id=lambda: self.current_session_id,
             write_files_cwd=self._write_files_cwd,
         )
+
+    async def _recover(self, lifecycle: SandboxLifecycle) -> bool:
+        if lifecycle is not SandboxLifecycle.STOPPED:
+            return False
+        payload = await self._service.resume_sandbox(
+            name=self.name,
+            project_id=self.project_id,
+            include_system_routes=self._include_system_routes,
+        )
+        self._apply_payload(payload)
+        return True
 
     def run_process(
         self,
@@ -923,16 +945,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
+        parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
-            self._service.run_process(
-                session_id=self.current_session_id,
-                command=command,
-                args=args,
-                cwd=cwd,
-                env=env,
-                sudo=sudo,
-                kill_after=parse_duration_seconds(kill_after),
-                output_router=output_router,
+            execute_with_sandbox_recovery(
+                lambda: self._service.run_process(
+                    session_id=self.current_session_id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    kill_after=parsed_kill_after,
+                    output_router=output_router,
+                ),
+                coordinator=self,
             )
         )
         assert state.process.returncode is not None
@@ -972,15 +998,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
+        parsed_args = list(args) if args is not None else None
+        parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
-            self._service.create_process(
-                session_id=self.current_session_id,
-                command=command,
-                args=list(args) if args is not None else None,
-                cwd=cwd,
-                env=env,
-                sudo=sudo,
-                kill_after=parse_duration_seconds(kill_after),
+            execute_with_sandbox_recovery(
+                lambda: self._service.create_process(
+                    session_id=self.current_session_id,
+                    command=command,
+                    args=parsed_args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    kill_after=parsed_kill_after,
+                ),
+                coordinator=self,
             )
         )
         return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
@@ -988,15 +1019,25 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process from the current session."""
         state = iter_coroutine(
-            self._service.get_process(
-                session_id=self.current_session_id, process_id=process_id, wait=wait
+            execute_with_sandbox_recovery(
+                lambda: self._service.get_process(
+                    session_id=self.current_session_id,
+                    process_id=process_id,
+                    wait=wait,
+                ),
+                coordinator=self,
             )
         )
         return SyncProcess(payload=state, service=self._service)
 
     def query_processes(self) -> list[SyncProcess]:
         """Return handles for processes in the current session."""
-        states = iter_coroutine(self._service.query_processes(session_id=self.current_session_id))
+        states = iter_coroutine(
+            execute_with_sandbox_recovery(
+                lambda: self._service.query_processes(session_id=self.current_session_id),
+                coordinator=self,
+            )
+        )
         return [SyncProcess(payload=state, service=self._service) for state in states]
 
     def list_sessions(
@@ -1038,10 +1079,14 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
 
         The service rejects durations shorter than one second.
         """
+        parsed_duration = parse_required_duration_seconds(duration)
         payload = iter_coroutine(
-            self._service.extend_runtime_session_timeout(
-                session_id=self.current_session_id,
-                duration=parse_required_duration_seconds(duration),
+            execute_with_sandbox_recovery(
+                lambda: self._service.extend_runtime_session_timeout(
+                    session_id=self.current_session_id,
+                    duration=parsed_duration,
+                ),
+                coordinator=self,
             )
         )
         return self._apply_current_session_payload(payload)
@@ -1049,18 +1094,26 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     def update_network_policy(self, network_policy: NetworkPolicy) -> SyncSandboxRuntimeSession:
         """Replace the current session's network policy."""
         payload = iter_coroutine(
-            self._service.update_runtime_session_network_policy(
-                session_id=self.current_session_id, network_policy=network_policy
+            execute_with_sandbox_recovery(
+                lambda: self._service.update_runtime_session_network_policy(
+                    session_id=self.current_session_id,
+                    network_policy=network_policy,
+                ),
+                coordinator=self,
             )
         )
         return self._apply_current_session_payload(payload)
 
     def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
         """Create a filesystem snapshot from the current session."""
+        parsed_expiration = _parse_snapshot_expiration(expiration)
         result = iter_coroutine(
-            self._service.create_snapshot(
-                session_id=self.current_session_id,
-                expiration=_parse_snapshot_expiration(expiration),
+            execute_with_sandbox_recovery(
+                lambda: self._service.create_snapshot(
+                    session_id=self.current_session_id,
+                    expiration=parsed_expiration,
+                ),
+                coordinator=self,
             )
         )
         self._apply_current_session_payload(result.session)
@@ -1162,8 +1215,13 @@ class _ManagedSyncSandbox(SyncSandbox):
         payload: SandboxState,
         service: SandboxService,
         destroy_on_exit: bool,
+        include_system_routes: bool | None = None,
     ) -> None:
-        super().__init__(payload=payload, service=service)
+        super().__init__(
+            payload=payload,
+            service=service,
+            include_system_routes=include_system_routes,
+        )
         self._destroy_on_exit = destroy_on_exit
 
     def __enter__(self) -> Self:
@@ -1223,8 +1281,26 @@ def create_sandbox(
         raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
 
 
-def get_sandbox(service: SandboxService, **kwargs: Any) -> SyncSandbox:
-    return SyncSandbox(payload=iter_coroutine(service.get_sandbox(**kwargs)), service=service)
+def get_sandbox(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    resume: bool = False,
+    include_system_routes: bool | None = None,
+) -> SyncSandbox:
+    return SyncSandbox(
+        payload=iter_coroutine(
+            service.get_sandbox(
+                name=name,
+                project_id=project_id,
+                resume=resume,
+                include_system_routes=include_system_routes,
+            )
+        ),
+        service=service,
+        include_system_routes=include_system_routes,
+    )
 
 
 def get_or_create_sandbox(
@@ -1266,16 +1342,43 @@ def get_or_create_sandbox(
                 snapshot_retention=snapshot_retention,
             )
         )
-        return SyncSandbox(payload=state, service=service), created
+        return (
+            SyncSandbox(
+                payload=state,
+                service=service,
+                include_system_routes=include_system_routes,
+            ),
+            created,
+        )
     except _SandboxTerminalState as error:
-        raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
+        raise _terminal_error(
+            error,
+            SyncSandbox(
+                payload=error.sandbox,
+                service=service,
+                include_system_routes=include_system_routes,
+            ),
+        ) from error
 
 
-def resume_sandbox(service: SandboxService, **kwargs: Any) -> _ManagedSyncSandbox:
+def resume_sandbox(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    include_system_routes: bool | None = None,
+) -> _ManagedSyncSandbox:
     return _ManagedSyncSandbox(
-        payload=iter_coroutine(service.resume_sandbox(**kwargs)),
+        payload=iter_coroutine(
+            service.resume_sandbox(
+                name=name,
+                project_id=project_id,
+                include_system_routes=include_system_routes,
+            )
+        ),
         service=service,
         destroy_on_exit=False,
+        include_system_routes=include_system_routes,
     )
 
 

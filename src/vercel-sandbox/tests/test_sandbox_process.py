@@ -15,11 +15,11 @@ from vercel.api import session
 from vercel.sandbox import sync as sandbox_sync
 
 
-def _sandbox_response() -> dict[str, object]:
+def _sandbox_response(*, session_id: str = "sbx_1") -> dict[str, object]:
     return {
-        "sandbox": {"name": "preview", "currentSessionId": "sbx_1", "status": "running"},
+        "sandbox": {"name": "preview", "currentSessionId": session_id, "status": "running"},
         "session": {
-            "id": "sbx_1",
+            "id": session_id,
             "sourceSandboxName": "preview",
             "projectId": "prj_1",
             "status": "running",
@@ -33,6 +33,7 @@ def _process_response(
     *,
     args: list[str] | None = None,
     command_id: str = "cmd_1",
+    session_id: str = "sbx_1",
 ) -> dict[str, object]:
     return {
         "command": {
@@ -40,7 +41,7 @@ def _process_response(
             "name": "python",
             "args": args or [],
             "cwd": "/vercel/sandbox",
-            "sessionId": "sbx_1",
+            "sessionId": session_id,
             "exitCode": returncode,
             "startedAt": 1,
         }
@@ -55,12 +56,17 @@ def _logs_response() -> httpx.Response:
     return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
 
 
-def _completed_response(returncode: int = 0, *, args: list[str] | None = None) -> httpx.Response:
+def _completed_response(
+    returncode: int = 0,
+    *,
+    args: list[str] | None = None,
+    session_id: str = "sbx_1",
+) -> httpx.Response:
     records = [
-        _process_response(args=args),
+        _process_response(args=args, session_id=session_id),
         {"stream": "stdout", "data": "out\n"},
         {"stream": "stderr", "data": "err\n"},
-        _process_response(returncode, args=args),
+        _process_response(returncode, args=args, session_id=session_id),
     ]
     return httpx.Response(200, text="".join(json.dumps(record) + "\n" for record in records))
 
@@ -612,6 +618,92 @@ def test_sync_run_process_reads_chunked_ndjson(mock_env_clear: None) -> None:
 
 
 @respx.mock
+async def test_async_run_process_replays_pre_stream_stopped_session_error(
+    mock_env_clear: None,
+) -> None:
+    events: list[str] = []
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+
+    def old_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old-command")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=old_command_handler
+    )
+
+    def resume_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("resume")
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=resume_handler)
+
+    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement-command")
+        return _completed_response(session_id="sbx_new")
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        side_effect=replacement_command_handler
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        result = await box.run_process("python", capture_output=True)
+
+    assert result.session_id == "sbx_new"
+    assert result.stdout == "out\n"
+    assert events == ["old-command", "resume", "replacement-command"]
+
+
+@respx.mock
+def test_sync_run_process_replays_pre_stream_stopped_session_error(
+    mock_env_clear: None,
+) -> None:
+    events: list[str] = []
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+
+    def old_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old-command")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=old_command_handler
+    )
+
+    def resume_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("resume")
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=resume_handler)
+
+    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement-command")
+        return _completed_response(session_id="sbx_new")
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        side_effect=replacement_command_handler
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        result = box.run_process("python", capture_output=True)
+
+    assert result.session_id == "sbx_new"
+    assert result.stdout == "out\n"
+    assert events == ["old-command", "resume", "replacement-command"]
+
+
+@respx.mock
 async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
@@ -784,3 +876,73 @@ async def test_run_process_rejects_invalid_streams(
         box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
         with pytest.raises(error, match=match):
             await box.run_process("python")
+
+
+@respx.mock
+async def test_async_run_process_does_not_replay_lifecycle_stream_errors(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(
+            200,
+            text="".join(
+                json.dumps(record) + "\n"
+                for record in (
+                    _process_response(),
+                    {
+                        "stream": "error",
+                        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
+                    },
+                )
+            ),
+        )
+    )
+    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
+            await box.run_process("python")
+
+    assert exc_info.value.code == "sandbox_stopped"
+    assert not resume_route.called
+
+
+@respx.mock
+def test_sync_run_process_does_not_replay_lifecycle_stream_errors(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(
+            200,
+            text="".join(
+                json.dumps(record) + "\n"
+                for record in (
+                    _process_response(),
+                    {
+                        "stream": "error",
+                        "data": {"code": "sandbox_stopped", "message": "stream stopped"},
+                    },
+                )
+            ),
+        )
+    )
+    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        with pytest.raises(sandbox.SandboxStreamError, match="stream stopped") as exc_info:
+            box.run_process("python")
+
+    assert exc_info.value.code == "sandbox_stopped"
+    assert not resume_route.called

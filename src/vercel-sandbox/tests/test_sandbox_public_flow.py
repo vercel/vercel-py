@@ -1904,11 +1904,16 @@ async def test_destroyed_async_handles_continue_issuing_requests(mock_env_clear:
 
 
 @respx.mock
-async def test_stopped_async_sandbox_is_inspectable_and_backend_authoritative(
+async def test_stopped_async_sandbox_recovers_a_covered_operation(
     mock_env_clear: None,
 ) -> None:
+    events: list[str] = []
+    stopped = _sandbox_response()
+    stopped_sandbox = stopped["sandbox"]
+    assert isinstance(stopped_sandbox, dict)
+    stopped_sandbox["persistent"] = False
     respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+        return_value=httpx.Response(200, json=stopped)
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
         return_value=httpx.Response(
@@ -1918,16 +1923,56 @@ async def test_stopped_async_sandbox_is_inspectable_and_backend_authoritative(
             },
         )
     )
+
+    def old_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old-command")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
     command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        side_effect=old_command_handler
+    )
+    resumed = _sandbox_response(session_id="sbx_456")
+    resumed["routes"] = [
+        {
+            "url": "https://replacement.sandbox.test",
+            "subdomain": "replacement",
+            "port": 3000,
+            "system": False,
+        }
+    ]
+
+    def resume_handler(request: httpx.Request) -> httpx.Response:
+        events.append("resume")
+        assert request.url.params["resume"] == "true"
+        assert "__includeSystemRoutes" not in request.url.params
+        return httpx.Response(200, json=resumed)
+
+    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=resume_handler
+    )
+
+    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement-command")
+        return httpx.Response(200, json=_command_response(session_id="sbx_456"))
+
+    replacement_command_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_456/cmd"
+    ).mock(side_effect=replacement_command_handler)
+    process_refresh_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_456/cmd/cmd_123"
+    ).mock(
         return_value=httpx.Response(
             409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
     )
     read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
         return_value=httpx.Response(
             409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
     )
 
@@ -1938,15 +1983,30 @@ async def test_stopped_async_sandbox_is_inspectable_and_backend_authoritative(
         assert await handle.stop() is handle
         assert handle.current_session is retained_session
         assert handle.current_session.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
-            await handle.create_process("python", ["--version"])
         with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
             await handle.fs.read_bytes("message.txt")
+        process = await handle.create_process("python", ["--version"])
+        with pytest.raises(SandboxApiError, match="session is stopped") as retained_exc:
+            await retained_session.create_process("python", ["--version"])
+        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
+            await process.refresh()
 
     assert command_route.called
+    assert resume_route.called
+    assert replacement_command_route.called
+    assert process_refresh_route.called
     assert read_route.called
-    assert process_exc.value.code == "session_stopped"
-    assert fs_exc.value.code == "session_stopped"
+    assert fs_exc.value.code == "sandbox_stopped"
+    assert retained_exc.value.code == "sandbox_stopped"
+    assert process_exc.value.code == "sandbox_stopped"
+    assert process.session_id == "sbx_456"
+    assert handle.current_session is not retained_session
+    assert handle.current_session is not None
+    assert handle.current_session.id == "sbx_456"
+    assert retained_session.id == "sbx_123"
+    assert retained_session.status is SandboxStatus.STOPPED
+    assert handle.routes[0].url == "https://replacement.sandbox.test"
+    assert events == ["old-command", "resume", "replacement-command", "old-command"]
 
 
 @respx.mock
@@ -1973,11 +2033,16 @@ def test_destroyed_sync_handles_continue_issuing_requests(mock_env_clear: None) 
 
 
 @respx.mock
-def test_stopped_sync_sandbox_is_inspectable_and_backend_authoritative(
+def test_stopped_sync_sandbox_recovers_a_covered_operation(
     mock_env_clear: None,
 ) -> None:
+    events: list[str] = []
+    stopped = _sandbox_response()
+    stopped_sandbox = stopped["sandbox"]
+    assert isinstance(stopped_sandbox, dict)
+    stopped_sandbox["persistent"] = False
     respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+        return_value=httpx.Response(200, json=stopped)
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
         return_value=httpx.Response(
@@ -1987,16 +2052,56 @@ def test_stopped_sync_sandbox_is_inspectable_and_backend_authoritative(
             },
         )
     )
+
+    def old_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old-command")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
     command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+        side_effect=old_command_handler
+    )
+    resumed = _sandbox_response(session_id="sbx_456")
+    resumed["routes"] = [
+        {
+            "url": "https://replacement.sandbox.test",
+            "subdomain": "replacement",
+            "port": 3000,
+            "system": False,
+        }
+    ]
+
+    def resume_handler(request: httpx.Request) -> httpx.Response:
+        events.append("resume")
+        assert request.url.params["resume"] == "true"
+        assert "__includeSystemRoutes" not in request.url.params
+        return httpx.Response(200, json=resumed)
+
+    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=resume_handler
+    )
+
+    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement-command")
+        return httpx.Response(200, json=_command_response(session_id="sbx_456"))
+
+    replacement_command_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_456/cmd"
+    ).mock(side_effect=replacement_command_handler)
+    process_refresh_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_456/cmd/cmd_123"
+    ).mock(
         return_value=httpx.Response(
             409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
     )
     read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
         return_value=httpx.Response(
             409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
     )
 
@@ -2007,15 +2112,785 @@ def test_stopped_sync_sandbox_is_inspectable_and_backend_authoritative(
         assert handle.stop() is handle
         assert handle.current_session is retained_session
         assert handle.current_session.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
-            handle.create_process("python", ["--version"])
         with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
             handle.fs.read_bytes("message.txt")
+        process = handle.create_process("python", ["--version"])
+        with pytest.raises(SandboxApiError, match="session is stopped") as retained_exc:
+            retained_session.create_process("python", ["--version"])
+        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
+            process.refresh()
 
     assert command_route.called
+    assert resume_route.called
+    assert replacement_command_route.called
+    assert process_refresh_route.called
     assert read_route.called
-    assert process_exc.value.code == "session_stopped"
-    assert fs_exc.value.code == "session_stopped"
+    assert fs_exc.value.code == "sandbox_stopped"
+    assert retained_exc.value.code == "sandbox_stopped"
+    assert process_exc.value.code == "sandbox_stopped"
+    assert process.session_id == "sbx_456"
+    assert handle.current_session is not retained_session
+    assert handle.current_session is not None
+    assert handle.current_session.id == "sbx_456"
+    assert retained_session.id == "sbx_123"
+    assert retained_session.status is SandboxStatus.STOPPED
+    assert handle.routes[0].url == "https://replacement.sandbox.test"
+    assert events == ["old-command", "resume", "replacement-command", "old-command"]
+
+
+_RECOVERABLE_SANDBOX_OPERATIONS = (
+    (
+        "get_process",
+        "get",
+        "v2/sandboxes/sessions/sbx_old/cmd/cmd_123",
+        "v2/sandboxes/sessions/sbx_new/cmd/cmd_123",
+    ),
+    (
+        "query_processes",
+        "get",
+        "v2/sandboxes/sessions/sbx_old/cmd",
+        "v2/sandboxes/sessions/sbx_new/cmd",
+    ),
+    (
+        "extend_execution_time_limit",
+        "post",
+        "v2/sandboxes/sessions/sbx_old/extend-timeout",
+        "v2/sandboxes/sessions/sbx_new/extend-timeout",
+    ),
+    (
+        "update_network_policy",
+        "post",
+        "v2/sandboxes/sessions/sbx_old/network-policy",
+        "v2/sandboxes/sessions/sbx_new/network-policy",
+    ),
+    (
+        "snapshot",
+        "post",
+        "v2/sandboxes/sessions/sbx_old/snapshot",
+        "v2/sandboxes/sessions/sbx_new/snapshot",
+    ),
+)
+
+
+def _recovery_success_response(operation: str, *, session_id: str) -> httpx.Response:
+    session = _sandbox_response(session_id=session_id)["session"]
+    if operation in {"get_process", "query_processes"}:
+        command = _command_response(session_id=session_id)["command"]
+        if operation == "get_process":
+            return httpx.Response(200, json={"command": command})
+        return httpx.Response(200, json={"commands": [command]})
+    if operation == "snapshot":
+        return httpx.Response(
+            201,
+            json={
+                "snapshot": _snapshot_response(session_id=session_id)["snapshot"],
+                "session": session,
+            },
+        )
+    return httpx.Response(200, json={"session": session})
+
+
+async def _run_async_recoverable_operation(handle: sandbox.Sandbox, operation: str) -> object:
+    if operation == "get_process":
+        return await handle.get_process("cmd_123")
+    if operation == "query_processes":
+        return await handle.query_processes()
+    if operation == "extend_execution_time_limit":
+        return await handle.extend_execution_time_limit(2)
+    if operation == "update_network_policy":
+        return await handle.update_network_policy(NetworkPolicy.allow_all())
+    if operation == "snapshot":
+        return await handle.snapshot()
+    raise AssertionError(f"Unexpected operation: {operation}")
+
+
+def _run_sync_recoverable_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
+    if operation == "get_process":
+        return handle.get_process("cmd_123")
+    if operation == "query_processes":
+        return handle.query_processes()
+    if operation == "extend_execution_time_limit":
+        return handle.extend_execution_time_limit(2)
+    if operation == "update_network_policy":
+        return handle.update_network_policy(NetworkPolicy.allow_all())
+    if operation == "snapshot":
+        return handle.snapshot()
+    raise AssertionError(f"Unexpected operation: {operation}")
+
+
+@pytest.mark.parametrize(
+    ("operation", "method", "old_path", "replacement_path"),
+    _RECOVERABLE_SANDBOX_OPERATIONS,
+)
+@respx.mock
+async def test_async_sandbox_replays_each_remaining_covered_operation(
+    mock_env_clear: None,
+    operation: str,
+    method: str,
+    old_path: str,
+    replacement_path: str,
+) -> None:
+    events: list[str] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            events.append("lookup")
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        events.append("resume")
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+
+    def old_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    def replacement_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement")
+        return _recovery_success_response(operation, session_id="sbx_new")
+
+    getattr(respx, method)(f"https://sandbox.test/{old_path}").mock(side_effect=old_handler)
+    getattr(respx, method)(f"https://sandbox.test/{replacement_path}").mock(
+        side_effect=replacement_handler
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        result = await _run_async_recoverable_operation(handle, operation)
+
+    assert result is not None
+    assert handle.current_session_id == "sbx_new"
+    assert events == ["lookup", "old", "resume", "replacement"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "method", "old_path", "replacement_path"),
+    _RECOVERABLE_SANDBOX_OPERATIONS,
+)
+@respx.mock
+def test_sync_sandbox_replays_each_remaining_covered_operation(
+    mock_env_clear: None,
+    operation: str,
+    method: str,
+    old_path: str,
+    replacement_path: str,
+) -> None:
+    events: list[str] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            events.append("lookup")
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        events.append("resume")
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+
+    def old_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    def replacement_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement")
+        return _recovery_success_response(operation, session_id="sbx_new")
+
+    getattr(respx, method)(f"https://sandbox.test/{old_path}").mock(side_effect=old_handler)
+    getattr(respx, method)(f"https://sandbox.test/{replacement_path}").mock(
+        side_effect=replacement_handler
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        result = _run_sync_recoverable_operation(handle, operation)
+
+    assert result is not None
+    assert handle.current_session_id == "sbx_new"
+    assert events == ["lookup", "old", "resume", "replacement"]
+
+
+async def test_sandbox_payload_application_preserves_or_replaces_current_session(
+    mock_env_clear: None,
+) -> None:
+    async with session(service_options=_session_options()):
+        handle = sandbox.Sandbox(
+            payload=SandboxState(
+                name="preview",
+                current_session_id="sbx_old",
+                current_session=SandboxRuntimeSessionState(
+                    id="sbx_old",
+                    status=SandboxStatus.RUNNING,
+                ),
+            ),
+            service=get_sandbox_service(get_active_session()),
+        )
+        original_session = handle.current_session
+        assert original_session is not None
+
+        handle._apply_payload(
+            SandboxState(
+                name="preview",
+                current_session_id="sbx_old",
+                current_session=SandboxRuntimeSessionState(
+                    id="sbx_old",
+                    status=SandboxStatus.STOPPED,
+                ),
+            )
+        )
+        assert handle.current_session is original_session
+        assert original_session.status is SandboxStatus.STOPPED
+
+        handle._apply_payload(
+            SandboxState(
+                name="preview",
+                current_session_id="sbx_new",
+                current_session=None,
+                _current_session_attached=False,
+            )
+        )
+        assert handle.current_session_id == "sbx_new"
+        assert handle.current_session is None
+
+        handle._apply_payload(
+            SandboxState(
+                name="preview",
+                current_session_id="sbx_new",
+                current_session=SandboxRuntimeSessionState(
+                    id="sbx_new",
+                    status=SandboxStatus.RUNNING,
+                ),
+            )
+        )
+        assert handle.current_session is not None
+        assert handle.current_session is not original_session
+        assert handle.current_session.id == "sbx_new"
+
+
+@respx.mock
+async def test_async_sparse_sandbox_lookup_targets_current_session_without_resume(
+    mock_env_clear: None,
+) -> None:
+    events: list[str] = []
+    sparse_response = _sandbox_response(session_id="sbx_sparse")
+    del sparse_response["session"]
+
+    def lookup_handler(request: httpx.Request) -> httpx.Response:
+        events.append("lookup")
+        assert request.url.params["resume"] == "false"
+        return httpx.Response(200, json=sparse_response)
+
+    lookup_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lookup_handler
+    )
+
+    def operation_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("operation")
+        return httpx.Response(200, json=_command_response(session_id="sbx_sparse"))
+
+    operation_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_sparse/cmd").mock(
+        side_effect=operation_handler
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        assert handle.current_session_id == "sbx_sparse"
+        assert handle.current_session is None
+        process = await handle.create_process("python")
+
+    assert process.session_id == "sbx_sparse"
+    assert lookup_route.call_count == operation_route.call_count == 1
+    assert events == ["lookup", "operation"]
+
+
+@respx.mock
+def test_sync_sparse_sandbox_lookup_targets_current_session_without_resume(
+    mock_env_clear: None,
+) -> None:
+    events: list[str] = []
+    sparse_response = _sandbox_response(session_id="sbx_sparse")
+    del sparse_response["session"]
+
+    def lookup_handler(request: httpx.Request) -> httpx.Response:
+        events.append("lookup")
+        assert request.url.params["resume"] == "false"
+        return httpx.Response(200, json=sparse_response)
+
+    lookup_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lookup_handler
+    )
+
+    def operation_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("operation")
+        return httpx.Response(200, json=_command_response(session_id="sbx_sparse"))
+
+    operation_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_sparse/cmd").mock(
+        side_effect=operation_handler
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        assert handle.current_session_id == "sbx_sparse"
+        assert handle.current_session is None
+        process = handle.create_process("python")
+
+    assert process.session_id == "sbx_sparse"
+    assert lookup_route.call_count == operation_route.call_count == 1
+    assert events == ["lookup", "operation"]
+
+
+@pytest.mark.parametrize(
+    ("include_system_routes", "expected_projection"),
+    [(True, "true"), (False, "false"), (None, None)],
+)
+@respx.mock
+async def test_async_sandbox_recovery_preserves_route_projection(
+    mock_env_clear: None,
+    include_system_routes: bool | None,
+    expected_projection: str | None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        session_id = "sbx_old" if request.url.params["resume"] == "false" else "sbx_new"
+        return httpx.Response(
+            200,
+            json=_sandbox_response(session_id=session_id, project_id="prj_bound"),
+        )
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response(session_id="sbx_new"))
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(
+            name="preview",
+            project_id="prj_bound",
+            include_system_routes=include_system_routes,
+        )
+        await handle.create_process("python")
+
+    assert [request.url.params["resume"] for request in requests] == ["false", "true"]
+    for request in requests:
+        assert request.url.params["projectId"] == "prj_bound"
+        assert request.url.params.get("__includeSystemRoutes") == expected_projection
+
+
+@pytest.mark.parametrize(
+    ("include_system_routes", "expected_projection"),
+    [(True, "true"), (False, "false"), (None, None)],
+)
+@respx.mock
+def test_sync_sandbox_recovery_preserves_route_projection(
+    mock_env_clear: None,
+    include_system_routes: bool | None,
+    expected_projection: str | None,
+) -> None:
+    events: list[str] = []
+    requests: list[httpx.Request] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.params["resume"] == "false":
+            events.append("lookup")
+            session_id = "sbx_old"
+        else:
+            events.append("resume")
+            session_id = "sbx_new"
+        return httpx.Response(
+            200,
+            json=_sandbox_response(session_id=session_id, project_id="prj_bound"),
+        )
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+
+    def old_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    old_command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=old_command_handler
+    )
+
+    def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement")
+        return httpx.Response(200, json=_command_response(session_id="sbx_new"))
+
+    replacement_command_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd"
+    ).mock(side_effect=replacement_command_handler)
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(
+            name="preview",
+            project_id="prj_bound",
+            include_system_routes=include_system_routes,
+        )
+        handle.create_process("python")
+
+    assert [request.url.params["resume"] for request in requests] == ["false", "true"]
+    for request in requests:
+        assert request.url.params["projectId"] == "prj_bound"
+        assert request.url.params.get("__includeSystemRoutes") == expected_projection
+    assert old_command_route.call_count == replacement_command_route.call_count == 1
+    assert events == ["lookup", "old", "resume", "replacement"]
+
+
+@pytest.mark.parametrize("failure_phase", ["resume", "resume_410", "replay"])
+@respx.mock
+async def test_async_sandbox_recovery_propagates_failed_resume_or_replay(
+    mock_env_clear: None,
+    failure_phase: str,
+) -> None:
+    events: list[str] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            events.append("lookup")
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        events.append("resume")
+        if failure_phase in {"resume", "resume_410"}:
+            return httpx.Response(
+                410 if failure_phase == "resume_410" else 409,
+                json={
+                    "error": {
+                        "code": (
+                            "snapshot_not_found"
+                            if failure_phase == "resume_410"
+                            else "resume_failed"
+                        ),
+                        "message": "resume failed",
+                    }
+                },
+            )
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+
+    def old_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=old_command_handler
+    )
+    if failure_phase == "replay":
+
+        def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
+            events.append("replacement")
+            return httpx.Response(
+                409,
+                json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+            )
+
+        respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+            side_effect=replacement_command_handler
+        )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            await handle.create_process("python")
+
+    expected_code = {
+        "resume": "resume_failed",
+        "resume_410": "snapshot_not_found",
+        "replay": "sandbox_stopped",
+    }[failure_phase]
+    assert exc_info.value.code == expected_code
+    assert events == (
+        ["lookup", "old", "resume"]
+        if failure_phase in {"resume", "resume_410"}
+        else ["lookup", "old", "resume", "replacement"]
+    )
+
+
+@pytest.mark.parametrize("failure_phase", ["resume", "resume_410", "replay"])
+@respx.mock
+def test_sync_sandbox_recovery_propagates_failed_resume_or_replay(
+    mock_env_clear: None,
+    failure_phase: str,
+) -> None:
+    events: list[str] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            events.append("lookup")
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        events.append("resume")
+        if failure_phase in {"resume", "resume_410"}:
+            return httpx.Response(
+                410 if failure_phase == "resume_410" else 409,
+                json={
+                    "error": {
+                        "code": (
+                            "snapshot_not_found"
+                            if failure_phase == "resume_410"
+                            else "resume_failed"
+                        ),
+                        "message": "resume failed",
+                    }
+                },
+            )
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=sandbox_handler
+    )
+
+    def old_command_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    old_command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=old_command_handler
+    )
+    if failure_phase == "replay":
+
+        def replacement_command_handler(_request: httpx.Request) -> httpx.Response:
+            events.append("replacement")
+            return httpx.Response(
+                409,
+                json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+            )
+
+        respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+            side_effect=replacement_command_handler
+        )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            handle.create_process("python")
+
+    expected_code = {
+        "resume": "resume_failed",
+        "resume_410": "snapshot_not_found",
+        "replay": "sandbox_stopped",
+    }[failure_phase]
+    assert exc_info.value.code == expected_code
+    assert sandbox_route.call_count == 2
+    assert old_command_route.call_count == 1
+    assert events == (
+        ["lookup", "old", "resume"]
+        if failure_phase in {"resume", "resume_410"}
+        else ["lookup", "old", "resume", "replacement"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "data"),
+    [
+        (
+            400,
+            {"error": {"code": "invalid_request", "message": "invalid request"}},
+        ),
+    ],
+)
+@respx.mock
+async def test_async_sandbox_does_not_recover_unrelated_non_410_api_errors(
+    mock_env_clear: None,
+    status_code: int,
+    data: dict[str, object] | None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def lookup_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.params["resume"] == "false"
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+
+    lookup_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lookup_handler
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(status_code, json=data)
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            await handle.create_process("python")
+
+    assert exc_info.value.status_code == status_code
+    assert lookup_route.call_count == 1
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("status_code", "data", "expected_code"),
+    [
+        (
+            400,
+            {"error": {"code": "invalid_request", "message": "invalid request"}},
+            "invalid_request",
+        ),
+    ],
+)
+@respx.mock
+def test_sync_sandbox_does_not_recover_unrelated_non_410_api_errors(
+    mock_env_clear: None,
+    status_code: int,
+    data: dict[str, object] | None,
+    expected_code: str | None,
+) -> None:
+    events: list[str] = []
+
+    def lookup_handler(request: httpx.Request) -> httpx.Response:
+        events.append("lookup")
+        assert request.url.params["resume"] == "false"
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+
+    lookup_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lookup_handler
+    )
+
+    def operation_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("operation")
+        return httpx.Response(status_code, json=data)
+
+    operation_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        side_effect=operation_handler
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            handle.create_process("python")
+
+    assert exc_info.value.status_code == status_code
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.data == data
+    assert lookup_route.call_count == operation_route.call_count == 1
+    assert events == ["lookup", "operation"]
+
+
+_UNRECOVERED_SANDBOX_OPERATIONS = (
+    ("update", "patch", "v2/sandboxes/preview"),
+    ("stop", "post", "v2/sandboxes/sessions/sbx_old/stop"),
+    ("destroy", "delete", "v2/sandboxes/preview"),
+    ("list_sessions", "get", "v2/sandboxes/sessions"),
+    ("list_snapshots", "get", "v2/sandboxes/snapshots"),
+)
+
+
+async def _run_async_unrecovered_operation(handle: sandbox.Sandbox, operation: str) -> object:
+    if operation == "update":
+        return await handle.update(runtime="node22")
+    if operation == "stop":
+        return await handle.stop()
+    if operation == "destroy":
+        return await handle.destroy()
+    if operation == "list_sessions":
+        return await handle.list_sessions()
+    if operation == "list_snapshots":
+        return await handle.list_snapshots()
+    raise AssertionError(f"Unexpected operation: {operation}")
+
+
+@pytest.mark.parametrize(
+    ("operation", "method", "path"),
+    _UNRECOVERED_SANDBOX_OPERATIONS,
+)
+@respx.mock
+async def test_async_sandbox_does_not_recover_noncovered_operations(
+    mock_env_clear: None,
+    operation: str,
+    method: str,
+    path: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def lookup_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.params["resume"] == "false"
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=lookup_handler)
+    getattr(respx, method)(f"https://sandbox.test/{path}").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            await _run_async_unrecovered_operation(handle, operation)
+
+    assert exc_info.value.code == "sandbox_stopped"
+    assert len(requests) == 1
+
+
+def _run_sync_unrecovered_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
+    if operation == "update":
+        return handle.update(runtime="node22")
+    if operation == "stop":
+        return handle.stop()
+    if operation == "destroy":
+        return handle.destroy()
+    if operation == "list_sessions":
+        return handle.list_sessions()
+    if operation == "list_snapshots":
+        return handle.list_snapshots()
+    raise AssertionError(f"Unexpected operation: {operation}")
+
+
+@pytest.mark.parametrize(
+    ("operation", "method", "path"),
+    _UNRECOVERED_SANDBOX_OPERATIONS,
+)
+@respx.mock
+def test_sync_sandbox_does_not_recover_noncovered_operations(
+    mock_env_clear: None,
+    operation: str,
+    method: str,
+    path: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def lookup_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.params["resume"] == "false"
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=lookup_handler)
+    getattr(respx, method)(f"https://sandbox.test/{path}").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            _run_sync_unrecovered_operation(handle, operation)
+
+    assert exc_info.value.code == "sandbox_stopped"
+    assert len(requests) == 1
 
 
 @respx.mock
