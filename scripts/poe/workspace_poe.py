@@ -17,6 +17,14 @@ RESOLVER = SCRIPT_DIR / "workspace_poe_resolve.py"
 PARALLEL_FALSE = {"0", "false", "no"}
 FAILURE_TAIL_LINES = 20
 QUIET_FAILURE_DETAIL = "workspace_poe.failure.detail"
+ROOT_TASKS = {
+    "fix": "fix-root",
+    "lint": "lint-root",
+    "test": "test-root",
+    "typecheck": "typecheck-root",
+    "test-examples": "test-examples-root",
+}
+PYTEST_TASKS = {"test", "test-examples"}
 
 
 @dataclass(frozen=True)
@@ -156,7 +164,7 @@ class WorkspaceRunner:
         poe_flags: Sequence[str] = (),
         verbose_output: bool = False,
     ) -> list[CommandSpec]:
-        root_task = f"{task}-root" if task in {"fix", "lint", "test", "typecheck"} else None
+        root_task = ROOT_TASKS.get(task)
         return [
             self.scope_command(
                 task,
@@ -218,7 +226,7 @@ class WorkspaceRunner:
         uv_scope = ("--all-packages",) if scope.package == "root" else ("--package", scope.package)
         env = self.base_env()
         env["WORKSPACE_POE_PACKAGE"] = scope.package
-        if task == "test":
+        if task in PYTEST_TASKS:
             env["WORKSPACE_POE_LOGRAIL_PROGRESS"] = "1"
         if scope.paths:
             env["WORKSPACE_POE_SCOPE_ARGS"] = shlex.join(scope.paths)
@@ -234,19 +242,26 @@ class WorkspaceRunner:
             display_label=scope.package,
             category=task,
             subject=scope.package,
-            parser="pytest" if task == "test" else None,
+            parser="pytest" if task in PYTEST_TASKS else None,
             quiet=task in {"lint", "typecheck"} and not verbose_output,
         )
 
     def resolve_scopes(self, task: str, argv: Sequence[str]) -> tuple[Scope, ...]:
         env = self.base_env()
         env["WORKSPACE_POE_SCOPE_TASK"] = task
-        output = subprocess.check_output(
-            (sys.executable, str(RESOLVER), *argv),
-            cwd=self.root,
-            env=env,
-            text=True,
-        )
+        try:
+            output = subprocess.check_output(
+                (sys.executable, str(RESOLVER), *argv),
+                cwd=self.root,
+                env=env,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or "").strip()
+            raise SystemExit(
+                detail or f"could not resolve scopes for workspace task {task!r}"
+            ) from None
         scopes: list[Scope] = []
         for line in output.splitlines():
             if not line:
@@ -384,6 +399,17 @@ def run_root_task(task: str, argv: Sequence[str]) -> int:
                 "pytest",
                 shlex.join((os.environ["PYTEST"], *args)),
                 category="test",
+                parser="pytest",
+            )
+        )
+    if task == "test-examples-root":
+        extra_args = list(argv) or poe_extra_args()
+        args = ["tests/test_examples.py", *extra_args]
+        return run_command(
+            env_command(
+                "pytest",
+                shlex.join((os.environ["PYTEST"], *args)),
+                category="test-examples",
                 parser="pytest",
             )
         )

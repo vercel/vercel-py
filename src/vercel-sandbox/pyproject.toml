@@ -69,3 +69,6 @@ packages = ["vercel.sandbox"]
 
 [tool.poe.tasks.typecheck]
 cmd = "$MYPY"
+
+[tool.poe.tasks.test-examples]
+cmd = "$PYTEST -m live tests/live/test_examples.py"

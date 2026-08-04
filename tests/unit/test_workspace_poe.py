@@ -104,6 +104,42 @@ def test_scope_command_lograil_name_includes_task_and_package() -> None:
     assert command.subject == "root"
 
 
+def test_example_scope_command_maps_root_to_internal_task() -> None:
+    runner = object.__new__(workspace_poe.WorkspaceRunner)
+    runner.root = Path.cwd()
+    runner.project_root = None
+    scope = workspace_poe.Scope("root", Path.cwd())
+
+    command = runner.scope_command(
+        "test-examples",
+        scope,
+        ("-k", "sessions_and_resume"),
+        workspace_poe.ROOT_TASKS["test-examples"],
+    )
+
+    assert "test-examples-root" in command.argv
+    assert command.argv[-2:] == ("-k", "sessions_and_resume")
+    assert command.parser == "pytest"
+    assert command.env["WORKSPACE_POE_LOGRAIL_PROGRESS"] == "1"
+
+
+def test_example_scope_command_preserves_package_passthrough() -> None:
+    runner = object.__new__(workspace_poe.WorkspaceRunner)
+    runner.root = Path.cwd()
+    runner.project_root = None
+    scope = workspace_poe.Scope("vercel-sandbox", Path.cwd())
+
+    command = runner.scope_command(
+        "test-examples",
+        scope,
+        ("-k", "sessions_and_resume"),
+        workspace_poe.ROOT_TASKS["test-examples"],
+    )
+
+    assert command.argv[-3:] == ("test-examples", "-k", "sessions_and_resume")
+    assert command.parser == "pytest"
+
+
 def test_tool_command_lograil_name_includes_tool_and_package(monkeypatch) -> None:
     monkeypatch.setenv("WORKSPACE_POE_PACKAGE", "vercel-celery")
 

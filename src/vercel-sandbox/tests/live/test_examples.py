@@ -1,3 +1,7 @@
+"""Executable Sandbox examples."""
+
+from __future__ import annotations
+
 import os
 import shlex
 import subprocess
@@ -6,21 +10,23 @@ from pathlib import Path
 
 import pytest
 
-# Optional when credentials are unavailable, including forked pull requests.
-_has_explicit_vercel_credentials = bool(
-    (os.getenv("VERCEL_TOKEN") or os.getenv("VERCEL_OIDC_TOKEN"))
-    and os.getenv("VERCEL_PROJECT_ID")
-    and os.getenv("VERCEL_TEAM_ID")
-)
-_has_credentials = bool(os.getenv("BLOB_READ_WRITE_TOKEN") and _has_explicit_vercel_credentials)
-_examples_dir = Path(__file__).resolve().parents[1] / "examples"
+from .conftest import requires_sandbox_credentials
+
+_EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "examples"
+_EXAMPLE_ARGUMENTS = {
+    "sandbox_04_dev_server.py": ("--destroy",),
+}
 
 
 def _discover_examples(directory: Path) -> list[Path]:
+    """Return only top-level, standalone Sandbox example programs."""
     if not directory.is_dir():
         return []
+
     examples = sorted(
-        path for path in directory.iterdir() if path.is_file() and path.suffix == ".py"
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix == ".py" and path.name.startswith("sandbox_")
     )
     scope_args = shlex.split(os.getenv("WORKSPACE_POE_SCOPE_ARGS", ""))
     if not scope_args:
@@ -37,24 +43,19 @@ def _discover_examples(directory: Path) -> list[Path]:
     return selected or examples
 
 
-_example_files = _discover_examples(_examples_dir)
+_EXAMPLE_FILES = _discover_examples(_EXAMPLES_DIR)
 
 
-@pytest.mark.skipif(
-    not _has_credentials,
-    reason=(
-        "Requires BLOB_READ_WRITE_TOKEN, VERCEL_TOKEN or VERCEL_OIDC_TOKEN, "
-        "VERCEL_PROJECT_ID, and VERCEL_TEAM_ID"
-    ),
-)
-@pytest.mark.parametrize("script_path", _example_files, ids=lambda p: p.name)
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.parametrize("script_path", _EXAMPLE_FILES, ids=lambda path: path.name)
 def test_example(script_path: Path) -> None:
-    """Run a single example script and verify it succeeds."""
+    """Run one standalone Sandbox example and verify it succeeds."""
     _run_example(script_path)
 
 
 def _run_example(script_path: Path) -> None:
-    command = [sys.executable, str(script_path)]
+    command = [sys.executable, str(script_path), *_EXAMPLE_ARGUMENTS.get(script_path.name, ())]
 
     try:
         result = subprocess.run(
@@ -63,18 +64,18 @@ def _run_example(script_path: Path) -> None:
             text=True,
             timeout=300,
         )
-    except subprocess.TimeoutExpired as e:
-        stdout = e.stdout.decode() if e.stdout else ""
-        stderr = e.stderr.decode() if e.stderr else ""
-        # Tail stdout to avoid overwhelming output
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout.decode() if isinstance(error.stdout, bytes) else error.stdout or ""
+        stderr = error.stderr.decode() if isinstance(error.stderr, bytes) else error.stderr or ""
         max_chars = 10000
         if len(stdout) > max_chars:
             stdout = f"... [{len(stdout) - max_chars} chars truncated] ...\n" + stdout[-max_chars:]
         pytest.fail(
-            f"{script_path.name} timed out after {e.timeout}s\n"
+            f"{script_path.name} timed out after {error.timeout}s\n"
             f"STDOUT (tail):\n{stdout}\n"
             f"STDERR:\n{stderr}"
         )
+
     assert result.returncode == 0, (
         f"{script_path.name} failed with code {result.returncode}\n"
         f"STDOUT:\n{result.stdout}\n"

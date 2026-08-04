@@ -47,5 +47,9 @@ jobs:
       - name: Test
         run: ./scripts/test.sh
 
+      - name: Test examples
+        if: matrix.python-version == '3.12'
+        run: uv run poe test-examples
+
       - name: Build package
         run: ./scripts/build.sh

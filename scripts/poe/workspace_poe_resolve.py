@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from collections import OrderedDict
+from collections.abc import Iterable
 
 try:
     import tomllib
@@ -30,15 +31,65 @@ def workspace_packages() -> list[tuple[str, str]]:
     )
 
 
-def first_task_cwd(package_path: str, task_name: str) -> str:
-    if not task_name:
-        return package_path
+ROOT_TASKS = {
+    "fix": "fix-root",
+    "lint": "lint-root",
+    "test": "test-root",
+    "typecheck": "typecheck-root",
+    "test-examples": "test-examples-root",
+}
+OPT_IN_TASKS = frozenset({"test-examples"})
+
+
+def local_tasks(package_path: str) -> dict[str, object]:
     pyproject = os.path.join(package_path, "pyproject.toml")
     try:
         with open(pyproject, "rb") as file:
             tasks = tomllib.load(file).get("tool", {}).get("poe", {}).get("tasks", {})
     except FileNotFoundError:
+        return {}
+    return tasks if isinstance(tasks, dict) else {}
+
+
+def local_task_declared(package_path: str, task_name: str) -> bool:
+    return task_name in local_tasks(package_path)
+
+
+def task_for_scope(package: str, task_name: str) -> str:
+    return ROOT_TASKS.get(task_name, task_name) if package == "root" else task_name
+
+
+def task_is_supported(package: str, package_path: str, task_name: str) -> bool:
+    if task_name not in OPT_IN_TASKS:
+        return True
+    return local_task_declared(package_path, task_for_scope(package, task_name))
+
+
+def opt_in_packages(task_name: str, packages: Iterable[tuple[str, str]], root: str) -> set[str]:
+    selected = {
+        package
+        for package, package_path in packages
+        if task_is_supported(package, package_path, task_name)
+    }
+    if task_is_supported("root", root, task_name):
+        selected.add("root")
+    return selected
+
+
+def require_task_support(package: str, package_path: str, task_name: str) -> None:
+    if task_is_supported(package, package_path, task_name):
+        return
+    declared_task = task_for_scope(package, task_name)
+    raise SystemExit(
+        f"workspace task {task_name!r} is not declared by {package!r}; "
+        f"add [tool.poe.tasks.{declared_task}] to {os.path.join(package_path, 'pyproject.toml')}"
+    )
+
+
+def first_task_cwd(package_path: str, task_name: str) -> str:
+    if not task_name:
         return package_path
+    tasks = local_tasks(package_path)
 
     def first_cwd(name: str) -> str | None:
         task = tasks.get(name, {})
@@ -64,14 +115,19 @@ def main(argv: list[str]) -> int:
     scoped_paths: dict[str, list[str]] = {}
 
     if not argv:
-        package_selected.update(package_paths)
-        package_selected.add("root")
+        if task_name in OPT_IN_TASKS:
+            package_selected.update(opt_in_packages(task_name, packages, root))
+        else:
+            package_selected.update(package_paths)
+            package_selected.add("root")
 
     for arg in argv:
         if arg in package_paths:
+            require_task_support(arg, package_paths[arg], task_name)
             package_selected.add(arg)
             continue
         if arg == "root":
+            require_task_support("root", root, task_name)
             package_selected.add("root")
             continue
 
@@ -86,6 +142,7 @@ def main(argv: list[str]) -> int:
                     owner_path = package_path
 
         task_cwd = root if owner == "root" else first_task_cwd(owner_path, task_name)
+        require_task_support(owner, owner_path, task_name)
         scoped_paths.setdefault(owner, []).append(os.path.relpath(abs_arg, task_cwd))
 
     for package, package_path in packages:

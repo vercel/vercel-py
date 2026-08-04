@@ -201,6 +201,16 @@ args = [
 [tool.poe.tasks.test-root]
 cmd = "scripts/poe/workspace_poe.py root-task test-root"
 
+[tool.poe.tasks.test-examples]
+cmd = "scripts/poe/workspace_poe.py workspace test-examples --poe-verbose ${verbose:-false} ${scopes}"
+args = [
+  { name = "verbose", options = ["-v", "--verbose"], type = "boolean" },
+  { name = "scopes", positional = true, multiple = true },
+]
+
+[tool.poe.tasks.test-examples-root]
+cmd = "scripts/poe/workspace_poe.py root-task test-examples-root"
+
 [tool.poe.tasks.qa]
 cmd = "scripts/poe/workspace_poe.py qa --poe-quiet ${quiet} --poe-verbose ${verbose} ${scopes}"
 args = [
