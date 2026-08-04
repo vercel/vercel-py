@@ -2,8 +2,10 @@ import asyncio
 import gc
 import json
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
+from threading import Event, Lock
 from typing import Any
 
 import httpx
@@ -1973,12 +1975,25 @@ async def test_stopped_async_sandbox_recovers_a_covered_operation(
             json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
     )
-    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
-        return_value=httpx.Response(
+
+    def old_read_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old-read")
+        return httpx.Response(
             409,
             json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
+
+    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
+        side_effect=old_read_handler
     )
+
+    def replacement_read_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement-read")
+        return httpx.Response(200, content=b"recovered")
+
+    replacement_read_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_456/fs/read"
+    ).mock(side_effect=replacement_read_handler)
 
     async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
@@ -1987,8 +2002,7 @@ async def test_stopped_async_sandbox_recovers_a_covered_operation(
         assert await handle.stop() is handle
         assert handle.current_session is retained_session
         assert handle.current_session.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
-            await handle.fs.read_bytes("message.txt")
+        assert await handle.fs.read_bytes("message.txt") == b"recovered"
         process = await handle.create_process("python", ["--version"])
         with pytest.raises(SandboxApiError, match="session is stopped") as retained_exc:
             await retained_session.create_process("python", ["--version"])
@@ -2000,7 +2014,7 @@ async def test_stopped_async_sandbox_recovers_a_covered_operation(
     assert replacement_command_route.called
     assert process_refresh_route.called
     assert read_route.called
-    assert fs_exc.value.code == "sandbox_stopped"
+    assert replacement_read_route.called
     assert retained_exc.value.code == "sandbox_stopped"
     assert process_exc.value.code == "sandbox_stopped"
     assert process.session_id == "sbx_456"
@@ -2010,7 +2024,13 @@ async def test_stopped_async_sandbox_recovers_a_covered_operation(
     assert retained_session.id == "sbx_123"
     assert retained_session.status is SandboxStatus.STOPPED
     assert handle.routes[0].url == "https://replacement.sandbox.test"
-    assert events == ["old-command", "resume", "replacement-command", "old-command"]
+    assert events == [
+        "old-read",
+        "resume",
+        "replacement-read",
+        "replacement-command",
+        "old-command",
+    ]
 
 
 @respx.mock
@@ -2102,12 +2122,25 @@ def test_stopped_sync_sandbox_recovers_a_covered_operation(
             json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
     )
-    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
-        return_value=httpx.Response(
+
+    def old_read_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old-read")
+        return httpx.Response(
             409,
             json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
+
+    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
+        side_effect=old_read_handler
     )
+
+    def replacement_read_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement-read")
+        return httpx.Response(200, content=b"recovered")
+
+    replacement_read_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_456/fs/read"
+    ).mock(side_effect=replacement_read_handler)
 
     with session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
@@ -2116,8 +2149,7 @@ def test_stopped_sync_sandbox_recovers_a_covered_operation(
         assert handle.stop() is handle
         assert handle.current_session is retained_session
         assert handle.current_session.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
-            handle.fs.read_bytes("message.txt")
+        assert handle.fs.read_bytes("message.txt") == b"recovered"
         process = handle.create_process("python", ["--version"])
         with pytest.raises(SandboxApiError, match="session is stopped") as retained_exc:
             retained_session.create_process("python", ["--version"])
@@ -2129,7 +2161,7 @@ def test_stopped_sync_sandbox_recovers_a_covered_operation(
     assert replacement_command_route.called
     assert process_refresh_route.called
     assert read_route.called
-    assert fs_exc.value.code == "sandbox_stopped"
+    assert replacement_read_route.called
     assert retained_exc.value.code == "sandbox_stopped"
     assert process_exc.value.code == "sandbox_stopped"
     assert process.session_id == "sbx_456"
@@ -2139,7 +2171,160 @@ def test_stopped_sync_sandbox_recovers_a_covered_operation(
     assert retained_session.id == "sbx_123"
     assert retained_session.status is SandboxStatus.STOPPED
     assert handle.routes[0].url == "https://replacement.sandbox.test"
-    assert events == ["old-command", "resume", "replacement-command", "old-command"]
+    assert events == [
+        "old-read",
+        "resume",
+        "replacement-read",
+        "replacement-command",
+        "old-command",
+    ]
+
+
+@respx.mock
+async def test_async_process_and_filesystem_recovery_share_one_resume_request(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_started = asyncio.Event()
+    second_recovery_waiter = asyncio.Event()
+    shared_resume_calls = 0
+    original_await_shared_resume = sandbox_async_runtime.Sandbox._await_shared_resume
+
+    async def track_shared_resume(handle: sandbox.Sandbox) -> None:
+        nonlocal shared_resume_calls
+        shared_resume_calls += 1
+        if shared_resume_calls == 2:
+            second_recovery_waiter.set()
+        await original_await_shared_resume(handle)
+
+    monkeypatch.setattr(sandbox_async_runtime.Sandbox, "_await_shared_resume", track_shared_resume)
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        raise AssertionError("The resume route must use its async handler")
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        side_effect=sandbox_handler
+    )
+
+    async def resume_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["resume"] == "true"
+        resume_started.set()
+        await asyncio.wait_for(second_recovery_waiter.wait(), timeout=5)
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    resume_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}
+    ).mock(side_effect=resume_handler)
+    old_process_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+    old_read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/fs/read").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+    replacement_process_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd"
+    ).mock(return_value=httpx.Response(200, json={"commands": []}))
+    replacement_read_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/read"
+    ).mock(return_value=httpx.Response(200, content=b"replacement"))
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        process_task = asyncio.create_task(handle.query_processes())
+        await resume_started.wait()
+        filesystem_task = asyncio.create_task(handle.fs.read_bytes("message.txt"))
+        assert await process_task == []
+        assert await filesystem_task == b"replacement"
+
+    assert handle.current_session_id == "sbx_new"
+    assert shared_resume_calls == 2
+    assert resume_route.call_count == 1
+    assert old_process_route.call_count == replacement_process_route.call_count == 1
+    assert old_read_route.call_count == replacement_read_route.call_count == 1
+
+
+@respx.mock
+def test_sync_process_and_filesystem_recovery_share_one_resume_request(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resume_started = Event()
+    second_recovery_waiter = Event()
+    shared_resume_lock = Lock()
+    shared_resume_calls = 0
+    original_await_shared_resume = sandbox_sync_runtime.SyncSandbox._await_shared_resume
+
+    async def track_shared_resume(handle: sandbox_sync.SyncSandbox) -> None:
+        nonlocal shared_resume_calls
+        with shared_resume_lock:
+            shared_resume_calls += 1
+            if shared_resume_calls == 2:
+                second_recovery_waiter.set()
+        await original_await_shared_resume(handle)
+
+    monkeypatch.setattr(
+        sandbox_sync_runtime.SyncSandbox, "_await_shared_resume", track_shared_resume
+    )
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        raise AssertionError("The resume route must use its blocking handler")
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        side_effect=sandbox_handler
+    )
+
+    def resume_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["resume"] == "true"
+        resume_started.set()
+        assert second_recovery_waiter.wait(timeout=5)
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    resume_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}
+    ).mock(side_effect=resume_handler)
+    old_process_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+    old_read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/fs/read").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+    )
+    replacement_process_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd"
+    ).mock(return_value=httpx.Response(200, json={"commands": []}))
+    replacement_read_route = respx.post(
+        "https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/read"
+    ).mock(return_value=httpx.Response(200, content=b"replacement"))
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            process_future = executor.submit(handle.query_processes)
+            assert resume_started.wait(timeout=5)
+            filesystem_future = executor.submit(handle.fs.read_bytes, "message.txt")
+            assert process_future.result(timeout=5) == []
+            assert filesystem_future.result(timeout=5) == b"replacement"
+
+    assert handle.current_session_id == "sbx_new"
+    assert shared_resume_calls == 2
+    assert resume_route.call_count == 1
+    assert old_process_route.call_count == replacement_process_route.call_count == 1
+    assert old_read_route.call_count == replacement_read_route.call_count == 1
 
 
 _RECOVERABLE_SANDBOX_OPERATIONS = (

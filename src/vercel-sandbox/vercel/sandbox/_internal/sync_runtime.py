@@ -25,6 +25,7 @@ from vercel.sandbox._internal.filesystem_handle_core import (
     BinaryReaderCore,
     BinaryWriterCore,
     FilesystemHandleBinding,
+    FilesystemOperationBinding,
     TextReaderCore,
     TextWriterCore,
 )
@@ -220,17 +221,17 @@ class SyncSnapshot(SnapshotHandleBase):
 class SyncSandboxFilesystem:
     """Perform synchronous filesystem operations in a sandbox session."""
 
-    __slots__ = ("_service", "_session_id", "_write_files_cwd")
+    __slots__ = ("_execution", "_service", "_write_files_cwd")
 
     def __init__(
         self,
         *,
         service: SandboxService,
-        session_id: Callable[[], str],
+        execution: FilesystemOperationBinding,
         write_files_cwd: Callable[[RemotePath | None], str],
     ) -> None:
         self._service = service
-        self._session_id = session_id
+        self._execution = execution
         self._write_files_cwd = write_files_cwd
 
     @overload
@@ -320,7 +321,7 @@ class SyncSandboxFilesystem:
         binding = FilesystemHandleBinding(
             service=self._service,
             runtime=self._service.staging_file_runtime,
-            session_id=self._session_id,
+            execution=self._execution,
             write_files_cwd=self._write_files_cwd,
             path=path,
             cwd=normalized_cwd,
@@ -363,12 +364,16 @@ class SyncSandboxFilesystem:
             SandboxPathNotFoundError: If a parent directory is missing and
                 ``recursive`` is false.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         iter_coroutine(
-            self._service.mkdir(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                recursive=recursive,
+            self._execution.execute(
+                lambda session_id: self._service.mkdir(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    recursive=recursive,
+                )
             )
         )
 
@@ -385,12 +390,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxPathNotFoundError: If the file does not exist.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.read_bytes(
-                operation="read_bytes",
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
+            self._execution.execute(
+                lambda session_id: self._service.read_bytes(
+                    operation="read_bytes",
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                )
             )
         )
 
@@ -476,27 +485,35 @@ class SyncSandboxFilesystem:
         )
 
     def _write_files(self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None) -> None:
+        """Upload an in-memory write set with deliberate at-least-once replay.
+
+        Sandbox-level lifecycle recovery may replay the full archive once. The
+        first non-atomic upload may already have written some paths when it
+        reports a recognized lifecycle failure.
+        """
         for file in files:
             _validate_file_mode(file.mode)
-        resolved_cwd = self._write_files_cwd(cwd)
-        entries = [
-            _UploadFileEntry(
-                path=f.path,
-                size=len(f.content),
-                source=SyncByteStreamRuntime.reader(f.content),
-                mode=f.mode,
-                archive_path=_normalize_tar_path(f.path, cwd=resolved_cwd),
-            )
-            for f in files
-        ]
-        iter_coroutine(
-            self._service.write_stream_archive(
-                session_id=self._session_id(),
+
+        async def write(session_id: str) -> None:
+            resolved_cwd = self._write_files_cwd(cwd)
+            entries = [
+                _UploadFileEntry(
+                    path=file.path,
+                    size=len(file.content),
+                    source=SyncByteStreamRuntime.reader(file.content),
+                    mode=file.mode,
+                    archive_path=_normalize_tar_path(file.path, cwd=resolved_cwd),
+                )
+                for file in files
+            ]
+            await self._service.write_stream_archive(
+                session_id=session_id,
                 entries=entries,
                 paths=tuple(entry.path for entry in entries),
                 cwd=resolved_cwd,
             )
-        )
+
+        iter_coroutine(self._execution.execute(write))
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SyncSandboxFilesystemBatch":
         """Create a context manager that stages files for one write request.
@@ -520,12 +537,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the remote check fails.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.exists(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.exists(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -535,12 +556,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the remote check fails.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.is_file(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.is_file(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -550,12 +575,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the remote check fails.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.is_dir(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.is_dir(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -575,12 +604,16 @@ class SyncSandboxFilesystem:
             SandboxFilesystemCommandError: If the listing fails, including
                 when the directory does not exist.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.listdir(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.listdir(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -604,14 +637,18 @@ class SyncSandboxFilesystem:
             SandboxFilesystemCommandError: If removal fails, including when
                 the path is missing and ``missing_ok`` is false.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         iter_coroutine(
-            self._service.remove(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                recursive=recursive,
-                missing_ok=missing_ok,
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.remove(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    recursive=recursive,
+                    missing_ok=missing_ok,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -632,13 +669,18 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the rename fails.
         """
+        remote_source = _coerce_remote_path(source)
+        remote_destination = _coerce_remote_path(destination)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         iter_coroutine(
-            self._service.rename(
-                session_id=self._session_id(),
-                source=_coerce_remote_path(source),
-                destination=_coerce_remote_path(destination),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.rename(
+                    session_id=session_id,
+                    source=remote_source,
+                    destination=remote_destination,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -687,7 +729,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         self._service = service
         self.fs = SyncSandboxFilesystem(
             service=service,
-            session_id=lambda: self.id,
+            execution=FilesystemOperationBinding.direct(self.id),
             write_files_cwd=self._write_files_cwd,
         )
 
@@ -925,7 +967,12 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         self._recovery_attempt: _SyncRecoveryAttempt | None = None
         self.fs = SyncSandboxFilesystem(
             service=service,
-            session_id=lambda: self.current_session_id,
+            execution=FilesystemOperationBinding(
+                execute=lambda operation: execute_with_sandbox_recovery(
+                    operation, coordinator=self
+                ),
+                bind=self._ensure_active,
+            ),
             write_files_cwd=self._write_files_cwd,
         )
 
@@ -987,6 +1034,11 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                         self._recovery_attempt = None
                     self._recovery_condition.notify_all()
             return
+
+    async def _ensure_active(self) -> str:
+        """Ensure an active current session before binding a lazy stream."""
+        await self._await_shared_resume()
+        return self.current_session_id
 
     async def _wait_for_transition(self, target: SandboxRecoveryTarget) -> None:
         deadline = time.monotonic() + TRANSITION_TIMEOUT

@@ -1,6 +1,6 @@
 """Write targets for streaming Sandbox filesystem handles."""
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Protocol
 
@@ -96,36 +96,63 @@ class _FilesystemWriteTargetSource:
         self,
         *,
         name: str,
-        runtime: _TemporaryFileRuntime,
-        bind: Callable[[], _WriteBinding],
-        size: int | None,
+        bind: Callable[[], Awaitable[_WriteBinding]],
+        size: int,
         permissions: int | None,
     ) -> None:
         self.name = name
-        self._runtime = runtime
         self._bind = bind
         self._size = size
         self._permissions = permissions
 
     def acquire(self) -> AbstractAsyncContextManager[_WriteTarget]:
         return _acquire_write_target(
-            runtime=self._runtime,
-            bound=self._bind(),
+            bind=self._bind,
             name=self.name,
             size=self._size,
             permissions=self._permissions,
         )
 
 
+class _SpooledWriteTargetSource:
+    def __init__(
+        self,
+        *,
+        name: str,
+        runtime: _TemporaryFileRuntime,
+        execution: Callable[[Callable[[str], Awaitable[None]]], Awaitable[None]],
+        bound_write: Callable[[str], _WriteBinding],
+        permissions: int | None,
+    ) -> None:
+        self.name = name
+        self._runtime = runtime
+        self._execution = execution
+        self._bound_write = bound_write
+        self._permissions = permissions
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[_WriteTarget]:
+        async with self._runtime.temporary_file() as spool:
+            yield _SpooledWriteTarget(
+                spool,
+                execution=self._execution,
+                bound_write=self._bound_write,
+                permissions=self._permissions,
+            )
+
+
 class _SpooledWriteTarget:
     def __init__(
         self,
         spool: StagingByteFile,
-        bound: _WriteBinding,
+        *,
+        execution: Callable[[Callable[[str], Awaitable[None]]], Awaitable[None]],
+        bound_write: Callable[[str], _WriteBinding],
         permissions: int | None,
     ) -> None:
         self._spool = spool
-        self._bound = bound
+        self._execution = execution
+        self._bound_write = bound_write
         self._permissions = permissions
 
     async def write(self, data: bytes) -> None:
@@ -137,8 +164,12 @@ class _SpooledWriteTarget:
     async def finish(self) -> None:
         await self._spool.flush()
         size = await self._spool.tell()
-        await self._spool.seek(0)
-        await self._bound.publish(self._spool, size, self._permissions)
+
+        async def publish(session_id: str) -> None:
+            await self._spool.seek(0)
+            await self._bound_write(session_id).publish(self._spool, size, self._permissions)
+
+        await self._execution(publish)
 
     async def abort(self) -> None:
         pass
@@ -168,15 +199,11 @@ class _ExactSizeWriteTarget:
 @asynccontextmanager
 async def _acquire_write_target(
     *,
-    runtime: _TemporaryFileRuntime,
-    bound: _WriteBinding,
+    bind: Callable[[], Awaitable[_WriteBinding]],
     name: str,
-    size: int | None,
+    size: int,
     permissions: int | None,
 ) -> AsyncIterator[_WriteTarget]:
-    if size is None:
-        async with runtime.temporary_file() as spool:
-            yield _SpooledWriteTarget(spool, bound, permissions)
-    else:
-        async with bound.open_upload(size, permissions) as upload:
-            yield _ExactSizeWriteTarget(upload, name=name, size=size)
+    bound = await bind()
+    async with bound.open_upload(size, permissions) as upload:
+        yield _ExactSizeWriteTarget(upload, name=name, size=size)
