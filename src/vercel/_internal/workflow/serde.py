@@ -28,14 +28,12 @@ TypeScript compiler plugin generates.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
-import datetime
-import decimal
 import enum
 import operator
-import pathlib
-import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, TypeVar
 
 CLASS_ID_PREFIX = "class//"
@@ -50,14 +48,44 @@ class _Registration:
     deserialize: Callable[[Any], Any]
 
 
-_by_class_id: dict[str, _Registration] = {}
-_by_class: dict[type, _Registration] = {}
-# Types devalue already carries that a registration on a base class would
-# otherwise capture. Walking the MRO stops here, declining the value.
-_NATIVE: set[type] = {datetime.datetime}
-# `type(value)` -> the registration that applies to it, or None. Cleared
-# whenever a registration lands, since a new one can change the answer.
-_resolved: dict[type, _Registration | None] = {}
+@dataclasses.dataclass
+class _Registry:
+    """The registrations one side of the sandbox boundary can see.
+
+    A sandbox gets its own, holding the classes it imported itself and nothing
+    else -- see :func:`sandboxed_registrations`.
+    """
+
+    by_class_id: dict[str, _Registration] = dataclasses.field(default_factory=dict)
+    by_class: dict[type, str] = dataclasses.field(default_factory=dict)
+    # `type(value)` -> the classId that applies to it, or None. Dropped
+    # whenever a registration lands here, since a new one can change the
+    # answer.
+    resolved: dict[type, str | None] = dataclasses.field(default_factory=dict)
+    # Types devalue carries itself, which a registration on a base class would
+    # otherwise capture. The MRO walk stops here and declines the value.
+    native: set[type] = dataclasses.field(default_factory=set)
+
+    def registration(self, class_id: str) -> _Registration | None:
+        return self.by_class_id.get(class_id)
+
+    def add(self, cls: type, registration: _Registration) -> None:
+        self.by_class_id[registration.class_id] = registration
+        self.by_class[cls] = registration.class_id
+        self.resolved.clear()
+
+
+# What the host registers, at import and afterwards.
+_HOST = _Registry()
+# The registry in effect. Unset outside a sandbox, where there is one registry
+# and it is the host's; `sandboxed_registrations` sets one for the sandbox.
+_registry: contextvars.ContextVar[_Registry | None] = contextvars.ContextVar(
+    "_registry", default=None
+)
+
+
+def _current() -> _Registry:
+    return _registry.get() or _HOST
 
 
 def default_class_id(cls: type) -> str:
@@ -110,14 +138,14 @@ def register_serializable(
                 f"or a deserialize= function, to be read back"
             )
 
-    registration = _Registration(
-        class_id=class_id or default_class_id(cls),
-        serialize=serialize,
-        deserialize=deserialize,
+    _current().add(
+        cls,
+        _Registration(
+            class_id=class_id or default_class_id(cls),
+            serialize=serialize,
+            deserialize=deserialize,
+        ),
     )
-    _by_class_id[registration.class_id] = registration
-    _by_class[cls] = registration
-    _resolved.clear()
 
 
 def serializable(cls: type[T] | None = None, *, class_id: str | None = None) -> Any:
@@ -146,6 +174,35 @@ def serializable(cls: type[T] | None = None, *, class_id: str | None = None) -> 
     return decorate if cls is None else decorate(cls)
 
 
+def _registration(class_id: str) -> _Registration | None:
+    return _current().registration(class_id)
+
+
+@contextlib.contextmanager
+def sandboxed_registrations() -> Iterator[None]:
+    """Give this context a registry of its own, holding only the built-ins.
+
+    Entered by `workflow_sandbox`. The sandbox re-imports the workflow's
+    module, so the `@serializable` classes it needs are registered again here;
+    what the host registered elsewhere is deliberately not visible, which is
+    what keeps the sandbox from being handed a class its own code never
+    imported -- and through that class's `__globals__`, the host's module
+    graph.
+
+    Nothing shared is mutated, so there is nothing to restore and concurrent
+    runs do not interfere. The registry is dropped whole when the scope closes,
+    taking the sandbox's classes with it, which is why none of this needs weak
+    keys: no payload of this run crosses the boundary un-serialized.
+    """
+    sandboxed = _Registry()
+    token = _registry.set(sandboxed)
+    try:
+        _register_builtins(sandboxed)
+        yield
+    finally:
+        _registry.reset(token)
+
+
 def _resolve(tp: type) -> _Registration | None:
     """The registration that applies to *tp*, by method resolution order.
 
@@ -154,17 +211,19 @@ def _resolve(tp: type) -> _Registration | None:
     which of several applicable registrations wins without any ordering rule
     of our own.
     """
-    if tp in _resolved:
-        return _resolved[tp]
-    found: _Registration | None = None
+    registry = _current()
+    if tp in registry.resolved:
+        class_id = registry.resolved[tp]
+        return registry.registration(class_id) if class_id is not None else None
+    found: str | None = None
     for base in tp.__mro__:
-        if base in _NATIVE:
+        if base in registry.native:
             break
-        if base in _by_class:
-            found = _by_class[base]
+        found = registry.by_class.get(base)
+        if found is not None:
             break
-    _resolved[tp] = found
-    return found
+    registry.resolved[tp] = found
+    return registry.registration(found) if found is not None else None
 
 
 def reduce_instance(value: Any) -> Any:
@@ -193,7 +252,7 @@ def revive_instance(value: Any) -> Any:
     if not isinstance(value, dict) or not isinstance(value.get("classId"), str):
         raise ValueError(f"malformed Instance payload: {value!r}")
     class_id = value["classId"]
-    registration = _by_class_id.get(class_id)
+    registration = _registration(class_id)
     if registration is None:
         raise ValueError(
             f"unknown class {class_id!r}; register it with @serializable to read "
@@ -242,44 +301,80 @@ REVIVERS: dict[str, Callable[[Any], Any]] = {"Instance": revive_instance}
 #
 # An `enum.Enum` cannot be covered here because the class is the user's; it is
 # one `@serializable` away, and `registration_hint` says so.
+#
+# These are registered per registry rather than once, for the reason
+# `_register_builtins` gives.
 
-register_serializable(
-    decimal.Decimal,
-    serialize=str,
-    deserialize=decimal.Decimal,
-)
-register_serializable(
-    uuid.UUID,
-    serialize=str,
-    deserialize=uuid.UUID,
-)
-register_serializable(
-    # `datetime` is a `date` subclass and devalue carries it as a JS `Date`
-    # already; `_NATIVE` is what keeps this registration off it.
-    datetime.date,
-    serialize=lambda value: value.isoformat(),
-    deserialize=datetime.date.fromisoformat,
-)
-register_serializable(
-    datetime.time,
-    serialize=lambda value: value.isoformat(),
-    deserialize=datetime.time.fromisoformat,
-)
-register_serializable(
-    datetime.timedelta,
-    # Exact rather than `total_seconds()`, which is a float and rounds.
-    serialize=lambda value: {
-        "days": value.days,
-        "seconds": value.seconds,
-        "microseconds": value.microseconds,
-    },
-    deserialize=lambda data: datetime.timedelta(**data),
-)
-register_serializable(
-    pathlib.PurePath,
-    # The concrete class is host-dependent (`PosixPath` / `WindowsPath`), so
-    # the id names the portable one and reading picks the local flavour.
-    class_id=f"{CLASS_ID_PREFIX}pathlib//Path",
-    serialize=str,
-    deserialize=pathlib.Path,
-)
+
+def _register_builtins(registry: _Registry) -> None:
+    """Register the stdlib types this module carries into *registry*.
+
+    Called for the host at import, and again for each sandbox. Each needs its
+    own: a sandbox re-imports `uuid`, so its `uuid.UUID` is a different class
+    object, and a registration made against the host's does not apply to it.
+
+    Reading a payload then builds the sandbox's own class, which is the point
+    for `datetime.date` -- inside a sandbox that is `_RestrictedDate`, there to
+    keep `date.today()` out of a workflow body.
+    """
+
+    def add(
+        cls: type,
+        class_id: str,
+        *,
+        serialize: Callable[[Any], Any],
+        deserialize: Callable[[Any], Any],
+    ) -> None:
+        # The id is spelled out rather than derived from the class, which inside
+        # a sandbox would put `_RestrictedDate` on the wire.
+        registry.add(cls, _Registration(class_id, serialize, deserialize))
+
+    import datetime  # noqa: PLC0415
+    import decimal  # noqa: PLC0415
+    import pathlib  # noqa: PLC0415
+    import uuid  # noqa: PLC0415
+
+    add(
+        decimal.Decimal,
+        f"{CLASS_ID_PREFIX}decimal//Decimal",
+        serialize=str,
+        deserialize=decimal.Decimal,
+    )
+    add(uuid.UUID, f"{CLASS_ID_PREFIX}uuid//UUID", serialize=str, deserialize=uuid.UUID)
+    add(
+        # `datetime` is a `date` subclass and devalue carries it as a JS `Date`
+        # already; `registry.native` keeps this registration off it.
+        datetime.date,
+        f"{CLASS_ID_PREFIX}datetime//date",
+        serialize=lambda value: value.isoformat(),
+        deserialize=datetime.date.fromisoformat,
+    )
+    add(
+        datetime.time,
+        f"{CLASS_ID_PREFIX}datetime//time",
+        serialize=lambda value: value.isoformat(),
+        deserialize=datetime.time.fromisoformat,
+    )
+    add(
+        datetime.timedelta,
+        f"{CLASS_ID_PREFIX}datetime//timedelta",
+        # Exact rather than `total_seconds()`, which is a float and rounds.
+        serialize=lambda value: {
+            "days": value.days,
+            "seconds": value.seconds,
+            "microseconds": value.microseconds,
+        },
+        deserialize=lambda data: datetime.timedelta(**data),
+    )
+    registry.native.add(datetime.datetime)
+    add(
+        pathlib.PurePath,
+        # The concrete class is host-dependent (`PosixPath` / `WindowsPath`), so
+        # the id names the portable one and reading picks the local one.
+        f"{CLASS_ID_PREFIX}pathlib//Path",
+        serialize=str,
+        deserialize=pathlib.Path,
+    )
+
+
+_register_builtins(_HOST)

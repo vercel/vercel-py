@@ -254,12 +254,11 @@ class WorkflowOrchestratorContext:
     def current(cls) -> Self:
         return cls._ctx.get()
 
-    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
+    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes:
+        """Run the body inside the sandbox, returning its result serialized there."""
         wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input:
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
-        what = f"the input of run {workflow_run.run_id}"
-        kwargs = ser.keyword_arguments(ser.hydrate(workflow_run.input, what=what), what=what)
 
         with workflow_sandbox(policy=self.registry._sandbox_policy):
             mod = importlib.import_module(wf.module)
@@ -269,6 +268,9 @@ class WorkflowOrchestratorContext:
             obj: Any = mod
             for attr in wf.qualname.split("."):
                 obj = getattr(obj, attr)
+
+            what = f"the input of run {workflow_run.run_id}"
+            kwargs = ser.keyword_arguments(ser.hydrate(workflow_run.input, what=what), what=what)
 
             async def inner():
                 self._fut = asyncio.ensure_future(obj.func(**kwargs))
@@ -281,7 +283,7 @@ class WorkflowOrchestratorContext:
             finally:
                 self._ctx.reset(token)
             assert self._fut
-            return self._fut.result()
+            return ser.dehydrate(self._fut.result())
 
     # `args` is always empty: `Step.__call__` refuses a positional call before
     # forwarding, and only spells one because a ParamSpec has to carry both
@@ -653,8 +655,7 @@ async def workflow_handler(
         events, seed=run_id, started_at=workflow_started_at, registry=registry
     )
     try:
-        result = context.run_workflow(workflow_run)
-        output = ser.dehydrate(result)
+        output = context.run_workflow(workflow_run)
     except BaseException as e:
         if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
             # Workflow suspended, continue outside the try..except block

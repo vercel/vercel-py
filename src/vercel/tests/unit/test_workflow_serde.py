@@ -12,13 +12,14 @@ from __future__ import annotations
 import datetime
 import decimal
 import enum
+import gc
 import pathlib
 import uuid
 
 import pytest
 
 from vercel._internal import devalue
-from vercel._internal.workflow import serde, serialization as ser
+from vercel._internal.workflow import py_sandbox, serde, serialization as ser
 
 
 def _wire(value):
@@ -132,15 +133,15 @@ class _Ledger:
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """Undo whatever a test registers, leaving the built-ins in place."""
-    class_ids = dict(serde._by_class_id)
-    classes = dict(serde._by_class)
+    """Undo whatever a test registers in the host registry."""
+    host = serde._HOST
+    class_ids, classes = dict(host.by_class_id), dict(host.by_class)
     yield
-    serde._by_class_id.clear()
-    serde._by_class_id.update(class_ids)
-    serde._by_class.clear()
-    serde._by_class.update(classes)
-    serde._resolved.clear()
+    host.by_class_id.clear()
+    host.by_class_id.update(class_ids)
+    host.by_class.clear()
+    host.by_class.update(classes)
+    host.resolved.clear()
 
 
 def test_a_user_class_round_trips_through_the_dunder_protocol() -> None:
@@ -238,6 +239,135 @@ def test_re_registering_replaces_rather_than_conflicts() -> None:
     # longer resolves -- there is one classId, and it names one class.
     assert type(_round_trip(second())) is second
     assert type(_round_trip(first())) is second
+
+
+def test_replays_do_not_accumulate_in_the_host_registry() -> None:
+    """A replay re-imports the workflow's module, registering its classes again.
+
+    Each import produces a new class object, so anything those registrations
+    reach would pin one dead class -- and its module globals -- per replay.
+    They go into the sandbox's own registry, which is dropped whole when the
+    sandbox exits, so the host's does not grow at all.
+    """
+    classes, class_ids = len(serde._HOST.by_class), len(serde._HOST.by_class_id)
+
+    for _ in range(50):
+        with serde.sandboxed_registrations():
+            _define_and_register()
+    gc.collect()
+
+    assert len(serde._HOST.by_class) == classes
+    assert len(serde._HOST.by_class_id) == class_ids
+
+
+def test_a_sandbox_registration_does_not_outlive_the_sandbox() -> None:
+    """A replay must not leave the host deserializing into the sandbox's class.
+
+    The sandbox re-imports the workflow's module, so the same classId is
+    registered again against a different class object. Without a registry of
+    its own the last one wins for the rest of the process, and an `Enum` is
+    where that shows: the host would hand its caller a member that is neither
+    `is` nor `==` the one the caller has.
+    """
+    host = _define_and_register()
+
+    with serde.sandboxed_registrations():
+        sandboxed = _define_and_register()
+        assert type(_round_trip(sandboxed())) is sandboxed, "its own class applies inside"
+        # The classId is the same on both sides, which is what lets a payload
+        # cross: a step input is dehydrated here and revived by the host.
+        crossing = ser.dehydrate(sandboxed())
+
+    assert type(_round_trip(host())) is host
+    assert type(ser.hydrate(crossing, what="a payload")) is host, "each side revives its own"
+
+
+def test_a_sandbox_registration_does_not_reach_the_host() -> None:
+    # Nothing carries a sandbox-registered class out: a run's payloads are all
+    # serialized inside the sandbox, its return value included.
+    with serde.sandboxed_registrations():
+        serde.register_serializable(Point, class_id="class//sandbox-only//Point")
+
+    with pytest.raises(ser.SerializationError, match="Register Point with @serializable"):
+        ser.dehydrate(Point(1, 2))
+
+
+def test_a_host_registration_is_not_visible_inside_a_sandbox() -> None:
+    """The isolation this buys.
+
+    A class the sandbox has not imported itself must not be reachable through
+    the registry, because reviving one hands workflow code a host class object
+    -- and through its `__globals__`, the host's module graph, which is what
+    the sandbox exists to keep out of reach.
+    """
+    serde.register_serializable(Point)
+    payload = ser.dehydrate(Point(1, 2))
+
+    with serde.sandboxed_registrations():
+        with pytest.raises(ser.SerializationError, match="unknown class"):
+            ser.hydrate(payload, what="a payload")
+
+
+def test_the_sandbox_registers_the_stdlib_classes_it_imported_itself() -> None:
+    """A sandbox re-imports most of the stdlib types this module registers.
+
+    Its `uuid.UUID` is a different class object, so a registry holding only the
+    host's would not cover a `UUID` built inside a workflow.
+    """
+    with py_sandbox.workflow_sandbox():
+        import uuid as sandboxed  # noqa: PLC0415
+
+        value = sandboxed.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+        assert type(value) is not uuid.UUID, "premise: the sandbox re-imported uuid"
+        assert _round_trip(value) == value
+
+
+def test_a_restricted_stdlib_class_is_not_swapped_for_the_hosts() -> None:
+    """Reviving must build the sandbox's class, not the host's.
+
+    `datetime.date` inside a sandbox is a restricted subclass, there to keep
+    `date.today()` out of a workflow body. Handing back the host's class would
+    undo that.
+    """
+    payload = ser.dehydrate(datetime.date(2026, 8, 4))
+
+    with py_sandbox.workflow_sandbox():
+        import datetime as sandboxed  # noqa: PLC0415
+
+        revived = ser.hydrate(payload, what="a payload")
+        assert type(revived) is sandboxed.date
+        with pytest.raises(py_sandbox.SandboxRestrictionError):
+            type(revived).today()
+
+
+def test_the_wire_id_does_not_follow_the_sandbox_class_name() -> None:
+    # Derived from the class it would read `class//...//_RestrictedDate`, which
+    # the other side has never heard of.
+    with py_sandbox.workflow_sandbox():
+        import datetime as sandboxed  # noqa: PLC0415
+
+        wire = _wire(sandboxed.date(2026, 8, 4))
+        assert f'"{serde.CLASS_ID_PREFIX}datetime//date"' in wire
+        assert "_Restricted" not in wire
+
+
+def test_datetime_stays_native_inside_a_sandbox() -> None:
+    # `registry.native` has to hold the sandbox's `datetime`, not the host's,
+    # or the `date` registration would capture it through the MRO.
+    with py_sandbox.workflow_sandbox():
+        import datetime as sandboxed  # noqa: PLC0415
+
+        value = sandboxed.datetime(2026, 7, 30, tzinfo=datetime.timezone.utc)
+        assert "Instance" not in _wire(value)
+
+
+def test_built_ins_are_visible_inside_a_sandbox() -> None:
+    # They are registered when this module is imported, and `serde` is reached
+    # through to the host rather than re-imported, so a registry that started
+    # empty would not have them.
+    with serde.sandboxed_registrations():
+        assert _round_trip(decimal.Decimal("1.50")) == decimal.Decimal("1.50")
+        assert _round_trip(pathlib.Path("/tmp/x")) == pathlib.Path("/tmp/x")
 
 
 def test_a_class_without_the_protocol_is_refused_at_registration() -> None:
