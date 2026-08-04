@@ -114,11 +114,11 @@ class Point:
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Point) and (self.x, self.y) == (other.x, other.y)
 
-    def __workflow_serialize__(self) -> dict[str, int]:
+    def _workflow_serialize(self) -> dict[str, int]:
         return {"x": self.x, "y": self.y}
 
     @classmethod
-    def __workflow_deserialize__(cls, data: dict[str, int]) -> Point:
+    def _workflow_deserialize(cls, data: dict[str, int]) -> Point:
         return cls(**data)
 
 
@@ -153,11 +153,11 @@ def test_a_user_class_round_trips_through_the_dunder_protocol() -> None:
 def test_the_decorator_registers_the_class_it_wraps() -> None:
     @serde.serializable
     class Tagged:
-        def __workflow_serialize__(self) -> int:
+        def _workflow_serialize(self) -> int:
             return 7
 
         @classmethod
-        def __workflow_deserialize__(cls, data: int) -> Tagged:
+        def _workflow_deserialize(cls, data: int) -> Tagged:
             return cls()
 
     assert isinstance(_round_trip(Tagged()), Tagged)
@@ -219,11 +219,11 @@ def _define_and_register() -> type:
 
     @serde.serializable(class_id="class//tests//Reloaded")
     class Reloaded:
-        def __workflow_serialize__(self) -> int:
+        def _workflow_serialize(self) -> int:
             return 7
 
         @classmethod
-        def __workflow_deserialize__(cls, data: int) -> Reloaded:
+        def _workflow_deserialize(cls, data: int) -> Reloaded:
             return cls()
 
     return Reloaded
@@ -243,10 +243,10 @@ def test_re_registering_replaces_rather_than_conflicts() -> None:
 def test_a_class_without_the_protocol_is_refused_at_registration() -> None:
     class Bare: ...
 
-    with pytest.raises(TypeError, match="__workflow_serialize__"):
+    with pytest.raises(TypeError, match="_workflow_serialize"):
         serde.register_serializable(Bare)
 
-    with pytest.raises(TypeError, match="__workflow_deserialize__"):
+    with pytest.raises(TypeError, match="_workflow_deserialize"):
         serde.register_serializable(Bare, serialize=str)
 
 
@@ -284,11 +284,11 @@ def test_corrupt_data_for_a_known_class_names_the_class() -> None:
 
 def test_a_failing_serializer_names_the_class() -> None:
     class Broken:
-        def __workflow_serialize__(self) -> dict:
+        def _workflow_serialize(self) -> dict:
             raise RuntimeError("boom")
 
         @classmethod
-        def __workflow_deserialize__(cls, data: dict) -> Broken:
+        def _workflow_deserialize(cls, data: dict) -> Broken:
             return cls()
 
     serde.register_serializable(Broken)

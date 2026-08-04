@@ -76,7 +76,7 @@ def register_serializable(
 
     *serialize* turns an instance into something devalue can already carry;
     *deserialize* turns that back into an instance. Both default to the
-    ``__workflow_serialize__`` / ``__workflow_deserialize__`` methods on the
+    ``_workflow_serialize`` / ``_workflow_deserialize`` methods on the
     class, and for an `enum.Enum` subclass to its member value and back.
 
     Pass *class_id* to pin the id — necessary when pairing with a class on the
@@ -89,24 +89,24 @@ def register_serializable(
     a fresh class object each time.
     """
     if serialize is None:
-        if hasattr(cls, "__workflow_serialize__"):
-            serialize = operator.methodcaller("__workflow_serialize__")
+        if hasattr(cls, "_workflow_serialize"):
+            serialize = operator.methodcaller("_workflow_serialize")
         elif issubclass(cls, enum.Enum):
             serialize = operator.attrgetter("value")
         else:
             raise TypeError(
-                f"{cls.__qualname__} needs a __workflow_serialize__ method, or a "
+                f"{cls.__qualname__} needs a _workflow_serialize method, or a "
                 f"serialize= function, to be put on the wire"
             )
     if deserialize is None:
-        hook = getattr(cls, "__workflow_deserialize__", None)
+        hook = getattr(cls, "_workflow_deserialize", None)
         if hook is not None:
             deserialize = hook
         elif issubclass(cls, enum.Enum):
             deserialize = cls
         else:
             raise TypeError(
-                f"{cls.__qualname__} needs a __workflow_deserialize__ classmethod, "
+                f"{cls.__qualname__} needs a _workflow_deserialize classmethod, "
                 f"or a deserialize= function, to be read back"
             )
 
@@ -127,11 +127,11 @@ def serializable(cls: type[T] | None = None, *, class_id: str | None = None) -> 
 
         @serializable
         class Point:
-            def __workflow_serialize__(self) -> dict[str, int]:
+            def _workflow_serialize(self) -> dict[str, int]:
                 return {"x": self.x, "y": self.y}
 
             @classmethod
-            def __workflow_deserialize__(cls, data: dict[str, int]) -> "Point":
+            def _workflow_deserialize(cls, data: dict[str, int]) -> "Point":
                 return cls(**data)
 
         @serializable

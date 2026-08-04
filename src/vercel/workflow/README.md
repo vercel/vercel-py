@@ -83,11 +83,11 @@ class Point:
     def __init__(self, x: int, y: int) -> None:
         self.x, self.y = x, y
 
-    def __workflow_serialize__(self) -> dict[str, int]:
+    def _workflow_serialize(self) -> dict[str, int]:
         return {"x": self.x, "y": self.y}
 
     @classmethod
-    def __workflow_deserialize__(cls, data: dict[str, int]) -> "Point":
+    def _workflow_deserialize(cls, data: dict[str, int]) -> "Point":
         return cls(**data)
 
 
