@@ -38,7 +38,9 @@ from .helpers import make_leased_metadata
 
 def _queue_debug_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
     return [
-        json.loads(record.message) for record in caplog.records if record.name == "vercel.queue"
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "vercel.queue"
     ]
 
 
@@ -639,7 +641,7 @@ def test_sync_retry_after_tolerates_missing_lease_with_warning(
         client.retry_after(make_leased_metadata("emails"), 5)
 
     assert any(
-        record.levelno == logging.WARNING and "no longer exists" in record.message
+        record.levelno == logging.WARNING and "no longer exists" in record.getMessage()
         for record in caplog.records
     )
 
@@ -696,7 +698,7 @@ async def test_async_retry_after_tolerates_missing_lease_with_warning(
         await client.retry_after(make_leased_metadata("emails"), 5)
 
     assert any(
-        record.levelno == logging.WARNING and "no longer exists" in record.message
+        record.levelno == logging.WARNING and "no longer exists" in record.getMessage()
         for record in caplog.records
     )
 

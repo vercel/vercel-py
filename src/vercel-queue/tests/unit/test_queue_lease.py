@@ -72,7 +72,9 @@ from .helpers import (
 
 def _queue_debug_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
     return [
-        json.loads(record.message) for record in caplog.records if record.name == "vercel.queue"
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "vercel.queue"
     ]
 
 
