@@ -6,13 +6,18 @@ results matched onto the wrong calls. ``resume()`` must detect this and fail
 loudly rather than silently returning the wrong value.
 """
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
-from vercel._internal.workflow import core, runtime, serialization as ser, world as w
+from vercel._internal.workflow import (
+    core,
+    loop as workflow_loop,
+    runtime,
+    serialization as ser,
+    world as w,
+)
 
 
 async def _greet(*, name: str) -> str:
@@ -28,8 +33,6 @@ def _context(
         started_at=0,
         registry=core.Workflows(as_vercel_job=False),
     )
-    # resume() short-circuits unless a workflow future is in flight.
-    ctx._fut = asyncio.get_event_loop().create_future()
     return ctx
 
 
@@ -60,8 +63,8 @@ async def test_reordered_step_args_raise_nondeterminism() -> None:
     assert isinstance(sus.future.exception(), runtime.NondeterminismError)
 
 
-async def test_matching_step_does_not_raise() -> None:
-    """Same step + same input -> no error, suspension is marked replayed."""
+async def test_matching_step_parks_without_nondeterminism() -> None:
+    """Same step + same input -> suspension is replayed, then the run parks."""
     step = core.Step(_greet)
     cid = "step_1"
     events: list[w.Event] = [
@@ -71,7 +74,8 @@ async def test_matching_step_does_not_raise() -> None:
     sus = _suspension(cid, _args(name="a"))
     ctx.suspensions[cid] = sus
 
-    ctx.resume()
+    with pytest.raises(runtime._SuspendException):
+        ctx.resume()
 
     assert not sus.future.done()
     assert sus.has_created_event
@@ -101,7 +105,7 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     assert isinstance(wait.future.exception(), runtime.NondeterminismError)
 
 
-# --- concurrent delivery: the resume_wrapper gate + resume single-step -----------
+# --- concurrent delivery: the loop idle hook + resume single-step ----------------
 #
 # When a body issues several calls from concurrent coroutines, recorded
 # completions must be delivered ONE AT A TIME, each only once the body has fully
@@ -109,8 +113,7 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
 # still-running one and the two issue their next calls in a different order than
 # at record time -> the positional correlation IDs no longer line up ->
 # NondeterminismError. Two pieces cooperate:
-#   * resume_wrapper() is the heartbeat: it re-arms itself every tick and only
-#     runs resume() when the loop's ready queue was otherwise empty (quiescent).
+#   * WorkflowLoop calls resume() only when its ready queue is empty (quiescent).
 #   * resume() applies at most one recorded event (single-step), or parks.
 
 _ARGS = _args(name="a")
@@ -145,17 +148,14 @@ async def test_single_step_delivers_one_completion_per_pass() -> None:
     # exactly one completion delivered; its suspension consumed...
     assert sus1.future.done() and sus1.future.result() == "one"
     assert "step_1" not in ctx.suspensions
-    # ...the second still pending, and the run not parked (the heartbeat will
-    # deliver it on a later pass).
+    # ...the second still pending, and resume() returned normally so the loop
+    # can deliver it on a later idle pass.
     assert not sus2.future.done()
     assert "step_2" in ctx.suspensions
-    assert not ctx._suspended
 
 
-async def test_resume_wrapper_defers_while_loop_has_pending_work() -> None:
-    """A completion is available, but the loop still has a pending callback (the
-    body mid-reaction). The wrapper must NOT run resume() -- it re-arms and waits
-    for the next tick."""
+async def test_workflow_loop_runs_pending_work_before_resume() -> None:
+    """The idle hook runs only after the body's pending callbacks are drained."""
     step = core.Step(_greet)
     events: list[w.Event] = [
         _created(step, "step_1"),
@@ -165,23 +165,28 @@ async def test_resume_wrapper_defers_while_loop_has_pending_work() -> None:
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
 
-    loop = asyncio.get_running_loop()
-    pending = loop.call_soon(lambda: None)
+    pending_ran = False
+
+    def pending() -> None:
+        nonlocal pending_ran
+        pending_ran = True
+
+    def resume() -> None:
+        assert pending_ran
+        ctx.resume()
+
+    loop = workflow_loop.WorkflowLoop(idle_hook=resume)
     try:
-        ctx.resume_wrapper()
+        loop.call_soon(pending)
+        loop._run_once()
 
-        assert not sus1.future.done()  # resume() not run -> nothing delivered
-        assert ctx.replay_index == 0  # event log untouched
-        assert ctx.resume_handle is not None  # re-armed for the next tick
+        assert sus1.future.done() and sus1.future.result() == "one"
     finally:
-        pending.cancel()
-        if ctx.resume_handle is not None:
-            ctx.resume_handle.cancel()
+        loop.close()
 
 
-async def test_resume_wrapper_runs_resume_when_quiescent() -> None:
-    """With the ready queue empty, the wrapper runs resume() (delivering one
-    completion) and re-arms itself."""
+async def test_workflow_loop_runs_resume_when_quiescent() -> None:
+    """With the ready queue empty, the idle hook delivers one completion."""
     step = core.Step(_greet)
     events: list[w.Event] = [
         _created(step, "step_1"),
@@ -191,34 +196,32 @@ async def test_resume_wrapper_runs_resume_when_quiescent() -> None:
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
 
-    ctx.resume_wrapper()
+    loop = workflow_loop.WorkflowLoop(idle_hook=ctx.resume)
+    try:
+        loop._run_once()
+        assert sus1.future.done() and sus1.future.result() == "one"
+    finally:
+        loop.close()
 
-    assert sus1.future.done() and sus1.future.result() == "one"
-    assert ctx.resume_handle is not None  # heartbeat re-armed
 
-    ctx.resume_handle.cancel()
-
-
-async def test_resume_parks_and_cancels_heartbeat_when_nothing_to_deliver() -> None:
+async def test_idle_resume_parks_when_nothing_to_deliver() -> None:
     """Suspension registered and its create replayed, no completion yet -> the
-    run suspends (cancels its future) and stops the heartbeat rather than
-    spinning."""
+    run suspends by cancelling its future."""
     step = core.Step(_greet)
     events: list[w.Event] = [_created(step, "step_1")]
     ctx = _context(events)
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
-    # the heartbeat would have armed itself before calling resume().
-    loop = asyncio.get_running_loop()
-    ctx.resume_handle = loop.call_soon(ctx.resume_wrapper)
 
-    ctx.resume()
+    loop = workflow_loop.WorkflowLoop(idle_hook=ctx.resume)
+    try:
+        with pytest.raises(runtime._SuspendException):
+            loop._run_once()
 
-    assert sus1.has_created_event
-    assert not sus1.future.done()
-    assert ctx._suspended
-    assert ctx._fut is not None and ctx._fut.cancelled()
-    assert ctx.resume_handle.cancelled()  # heartbeat stopped
+        assert sus1.has_created_event
+        assert not sus1.future.done()
+    finally:
+        loop.close()
 
 
 # --- now(): deterministic clock anchored to replay progress, not list tail ------
