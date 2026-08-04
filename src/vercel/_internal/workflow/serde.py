@@ -7,7 +7,7 @@ a change to *that package*, not something either SDK can do on its own. The one
 tag it leaves open is ``Instance``, carrying ``{classId, data}``, where the
 class is found by ``classId`` in a registry each side keeps.
 
-Riding that rail rather than minting a Python-only tag buys two things.
+Using that tag rather than adding a Python-only one has two advantages.
 
 A JavaScript reader that has never heard of the class still renders the
 payload: the CLI and the dashboard revive ``Instance`` through
@@ -100,7 +100,7 @@ def register_serializable(
     serialize: Callable[[T], Any] | None = None,
     deserialize: Callable[[Any], T] | None = None,
 ) -> None:
-    """Teach the wire format about *cls*.
+    """Register *cls* so its instances can be serialized.
 
     *serialize* turns an instance into something devalue can already carry;
     *deserialize* turns that back into an instance. Both default to the
@@ -206,10 +206,10 @@ def sandboxed_registrations() -> Iterator[None]:
 def _resolve(tp: type) -> _Registration | None:
     """The registration that applies to *tp*, by method resolution order.
 
-    The MRO is what makes a base-class registration cover its subclasses —
-    `pathlib.Path` is registered once and matches `PosixPath` — and it settles
-    which of several applicable registrations wins without any ordering rule
-    of our own.
+    Using the MRO makes a base-class registration cover its subclasses --
+    `pathlib.PurePath` is registered once and matches `PosixPath` -- and
+    decides between several applicable registrations without this module
+    needing an ordering rule of its own.
     """
     registry = _current()
     if tp in registry.resolved:
@@ -227,7 +227,11 @@ def _resolve(tp: type) -> _Registration | None:
 
 
 def reduce_instance(value: Any) -> Any:
-    """devalue reducer for the ``Instance`` tag. Falsy declines the value."""
+    """devalue reducer for the ``Instance`` tag.
+
+    Returns a falsy value for a type nothing has registered, which is how a
+    devalue reducer declines.
+    """
     registration = _resolve(type(value))
     if registration is None:
         return False
@@ -244,10 +248,10 @@ def reduce_instance(value: Any) -> Any:
 def revive_instance(value: Any) -> Any:
     """devalue reviver for the ``Instance`` tag.
 
-    Raises `ValueError` for a class this side has not registered, which
-    :func:`vercel._internal.workflow.serialization.hydrate` reports with the
-    name of the payload it came from. Returning a stand-in instead would hand
-    the workflow something that is not the value it was sent.
+    Raises `ValueError` for a class this side has not registered;
+    :func:`vercel._internal.workflow.serialization.hydrate` reports it with
+    the name of the payload it came from. Returning a stand-in instead would
+    give the workflow a value it was not sent.
     """
     if not isinstance(value, dict) or not isinstance(value.get("classId"), str):
         raise ValueError(f"malformed Instance payload: {value!r}")
@@ -268,7 +272,7 @@ def revive_instance(value: Any) -> Any:
 
 
 def registration_hint(value: Any) -> str:
-    """A sentence naming the way out, for a value nothing can serialize."""
+    """The suggestion to append when a value cannot be serialized."""
     if isinstance(value, enum.Enum):
         # The class is user-defined, so no built-in registration can cover it.
         # `StrEnum`/`IntEnum` need none: they are `str`/`int` on the wire.
