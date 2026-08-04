@@ -188,8 +188,8 @@ class BaseWorkflowRun(BaseModel):
     )
     # run_created returns input as str `'[Circular]'`,
     # while run_completed returns input_ref
-    input: list[bytes] | str | None = None
-    output: list[bytes] | None = None
+    input: bytes | str | None = None
+    output: bytes | None = None
     error: StructuredError | None = None
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
     started_at: datetime | None = pydantic.Field(default=None, alias="startedAt")
@@ -214,7 +214,7 @@ class CancelledWorkflowRun(BaseWorkflowRun):
 
 class CompletedWorkflowRun(BaseWorkflowRun):
     status: Literal["completed"]
-    output: list[bytes] | None = None  # create run_completed event returns run without output
+    output: bytes | None = None  # create run_completed event returns run without output
     error: None = None
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
@@ -240,8 +240,8 @@ class BaseWorkflowStep(BaseModel):
     step_id: str = pydantic.Field(alias="stepId")
     step_name: str = pydantic.Field(alias="stepName")
     status: StepStatus
-    input: list[bytes] | None = None
-    output: list[bytes] | None = None
+    input: bytes | None = None
+    output: bytes | None = None
     """
     The error from a step_retrying or step_failed event.
     This tracks the most recent error the step encountered, which may
@@ -275,7 +275,7 @@ class CancelledWorkflowStep(BaseWorkflowStep):
 
 class CompletedWorkflowStep(BaseWorkflowStep):
     status: Literal["completed"]
-    output: list[bytes] | None = None
+    output: bytes | None = None
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
 
@@ -326,7 +326,7 @@ class BaseEvent(BaseModel):
 class RunCreatedEventData(BaseModel):
     deployment_id: str = pydantic.Field(alias="deploymentId")
     workflow_name: str = pydantic.Field(alias="workflowName")
-    input: list[bytes]
+    input: bytes
     execution_context: dict[str, Any] | None = pydantic.Field(
         default=None, alias="executionContext", exclude_if=lambda e: e is None
     )
@@ -358,7 +358,7 @@ class RunStartedEvent(BaseEvent):
 
 
 class RunCompletedEventData(BaseModel):
-    output: list[bytes]
+    output: bytes
 
     def into_event(self) -> "RunCompletedEvent":
         return RunCompletedEvent(eventData=self)
@@ -400,7 +400,7 @@ class RunFailedEvent(BaseEvent):
 
 class StepCreatedEventData(BaseModel):
     step_name: str = pydantic.Field(alias="stepName")
-    input: list[bytes] | dict[str, Any]
+    input: bytes | dict[str, Any]
 
     def into_event(self, correlation_id: str) -> "StepCreatedEvent":
         return StepCreatedEvent(correlationId=correlation_id, eventData=self)
@@ -465,7 +465,7 @@ class StepRetryingEvent(BaseEvent):
 
 
 class StepCompletedEventData(BaseModel):
-    result: list[bytes] | Any = None
+    result: bytes | Any = None
 
     def into_event(self, correlation_id: str) -> "StepCompletedEvent":
         return StepCompletedEvent(correlationId=correlation_id, eventData=self)
@@ -504,7 +504,7 @@ class Hook(BaseModel):
     owner_id: str = pydantic.Field(alias="ownerId")
     project_id: str = pydantic.Field(alias="projectId")
     environment: str
-    metadata: list[bytes] | None = None
+    metadata: bytes | None = None
     created_at: datetime = pydantic.Field(alias="createdAt")
     spec_version: int | None = pydantic.Field(default=None, alias="specVersion")
     is_webhook: bool | None = pydantic.Field(default=None, alias="isWebhook")
@@ -513,7 +513,7 @@ class Hook(BaseModel):
 
 class HookCreatedEventData(BaseModel):
     token: str
-    metadata: list[bytes] | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+    metadata: bytes | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
     def into_event(self, correlation_id: str) -> "HookCreatedEvent":
         return HookCreatedEvent(correlationId=correlation_id, eventData=self)
@@ -534,7 +534,7 @@ class HookCreatedEvent(BaseEvent):
 
 
 class HookReceivedEventData(BaseModel):
-    payload: list[bytes]
+    payload: bytes
 
     def into_event(self, correlation_id: str) -> "HookReceivedEvent":
         return HookReceivedEvent(correlationId=correlation_id, eventData=self)

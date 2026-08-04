@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
-from vercel._internal.workflow import core, runtime, world as w
+from vercel._internal.workflow import core, runtime, serialization as ser, world as w
 
 
-async def _greet(name: str) -> str:
+async def _greet(*, name: str) -> str:
     return name
 
 
@@ -33,10 +33,13 @@ def _context(
     return ctx
 
 
-def _suspension(correlation_id: str, args_json: bytes) -> runtime.Suspension:
-    return runtime.Suspension(
-        correlation_id=correlation_id, step=core.Step(_greet), input=args_json
-    )
+def _args(**kwargs: Any) -> bytes:
+    """A step input payload, encoded the way the runtime encodes one."""
+    return ser.dehydrate(ser.step_arguments(kwargs))
+
+
+def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:
+    return runtime.Suspension(correlation_id=correlation_id, step=core.Step(_greet), input=args)
 
 
 async def test_reordered_step_args_raise_nondeterminism() -> None:
@@ -45,10 +48,10 @@ async def test_reordered_step_args_raise_nondeterminism() -> None:
     step = core.Step(_greet)
     cid = "step_1"
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=[b'json[["a"], {}]']).into_event(cid)
+        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event(cid)
     ]
     ctx = _context(events)
-    sus = _suspension(cid, b'json[["b"], {}]')
+    sus = _suspension(cid, _args(name="b"))
     ctx.suspensions[cid] = sus
 
     ctx.resume()
@@ -62,10 +65,10 @@ async def test_matching_step_does_not_raise() -> None:
     step = core.Step(_greet)
     cid = "step_1"
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=[b'json[["a"], {}]']).into_event(cid)
+        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event(cid)
     ]
     ctx = _context(events)
-    sus = _suspension(cid, b'json[["a"], {}]')
+    sus = _suspension(cid, _args(name="a"))
     ctx.suspensions[cid] = sus
 
     ctx.resume()
@@ -84,7 +87,7 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     """
     step = core.Step(_greet)
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=[b'json[["a"], {}]']).into_event("step_1")
+        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event("step_1")
     ]
     ctx = _context(events)
     wait = runtime.Wait(
@@ -110,15 +113,15 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
 #     runs resume() when the loop's ready queue was otherwise empty (quiescent).
 #   * resume() applies at most one recorded event (single-step), or parks.
 
-_ARGS = b'json[["a"], {}]'
+_ARGS = _args(name="a")
 
 
 def _created(step: "core.Step[Any, Any]", cid: str) -> w.Event:
-    return w.StepCreatedEventData(stepName=step.name, input=[_ARGS]).into_event(cid)
+    return w.StepCreatedEventData(stepName=step.name, input=_ARGS).into_event(cid)
 
 
-def _completed(cid: str, result_json: bytes) -> w.Event:
-    return w.StepCompletedEventData(result=[b"json" + result_json]).into_event(cid)
+def _completed(cid: str, result: Any) -> w.Event:
+    return w.StepCompletedEventData(result=ser.dehydrate(result)).into_event(cid)
 
 
 async def test_single_step_delivers_one_completion_per_pass() -> None:
@@ -128,8 +131,8 @@ async def test_single_step_delivers_one_completion_per_pass() -> None:
     events: list[w.Event] = [
         _created(step, "step_1"),
         _created(step, "step_2"),
-        _completed("step_1", b'"one"'),
-        _completed("step_2", b'"two"'),
+        _completed("step_1", "one"),
+        _completed("step_2", "two"),
     ]
     ctx = _context(events)
     sus1 = _suspension("step_1", _ARGS)
@@ -156,7 +159,7 @@ async def test_resume_wrapper_defers_while_loop_has_pending_work() -> None:
     step = core.Step(_greet)
     events: list[w.Event] = [
         _created(step, "step_1"),
-        _completed("step_1", b'"one"'),
+        _completed("step_1", "one"),
     ]
     ctx = _context(events)
     sus1 = _suspension("step_1", _ARGS)
@@ -182,7 +185,7 @@ async def test_resume_wrapper_runs_resume_when_quiescent() -> None:
     step = core.Step(_greet)
     events: list[w.Event] = [
         _created(step, "step_1"),
-        _completed("step_1", b'"one"'),
+        _completed("step_1", "one"),
     ]
     ctx = _context(events)
     sus1 = _suspension("step_1", _ARGS)
@@ -254,7 +257,7 @@ async def test_now_advances_with_replay_index() -> None:
     step = core.Step(_greet)
     events: list[w.Event] = [
         _stamp(_created(step, "step_1"), t0, event_id="evt_1"),
-        _stamp(_completed("step_1", b'"one"'), t1, event_id="evt_2"),
+        _stamp(_completed("step_1", "one"), t1, event_id="evt_2"),
         _stamp(_created(step, "step_2"), t2, event_id="evt_3"),
     ]
     ctx = _context(events)

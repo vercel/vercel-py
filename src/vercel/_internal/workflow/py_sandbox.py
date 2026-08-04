@@ -950,10 +950,10 @@ class SandboxPolicy:
 def workflow_sandbox(*, policy: SandboxPolicy | None = None) -> Iterator[None]:
     """Activate the workflow sandbox for the current context.
 
-    Gives this context its own private ``sys.modules`` table and marks it
-    as in-sandbox so proxy modules enforce restrictions. Both are
-    ContextVars, so concurrent runs are isolated without touching any
-    shared global.
+    Gives this context its own private ``sys.modules`` table, its own
+    serializable-class registrations, and marks it as in-sandbox so proxy
+    modules enforce restrictions. All are ContextVars, so concurrent runs
+    are isolated without touching any shared global.
     """
     if policy is None:
         policy = SandboxPolicy()
@@ -963,8 +963,13 @@ def workflow_sandbox(*, policy: SandboxPolicy | None = None) -> Iterator[None]:
     table_token = _sandbox_sys_modules.set(table)
     sandbox_token = _in_sandbox.set(True)
     passthrough_token = _policy_passthroughs.set(frozenset(policy.passthrough_modules))
+    # Imported here rather than at module scope: `serde` is a leaf, but this
+    # module is imported by `core` before the rest of the package exists.
+    from . import serde
+
     try:
-        yield
+        with serde.sandboxed_registrations():
+            yield
     finally:
         _policy_passthroughs.reset(passthrough_token)
         _in_sandbox.reset(sandbox_token)

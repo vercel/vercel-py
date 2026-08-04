@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import functools
-import json
+import inspect
 import random as _random
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
@@ -23,6 +23,32 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 DEFAULT_MAX_RETRIES = 3
+
+
+def _require_keyword_only(func: Callable[..., Any], kind: str) -> None:
+    """Reject a workflow or step whose parameters could be passed positionally.
+
+    Calls are recorded as the single object `@workflow/core` records for a
+    call with one argument, so there is nowhere for a positional argument to
+    go. Declaring the parameters keyword-only is what makes that visible in the
+    signature -- and it lets the type checker reject a positional call, since
+    `start()` and `Step.__call__` forward a `ParamSpec`.
+
+    Raised at registration rather than at call time so the whole codebase
+    reports at import, each error pointing at its own definition.
+    """
+    positional = [
+        name
+        for name, param in inspect.signature(func).parameters.items()
+        if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD, param.VAR_POSITIONAL)
+    ]
+    if positional:
+        raise TypeError(
+            f"{kind} {func.__qualname__} takes positional parameter(s) "
+            f"{', '.join(positional)}; workflows and steps are called with keyword "
+            f"arguments only. Declare them keyword-only: "
+            f"async def {func.__name__}(*, {positional[0]}: ...)"
+        )
 
 
 class Workflow(Generic[P, T]):
@@ -53,6 +79,11 @@ class Step(Generic[P, T]):
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         from . import runtime
+
+        if args:
+            raise TypeError(
+                f"{self.name} takes keyword arguments only; got {len(args)} positional argument(s)"
+            )
 
         try:
             ctx = runtime.WorkflowOrchestratorContext.current()
@@ -174,14 +205,13 @@ class BaseHook:
             raise RuntimeError("cannot call resume() inside workflow")
 
         if isinstance(self, pydantic.BaseModel):
-            json_str = self.model_dump_json(**kwargs)
+            payload = self.model_dump(**{"mode": "python", **kwargs})
         elif dataclasses.is_dataclass(self):
-            obj = dataclasses.asdict(self, dict_factory=kwargs.pop("dict_factory", dict))
-            json_str = json.dumps(obj, **kwargs)
+            payload = dataclasses.asdict(self, **kwargs)
         else:
             raise TypeError("resume only supports pydantic models or dataclasses")
 
-        return await runtime.resume_hook(token_or_hook, json_str)
+        return await runtime.resume_hook(token_or_hook, payload)
 
 
 class Workflows:
@@ -212,6 +242,7 @@ class Workflows:
         return self._namespace
 
     def workflow(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
+        _require_keyword_only(func, "workflow")
         rv = Workflow(func, registry=self)
         assert rv.workflow_id not in self._workflows, f"Duplicate workflow ID: {rv.workflow_id}"
         self._workflows[rv.workflow_id] = rv
@@ -235,6 +266,7 @@ class Workflows:
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> Step[P, T] | Callable[[Callable[P, Coroutine[Any, Any, T]]], Step[P, T]]:
         def register(f: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
+            _require_keyword_only(f, "step")
             rv = Step(f, max_retries=max_retries)
             assert rv.name not in self._steps, f"Duplicate step name: {rv.name}"
             self._steps[rv.name] = rv

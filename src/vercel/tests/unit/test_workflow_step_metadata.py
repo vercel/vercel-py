@@ -7,17 +7,19 @@ as an idempotency key for non-idempotent side effects.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from vercel._internal.workflow import runtime, world as w
+from vercel._internal.workflow import runtime, serialization as ser, world as w
 from vercel._internal.workflow.worlds.local import LocalWorld
 from vercel.workflow import StepInfo, Workflows, get_step_metadata
 
 
-def _encode(args: list, kwargs: dict) -> list[bytes]:
-    return [b"json" + json.dumps([args, kwargs]).encode()]
+def _run_input(**kwargs) -> bytes:
+    return ser.dehydrate(ser.argument_array(kwargs))
+
+
+def _step_input(**kwargs) -> bytes:
+    return ser.dehydrate(ser.step_arguments(kwargs))
 
 
 class _RecordingLocalWorld(LocalWorld):
@@ -46,7 +48,7 @@ async def test_step_metadata_available_inside_step(tmp_path, monkeypatch) -> Non
     captured: list[StepInfo] = []
 
     @registry.step
-    async def greet(name: str) -> str:
+    async def greet(*, name: str) -> str:
         captured.append(get_step_metadata())
         return f"hi {name}"
 
@@ -56,7 +58,7 @@ async def test_step_metadata_available_inside_step(tmp_path, monkeypatch) -> Non
         w.RunCreatedEventData(
             deploymentId="",
             workflowName="test-wf",
-            input=_encode(["world"], {}),
+            input=_run_input(name="world"),
         ).into_event(),
     )
     assert run_result.run is not None
@@ -66,7 +68,7 @@ async def test_step_metadata_available_inside_step(tmp_path, monkeypatch) -> Non
     step_id = "step_testid"
     await world.events_create(
         run_id,
-        w.StepCreatedEventData(stepName=greet.name, input=_encode(["world"], {})).into_event(
+        w.StepCreatedEventData(stepName=greet.name, input=_step_input(name="world")).into_event(
             step_id
         ),
     )

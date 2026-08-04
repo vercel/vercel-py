@@ -3,7 +3,6 @@ import contextvars
 import dataclasses
 import functools
 import importlib
-import json
 import logging
 import math
 import random
@@ -20,7 +19,7 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, nanoid, ulid, world as w
+from . import core, nanoid, serialization as ser, ulid, world as w
 from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
@@ -255,13 +254,11 @@ class WorkflowOrchestratorContext:
     def current(cls) -> Self:
         return cls._ctx.get()
 
-    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> Any:
+    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes:
+        """Run the body inside the sandbox, returning its result serialized there."""
         wf = self.registry._get_workflow(workflow_run.workflow_name)
-        if not workflow_run.input or not isinstance(workflow_run.input, list):
+        if not workflow_run.input:
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
-        if not workflow_run.input[0].startswith(b"json"):
-            raise RuntimeError(f"Unsupported workflow input encoding for run {workflow_run.run_id}")
-        args, kwargs = json.loads(workflow_run.input[0][len(b"json") :].decode())
 
         with workflow_sandbox(policy=self.registry._sandbox_policy):
             mod = importlib.import_module(wf.module)
@@ -272,8 +269,11 @@ class WorkflowOrchestratorContext:
             for attr in wf.qualname.split("."):
                 obj = getattr(obj, attr)
 
+            what = f"the input of run {workflow_run.run_id}"
+            kwargs = ser.keyword_arguments(ser.hydrate(workflow_run.input, what=what), what=what)
+
             async def inner():
-                self._fut = asyncio.ensure_future(obj.func(*args, **kwargs))
+                self._fut = asyncio.ensure_future(obj.func(**kwargs))
                 self.resume_wrapper()  # arm the resume callback
                 await self._fut
 
@@ -283,10 +283,13 @@ class WorkflowOrchestratorContext:
             finally:
                 self._ctx.reset(token)
             assert self._fut
-            return self._fut.result()
+            return ser.dehydrate(self._fut.result())
 
+    # `args` is always empty: `Step.__call__` refuses a positional call before
+    # forwarding, and only spells one because a ParamSpec has to carry both
+    # halves.
     async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
-        input_data = b"json" + json.dumps((args, kwargs), sort_keys=True).encode()
+        input_data = ser.dehydrate(ser.step_arguments(kwargs))
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
         return await sus.future
@@ -466,7 +469,7 @@ class WorkflowOrchestratorContext:
                     # The recorded step at this (positional) correlation ID must be
                     # the same call the body just issued; a mismatch means the body
                     # is non-deterministic.
-                    if sus.step.name != name or [sus.input] != recorded_input:
+                    if sus.step.name != name or sus.input != recorded_input:
                         self._fail_suspension(
                             sus,
                             NondeterminismError(
@@ -487,13 +490,12 @@ class WorkflowOrchestratorContext:
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
                     assert isinstance(sus, Suspension)
-                    if data[0].startswith(b"json"):
-                        result = json.loads(data[0][len(b"json") :].decode())
-                    else:
-                        self._fut.cancel(
-                            f"Unsupported step result encoding for "
-                            f"correlation ID {event.correlation_id}"
+                    try:
+                        result = ser.hydrate(
+                            data, what=f"the result of step {event.correlation_id}"
                         )
+                    except ser.SerializationError as error:
+                        self._fut.cancel(str(error))
                         return
                     sus.future.set_result(result)
 
@@ -521,13 +523,12 @@ class WorkflowOrchestratorContext:
                 case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
                     hook = self.suspensions[event.correlation_id]
                     assert isinstance(hook, Hook)
-                    if data[0].startswith(b"json"):
-                        result = json.loads(data[0][len(b"json") :].decode())
-                    else:
-                        self._fut.cancel(
-                            f"Unsupported step result encoding for "
-                            f"correlation ID {event.correlation_id}"
+                    try:
+                        result = ser.hydrate(
+                            data, what=f"the payload of hook {event.correlation_id}"
                         )
+                    except ser.SerializationError as error:
+                        self._fut.cancel(str(error))
                         return
                     hook.set_result(result)
                     if not hook.futures:
@@ -654,8 +655,7 @@ async def workflow_handler(
         events, seed=run_id, started_at=workflow_started_at, registry=registry
     )
     try:
-        result = context.run_workflow(workflow_run)
-        output = b"json" + json.dumps(result).encode()
+        output = context.run_workflow(workflow_run)
     except BaseException as e:
         if isinstance(e, asyncio.CancelledError) and e.args and e.args[0] == SUSPENDED_MESSAGE:
             # Workflow suspended, continue outside the try..except block
@@ -680,7 +680,7 @@ async def workflow_handler(
         try:
             await world.events_create(
                 run_id,
-                w.RunCompletedEventData(output=[output]).into_event(),
+                w.RunCompletedEventData(output=output).into_event(),
             )
         except w.EntityConflictError:
             logger.warning(f"Workflow run {run_id} was already completed")
@@ -696,7 +696,7 @@ async def workflow_handler(
             elif isinstance(sus, Suspension):
 
                 async def create_step(s=sus):
-                    step_data = w.StepCreatedEventData(stepName=s.step.name, input=[s.input])
+                    step_data = w.StepCreatedEventData(stepName=s.step.name, input=s.input)
                     try:
                         await world.events_create(run_id, step_data.into_event(s.correlation_id))
                     except w.EntityConflictError:
@@ -890,9 +890,8 @@ async def step_handler(
         # Deserialize step input
         if not step_run.input:
             raise RuntimeError(f"Step '{req.step_id}' has no input")
-        if not step_run.input[0].startswith(b"json"):
-            raise RuntimeError(f"Unsupported step input encoding for step {req.step_id}")
-        args, kwargs = json.loads(step_run.input[0][len(b"json") :].decode())
+        what = f"the input of step {req.step_id}"
+        kwargs = ser.step_keyword_arguments(ser.hydrate(step_run.input, what=what), what=what)
 
         logger.debug(
             "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
@@ -911,17 +910,17 @@ async def step_handler(
         )
         # Execute the step function
         try:
-            result = await step.func(*args, **kwargs)
+            result = await step.func(**kwargs)
         finally:
             _step_ctx.reset(token)
 
         # Serialize the result
-        output = b"json" + json.dumps(result).encode()
+        output = ser.dehydrate(result)
 
         # Complete the step via event
         await world.events_create(
             req.workflow_run_id,
-            w.StepCompletedEventData(result=[output]).into_event(req.step_id),
+            w.StepCompletedEventData(result=output).into_event(req.step_id),
         )
 
     except Exception as e:
@@ -1118,9 +1117,7 @@ class Run:
             if run.status == "completed":
                 if not run.output:
                     raise RuntimeError(f"Completed workflow {run.run_id} has no output")
-                if not run.output[0].startswith(b"json"):
-                    raise RuntimeError(f"Unsupported workflow output encoding for {run.run_id}")
-                return json.loads(run.output[0][len(b"json") :].decode())
+                return ser.hydrate(run.output, what=f"the output of run {run.run_id}")
 
             elif run.status == "cancelled":
                 raise RuntimeError("workflow cancelled")
@@ -1133,14 +1130,19 @@ class Run:
 
 
 async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
+    # See `Step.__call__` on why a keyword-only call still spells `*args`.
+    if args:
+        raise TypeError(
+            f"{wf.workflow_id} takes keyword arguments only; got {len(args)} positional argument(s)"
+        )
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = b"json" + json.dumps([args, kwargs], sort_keys=True).encode()
+    input_data = ser.dehydrate(ser.argument_array(kwargs))
     data = w.RunCreatedEventData(
         deploymentId=deployment_id,
         workflowName=wf.workflow_id,
-        input=[input_data],
+        input=input_data,
         executionContext={"queueNamespace": namespace} if namespace is not None else None,
     )
     result = await world.events_create(None, data.into_event())
@@ -1159,15 +1161,14 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     return Run(run_id)
 
 
-async def resume_hook(token_or_hook: str | w.Hook, payload_json: str) -> w.Hook:
+async def resume_hook(token_or_hook: str | w.Hook, payload: Any) -> w.Hook:
     world = w.get_world()
     if isinstance(token_or_hook, str):
         hook = await world.hooks_get_by_token(token_or_hook)
     else:
         hook = token_or_hook
     run = await world.runs_get(hook.run_id)
-    payload = b"json" + payload_json.encode()
-    data = w.HookReceivedEventData(payload=[payload])
+    data = w.HookReceivedEventData(payload=ser.dehydrate(payload))
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     execution_context = run.execution_context or {}
     namespace = execution_context.get("queueNamespace")
