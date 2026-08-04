@@ -1,7 +1,8 @@
 """Tests for the workflow sandbox (vercel.workflow.py_sandbox).
 
 Covers:
-- _RESTRICTIONS: builtins, datetime, os, time, socket, random, threading, asyncio
+- _RESTRICTIONS: builtins, datetime, platform, os, time, socket, random, threading,
+  asyncio
 - _BLOCKED: subprocess, ssl, ctypes, multiprocessing, signal, etc.
 - _PASSTHROUGHS: stdlib modules that pass through unchanged
 - Loop proxy: allowlisted methods pass, everything else restricted
@@ -11,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import platform
 import sys
 
 import pytest
@@ -191,6 +193,43 @@ class TestOsRestrictions:
         ns = _run_in_sandbox("import os; result = type(os.environ)")
         # Should be a dict (copy), not os._Environ
         assert ns["result"] is dict or ns["result"] is not type(real_os.environ)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  platform restrictions (allowlist)
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestPlatformRestrictions:
+    def test_platform_system_answered_by_the_host(self):
+        """The sandbox's own `platform` cannot answer: it reaches `os.uname()`.
+
+        Which matters beyond anyone calling it directly -- before 3.13 `uuid`
+        calls it at import on everything but Windows and macOS, so blocking it
+        means a workflow cannot import `uuid` at all on Linux.
+        """
+        ns = _run_in_sandbox("import platform; result = platform.system()")
+        assert ns["result"] == platform.system()
+
+    def test_platform_host_identity_blocked(self):
+        # `node` and `uname` report which *machine* this is, and two replays of
+        # one run are not generally the same machine. The rest are blocked
+        # because the module is an allowlist -- reaching `os.uname()` would stop
+        # them anyway, but they name themselves rather than the syscall.
+        for call in ("node()", "uname()", "machine()", "platform()", "processor()"):
+            with pytest.raises(SandboxRestrictionError, match=rf"platform\.{call[:-2]}\("):
+                _run_in_sandbox(f"import platform; platform.{call}")
+
+    def test_uuid_imports_but_uuid4_stays_blocked(self):
+        """What `platform.system()` buys, and what it must not cost.
+
+        Reaching `uuid` by passthrough would fix the import too, but it hands
+        the sandbox the host module, whose `os` is the unrestricted one -- and
+        `uuid4()` would work.
+        """
+        ns = _run_in_sandbox("import uuid; result = uuid.UUID(int=1)")
+        assert str(ns["result"]) == "00000000-0000-0000-0000-000000000001"
+        _raises_in_sandbox("import uuid; uuid.uuid4()")
 
 
 # ═══════════════════════════════════════════════════════════════
