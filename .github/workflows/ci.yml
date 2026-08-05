@@ -64,6 +64,21 @@ jobs:
           git clone --depth 1 --branch v5.9.0
           https://github.com/sveltejs/devalue.git "$RUNNER_TEMP/devalue"
 
+      # The local-world interop test runs the real `workflow` CLI against the
+      # `.workflow-data` files the Python local world writes. Installed here
+      # rather than left to the test's own npm fallback, so npm runs once per
+      # job in a visible step instead of inside five test processes.
+      #
+      # A git checkout (as for devalue above) is not an option: the CLI is
+      # TypeScript and needs a pnpm workspace install plus a tsc build, so the
+      # published tarball is the practical artifact. `--ignore-scripts` skips
+      # the native postinstalls of @swc/core, esbuild and cbor-extract, which
+      # the read-only `inspect` path does not use.
+      - name: Install the workflow CLI
+        run: >-
+          npm install workflow@5.0.0-beta.38 --no-save --no-audit --no-fund
+          --ignore-scripts --prefix "$RUNNER_TEMP/workflow-cli"
+
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
@@ -77,6 +92,7 @@ jobs:
         run: ./scripts/test.sh
         env:
           VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
+          VERCEL_WORKFLOW_CLI: ${{ runner.temp }}/workflow-cli/node_modules/workflow
 
       - name: Test examples
         if: matrix.python-version == '3.12'
