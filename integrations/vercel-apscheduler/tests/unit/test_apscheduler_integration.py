@@ -31,7 +31,11 @@ from vercel.integrations.apscheduler._driver import (
     StartDecision,
     WakeToken,
 )
-from vercel.integrations.apscheduler._jobstore import RedisJobCoordinator
+from vercel.integrations.apscheduler._jobstore import (
+    PROVENANCE_DECLARED,
+    PROVENANCE_RUNTIME,
+    RedisJobCoordinator,
+)
 from vercel.integrations.apscheduler._options import VercelAPSchedulerOptions
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
 from vercel.integrations.apscheduler._subscriber import register_scheduler
@@ -416,9 +420,9 @@ class InMemoryJobCoordinator(RedisJobCoordinator):
             return
         self._versions[job.id] = self._next_revision()
         self._provenance[job.id] = (
-            "runtime"
+            PROVENANCE_RUNTIME
             if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
-            else "declared"
+            else PROVENANCE_DECLARED
         )
         self._rearm(job, rearm=True)
 
@@ -614,6 +618,23 @@ def test_custom_environment_state_is_environment_scoped(
     _scheduler, adapter, _driver = scheduler_with_driver()
 
     assert adapter.scope == "prj_123:staging"
+
+
+def test_named_environment_without_project_id_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent project-less scope could interleave two projects' state."""
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={"default": InMemoryRedisJobStore()},
+    )
+    adapter = get_adapter(scheduler)
+    assert adapter is not None
+
+    with pytest.raises(APSchedulerConfigurationError, match="VERCEL_PROJECT_ID"):
+        adapter._bind_runtime()
 
 
 def test_preview_state_stays_deployment_scoped(

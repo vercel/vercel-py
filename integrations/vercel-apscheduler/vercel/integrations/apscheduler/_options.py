@@ -79,7 +79,14 @@ def resolve_state_scope(deployment: str) -> str:
     if not environment or environment.casefold() in {"preview", "development"}:
         return deployment
     project = environ.get("VERCEL_PROJECT_ID", "").strip()
-    return f"{project}:{environment}" if project else environment
+    if not project:
+        # Without the project, two projects sharing one Redis database would
+        # silently interleave a namespace. Refuse rather than guess.
+        raise ValueError(
+            "VERCEL_PROJECT_ID is required to scope durable scheduler state "
+            f'in the "{environment}" environment'
+        )
+    return f"{project}:{environment}"
 
 
 @dataclass(frozen=True, slots=True)

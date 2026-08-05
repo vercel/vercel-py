@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import logging
 import pickle
+from collections.abc import Iterator
 from datetime import datetime, timezone
 
 from apscheduler.jobstores.base import (  # type: ignore[import-untyped]
@@ -25,8 +26,12 @@ if TYPE_CHECKING:
     from ._driver import RedisDriver
 
 UTC = timezone.utc
+# Code owns "declared" jobs across deployments; the store owns "runtime" jobs.
+# Takeover reconciliation reads this on promote.
+PROVENANCE_DECLARED = "declared"
+PROVENANCE_RUNTIME = "runtime"
 
-__all__ = ["RedisJobCoordinator"]
+__all__ = ["PROVENANCE_DECLARED", "PROVENANCE_RUNTIME", "RedisJobCoordinator"]
 
 
 # Shared tail of the job write scripts: bump the store revision, persist the
@@ -263,7 +268,7 @@ class RedisJobCoordinator:
             self.versions_key,
             str(datetime_to_utc_timestamp(now)),
         )
-        return cast("list[tuple[Any, int]]", self._decode_versioned_jobs(raw))
+        return [(job, revision) for _, job, revision, _ in self._decode_records(raw, stride=3)]
 
     def get_all_jobs_with_revisions(self) -> list[tuple[Any, int, str]]:
         raw = self.redis.eval(
@@ -273,10 +278,10 @@ class RedisJobCoordinator:
             self.versions_key,
             self.provenance_key,
         )
-        jobs = cast(
-            "list[tuple[Any, int, str]]",
-            self._decode_versioned_jobs(raw, stride=4),
-        )
+        jobs = [
+            (job, revision, provenance)
+            for _, job, revision, provenance in self._decode_records(raw, stride=4)
+        ]
         return sorted(
             jobs,
             key=lambda item: (
@@ -322,12 +327,10 @@ class RedisJobCoordinator:
             if next_run_time is not None
             else ""
         )
-        # Code owns "declared" jobs across deployments; the store owns
-        # "runtime" jobs. Takeover reconciliation reads this on promote.
         provenance = (
-            "runtime"
+            PROVENANCE_RUNTIME
             if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
-            else "declared"
+            else PROVENANCE_DECLARED
         )
         now = datetime.now(UTC)
         return self.redis.eval(
@@ -349,10 +352,19 @@ class RedisJobCoordinator:
         score = str(datetime_to_utc_timestamp(next_run_time)) if next_run_time is not None else ""
         return state, score
 
-    def _decode_versioned_jobs(self, raw: Any, *, stride: int = 3) -> list[tuple[Any, ...]]:
+    def _decode_records(
+        self,
+        raw: Any,
+        *,
+        stride: int,
+    ) -> Iterator[tuple[str, Any, int, str]]:
+        """Yield ``(job_id, job, revision, provenance)`` from a script reply.
+
+        ``stride`` is the script's fields per record; provenance is empty when
+        the script does not return it.
+        """
         if not isinstance(raw, (list, tuple)) or len(raw) % stride:
             raise RuntimeError("Redis returned invalid APScheduler versioned jobs")
-        jobs: list[tuple[Any, ...]] = []
         for index in range(0, len(raw), stride):
             job_id = _text(raw[index])
             state = raw[index + 1]
@@ -362,11 +374,8 @@ class RedisJobCoordinator:
             except Exception:  # noqa: BLE001 - any unpickling failure
                 self._quarantine_job(job_id)
                 continue
-            if stride == 3:
-                jobs.append((job, revision))
-            else:
-                jobs.append((job, revision, _text(raw[index + 3])))
-        return jobs
+            provenance = _text(raw[index + 3]) if stride > 3 else ""
+            yield job_id, job, revision, provenance
 
     def _quarantine_job(self, job_id: str) -> None:
         """Sideline a job whose persisted state no longer reconstitutes.

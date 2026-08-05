@@ -25,6 +25,9 @@ try:
         STATE_STOPPED,
         BaseScheduler,
     )
+    from apscheduler.triggers.interval import (  # type: ignore[import-untyped]
+        IntervalTrigger,
+    )
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "vercel-apscheduler requires APScheduler 3.x and redis. "
@@ -42,6 +45,7 @@ __all__ = [
     "STATE_STOPPED",
     "BaseExecutor",
     "BaseScheduler",
+    "IntervalTrigger",
     "JobExecutionEvent",
     "JobSubmissionEvent",
     "MaxInstancesReachedError",
