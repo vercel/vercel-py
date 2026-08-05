@@ -335,13 +335,8 @@ class SchedulerAdapter:
             self._pause_local()
             return
         self._publish_start_if_needed(decision, now=now)
-        if (
-            not decision.changed
-            and decision.start_status == "active"
-            and decision.current_wake is not None
-            and decision.current_wake.status == "pending"
-        ):
-            self.publish_wakeup(decision.current_wake, now=now)
+        if not decision.changed and decision.start_status == "active":
+            self.repair_wakeup(now=now)
         self._resume_local_if_paused()
 
     def pause(self) -> None:

@@ -19,6 +19,9 @@ from ._options import (
 ENVIRONMENT_ENV = "VERCEL_ENV"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 ACTIVATION_HOOK_NAME = "vercel-apscheduler:auto-activate"
+# Activation is idempotent; the periodic re-run is what notices and heals a
+# wake whose queue message died (for example stranded by a rollback).
+HEAL_SWEEP_INTERVAL_SECONDS = 5 * 60
 
 
 def register_automatic_activation() -> None:
@@ -41,6 +44,7 @@ def register_automatic_activation() -> None:
     run_on_next_invocation(
         ACTIVATION_HOOK_NAME,
         _automatic_activation_hook,
+        repeat_after_seconds=HEAL_SWEEP_INTERVAL_SECONDS,
     )
 
 

@@ -14,11 +14,16 @@ from vercel.integrations.apscheduler._options import is_queue_serving_runtime
 def test_registers_request_driven_automatic_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registered: list[tuple[str, Any]] = []
+    registered: list[tuple[str, Any, float | None]] = []
     invocation_hooks = ModuleType("vercel_runtime.invocation_hooks")
 
-    def run_on_next_invocation(name: str, callback: Any) -> None:
-        registered.append((name, callback))
+    def run_on_next_invocation(
+        name: str,
+        callback: Any,
+        *,
+        repeat_after_seconds: float | None = None,
+    ) -> None:
+        registered.append((name, callback, repeat_after_seconds))
 
     runtime = ModuleType("vercel_runtime")
     runtime.__path__ = []  # type: ignore[attr-defined]
@@ -42,6 +47,7 @@ def test_registers_request_driven_automatic_activation(
         (
             _automatic.ACTIVATION_HOOK_NAME,
             _automatic._automatic_activation_hook,
+            _automatic.HEAL_SWEEP_INTERVAL_SECONDS,
         )
     ]
 
