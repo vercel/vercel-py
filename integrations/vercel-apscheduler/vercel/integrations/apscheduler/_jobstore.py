@@ -270,9 +270,23 @@ class RedisJobCoordinator:
             self.versions_key,
             str(datetime_to_utc_timestamp(now)),
         )
-        return [(job, revision) for _, job, revision, _ in self._decode_records(raw, stride=3)]
+        due: list[tuple[Any, int]] = []
+        for job_id, job, revision, _provenance in self._decode_records(raw, stride=3):
+            if job is None:
+                self.quarantine_job(job_id)
+                continue
+            due.append((job, revision))
+        return due
 
-    def get_all_jobs_with_revisions(self) -> list[tuple[Any, int, str]]:
+    def get_all_jobs_with_revisions(
+        self,
+    ) -> tuple[list[tuple[Any, int, str]], list[tuple[str, int, str]]]:
+        """Return decodable jobs plus records this code can no longer load.
+
+        Undecodable records are returned as ``(job_id, revision, provenance)``
+        so takeover reconciliation can atomically restore a declaration whose
+        persisted definition no longer loads, instead of stranding it.
+        """
         raw = self.redis.eval(
             _GET_ALL_WITH_REVISIONS_SCRIPT,
             3,
@@ -280,17 +294,20 @@ class RedisJobCoordinator:
             self.versions_key,
             self.provenance_key,
         )
-        jobs = [
-            (job, revision, provenance)
-            for _, job, revision, provenance in self._decode_records(raw, stride=4)
-        ]
-        return sorted(
-            jobs,
+        jobs: list[tuple[Any, int, str]] = []
+        undecodable: list[tuple[str, int, str]] = []
+        for job_id, job, revision, provenance in self._decode_records(raw, stride=4):
+            if job is None:
+                undecodable.append((job_id, revision, provenance))
+                continue
+            jobs.append((job, revision, provenance))
+        jobs.sort(
             key=lambda item: (
                 item[0].next_run_time is None,
                 item[0].next_run_time or datetime.max.replace(tzinfo=UTC),
             ),
         )
+        return jobs, undecodable
 
     def cas_update_job(self, job: Any, expected_revision: int) -> bool:
         state, score = self._serialized_job(job)
@@ -360,11 +377,13 @@ class RedisJobCoordinator:
         raw: Any,
         *,
         stride: int,
-    ) -> Iterator[tuple[str, Any, int, str]]:
+    ) -> Iterator[tuple[str, Any | None, int, str]]:
         """Yield ``(job_id, job, revision, provenance)`` from a script reply.
 
         ``stride`` is the script's fields per record; provenance is empty when
-        the script does not return it.
+        the script does not return it. ``job`` is ``None`` when the persisted
+        state no longer reconstitutes under this deployment's code; the caller
+        decides whether to quarantine or repair the record.
         """
         if not isinstance(raw, (list, tuple)) or len(raw) % stride:
             raise RuntimeError("Redis returned invalid APScheduler versioned jobs")
@@ -372,15 +391,14 @@ class RedisJobCoordinator:
             job_id = _text(raw[index])
             state = raw[index + 1]
             revision = int(_text(raw[index + 2]))
+            provenance = _text(raw[index + 3]) if stride > 3 else ""
             try:
                 job = self.store._reconstitute_job(state)
             except Exception:  # noqa: BLE001 - any unpickling failure
-                self._quarantine_job(job_id)
-                continue
-            provenance = _text(raw[index + 3]) if stride > 3 else ""
+                job = None
             yield job_id, job, revision, provenance
 
-    def _quarantine_job(self, job_id: str) -> None:
+    def quarantine_job(self, job_id: str) -> None:
         """Sideline a job whose persisted state no longer reconstitutes.
 
         Typically a dynamic job whose function was removed by a later

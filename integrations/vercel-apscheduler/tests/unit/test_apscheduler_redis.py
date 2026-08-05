@@ -613,7 +613,7 @@ def test_real_redis_cas_prevents_stale_overwrite_and_resurrection(
                 run_date=run_time,
                 id="mutable",
             )
-        [(stale_job, stale_revision, _)] = adapter.coordinator.get_all_jobs_with_revisions()
+        [(stale_job, stale_revision, _)] = adapter.coordinator.get_all_jobs_with_revisions()[0]
 
         scheduler.modify_job("mutable", name="new-name")
         stale_job._modify(name="stale-name")
@@ -623,7 +623,7 @@ def test_real_redis_cas_prevents_stale_overwrite_and_resurrection(
         )
         assert scheduler.get_job("mutable").name == "new-name"
 
-        [(removed_job, removed_revision, _)] = adapter.coordinator.get_all_jobs_with_revisions()
+        [(removed_job, removed_revision, _)] = adapter.coordinator.get_all_jobs_with_revisions()[0]
         scheduler.remove_job("mutable")
         assert not adapter.coordinator.cas_update_job(
             removed_job,
@@ -641,6 +641,8 @@ def _real_scheduler(
 ) -> tuple[BlockingScheduler, SchedulerAdapter, Redis, tuple[str, ...]]:
     assert REDIS_URL is not None
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", deployment)
+    if not environ.get("VERCEL_ENV") and not environ.get("VERCEL_TARGET_ENV"):
+        monkeypatch.setenv("VERCEL_ENV", "preview")
     monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
     monkeypatch.setenv(
         "VERCEL_APSCHEDULER_SUBSCRIBERS",
@@ -724,7 +726,9 @@ def test_real_redis_takeover_reconciles_declared_jobs(
             )
         before = {
             job.id: job.next_run_time
-            for job, _revision, _provenance in (adapter.coordinator.get_all_jobs_with_revisions())
+            for job, _revision, _provenance in (
+                adapter.coordinator.get_all_jobs_with_revisions()[0]
+            )
         }
         assert adapter.driver.reconciled_deployment() == "dpl_reconcile_one"
 
@@ -763,7 +767,7 @@ def test_real_redis_takeover_reconciles_declared_jobs(
         records = {
             job.id: (job, provenance)
             for job, _revision, provenance in (
-                second_adapter.coordinator.get_all_jobs_with_revisions()
+                second_adapter.coordinator.get_all_jobs_with_revisions()[0]
             )
         }
         assert set(records) == {"keep", "changed", "dynamic"}
@@ -773,6 +777,83 @@ def test_real_redis_takeover_reconciles_declared_jobs(
         assert records["changed"][0].trigger.interval == timedelta(hours=2)
         assert records["dynamic"][1] == "runtime"
         assert second_adapter.driver.reconciled_deployment() == "dpl_reconcile_two"
+    finally:
+        client.delete(*keys)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_takeover_restores_unloadable_declared_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared record that no longer loads is rewritten, not stranded.
+
+    Moving a scheduled function's module makes the persisted record
+    unloadable under the new code. The declaration is authoritative, so
+    takeover reconciliation must rewrite the record instead of leaving it
+    quarantined forever behind an insert-if-absent conflict.
+    """
+    assert REDIS_URL is not None
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_restore")
+    scheduler, _adapter, client, keys = _real_scheduler(
+        monkeypatch,
+        deployment="dpl_restore_one",
+    )
+    try:
+        scheduler.add_job(
+            durable_test_job,
+            "interval",
+            hours=1,
+            id="moved",
+            replace_existing=True,
+        )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            scheduler.start()
+        store = scheduler._jobstores["default"]
+        raw: Any = client.hget(store.jobs_key, "moved")
+        state = pickle.loads(raw)  # noqa: S301 - crafted by this test
+        state["func"] = "missing_module:missing_function"
+        client.hset(store.jobs_key, mapping={"moved": pickle.dumps(state)})
+
+        # A new deployment declaring the same job takes the namespace over.
+        _adapter_module._ACTIVE_IDENTITIES.clear()
+        monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_restore_two")
+        monkeypatch.delenv("VERCEL")
+        second = BlockingScheduler(
+            timezone=UTC,
+            jobstores={"default": _redis_job_store(REDIS_URL)},
+        )
+        modules[TEST_SCHEDULER_MODULE].__dict__["scheduler"] = second
+        monkeypatch.setenv("VERCEL", "1")
+        second.add_job(
+            durable_test_job,
+            "interval",
+            hours=1,
+            id="moved",
+            replace_existing=True,
+        )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            second.start()
+        second_adapter = get_adapter(second)
+        assert second_adapter is not None
+
+        jobs, undecodable = second_adapter.coordinator.get_all_jobs_with_revisions()
+        assert undecodable == []
+        [(restored, _revision, provenance)] = jobs
+        assert restored.id == "moved"
+        assert provenance == "declared"
+        assert restored.next_run_time is not None
+        second_store = second._jobstores["default"]
+        assert client.zscore(second_store.run_times_key, "moved") is not None
     finally:
         client.delete(*keys)
 

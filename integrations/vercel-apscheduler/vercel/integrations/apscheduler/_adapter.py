@@ -740,8 +740,10 @@ class SchedulerAdapter:
         Environment-scoped stores outlive deployments, so on the first touch
         by a new deployment the code's declarations win for ``declared`` jobs:
         removed declarations are deleted before any due planning, changed
-        triggers restart their schedule, unchanged jobs keep their progress.
-        ``runtime`` jobs belong to the store and are never touched.
+        triggers restart their schedule, unchanged jobs keep their progress,
+        and a declared record that no longer loads is rewritten from its
+        declaration. ``runtime`` jobs belong to the store and are never
+        touched; an unloadable one is quarantined.
         """
         if self._reconciled or not self._scope_outlives_deployments:
             return
@@ -752,7 +754,9 @@ class SchedulerAdapter:
             return
         missing = dict(self._declared_jobs)
         with self.scheduler._jobstores_lock:
-            for job, revision, provenance in self.coordinator.get_all_jobs_with_revisions():
+            jobs, undecodable = self.coordinator.get_all_jobs_with_revisions()
+            self._reconcile_undecodable(undecodable, missing, now)
+            for job, revision, provenance in jobs:
                 missing.pop(str(job.id), None)
                 if provenance != PROVENANCE_DECLARED:
                     continue
@@ -788,9 +792,46 @@ class SchedulerAdapter:
         self.driver.mark_reconciled(self.deployment, now)
         self._reconciled = True
 
+    def _reconcile_undecodable(
+        self,
+        undecodable: list[tuple[str, int, str]],
+        missing: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        """Repair or sideline records this deployment's code cannot load."""
+        for job_id, revision, provenance in undecodable:
+            declared = missing.pop(job_id, None)
+            if provenance != PROVENANCE_DECLARED:
+                # The store owns runtime jobs, even unloadable ones.
+                self.coordinator.quarantine_job(job_id)
+                continue
+            if declared is None:
+                if self.coordinator.cas_remove_job(job_id, revision):
+                    self._logger.info(
+                        'Removed job "%s": this deployment no longer declares it',
+                        job_id,
+                    )
+                continue
+            # The code still declares this job but its persisted record no
+            # longer loads (typically its function moved). The declaration is
+            # authoritative; restart its schedule under the new code.
+            declared._modify(
+                next_run_time=declared.trigger.get_next_fire_time(
+                    None,
+                    now.astimezone(self.scheduler.timezone),
+                )
+            )
+            if self.coordinator.cas_update_job(declared, revision):
+                self._logger.info(
+                    'Rewrote job "%s" from its declaration: the persisted '
+                    "definition no longer loads under this deployment",
+                    job_id,
+                )
+
     def _rebase_before(self, activation_time: datetime) -> None:
         with self.scheduler._jobstores_lock:
-            for job, revision, _provenance in self.coordinator.get_all_jobs_with_revisions():
+            jobs, _undecodable = self.coordinator.get_all_jobs_with_revisions()
+            for job, revision, _provenance in jobs:
                 next_run_time = job.next_run_time
                 if next_run_time is None or next_run_time >= activation_time:
                     continue
