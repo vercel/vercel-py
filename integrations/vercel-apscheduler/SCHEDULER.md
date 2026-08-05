@@ -10,13 +10,65 @@ a wake message does not represent one job
 a wake message asks the scheduler to evaluate all jobs at logical time T
 ```
 
-This document describes the durable driver: the Redis state machine that
-guarantees one logical chain. The APScheduler adapter that publishes and
-consumes the actual Queue messages builds on the primitives described here.
+## Subscriber contract
+
+Applications declare an ordinary scheduler object:
+
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "scheduler:scheduler"
+```
+
+Before importing the subscriber for build-time introspection, the Python
+builder activates the integration. Constructing the scheduler then registers
+two internal callbacks in `vercel.queue`:
+
+| Internal subscription | Purpose |
+| --- | --- |
+| start | Activate a durable generation and reserve its first wake |
+| wake | Evaluate due jobs and reserve the next wake |
+
+The builder extracts those callbacks and produces the Function and Queue
+triggers. The entrypoint is a locator only: the scheduler's durable identity
+derives from its `RedisJobStore` `jobs_key` (dots become dashes), the one
+value that is refactor-stable and exactly as durable as the state it names.
+Renaming the variable or moving the module never orphans the Redis namespace
+or the queue topics; deliberately renaming `jobs_key` is an identity
+migration. The `scheduler_id` integration option pins an identity explicitly.
+
+Two schedulers whose keys collapse to one identity fail loudly at import;
+give each scheduler's store a distinct `jobs_key`.
+
+The topic names are implementation details. Applications do not configure or
+publish to them. Build-time imports run in discovery mode;
+calls to `start()`, `pause()`, or `resume()` during discovery have no external
+effect.
+
+## Runtime lifecycle
+
+On Vercel, the adapter changes only three lifecycle methods:
+
+```python
+scheduler.start()
+scheduler.pause()
+scheduler.resume()
+```
+
+`start()` makes the scheduler running if it is not already running. `pause()`
+makes it paused. `resume()` has the same durable transition as starting a
+paused scheduler. Each method is idempotent. The caller must be executing in
+the target deployment; v1 has no cross-deployment control API.
+
+Outside Vercel, APScheduler's original methods are used.
 
 ## Durable state
 
-The driver stores one Redis hash per deployment and scheduler:
+State is scoped by environment for production and custom environments, and by
+deployment for previews and development. A named environment's schedules,
+dynamic jobs, and wake chain therefore survive promotions, while preview
+state stays disposable.
+
+The driver stores one Redis hash per scope and scheduler:
 
 ```text
 state              running | paused
@@ -27,14 +79,19 @@ current_logical_time
 current_status     pending | published | processing
 active_owner
 active_lease_until
+reconciled_deployment
 ```
 
 Redis Lua scripts update these fields atomically. Driver state has no TTL.
 
-The driver key carries a `{deployment:scheduler}` hash tag, so it always
-shares a Redis Cluster slot with the job-store keys that use the same
-namespace. Two deployments can use the same Redis database without sharing
-driver state.
+The driver key carries a `{scope:scheduler}` hash tag, so it always shares
+a Redis Cluster slot with the job-store keys that use the same namespace.
+Distinct scopes can use the same Redis database without sharing state.
+
+Each persisted job also records its provenance: `declared` for jobs
+materialized from code declarations, `runtime` for jobs added through the
+mutation APIs after `start()`. Code owns declared jobs across deployments;
+the store owns runtime jobs.
 
 ## Starting
 
@@ -52,9 +109,12 @@ Queue payload with the same idempotency key. After Queue accepts that message,
 operations, a later `start()` retries the same payload and key.
 
 The start delivery acquires the driver's single active-owner lease through
-`claim_start`. `finish_start` atomically marks the start active and reserves
-sequence 1 — or, when no work is scheduled, leaves the driver dormant with no
-current wake.
+`claim_start`. It starts APScheduler's internals without starting a background
+scheduler thread and materializes code-declared jobs into Redis using
+insert-if-absent semantics, so a cold import cannot overwrite a job changed
+through a runtime API. `finish_start` then atomically marks the start active
+and reserves sequence 1 — or, when no job is scheduled, leaves the driver
+dormant with no current wake.
 
 ## One wake
 
@@ -117,12 +177,137 @@ lease lapses.
 
 Resuming reuses `start()`: it atomically creates one new generation. Old
 messages remain permanently stale because their generation no longer matches.
+Occurrences that became due while paused are skipped, regardless of misfire
+settings: the new generation rebases every job to its next occurrence at or
+after the resume.
 
 The active-owner lease is deliberately not removed by pause or resume. If an
 old handler is still executing, the new generation's start delivery retries
 until that handler releases its lease. This closes the rapid pause/resume
 race: the new generation cannot begin while the old generation is still
 inside its critical section.
+
+## Runtime job mutations
+
+Runtime calls through APScheduler's public APIs are event-driven:
+
+```python
+scheduler.start()  # idempotent activation boundary in this Function instance
+scheduler.add_job(...)
+scheduler.modify_job(...)
+scheduler.reschedule_job(...)
+scheduler.pause_job(...)
+scheduler.resume_job(...)
+scheduler.remove_job(...)
+```
+
+The integration coordinates the Redis job write and wake rearm in one Lua
+transaction:
+
+- while paused, only the job is changed;
+- while running with no active owner, an earlier or missing current wake is
+  replaced with one new monotonic sequence;
+- while a start or wake owns the driver, the mutation records its earliest
+  candidate time and the owner folds that value into its one successor.
+
+Moving or removing a job may leave an already published wake in Queue. Queue
+messages cannot be canceled, so that now-empty wake is allowed to arrive; it
+recomputes the next exact due time and cannot fork the chain.
+
+Each persisted job has a monotonic revision. After executing a job, the wake
+updates or removes it only if the revision it read is still current. A
+concurrent runtime mutation therefore wins instead of being overwritten or
+resurrected by a late handler.
+
+Executing jobs may also mutate the store through the same APIs. An in-job
+`add_job()` of an existing id honors `replace_existing=True` by updating the
+persisted job, and the finishing wake reads the store again, so the change is
+reflected in the successor it reserves.
+
+Every cold Function instance that performs a runtime mutation must first call
+the idempotent `scheduler.start()`. Before that boundary, `add_job()` calls
+are treated as module-level declarations. Raw writes to Redis job-store keys
+are unsupported because they bypass atomic wake rearming and revision checks.
+
+The no-heartbeat design has one deliberate liveness contract: `start()` and
+mutation calls are durable after they return successfully. If a process dies
+after committing Redis but before publishing Queue, an idempotent `start()`
+republishes the pending token. Repeating an interrupted mutation is also safe:
+a retried mutation republishes the pending wake even when the retry itself
+fails, for example on a conflicting job id. A completely dormant scheduler
+does not wake periodically to repair an otherwise unobserved ambiguous
+failure. A delayed repair can pass a job's default misfire window; jobs whose
+occurrence must remain eligible should set an appropriate
+`misfire_grace_time` or `None`.
+
+## Redis and execution requirements
+
+v1 supports exactly one job store named `default`. It must be APScheduler's
+Redis-backed `RedisJobStore`, and it is also the lifecycle coordinator. The
+integration namespaces the job-store keys with the state scope and the
+scheduler identity, so distinct environments and previews can share a Redis
+database without sharing jobs or driver state.
+
+Runtime Cache is not suitable. It is evictable and cannot provide the durable
+atomic state needed for a pause to remain paused. Redis lifecycle state has no
+TTL, so use a durable Redis service rather than an ephemeral cache. Redis
+failures fail closed: lifecycle methods raise instead of claiming success,
+Queue handlers fail and are retried, and no job runs without acquiring the
+Redis owner lease.
+
+Jobs use the integration's inline executor so that a wake remains active until
+the job has completed and the durable job-store update has happened. Custom
+executors are rejected in v1. A scheduled function can enqueue longer work to
+another queue.
+
+Code-declared jobs require explicit stable IDs. If a job with that ID is
+already persisted, the declaration must permit replacement, but materializing
+the declaration does not overwrite the persisted runtime value. The
+`scheduled_job()` decorator enables replacement automatically; declaration
+calls to `add_job()` should pass `replace_existing=True`.
+
+## Deployment behavior
+
+Production and custom environments share one durable namespace, owned by
+exactly one deployment at a time. Queue delivery routing is advisory and may
+change underneath this design: today a message is delivered to the deployment
+that sent it, promoted or not; when the platform enables queue aliasing for a
+project, in-flight messages are instead handed to the environment's current
+deployment. Ownership therefore decides who may act, never who received a
+delivery: `start()` on a non-owner is a takeover that transfers ownership and
+opens a new generation in one atomic step. From that moment the demoted
+deployment is fenced out of the namespace entirely: its deliveries still
+arrive but every claim turns stale and acks, it repairs and rearms nothing,
+its cold starts write no declarations, and its mutation APIs refuse loudly.
+Its queue simply drains. A rollback is the same operation in the other
+direction; the mechanism has no notion of old and new, only of who owns the
+chain now.
+
+On takeover the new owner reconciles the
+store against its own declarations, before planning any due jobs: a job the
+code no longer declares is deleted and never runs, a changed trigger restarts
+its schedule, an unchanged job keeps its progress, and `runtime` jobs are
+never touched. A declared job whose persisted record no longer loads under
+the new code (typically because its function moved) is rewritten from the
+declaration and restarts its schedule. A `runtime` job whose definition no
+longer loads is quarantined: it leaves the due index, keeps its record for
+the operator, and logs an error.
+
+A takeover strands the previous owner's in-flight wake: it is consumed by
+the demoted deployment and acked as stale, and the new owner's chain starts
+from its own activation. Independently, a `published` or `processing` wake
+well past its logical time with no live owner lease is presumed lost and
+republished by the owner into its own queue. Within a queue the idempotency
+key makes a false-positive republish a no-op; across queues the claim fences
+duplicates. Repairs run from `start()`, from stale queue deliveries, and log
+a warning when they fire, since each one means a message actually died.
+
+Previews and development keep deployment-scoped namespaces: a preview chain
+dies with its deployment instead of following the branch.
+
+Deleting a deployment prevents its Functions from receiving further work.
+Redis records intentionally remain unless the operator removes them; automatic
+expiry would make reliable pause semantics impossible.
 
 ## Race outcomes
 
@@ -137,7 +322,14 @@ inside its critical section.
 | crash before Queue send | pending Redis token is republished |
 | old message after resume | generation check makes it stale |
 | owner loses its lease mid-execution | `lost` result forces a retry instead of an acknowledgement |
+| concurrent runtime add/modify | one token is rearmed; no second chain |
+| handler finishes after a job mutation | revision check preserves the mutation |
+| retried mutation fails on a conflicting id | the pending wake is still republished |
+| takeover while a wake is in flight | the demoted deployment consumes it and acks it as stale |
+| the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
+| takeover reconciliation races a demoted deployment's handler | ownership and revision CAS keep exactly one writer per job |
 
 These properties prevent parallel logical chains. They do not provide
-exactly-once side effects: if a process dies after external work but before
-its durable bookkeeping, Queue redelivery can execute that work again.
+exactly-once job side effects. If a process dies after an external side effect
+but before the job's updated run time is durably stored, Queue redelivery can
+execute it again. Jobs must be idempotent.

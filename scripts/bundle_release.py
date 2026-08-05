@@ -69,6 +69,7 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-sandbox",
 }
 PEER_DEPENDENCIES = {
+    "vercel-apscheduler": {"apscheduler"},
     "vercel-celery": {"celery"},
     "vercel-dramatiq": {"dramatiq"},
 }

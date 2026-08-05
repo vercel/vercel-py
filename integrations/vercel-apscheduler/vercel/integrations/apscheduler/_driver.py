@@ -15,7 +15,13 @@ from ._time import as_utc
 UTC = timezone.utc
 DRIVER_LEASE_SECONDS = 15 * 60
 DRIVER_RENEW_INTERVAL_SECONDS = 60
+# Long enough that a merely slow delivery or an in-progress retry cycle is
+# never declared dead, short enough that a stranded chain heals within one
+# activation sweep.
+WAKE_REPAIR_GRACE_SECONDS = 10 * 60
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+# Scopes are either a deployment id or "<project>:<environment>".
+_SCOPE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 ClaimState = Literal["claimed", "busy", "stale"]
 FinishState = Literal["advanced", "fenced", "lost"]
@@ -99,11 +105,16 @@ class DriverSnapshot:
 
 _START_SCRIPT = """
 -- vercel-apscheduler-v1:start
+-- ARGV[1] now (ISO-8601), ARGV[2] this deployment.
+-- A different owner means another deployment drives this chain; starting
+-- here is a takeover: one new generation fences every message and handler
+-- of the previous owner, exactly like resuming from a pause.
 local state = redis.call("HGET", KEYS[1], "state")
+local owner = redis.call("HGET", KEYS[1], "owner_deployment")
 local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")
 local changed = 0
 
-if state ~= "running" then
+if state ~= "running" or (owner and owner ~= ARGV[2]) then
   generation = generation + 1
   changed = 1
   redis.call(
@@ -112,15 +123,19 @@ if state ~= "running" then
     "state", "running",
     "generation", tostring(generation),
     "start_status", "pending",
-    "current_sequence", "0"
+    "current_sequence", "0",
+    "owner_deployment", ARGV[2]
   )
   redis.call(
     "HDEL",
     KEYS[1],
     "activation_time",
     "current_logical_time",
-    "current_status"
+    "current_status",
+    "dirty_logical_time"
   )
+elseif not owner then
+  redis.call("HSET", KEYS[1], "owner_deployment", ARGV[2])
 end
 
 redis.call("HSET", KEYS[1], "updated_at", ARGV[1])
@@ -172,6 +187,9 @@ return 1
 _CLAIM_START_SCRIPT = """
 -- vercel-apscheduler-v1:claim-start
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
+  return {"stale", ""}
+end
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[6] then
   return {"stale", ""}
 end
 if tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") ~= tonumber(ARGV[1]) then
@@ -233,6 +251,10 @@ then
 end
 
 local logical_time = ARGV[3]
+local dirty_time = redis.call("HGET", KEYS[1], "dirty_logical_time")
+if dirty_time and (logical_time == "" or dirty_time < logical_time) then
+  logical_time = dirty_time
+end
 redis.call(
   "HSET",
   KEYS[1],
@@ -257,7 +279,8 @@ redis.call(
   "active_owner",
   "active_kind",
   "active_generation",
-  "active_lease_until"
+  "active_lease_until",
+  "dirty_logical_time"
 )
 return {"advanced", logical_time ~= "" and "1" or "", logical_time}
 """
@@ -287,6 +310,9 @@ return 1
 _CLAIM_WAKE_SCRIPT = """
 -- vercel-apscheduler-v1:claim-wake
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
+  return "stale"
+end
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[8] then
   return "stale"
 end
 if tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") ~= tonumber(ARGV[1]) then
@@ -350,6 +376,10 @@ then
 end
 
 local logical_time = ARGV[5]
+local dirty_time = redis.call("HGET", KEYS[1], "dirty_logical_time")
+if dirty_time and (logical_time == "" or dirty_time < logical_time) then
+  logical_time = dirty_time
+end
 local next_sequence = tonumber(ARGV[2])
 if logical_time ~= "" then
   next_sequence = next_sequence + 1
@@ -377,13 +407,43 @@ redis.call(
   "active_kind",
   "active_generation",
   "active_sequence",
-  "active_lease_until"
+  "active_lease_until",
+  "dirty_logical_time"
 )
 return {
   "advanced",
   logical_time ~= "" and tostring(next_sequence) or "",
   logical_time
 }
+"""
+
+_REPAIR_OVERDUE_WAKE_SCRIPT = """
+-- vercel-apscheduler-v1:repair-overdue-wake
+if redis.call("HGET", KEYS[1], "state") ~= "running" then
+  return 0
+end
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[4] then
+  return 0
+end
+local status = redis.call("HGET", KEYS[1], "current_status")
+if status ~= "published" and status ~= "processing" then
+  return 0
+end
+local logical_time = redis.call("HGET", KEYS[1], "current_logical_time")
+if not logical_time or logical_time >= ARGV[1] then
+  return 0
+end
+local lease_until = tonumber(redis.call("HGET", KEYS[1], "active_lease_until") or "0")
+if redis.call("HGET", KEYS[1], "active_owner") and lease_until > tonumber(ARGV[2]) then
+  return 0
+end
+redis.call(
+  "HSET",
+  KEYS[1],
+  "current_status", "pending",
+  "updated_at", ARGV[3]
+)
+return 1
 """
 
 _RENEW_SCRIPT = """
@@ -425,26 +485,33 @@ class RedisDriver:
         self,
         client: Any,
         *,
-        deployment: str,
+        scope: str,
         scheduler_id: str,
+        deployment: str,
     ) -> None:
-        if not _IDENTIFIER_PATTERN.fullmatch(deployment):
+        if not _SCOPE_PATTERN.fullmatch(scope):
             raise ValueError(
-                "VERCEL_DEPLOYMENT_ID must contain only letters, digits, underscores, and hyphens"
+                "state scope must contain only letters, digits, dots, colons, "
+                "underscores, and hyphens"
             )
         if not _IDENTIFIER_PATTERN.fullmatch(scheduler_id):
             raise ValueError(
                 "scheduler identity must contain only letters, digits, underscores, and hyphens"
             )
+        if not _IDENTIFIER_PATTERN.fullmatch(deployment):
+            raise ValueError(
+                "deployment id must contain only letters, digits, underscores, and hyphens"
+            )
         self.client = client
-        self.deployment = deployment
+        self.scope = scope
         self.scheduler_id = scheduler_id
-        self.key = f"vercel:apscheduler:{{{deployment}:{scheduler_id}}}:driver"
+        self.deployment = deployment
+        self.key = f"vercel:apscheduler:{{{scope}:{scheduler_id}}}:driver"
 
     def start(self, now: datetime) -> StartDecision:
-        """Atomically start or resume one durable generation."""
+        """Atomically start, resume, or take over one durable generation."""
         now_utc = as_utc(now, name="now")
-        result = self._eval(_START_SCRIPT, now_utc.isoformat())
+        result = self._eval(_START_SCRIPT, now_utc.isoformat(), self.deployment)
         if not isinstance(result, (list, tuple)) or len(result) != 6:
             raise RuntimeError("Redis returned an invalid APScheduler start result")
         generation = int(_text(result[1]))
@@ -490,6 +557,7 @@ class RedisDriver:
             str(now_utc.timestamp()),
             str(lease_until.timestamp()),
             now_utc.isoformat(),
+            self.deployment,
         )
         if not isinstance(result, (list, tuple)) or len(result) != 2:
             raise RuntimeError("Redis returned an invalid APScheduler start claim")
@@ -562,6 +630,7 @@ class RedisDriver:
                 str(now_utc.timestamp()),
                 str(lease_until.timestamp()),
                 now_utc.isoformat(),
+                self.deployment,
             )
         )
         if result not in {"claimed", "busy", "stale"}:
@@ -620,6 +689,53 @@ class RedisDriver:
                 values[4],
                 values[5],
             ),
+        )
+
+    def repair_overdue_wake(
+        self,
+        now: datetime,
+        *,
+        grace_seconds: int = WAKE_REPAIR_GRACE_SECONDS,
+    ) -> bool:
+        """Demote a wake whose queue message is presumed lost.
+
+        ``published`` asserts that a message exists in a queue, and
+        ``processing`` that an owner is alive; a rollback strands the message
+        in a queue with no forward alias, an alias or retention expiry drops
+        it outright, and a crash orphans the owner. Nothing else ever
+        re-checks those assertions, so the chain would sleep forever. A wake
+        well past its logical time with no live owner lease is presumed dead
+        and demoted to ``pending``, which the standard pending-wake repair
+        then republishes. Racing a message that turns out to be alive is
+        safe: the queue deduplicates the idempotency key within a queue, and
+        the claim fences duplicates across queues.
+        """
+        now_utc = as_utc(now, name="now")
+        overdue_before = now_utc - timedelta(seconds=grace_seconds)
+        result = self._eval(
+            _REPAIR_OVERDUE_WAKE_SCRIPT,
+            overdue_before.isoformat(),
+            str(now_utc.timestamp()),
+            now_utc.isoformat(),
+            self.deployment,
+        )
+        return bool(int(result))
+
+    def owner_deployment(self) -> str | None:
+        """Return the deployment currently driving this chain."""
+        return _optional_text(self.client.hget(self.key, "owner_deployment"))
+
+    def reconciled_deployment(self) -> str | None:
+        """Return the deployment that last synced declarations here."""
+        return _optional_text(self.client.hget(self.key, "reconciled_deployment"))
+
+    def mark_reconciled(self, deployment: str, now: datetime) -> None:
+        self.client.hset(
+            self.key,
+            mapping={
+                "reconciled_deployment": deployment,
+                "updated_at": as_utc(now, name="now").isoformat(),
+            },
         )
 
     def renew(self, owner: str, now: datetime) -> bool:
