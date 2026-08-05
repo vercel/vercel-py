@@ -780,13 +780,8 @@ def test_check_fragments_requires_changed_package_fragment(
     monkeypatch.setattr(release, "parse_fragments", lambda _packages: [])
     monkeypatch.setattr(
         release,
-        "_changed_packages",
-        lambda _packages, *, base, head, code_only: {"pkg"},
-    )
-    monkeypatch.setattr(
-        release,
-        "_release_prepped_packages",
-        lambda _packages, *, base, head: set(),
+        "_changed_paths",
+        lambda *, base, head: {tmp_path / "pkg/code.py"},
     )
 
     assert release.check_fragments(base="origin/main") == 1
@@ -805,13 +800,41 @@ def test_check_fragments_exempts_release_prep_version_bumps(
     monkeypatch.setattr(release, "parse_fragments", lambda _packages: [])
     monkeypatch.setattr(
         release,
-        "_changed_packages",
-        lambda _packages, *, base, head, code_only: {"pkg"},
+        "_changed_paths",
+        lambda *, base, head: {version_file},
     )
+
+    assert release.check_fragments(base="origin/main") == 0
+
+
+def test_check_fragments_ignores_unchanged_fragment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    version_file = tmp_path / "pkg/version.py"
+    fragment_path = tmp_path / "changes/pkg/old.bugfix.md"
+    package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
+    fragment = release.Fragment("pkg", fragment_path, "bugfix", "Fix an older bug.")
+    monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
+    monkeypatch.setattr(release, "parse_fragments", lambda _packages: [fragment])
+    monkeypatch.setattr(release, "_changed_paths", lambda *, base, head: {tmp_path / "pkg/code.py"})
+
+    assert release.check_fragments(base="origin/main") == 1
+    assert "Missing news fragments for changed packages: pkg" in capsys.readouterr().out
+
+
+def test_check_fragments_accepts_changed_fragment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    version_file = tmp_path / "pkg/version.py"
+    fragment_path = tmp_path / "changes/pkg/new.bugfix.md"
+    package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
+    fragment = release.Fragment("pkg", fragment_path, "bugfix", "Fix the current bug.")
+    monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
+    monkeypatch.setattr(release, "parse_fragments", lambda _packages: [fragment])
     monkeypatch.setattr(
         release,
-        "_release_prepped_packages",
-        lambda _packages, *, base, head: {"pkg"},
+        "_changed_paths",
+        lambda *, base, head: {tmp_path / "pkg/code.py", fragment_path},
     )
 
     assert release.check_fragments(base="origin/main") == 0
