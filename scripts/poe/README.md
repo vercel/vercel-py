@@ -14,7 +14,8 @@ its local configuration differences.
   scripts and Poe tasks. It uses lograil for concurrent process dashboards and
   plain-mode output capture.
 - `workspace_poe_resolve.py` attributes package names and paths to workspace
-  packages for scoped runs.
+  packages for scoped runs and filters opt-in aggregate tasks to packages that
+  declare them locally.
 
 The top-level `scripts/fix.sh`, `scripts/lint.sh`, `scripts/test.sh`, and
 `scripts/typecheck.sh` are symlinks to `scripts/workspace-task.sh`. The symlink
@@ -57,6 +58,21 @@ The shared include defines these Poe tasks:
 
 Most packages should not redefine these tasks. Prefer tool configuration in
 `pyproject.toml` and inherit the shared tasks.
+
+Example testing is intentionally not a shared default task. A package that
+owns executable examples opts in by declaring a local task:
+
+```toml
+[tool.poe.tasks.test-examples]
+cmd = "$PYTEST -m live tests/live/test_examples.py"
+```
+
+The package task owns example discovery, pytest configuration, credentials,
+setup, and cleanup. The root package exposes the aggregate
+`uv run poe test-examples` and maps root examples to its internal
+`test-examples-root` task. An unscoped aggregate selects only packages and the
+root that declare the corresponding task; an explicitly requested package
+without support fails with a concise declaration error.
 
 Set `WORKSPACE_POE_PARALLEL=0` to run workspace and shared package checks
 sequentially. `false` and `no` are accepted as equivalent opt-outs. This also
@@ -138,6 +154,9 @@ The equivalent Poe commands are available at the workspace root:
 uv run poe lint vercel-oidc
 uv run poe typecheck vercel-oidc
 uv run poe test src/vercel/tests/unit/test_time.py -- -k coerce_duration
+uv run poe test-examples
+uv run poe test-examples vercel-sandbox
+uv run poe test-examples vercel-sandbox -- -k sessions_and_resume
 uv run poe qa src/vercel/tests/unit/test_time.py
 ```
 
@@ -192,14 +211,24 @@ The managed `pre-push.checks` hook invokes `uv run poe pre-push`, which runs
 news-fragment, lint, typecheck, and test checks concurrently through the
 Python/lograil runner.
 
+Example tasks use package scopes before `--` and pytest arguments after it.
+They run in parallel with the same workspace labels and pytest output parsing
+as the standard test task. Missing credentials are handled by each package's
+own checks, so forked pull requests can safely run the aggregate. For a local
+Sandbox run, callers can provide an OIDC token explicitly:
+
+```sh
+VERCEL_OIDC_TOKEN="$(vc project token)" uv run poe test-examples vercel-sandbox
+```
+
 ## Maintenance
 
 When changing this system, verify all shell code with system's default bash
 (helps catching new bash-isms on macOS).
 
 ```sh
-shellcheck -x scripts/build.sh scripts/test-examples.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
-/bin/bash -n scripts/build.sh scripts/test-examples.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
+shellcheck -x scripts/build.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
+/bin/bash -n scripts/build.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
 python3 -m py_compile scripts/poe/workspace_poe.py scripts/poe/workspace_poe_resolve.py scripts/workspace-task.sh scripts/qa.sh scripts/workspace-root-task.sh
 ```
 

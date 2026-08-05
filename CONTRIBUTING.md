@@ -55,6 +55,33 @@ uv run poe test vercel-oidc
 uv run poe typecheck vercel-queue
 ```
 
+Example tests are an opt-in workspace aggregate. Run all declared example
+tasks, or scope to one package and pass pytest arguments after `--`:
+
+```sh
+uv run poe test-examples
+uv run poe test-examples vercel-sandbox
+uv run poe test-examples vercel-sandbox -- -k sessions_and_resume
+```
+
+Each participating package owns its executable-example discovery, pytest
+runner and configuration, credential checks, setup, and cleanup. Packages opt
+in with a local `[tool.poe.tasks.test-examples]` declaration; packages without
+one are skipped by the unscoped aggregate and are rejected if explicitly
+requested. Root examples are run by the root package's internal
+`test-examples-root` task.
+
+The canonical task does not acquire credentials automatically. For local
+Sandbox runs, supply an OIDC token explicitly when needed:
+
+```sh
+VERCEL_OIDC_TOKEN="$(vc project token)" uv run poe test-examples vercel-sandbox
+```
+
+CI supplies `BLOB_READ_WRITE_TOKEN`, `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, and
+`VERCEL_TEAM_ID`; package-owned checks skip live examples safely when those
+secrets are unavailable.
+
 Auto-fix formatting and simple lint issues with:
 
 ```sh
