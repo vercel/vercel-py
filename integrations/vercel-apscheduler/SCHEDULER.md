@@ -265,14 +265,19 @@ calls to `add_job()` should pass `replace_existing=True`.
 
 ## Deployment behavior
 
-Production and custom environments share one durable namespace, and the
-platform aliases a promoted-away deployment's queue into its successor. The
-two compose into seamless succession: the old deployment's in-flight wake is
-delivered to the new deployment, the shared generation matches, and the chain
-continues on the new code at its very next wake. No request or manual step
-is needed for the chain itself.
+Production and custom environments share one durable namespace, owned by
+exactly one deployment at a time. Queue messages are delivered to the
+deployment that sent them, promoted or not, so ownership is what decides who
+may act: `start()` on a non-owner is a takeover that transfers ownership and
+opens a new generation in one atomic step. From that moment the demoted
+deployment is fenced out of the namespace entirely: its deliveries still
+arrive but every claim turns stale and acks, it repairs and rearms nothing,
+its cold starts write no declarations, and its mutation APIs refuse loudly.
+Its queue simply drains. A rollback is the same operation in the other
+direction; the mechanism has no notion of old and new, only of who owns the
+chain now.
 
-The first time a deployment touches a shared namespace it reconciles the
+On takeover the new owner reconciles the
 store against its own declarations, before planning any due jobs: a job the
 code no longer declares is deleted and never runs, a changed trigger restarts
 its schedule, an unchanged job keeps its progress, and `runtime` jobs are
@@ -280,14 +285,14 @@ never touched. A persisted job whose definition no longer loads under the new
 code (typically a runtime job whose function was removed) is quarantined: it
 leaves the due index, keeps its record for the operator, and logs an error.
 
-Rolling back re-promotes a deployment whose in-flight wake may be stranded in
-the newer deployment's queue, where no alias points. `published` and
-`processing` wakes well past their logical time with no live owner lease are
-therefore presumed lost and republished into the current deployment's queue.
-Within a queue the idempotency key makes a false-positive republish a no-op;
-across queues the claim fences duplicates. Repairs run from `start()`, from
-stale queue deliveries, and log a warning when they fire, since each one
-means a message actually died.
+A takeover strands the previous owner's in-flight wake: it is consumed by
+the demoted deployment and acked as stale, and the new owner's chain starts
+from its own activation. Independently, a `published` or `processing` wake
+well past its logical time with no live owner lease is presumed lost and
+republished by the owner into its own queue. Within a queue the idempotency
+key makes a false-positive republish a no-op; across queues the claim fences
+duplicates. Repairs run from `start()`, from stale queue deliveries, and log
+a warning when they fire, since each one means a message actually died.
 
 Previews and development keep deployment-scoped namespaces: a preview chain
 dies with its deployment instead of following the branch.
@@ -312,9 +317,9 @@ expiry would make reliable pause semantics impossible.
 | concurrent runtime add/modify | one token is rearmed; no second chain |
 | handler finishes after a job mutation | revision check preserves the mutation |
 | retried mutation fails on a conflicting id | the pending wake is still republished |
-| promote while a wake is in flight | queue aliasing delivers it to the new deployment; the shared generation matches and the chain continues |
-| rollback strands the current wake's message | the overdue wake is presumed lost and republished |
-| takeover reconciliation races an old deployment's handler | revision CAS keeps exactly one writer per job |
+| takeover while a wake is in flight | the demoted deployment consumes it and acks it as stale |
+| the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
+| takeover reconciliation races a demoted deployment's handler | ownership and revision CAS keep exactly one writer per job |
 
 These properties prevent parallel logical chains. They do not provide
 exactly-once job side effects. If a process dies after an external side effect

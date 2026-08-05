@@ -253,6 +253,18 @@ class SchedulerAdapter:
         self._bind_runtime()
         return cast("RedisJobCoordinator", self._coordinator)
 
+    def _owns_namespace(self) -> bool:
+        """Whether this deployment currently drives the shared chain.
+
+        Deployment-scoped namespaces are trivially owned. In a shared
+        namespace, only the owner may write declared jobs, publish wakes, or
+        mutate jobs; a stale deployment's touches must be inert so a demoted
+        code version can never resurrect or rewrite production state.
+        """
+        if not self._scope_outlives_deployments:
+            return True
+        return self.driver.owner_deployment() == self.deployment
+
     @property
     def _scope_outlives_deployments(self) -> bool:
         """Whether this namespace is shared by successive deployments.
@@ -305,6 +317,7 @@ class SchedulerAdapter:
             self._pause_local()
             return
         decision = self.driver.start(now)
+        self._reconcile_takeover(now)
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
             self.repair_wakeup(now=now)
@@ -394,6 +407,8 @@ class SchedulerAdapter:
 
     def publish_pending_wakeup(self) -> PublishedWakeup | None:
         """Repair a wake reserved in Redis before a failed Queue send."""
+        if not self._owns_namespace():
+            return None
         snapshot = self.driver.snapshot()
         wake = snapshot.current_wake
         if snapshot.state != "running" or wake is None or wake.status != "pending":
@@ -463,6 +478,12 @@ class SchedulerAdapter:
                 "call scheduler.start() before mutating durable jobs in this Function"
             )
         self.ensure_local_started()
+        if not self._owns_namespace():
+            raise APSchedulerConfigurationError(
+                f'deployment "{self.deployment}" no longer drives scheduler '
+                f'"{self.identity.scheduler_id}"; mutate jobs through the '
+                "promoted deployment"
+            )
 
     def ensure_local_started(self) -> None:
         """Start APScheduler internals without starting a scheduler thread."""
@@ -573,6 +594,12 @@ class SchedulerAdapter:
             raise APSchedulerConfigurationError(
                 f'job "{job.id}" must use the default Vercel inline executor'
             )
+        if not (self.is_runtime_mutation or self.is_wake_mutation) and not self._owns_namespace():
+            # A stale deployment's cold start must not write declarations into
+            # a namespace another deployment drives; taking ownership runs the
+            # reconciliation that writes them instead.
+            self._fill_declaration_defaults(job, jobstore_alias)
+            return False
         existing = jobstore.lookup_job(job.id)
         if existing is None:
             return True
@@ -582,8 +609,15 @@ class SchedulerAdapter:
             )
         if self.is_runtime_mutation or self.is_wake_mutation:
             return True
-        # The skipped write leaves the declared object without the defaults
-        # upstream _real_add_job would fill; reconciliation may persist it.
+        self._fill_declaration_defaults(job, jobstore_alias)
+        return False
+
+    def _fill_declaration_defaults(self, job: Any, jobstore_alias: str) -> None:
+        """Complete a declared job whose store write was skipped.
+
+        The skipped write leaves the object without the defaults upstream
+        ``_real_add_job`` would fill; reconciliation may persist it later.
+        """
         replacements: dict[str, Any] = {
             key: value
             for key, value in self.scheduler._job_defaults.items()
@@ -596,7 +630,6 @@ class SchedulerAdapter:
             )
         job._modify(**replacements)
         job._jobstore_alias = jobstore_alias
-        return False
 
     def wakeup(self) -> None:
         if not is_vercel_runtime():
@@ -654,6 +687,7 @@ class SchedulerAdapter:
                 stores["default"].redis,
                 scope=scope,
                 scheduler_id=self.identity.scheduler_id,
+                deployment=deployment,
             )
         if self._coordinator is None:
             self._coordinator = RedisJobCoordinator(
@@ -711,11 +745,15 @@ class SchedulerAdapter:
         """
         if self._reconciled or not self._scope_outlives_deployments:
             return
+        if not self._owns_namespace():
+            return
         if self.driver.reconciled_deployment() == self.deployment:
             self._reconciled = True
             return
+        missing = dict(self._declared_jobs)
         with self.scheduler._jobstores_lock:
             for job, revision, provenance in self.coordinator.get_all_jobs_with_revisions():
+                missing.pop(str(job.id), None)
                 if provenance != PROVENANCE_DECLARED:
                     continue
                 declared = self._declared_jobs.get(str(job.id))
@@ -743,6 +781,10 @@ class SchedulerAdapter:
                         'Job "%s" changed while reconciling; leaving the newer revision',
                         job.id,
                     )
+            for declared in missing.values():
+                # Declared before this deployment owned the namespace, so the
+                # cold-start materialization deliberately did not write it.
+                self.coordinator.add_job(declared)
         self.driver.mark_reconciled(self.deployment, now)
         self._reconciled = True
 

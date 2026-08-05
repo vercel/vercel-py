@@ -150,11 +150,12 @@ previews. This gives the driver the following guarantees:
 - Occurrences during a pause are skipped on resume instead of replayed in a
   catch-up burst.
 - Production schedules, dynamically added jobs, and the wake chain survive
-  promotions; the new deployment picks up the chain at its next wake and
-  syncs the store to its own declarations first, so a job deleted from code
-  never runs again and a changed trigger takes effect.
-- A wake whose queue message died (for example stranded by a rollback) is
-  presumed lost once it is well past due with no live owner, and republished.
+  promotions: one deployment owns the chain at a time, taking ownership syncs
+  the store to that code's declarations (a job deleted from code never runs
+  again, a changed trigger takes effect), and a demoted deployment's touches
+  are inert.
+- A wake whose queue message died is presumed lost once it is well past due
+  with no live owner, and republished by the owner.
 
 The scheduler's durable identity derives from its `RedisJobStore` `jobs_key`,
 so renaming variables or moving modules never orphans state. Two schedulers

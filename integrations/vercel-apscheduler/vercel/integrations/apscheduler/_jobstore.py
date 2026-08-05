@@ -37,7 +37,8 @@ __all__ = ["PROVENANCE_DECLARED", "PROVENANCE_RUNTIME", "RedisJobCoordinator"]
 # Shared tail of the job write scripts: bump the store revision, persist the
 # job, and rearm the wake token in the same atomic transaction. ARGV[4] is
 # "1" when the write may rearm, ARGV[5] the job's canonical wake candidate,
-# ARGV[6] the current time, ARGV[7] the provenance recorded on insert.
+# ARGV[6] the current time, ARGV[7] the provenance recorded on insert, and
+# ARGV[8] the writing deployment: only the chain's owner may rearm it.
 _WRITE_JOB_FRAGMENT = """
 local revision = redis.call("HINCRBY", KEYS[4], "job_revision", 1)
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
@@ -50,6 +51,7 @@ end
 
 if ARGV[4] == "1" and ARGV[5] ~= ""
   and redis.call("HGET", KEYS[4], "state") == "running"
+  and redis.call("HGET", KEYS[4], "owner_deployment") == ARGV[8]
 then
   local active_owner = redis.call("HGET", KEYS[4], "active_owner")
   if active_owner then
@@ -344,6 +346,7 @@ class RedisJobCoordinator:
             candidate,
             now.isoformat(),
             provenance,
+            self.driver.deployment,
         )
 
     def _serialized_job(self, job: Any) -> tuple[bytes, str]:

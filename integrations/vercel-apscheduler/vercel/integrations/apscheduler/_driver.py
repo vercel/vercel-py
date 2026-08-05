@@ -105,11 +105,16 @@ class DriverSnapshot:
 
 _START_SCRIPT = """
 -- vercel-apscheduler-v1:start
+-- ARGV[1] now (ISO-8601), ARGV[2] this deployment.
+-- A different owner means another deployment drives this chain; starting
+-- here is a takeover: one new generation fences every message and handler
+-- of the previous owner, exactly like resuming from a pause.
 local state = redis.call("HGET", KEYS[1], "state")
+local owner = redis.call("HGET", KEYS[1], "owner_deployment")
 local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")
 local changed = 0
 
-if state ~= "running" then
+if state ~= "running" or (owner and owner ~= ARGV[2]) then
   generation = generation + 1
   changed = 1
   redis.call(
@@ -118,7 +123,8 @@ if state ~= "running" then
     "state", "running",
     "generation", tostring(generation),
     "start_status", "pending",
-    "current_sequence", "0"
+    "current_sequence", "0",
+    "owner_deployment", ARGV[2]
   )
   redis.call(
     "HDEL",
@@ -128,6 +134,8 @@ if state ~= "running" then
     "current_status",
     "dirty_logical_time"
   )
+elseif not owner then
+  redis.call("HSET", KEYS[1], "owner_deployment", ARGV[2])
 end
 
 redis.call("HSET", KEYS[1], "updated_at", ARGV[1])
@@ -179,6 +187,9 @@ return 1
 _CLAIM_START_SCRIPT = """
 -- vercel-apscheduler-v1:claim-start
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
+  return {"stale", ""}
+end
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[6] then
   return {"stale", ""}
 end
 if tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") ~= tonumber(ARGV[1]) then
@@ -301,6 +312,9 @@ _CLAIM_WAKE_SCRIPT = """
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return "stale"
 end
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[8] then
+  return "stale"
+end
 if tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") ~= tonumber(ARGV[1]) then
   return "stale"
 end
@@ -408,6 +422,9 @@ _REPAIR_OVERDUE_WAKE_SCRIPT = """
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return 0
 end
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[4] then
+  return 0
+end
 local status = redis.call("HGET", KEYS[1], "current_status")
 if status ~= "published" and status ~= "processing" then
   return 0
@@ -470,6 +487,7 @@ class RedisDriver:
         *,
         scope: str,
         scheduler_id: str,
+        deployment: str,
     ) -> None:
         if not _SCOPE_PATTERN.fullmatch(scope):
             raise ValueError(
@@ -480,15 +498,20 @@ class RedisDriver:
             raise ValueError(
                 "scheduler identity must contain only letters, digits, underscores, and hyphens"
             )
+        if not _IDENTIFIER_PATTERN.fullmatch(deployment):
+            raise ValueError(
+                "deployment id must contain only letters, digits, underscores, and hyphens"
+            )
         self.client = client
         self.scope = scope
         self.scheduler_id = scheduler_id
+        self.deployment = deployment
         self.key = f"vercel:apscheduler:{{{scope}:{scheduler_id}}}:driver"
 
     def start(self, now: datetime) -> StartDecision:
-        """Atomically start or resume one durable generation."""
+        """Atomically start, resume, or take over one durable generation."""
         now_utc = as_utc(now, name="now")
-        result = self._eval(_START_SCRIPT, now_utc.isoformat())
+        result = self._eval(_START_SCRIPT, now_utc.isoformat(), self.deployment)
         if not isinstance(result, (list, tuple)) or len(result) != 6:
             raise RuntimeError("Redis returned an invalid APScheduler start result")
         generation = int(_text(result[1]))
@@ -534,6 +557,7 @@ class RedisDriver:
             str(now_utc.timestamp()),
             str(lease_until.timestamp()),
             now_utc.isoformat(),
+            self.deployment,
         )
         if not isinstance(result, (list, tuple)) or len(result) != 2:
             raise RuntimeError("Redis returned an invalid APScheduler start claim")
@@ -606,6 +630,7 @@ class RedisDriver:
                 str(now_utc.timestamp()),
                 str(lease_until.timestamp()),
                 now_utc.isoformat(),
+                self.deployment,
             )
         )
         if result not in {"claimed", "busy", "stale"}:
@@ -692,8 +717,13 @@ class RedisDriver:
             overdue_before.isoformat(),
             str(now_utc.timestamp()),
             now_utc.isoformat(),
+            self.deployment,
         )
         return bool(int(result))
+
+    def owner_deployment(self) -> str | None:
+        """Return the deployment currently driving this chain."""
+        return _optional_text(self.client.hget(self.key, "owner_deployment"))
 
     def reconciled_deployment(self) -> str | None:
         """Return the deployment that last synced declarations here."""

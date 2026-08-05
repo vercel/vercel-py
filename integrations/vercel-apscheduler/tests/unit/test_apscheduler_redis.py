@@ -58,6 +58,7 @@ def test_real_redis_driver_fences_concurrent_lifecycle_transitions() -> None:
         client,
         scope="dpl_driver_test",
         scheduler_id="scheduler",
+        deployment="dpl_driver_test",
     )
     client.delete(driver.key)
     try:
@@ -139,6 +140,7 @@ def test_real_redis_dormant_start_reserves_no_wake() -> None:
         client,
         scope="dpl_dormant_test",
         scheduler_id="scheduler",
+        deployment="dpl_dormant_test",
     )
     client.delete(driver.key)
     try:
@@ -166,6 +168,7 @@ def test_real_redis_lost_owner_is_not_mistaken_for_fence() -> None:
         client,
         scope="dpl_lost_owner_test",
         scheduler_id="scheduler",
+        deployment="dpl_lost_owner_test",
     )
     client.delete(driver.key)
     try:
@@ -215,6 +218,7 @@ def test_real_redis_overdue_published_wake_is_repaired() -> None:
         client,
         scope="dpl_repair_test",
         scheduler_id="scheduler",
+        deployment="dpl_repair_test",
     )
     client.delete(driver.key)
     try:
@@ -257,6 +261,65 @@ def test_real_redis_overdue_published_wake_is_repaired() -> None:
         assert driver.repair_overdue_wake(overdue) is False
     finally:
         client.delete(driver.key)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_takeover_fences_the_previous_deployment() -> None:
+    """A promoted deployment takes the chain; the demoted one goes inert.
+
+    Queue deliveries keep reaching a demoted deployment, so its claims,
+    repairs, and rearms against the shared namespace must all turn stale the
+    moment another deployment starts. Rolling back is the same operation in
+    the other direction.
+    """
+    assert REDIS_URL is not None
+    client = Redis.from_url(REDIS_URL)
+    first = RedisDriver(
+        client,
+        scope="prj_fence:production",
+        scheduler_id="scheduler",
+        deployment="dpl_first",
+    )
+    second = RedisDriver(
+        client,
+        scope="prj_fence:production",
+        scheduler_id="scheduler",
+        deployment="dpl_second",
+    )
+    client.delete(first.key)
+    try:
+        now = datetime.now(UTC)
+        overdue = now + timedelta(hours=1)
+        assert first.start(now).changed is True
+        assert first.claim_start(1, "start", now).state == "claimed"
+        finish = first.finish_start(1, "start", now + timedelta(minutes=1), now)
+        token = finish.wake
+        assert token is not None
+        first.release("start")
+        first.mark_wake_published(1, 1, now)
+        assert first.owner_deployment() == "dpl_first"
+
+        # Promote: the second deployment starts while the chain is running.
+        takeover = second.start(now)
+        assert takeover.changed is True
+        assert takeover.generation == 2
+        assert second.owner_deployment() == "dpl_second"
+
+        # The demoted deployment is fenced out of everything.
+        assert first.claim_wake(token, "old-wake", now).state == "stale"
+        assert first.claim_start(2, "old-start", now).state == "stale"
+        assert first.repair_overdue_wake(overdue) is False
+        assert first.start(now).changed is True  # explicit start = rollback
+
+        # Rollback: ownership and a fresh generation move back.
+        assert first.owner_deployment() == "dpl_first"
+        assert second.claim_start(3, "stale-second", now).state == "stale"
+        assert second.repair_overdue_wake(overdue) is False
+    finally:
+        client.delete(first.key)
 
 
 def _assert_spammed_lifecycle_converges(

@@ -113,8 +113,9 @@ class InMemoryRedisJobStore(RedisJobStore):
 
 
 class FakeDriver:
-    def __init__(self) -> None:
+    def __init__(self, deployment: str = "dpl_test") -> None:
         self.lock = Lock()
+        self.deployment = deployment
         self.state = "paused"
         self.generation = 0
         self.start_status: str | None = None
@@ -122,7 +123,11 @@ class FakeDriver:
         self.current: WakeToken | None = None
         self.last_sequence = 0
         self.owner: str | None = None
+        self.owner_deployment_value: str | None = None
         self.reconciled: str | None = None
+
+    def owner_deployment(self) -> str | None:
+        return self.owner_deployment_value
 
     def start(
         self,
@@ -132,7 +137,11 @@ class FakeDriver:
     ) -> StartDecision:
         del now, idle_timeout_seconds
         with self.lock:
-            changed = self.state != "running"
+            takeover = (
+                self.owner_deployment_value is not None
+                and self.owner_deployment_value != self.deployment
+            )
+            changed = self.state != "running" or takeover
             if changed:
                 self.state = "running"
                 self.generation += 1
@@ -140,6 +149,7 @@ class FakeDriver:
                 self.activation_time = None
                 self.current = None
                 self.last_sequence = 0
+            self.owner_deployment_value = self.deployment
             return StartDecision(
                 generation=self.generation,
                 changed=changed,
@@ -478,6 +488,9 @@ class InMemoryJobCoordinator(RedisJobCoordinator):
     def _rearm(self, job: Any, *, rearm: bool) -> None:
         if not rearm:
             return
+        driver_owner = self.driver.owner_deployment()
+        if driver_owner is not None and driver_owner != self.driver.deployment:
+            return
         next_run_time = getattr(job, "next_run_time", None)
         if next_run_time is None:
             return
@@ -696,6 +709,8 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
         second_adapter._bind_runtime()
     second_adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     second_adapter.coordinator.driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    # The new deployment holds its own driver handle on the shared hash.
+    driver.deployment = "dpl_two"
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
         return_value="msg",
@@ -707,6 +722,61 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
     assert store.jobs["changed"].next_run_time != changed_run_time
     assert store.jobs["changed"].trigger.interval == timedelta(hours=2)
     assert driver.reconciled == "dpl_two"
+
+
+def test_stale_deployment_touches_are_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A demoted deployment must not write into the shared namespace.
+
+    Its cold start must not resurrect declarations another version deleted,
+    its wake publishes must stay unsent, and its mutation APIs must refuse
+    loudly instead of racing the owner.
+    """
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_123")
+
+    owner_scheduler, _owner_adapter, driver = scheduler_with_driver()
+    owner_scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        hours=1,
+        id="kept",
+        replace_existing=True,
+    )
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg",
+    ):
+        owner_scheduler.start()
+    store: Any = owner_scheduler._jobstores["default"]
+    assert set(store.jobs) == {"kept"}
+
+    # A demoted deployment cold-starts against the shared store: same code
+    # age, different declarations ("legacy" was deleted by the owner's code).
+    _clear_scheduler_registrations()
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_stale")
+    stale = BlockingScheduler(timezone=UTC, jobstores={"default": store})
+    stale.add_job(durable_noop_job, "interval", hours=1, id="legacy", replace_existing=True)
+    stale_adapter = get_adapter(stale)
+    assert stale_adapter is not None
+    with patch(
+        "vercel.integrations.apscheduler._adapter.RedisJobCoordinator",
+        InMemoryJobCoordinator,
+    ):
+        stale_adapter._bind_runtime()
+    stale_adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    stale_adapter.coordinator.driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    driver.deployment = "dpl_stale"
+    driver.owner_deployment_value = "dpl_test"  # the promoted deployment
+
+    stale_adapter.ensure_local_started()
+
+    assert set(store.jobs) == {"kept"}  # no resurrection of "legacy"
+    assert stale_adapter.publish_pending_wakeup() is None
+    stale_adapter._lifecycle_called = True
+    with pytest.raises(APSchedulerConfigurationError, match="no longer drives"):
+        stale_adapter.prepare_runtime_mutation()
 
 
 def test_two_schedulers_sharing_a_store_key_collide_loudly() -> None:
