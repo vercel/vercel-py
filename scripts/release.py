@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+
 try:
     from scripts import workspace
 except ImportError:  # pragma: no cover - script execution path
@@ -705,9 +706,14 @@ def check_fragments(base: str | None = None) -> int:
         print("Could not detect a base branch for news fragment enforcement.")
         return 1
 
-    changed = _changed_packages(packages_by_name, base=base, head=head, code_only=True)
-    changed -= _release_prepped_packages(packages_by_name, base=base, head=head)
-    packages_with_fragments = {fragment.package for fragment in fragments}
+    changed_paths = _changed_paths(base=base, head=head)
+    changed = packages_for_paths(packages_by_name, changed_paths, code_only=True)
+    changed -= {
+        name for name, package in packages_by_name.items() if package.version_file in changed_paths
+    }
+    packages_with_fragments = {
+        fragment.package for fragment in fragments if fragment.path in changed_paths
+    }
     missing = sorted(changed - packages_with_fragments)
     if missing:
         packages = ", ".join(missing)
@@ -744,15 +750,6 @@ def _changed_packages(
         _changed_paths(base=base, head=head),
         code_only=code_only,
     )
-
-
-def _release_prepped_packages(
-    packages_by_name: dict[str, workspace.Package], *, base: str, head: str | None
-) -> set[str]:
-    changed_paths = _changed_paths(base=base, head=head)
-    return {
-        name for name, package in packages_by_name.items() if package.version_file in changed_paths
-    }
 
 
 def _changed_paths(*, base: str, head: str | None) -> set[Path]:
