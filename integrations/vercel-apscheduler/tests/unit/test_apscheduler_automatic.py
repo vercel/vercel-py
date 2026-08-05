@@ -40,6 +40,7 @@ def test_registers_request_driven_automatic_activation(
     )
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.setenv(
         _automatic.SUBSCRIBERS_ENV,
         '[{"id":"scheduler","entrypoint":"scheduler:scheduler"}]',
@@ -123,12 +124,32 @@ def test_preview_deployments_do_not_activate_automatically(
 ) -> None:
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.setenv(
         _automatic.SUBSCRIBERS_ENV,
         '[{"id":"scheduler","entrypoint":"scheduler:scheduler"}]',
     )
 
     assert not _automatic._automatic_environment()
+
+
+def test_custom_environments_activate_automatically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom environment is a named environment, not a preview.
+
+    It reports ``VERCEL_ENV=preview``, so the gate must resolve the
+    environment exactly the way durable state scoping does.
+    """
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.setenv("VERCEL_TARGET_ENV", "staging")
+    monkeypatch.setenv(
+        _automatic.SUBSCRIBERS_ENV,
+        '[{"id":"scheduler","entrypoint":"scheduler:scheduler"}]',
+    )
+
+    assert _automatic._automatic_environment()
 
 
 def test_subscriber_request_does_not_register_automatic_activation(

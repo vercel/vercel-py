@@ -15,11 +15,11 @@ from ._options import (
     is_discovery_runtime,
     is_queue_serving_runtime,
     is_vercel_runtime,
+    resolve_environment,
 )
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
-ENVIRONMENT_ENV = "VERCEL_ENV"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 ACTIVATION_HOOK_NAME = "vercel-apscheduler:auto-activate"
 # Activation is idempotent; the periodic re-run is what notices and heals a
@@ -100,10 +100,17 @@ def _warn_takeover_unavailable() -> None:
 
 
 def _automatic_environment() -> bool:
+    """Whether this deployment's environment activates schedulers on traffic.
+
+    Named environments (production and custom environments) share one durable
+    chain that must start and take over without a manual call, so they always
+    activate. The resolution must match ``resolve_state_scope``: a custom
+    environment reports ``VERCEL_ENV=preview`` but is a named environment.
+    """
     if not is_vercel_runtime() or not environ.get(SUBSCRIBERS_ENV):
         return False
-    environment = (environ.get(ENVIRONMENT_ENV) or "").strip().casefold()
-    return environment == "production"
+    environment = resolve_environment().casefold()
+    return environment not in {"", "development", "preview"}
 
 
 def _activate_configured_schedulers(*, takeover_allowed: bool) -> None:

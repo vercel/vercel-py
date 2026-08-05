@@ -59,10 +59,11 @@ makes it paused. `resume()` has the same durable transition as starting a
 paused scheduler. Each method is idempotent. The caller must be executing in
 the target deployment; v1 has no cross-deployment control API.
 
-Production additionally registers an automatic activation hook during import.
-The Vercel Python Runtime executes it around the application's first real
-request, after request-scoped OIDC credentials are available. Automatic
-activation never overrides an explicitly paused driver.
+Named environments (production and custom environments) additionally register
+an automatic activation hook during import. The Vercel Python Runtime
+executes it around the application's first real request, after request-scoped
+OIDC credentials are available. Automatic activation never overrides an
+explicitly paused driver.
 
 Outside Vercel, APScheduler's original methods are used.
 
@@ -295,6 +296,14 @@ and acks, it repairs and rearms nothing, its cold starts write no
 declarations, and its mutation APIs refuse loudly. Its queue simply drains.
 A rollback is the same operation in the other direction; the mechanism has
 no notion of old and new, only of who owns the chain now.
+
+Automatic takeover is traffic-driven: it happens on the first request the
+promoted deployment serves through an environment alias. After promoting or
+rolling back a deployment that receives no organic traffic, send one request
+through the environment's domain (or schedule a cron heartbeat) so the chain
+hands over promptly. Alias routing is judged by the request host, so do not
+point a manually created alias at an old deployment of a scheduler project:
+requests through that alias would let the old deployment take the chain.
 
 On takeover the new owner reconciles the
 store against its own declarations, before planning any due jobs: a job the
