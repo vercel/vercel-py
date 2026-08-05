@@ -4,7 +4,7 @@ from ._adapter import (
     install_vercel_apscheduler_integration,
     is_scheduler_subscriber,
 )
-from ._driver import APSchedulerConfigurationError
+from ._types import APSchedulerConfigurationError
 from .version import __version__
 
 __all__ = [

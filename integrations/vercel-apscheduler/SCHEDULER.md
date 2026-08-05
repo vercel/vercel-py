@@ -295,20 +295,43 @@ does not wake periodically to repair an otherwise unobserved ambiguous
 failure. A delayed repair can pass a finite misfire window; jobs that opt
 into one and must remain eligible after repairs should size it accordingly.
 
-## Redis and execution requirements
+## Backends and execution requirements
 
-v1 supports exactly one job store named `default`. It must be APScheduler's
-Redis-backed `RedisJobStore`, and it is also the lifecycle coordinator. The
-integration namespaces the job-store keys with the state scope and the
-scheduler identity, so distinct environments and previews can share a Redis
-database without sharing jobs or driver state.
+v1 supports exactly one job store named `default`. With APScheduler's
+Redis-backed `RedisJobStore` configured, it is also the lifecycle
+coordinator: the integration namespaces the job-store keys with the state
+scope and the scheduler identity, so distinct environments and previews can
+share a Redis database without sharing jobs or driver state. Redis lifecycle
+state has no TTL, so use a durable Redis service rather than an ephemeral
+cache. Redis failures fail closed: lifecycle methods raise instead of
+claiming success, Queue handlers fail and are retried, and no job runs
+without acquiring the Redis owner lease.
 
-Runtime Cache is not suitable. It is evictable and cannot provide the durable
-atomic state needed for a pause to remain paused. Redis lifecycle state has no
-TTL, so use a durable Redis service rather than an ephemeral cache. Redis
-failures fail closed: lifecycle methods raise instead of claiming success,
-Queue handlers fail and are retried, and no job runs without acquiring the
-Redis owner lease.
+Without a `RedisJobStore` (or with `VERCEL_APSCHEDULER_BACKEND=cache`), the
+integration runs on the Vercel Runtime Cache, which is evictable and has no
+compare-and-swap. The cache backend therefore relocates each guarantee to
+something that can actually carry it:
+
+- The single-successor rule moves to the queue: racing finishers compute the
+  same canonical successor and the same idempotency key, and the queue
+  accepts the publication once. Claims become best-effort filters, so
+  duplicate wake *executions* are more likely than under Redis; the contract
+  stays at-least-once.
+- Chain progress travels in the messages: a claim adopts a generation or
+  wake token that is ahead of the local document, so an evicted document —
+  or another process's memory under `vercel dev` — never strands the chain.
+  A `paused` document fences only its own and older generations; a resume's
+  new generation revives it.
+- Job-store writes are owner-fenced best-effort: the fence is checked
+  against the driver document rather than atomically with the write, so a
+  demoted deployment's stale pass aborts with the same error as in Redis
+  mode, but a narrow read-write race remains within the documented
+  best-effort envelope.
+- Code-declared jobs are durable because code is the backup: reconciliation
+  rewrites them from the declarations whenever the documents are missing.
+  Runtime-added jobs and lifecycle flags are best-effort by declared policy;
+  `pause()` additionally publishes a queue-borne control message so the flag
+  reaches the process serving the chain even where cache state does not.
 
 Jobs use the integration's inline executor so that a wake remains active until
 the job has completed and the durable job-store update has happened. Custom

@@ -10,7 +10,6 @@ import logging
 from os import environ
 from time import monotonic
 
-from ._driver import APSchedulerConfigurationError
 from ._imports import BaseScheduler
 from ._options import (
     is_discovery_runtime,
@@ -18,6 +17,7 @@ from ._options import (
     is_vercel_runtime,
     resolve_environment,
 )
+from ._types import APSchedulerConfigurationError
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 

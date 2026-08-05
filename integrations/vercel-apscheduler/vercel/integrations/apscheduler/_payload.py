@@ -7,8 +7,8 @@ from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
 
-from ._driver import WakeToken
 from ._time import as_utc
+from ._types import WakeToken
 
 START_KIND = "apscheduler.start"
 START_VERSION = 1
