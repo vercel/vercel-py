@@ -59,6 +59,12 @@ makes it paused. `resume()` has the same durable transition as starting a
 paused scheduler. Each method is idempotent. The caller must be executing in
 the target deployment; v1 has no cross-deployment control API.
 
+Named environments (production and custom environments) additionally register
+an automatic activation hook during import. The Vercel Python Runtime
+executes it around the application's first real request, after request-scoped
+OIDC credentials are available. Automatic activation never overrides an
+explicitly paused driver.
+
 Outside Vercel, APScheduler's original methods are used.
 
 ## Durable state
@@ -115,6 +121,11 @@ insert-if-absent semantics, so a cold import cannot overwrite a job changed
 through a runtime API. `finish_start` then atomically marks the start active
 and reserves sequence 1 — or, when no job is scheduled, leaves the driver
 dormant with no current wake.
+
+Automatic activation performs the same generation reservation, with one
+important distinction: it never changes an explicitly paused driver. Many cold
+Function instances can attempt activation concurrently, but the Redis
+transition produces one generation and one start identity.
 
 ## One wake
 
@@ -224,9 +235,11 @@ Executing jobs may also mutate the store through the same APIs. An in-job
 persisted job, and the finishing wake reads the store again, so the change is
 reflected in the successor it reserves.
 
-Every cold Function instance that performs a runtime mutation must first call
-the idempotent `scheduler.start()`. Before that boundary, `add_job()` calls
-are treated as module-level declarations. Raw writes to Redis job-store keys
+Automatic activation establishes the boundary before a production request
+reaches the application. Without automatic activation, every cold Function
+instance that performs a runtime mutation must first call the idempotent
+`scheduler.start()`. Before that boundary, `add_job()` calls are treated as
+module-level declarations. Raw writes to Redis job-store keys
 are unsupported because they bypass atomic wake rearming and revision checks.
 
 The no-heartbeat design has one deliberate liveness contract: `start()` and
@@ -275,13 +288,22 @@ that sent it, promoted or not; when the platform enables queue aliasing for a
 project, in-flight messages are instead handed to the environment's current
 deployment. Ownership therefore decides who may act, never who received a
 delivery: `start()` on a non-owner is a takeover that transfers ownership and
-opens a new generation in one atomic step. From that moment the demoted
-deployment is fenced out of the namespace entirely: its deliveries still
-arrive but every claim turns stale and acks, it repairs and rearms nothing,
-its cold starts write no declarations, and its mutation APIs refuse loudly.
-Its queue simply drains. A rollback is the same operation in the other
-direction; the mechanism has no notion of old and new, only of who owns the
-chain now.
+opens a new generation in one atomic step, and a promoted deployment takes
+over automatically on its first request that arrives through an environment
+alias. From that moment the demoted deployment is fenced out of the
+namespace entirely: its deliveries still arrive but every claim turns stale
+and acks, it repairs and rearms nothing, its cold starts write no
+declarations, and its mutation APIs refuse loudly. Its queue simply drains.
+A rollback is the same operation in the other direction; the mechanism has
+no notion of old and new, only of who owns the chain now.
+
+Automatic takeover is traffic-driven: it happens on the first request the
+promoted deployment serves through an environment alias. After promoting or
+rolling back a deployment that receives no organic traffic, send one request
+through the environment's domain (or schedule a cron heartbeat) so the chain
+hands over promptly. Alias routing is judged by the request host, so do not
+point a manually created alias at an old deployment of a scheduler project:
+requests through that alias would let the old deployment take the chain.
 
 On takeover the new owner reconciles the
 store against its own declarations, before planning any due jobs: a job the
@@ -328,6 +350,8 @@ expiry would make reliable pause semantics impossible.
 | takeover while a wake is in flight | the demoted deployment consumes it and acks it as stale |
 | the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
 | takeover reconciliation races a demoted deployment's handler | ownership and revision CAS keep exactly one writer per job |
+| concurrent first requests | one automatic generation and one start identity |
+| request arrives after explicit pause | state remains paused |
 
 These properties prevent parallel logical chains. They do not provide
 exactly-once job side effects. If a process dies after an external side effect

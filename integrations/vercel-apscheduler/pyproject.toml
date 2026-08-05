@@ -44,6 +44,9 @@ extend = "../ruff.toml"
     "SLF001",  # integration relies on APScheduler private extension points.
     "TRY400",  # executor lookup failure is logged with APScheduler context.
 ]
+"vercel/integrations/apscheduler/_automatic.py" = [
+    "PLC0415",  # runtime-only imports avoid a hard runtime dependency and an adapter cycle.
+]
 "vercel/integrations/apscheduler/_jobstore.py" = [
     "S403",  # APScheduler's RedisJobStore persistence format is pickle-based.
     "SLF001",  # coordinated reads must reuse APScheduler's reconstitution hook.

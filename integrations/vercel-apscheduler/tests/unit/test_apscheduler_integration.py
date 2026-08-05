@@ -157,6 +157,47 @@ class FakeDriver:
                 current_wake=self.current,
             )
 
+    def auto_activate(
+        self,
+        now: datetime,
+        *,
+        takeover_allowed: bool = False,
+    ) -> StartDecision:
+        del now
+        with self.lock:
+            foreign = (
+                self.owner_deployment_value is not None
+                and self.owner_deployment_value != self.deployment
+            )
+            explicitly_paused = self.state == "paused" and self.generation > 0
+            if foreign and (not takeover_allowed or explicitly_paused):
+                return StartDecision(
+                    generation=self.generation,
+                    changed=False,
+                    start_status=self.start_status or "",
+                    current_wake=self.current,
+                    state="paused" if explicitly_paused else "running",
+                    owned=False,
+                )
+            if foreign or (not explicitly_paused and self.state != "running"):
+                self.state = "running"
+                self.generation += 1
+                self.start_status = "pending"
+                self.activation_time = None
+                self.current = None
+                self.last_sequence = 0
+                changed = True
+            else:
+                changed = False
+            self.owner_deployment_value = self.deployment
+            return StartDecision(
+                generation=self.generation,
+                changed=changed,
+                start_status=self.start_status or "",
+                current_wake=self.current,
+                state="paused" if explicitly_paused else "running",
+            )
+
     def pause(self, now: datetime) -> bool:
         del now
         with self.lock:
@@ -760,6 +801,35 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
     assert driver.reconciled == "dpl_two"
 
 
+def test_implicit_activation_respects_chain_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployment-URL traffic never adopts a chain; alias traffic does."""
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_123")
+    _scheduler, adapter, driver = scheduler_with_driver()
+    driver.owner_deployment_value = "dpl_other"
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg",
+    ) as send:
+        adapter.auto_activate()
+
+    send.assert_not_called()
+    assert driver.owner_deployment_value == "dpl_other"
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg",
+    ) as send:
+        adapter.auto_activate(takeover_allowed=True)
+
+    send.assert_called_once()
+    assert driver.owner_deployment_value == "dpl_test"
+    assert driver.reconciled == "dpl_test"
+
+
 def test_stale_deployment_touches_are_inert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -912,6 +982,29 @@ def test_repeated_start_publishes_one_generation() -> None:
     assert driver.state == "running"
     assert driver.generation == 1
     assert StartPayload.from_payload(send.call_args.args[1]).generation == 1
+
+
+def test_automatic_activation_starts_once_and_respects_explicit_pause() -> None:
+    scheduler, adapter, driver = scheduler_with_driver()
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        adapter.auto_activate()
+        adapter.auto_activate()
+
+        send.assert_called_once()
+        assert driver.state == "running"
+        assert driver.generation == 1
+
+        scheduler.pause()
+        adapter.auto_activate()
+
+    send.assert_called_once()
+    assert driver.state == "paused"
+    assert driver.generation == 1
+    assert scheduler.state == STATE_PAUSED
 
 
 def test_start_paused_waits_for_resume_to_publish() -> None:

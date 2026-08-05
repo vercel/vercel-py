@@ -22,11 +22,11 @@ vc link
 vc deploy --prod
 ```
 
-Start the scheduler once through the authenticated route:
+Production activates the scheduler automatically on its first request. For
+example:
 
 ```bash
-curl -X POST -H "x-admin-secret: $APSCHEDULER_ADMIN_SECRET" \
-  https://your-deployment.example/scheduler/start
+curl https://your-deployment.example/
 ```
 
 The example exposes authenticated `/scheduler/start`, `/scheduler/pause`, and
