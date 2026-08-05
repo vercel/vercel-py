@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 - 2026-08-05
+
+### Internal
+
+- Run Sandbox examples through the package-owned workspace Poe task. (#234)
+
 ## 0.3.0 - 2026-07-31
 
 ### Features

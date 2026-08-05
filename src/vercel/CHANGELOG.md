@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 - 2026-08-05
+
+### Breaking Changes
+
+- The local workflow world now stores its `.workflow-data` files as JSON in the same format the TypeScript `@workflow/world-local` package uses, instead of CBOR. Runs, steps, hooks and events written by either SDK are now readable by the other. Existing `.workflow-data` directories are not readable in the new format and should be deleted. (#226)
+- Workflow payloads now use the devalue wire format of the TypeScript `@workflow/core` package, and workflows and steps are called with keyword arguments only. (#224)
+
+### Features
+
+- Workflow payloads can now carry native `Decimal`, `UUID`, `date`, `time`, `timedelta` and `Path`, and `@serializable` (or `register_serializable()`) is offered for custom classes. (#224)
+- Add sync and async clients with typed models for managing project-level routing rules and versions. (#219)
+
 ## 0.8.1 - 2026-08-02
 
 ### Bug Fixes
