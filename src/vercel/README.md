@@ -11,6 +11,7 @@ helpers.
 - `vercel.deployments` - deployment creation and deployment file upload helpers
 - `vercel.functions` - convenience exports for function code
 - `vercel.oidc` - OIDC token lookup, refresh, credentials, and payload decoding
+- `vercel.project_routes` - project-level routing rule staging, publishing, and history
 - `vercel.projects` - project list, create, update, and delete helpers
 - `vercel.sandbox` - Sandbox creation, commands, files, and snapshots, delivered by the
   separately owned `vercel-sandbox` dependency
