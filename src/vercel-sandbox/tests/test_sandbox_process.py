@@ -7,11 +7,12 @@ from collections.abc import AsyncIterator, Iterator
 import httpx
 import pytest
 import respx
+from sandbox_fixtures import sandbox_service_options
 
 from vercel import sandbox
+from vercel._internal.core.options import ServiceOptions
 from vercel.api import session
-from vercel.sandbox import SandboxServiceOptions, sync as sandbox_sync
-from vercel.sandbox._internal.options import SandboxCredentials
+from vercel.sandbox import sync as sandbox_sync
 
 
 def _sandbox_response() -> dict[str, object]:
@@ -140,16 +141,11 @@ def _chunked_ndjson(*records: object) -> list[bytes]:
     return [content[offset : offset + 1] for offset in range(len(content))]
 
 
-def _session_options() -> list[SandboxServiceOptions]:
-    async def credentials_factory() -> SandboxCredentials:
-        return SandboxCredentials(token="token", team_id="team_1", project_id="prj_1")
-
-    return [
-        SandboxServiceOptions(
-            base_url="https://sandbox.test",
-            credentials_factory=credentials_factory,
-        )
-    ]
+def _session_options() -> list[ServiceOptions]:
+    return sandbox_service_options(
+        team_id="team_1",
+        project_id="prj_1",
+    )
 
 
 def test_public_process_exports() -> None:
@@ -157,13 +153,17 @@ def test_public_process_exports() -> None:
         "CompletedProcess",
         "Process",
         "ProcessStatus",
+        "SandboxCredentials",
+        "SandboxCredentialsFactory",
         "TextReader",
     ):
         assert name in sandbox.__all__
     for name in (
         "CompletedProcess",
         "ProcessStatus",
+        "SandboxCredentials",
         "SyncProcess",
+        "SyncSandboxCredentialsFactory",
         "SyncTextReader",
     ):
         assert name in sandbox_sync.__all__

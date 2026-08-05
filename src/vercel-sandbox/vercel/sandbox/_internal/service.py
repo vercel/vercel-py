@@ -38,7 +38,13 @@ from vercel.sandbox._internal.models import (
     SnapshotRetentionUpdate,
     TagFilter,
 )
-from vercel.sandbox._internal.options import SandboxServiceOptions
+from vercel.sandbox._internal.options import (
+    SandboxCredentials,
+    SandboxCredentialsFactory,
+    SandboxServiceOptions,
+    SyncSandboxCredentialsFactory,
+    SyncSandboxServiceOptions,
+)
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.runtime_common import (
     _StreamUploadFileEntry,
@@ -1033,9 +1039,44 @@ class SandboxArchiveUpload:
         await self._writer.abort()
 
 
-def get_sandbox_service(session: "SdkSession | SyncSdkSession") -> SandboxService:
+def _adapt_sync_credentials_factory(
+    factory: SyncSandboxCredentialsFactory,
+) -> SandboxCredentialsFactory:
+    async def credentials_factory() -> SandboxCredentials:
+        return factory()
+
+    return credentials_factory
+
+
+def get_sandbox_service(session: "SdkSession") -> SandboxService:
     def factory() -> SandboxService:
         options = session.get_service_option(SandboxServiceOptions) or SandboxServiceOptions()
+        return SandboxService(
+            api_client=SandboxApiClient(
+                base_url=options.base_url,
+                credentials_factory=options.credentials_factory,
+                transport=session.get_transport(),
+                file_transfer_timeout=options.file_transfer_timeout,
+            ),
+            options=options,
+            ensure_open=session.check_open,
+            sleep=session.sleep,
+            staging_file_runtime=session.get_staging_file_runtime(),
+        )
+
+    return session.get_or_create_service(SandboxService, factory)
+
+
+def get_sync_sandbox_service(session: "SyncSdkSession") -> SandboxService:
+    def factory() -> SandboxService:
+        sync_options = (
+            session.get_service_option(SyncSandboxServiceOptions) or SyncSandboxServiceOptions()
+        )
+        options = SandboxServiceOptions(
+            base_url=sync_options.base_url,
+            credentials_factory=_adapt_sync_credentials_factory(sync_options.credentials_factory),
+            file_transfer_timeout=sync_options.file_transfer_timeout,
+        )
         return SandboxService(
             api_client=SandboxApiClient(
                 base_url=options.base_url,

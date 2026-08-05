@@ -9,6 +9,7 @@ import httpx
 import pytest
 import respx
 from hypothesis import HealthCheck, given, settings, strategies as st
+from sandbox_fixtures import sandbox_service_options as _session_options
 
 from vercel import sandbox
 from vercel.api import session
@@ -18,11 +19,9 @@ from vercel.sandbox import (
     SandboxFilesystemCommandError,
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
-    SandboxServiceOptions,
     SandboxUploadSizeMismatchError,
     sync as sandbox_sync,
 )
-from vercel.sandbox._internal.options import SandboxCredentials
 
 
 async def _read_as_chunks(source: bytes, chunk_size: int) -> AsyncIterator[bytes]:
@@ -100,18 +99,6 @@ def _logs_response(stdout: str = "", stderr: str = "") -> httpx.Response:
     if stderr:
         records.append({"stream": "stderr", "data": stderr})
     return httpx.Response(200, text="".join(json.dumps(item) + "\n" for item in records))
-
-
-def _session_options() -> list[SandboxServiceOptions]:
-    async def credentials_factory() -> SandboxCredentials:
-        return SandboxCredentials(token="token", team_id="team_123", project_id="prj_123")
-
-    return [
-        SandboxServiceOptions(
-            base_url="https://sandbox.test",
-            credentials_factory=credentials_factory,
-        )
-    ]
 
 
 def _tar_entries(content: bytes) -> dict[str, tuple[bytes, int]]:
