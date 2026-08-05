@@ -15,6 +15,10 @@ from ._time import as_utc
 UTC = timezone.utc
 DRIVER_LEASE_SECONDS = 15 * 60
 DRIVER_RENEW_INTERVAL_SECONDS = 60
+# Long enough that a merely slow delivery or an in-progress retry cycle is
+# never declared dead, short enough that a stranded chain heals within one
+# activation sweep.
+WAKE_REPAIR_GRACE_SECONDS = 10 * 60
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 ClaimState = Literal["claimed", "busy", "stale"]
@@ -397,6 +401,32 @@ return {
 }
 """
 
+_REPAIR_OVERDUE_WAKE_SCRIPT = """
+-- vercel-apscheduler-v1:repair-overdue-wake
+if redis.call("HGET", KEYS[1], "state") ~= "running" then
+  return 0
+end
+local status = redis.call("HGET", KEYS[1], "current_status")
+if status ~= "published" and status ~= "processing" then
+  return 0
+end
+local logical_time = redis.call("HGET", KEYS[1], "current_logical_time")
+if not logical_time or logical_time >= ARGV[1] then
+  return 0
+end
+local lease_until = tonumber(redis.call("HGET", KEYS[1], "active_lease_until") or "0")
+if redis.call("HGET", KEYS[1], "active_owner") and lease_until > tonumber(ARGV[2]) then
+  return 0
+end
+redis.call(
+  "HSET",
+  KEYS[1],
+  "current_status", "pending",
+  "updated_at", ARGV[3]
+)
+return 1
+"""
+
 _RENEW_SCRIPT = """
 -- vercel-apscheduler-v1:renew
 if redis.call("HGET", KEYS[1], "active_owner") ~= ARGV[1] then
@@ -632,6 +662,35 @@ class RedisDriver:
                 values[5],
             ),
         )
+
+    def repair_overdue_wake(
+        self,
+        now: datetime,
+        *,
+        grace_seconds: int = WAKE_REPAIR_GRACE_SECONDS,
+    ) -> bool:
+        """Demote a wake whose queue message is presumed lost.
+
+        ``published`` asserts that a message exists in a queue, and
+        ``processing`` that an owner is alive; a rollback strands the message
+        in a queue with no forward alias, an alias or retention expiry drops
+        it outright, and a crash orphans the owner. Nothing else ever
+        re-checks those assertions, so the chain would sleep forever. A wake
+        well past its logical time with no live owner lease is presumed dead
+        and demoted to ``pending``, which the standard pending-wake repair
+        then republishes. Racing a message that turns out to be alive is
+        safe: the queue deduplicates the idempotency key within a queue, and
+        the claim fences duplicates across queues.
+        """
+        now_utc = as_utc(now, name="now")
+        overdue_before = now_utc - timedelta(seconds=grace_seconds)
+        result = self._eval(
+            _REPAIR_OVERDUE_WAKE_SCRIPT,
+            overdue_before.isoformat(),
+            str(now_utc.timestamp()),
+            now_utc.isoformat(),
+        )
+        return bool(int(result))
 
     def renew(self, owner: str, now: datetime) -> bool:
         now_utc = as_utc(now, name="now")

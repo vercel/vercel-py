@@ -190,6 +190,68 @@ def test_real_redis_lost_owner_is_not_mistaken_for_fence() -> None:
         client.delete(driver.key)
 
 
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_overdue_published_wake_is_repaired() -> None:
+    """A published wake whose message died must become repairable.
+
+    ``published`` asserts a queue message exists; a rollback or an alias
+    expiry can falsify that silently. The repair demotes only a wake that is
+    well past due with no live owner, so live deliveries and running owners
+    are never disturbed.
+    """
+    assert REDIS_URL is not None
+    client = Redis.from_url(REDIS_URL)
+    driver = RedisDriver(
+        client,
+        deployment="dpl_repair_test",
+        scheduler_id="scheduler",
+    )
+    client.delete(driver.key)
+    try:
+        now = datetime.now(UTC)
+        overdue = now + timedelta(hours=1)
+        driver.start(now)
+        assert driver.claim_start(1, "start", now).state == "claimed"
+        finish = driver.finish_start(1, "start", now + timedelta(minutes=1), now)
+        token = finish.wake
+        assert token is not None
+        driver.release("start")
+
+        # Pending wakes are the existing repair path's job, not this one's.
+        assert driver.repair_overdue_wake(overdue) is False
+
+        driver.mark_wake_published(1, 1, now)
+
+        # Not yet overdue: the message is presumed alive.
+        assert driver.repair_overdue_wake(now + timedelta(minutes=5)) is False
+
+        # Overdue, published, no owner: the rollback strand. Demote to pending.
+        assert driver.repair_overdue_wake(overdue) is True
+        wake = driver.snapshot().current_wake
+        assert wake is not None
+        assert wake.status == "pending"
+
+        # Overdue but the owner holds a live lease: a slow handler, not a loss.
+        assert driver.claim_wake(token, "owner", now).state == "claimed"
+        assert driver.repair_overdue_wake(now + timedelta(minutes=12)) is False
+
+        # The owner's lease expired without a finish: a crash, repairable.
+        assert driver.repair_overdue_wake(overdue) is True
+        wake = driver.snapshot().current_wake
+        assert wake is not None
+        assert wake.status == "pending"
+
+        # Paused chains stay paused.
+        driver.mark_wake_published(1, 1, now)
+        driver.pause(now)
+        assert driver.repair_overdue_wake(overdue) is False
+    finally:
+        client.delete(driver.key)
+
+
 def _assert_spammed_lifecycle_converges(
     driver: RedisDriver,
     now: datetime,
