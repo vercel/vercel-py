@@ -781,6 +781,10 @@ def test_real_redis_takeover_reconciles_declared_jobs(
         client.delete(*keys)
 
 
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
 def test_real_redis_preview_idle_deadline_is_atomic_and_respects_pause() -> None:
     assert REDIS_URL is not None
     client = Redis.from_url(REDIS_URL)
@@ -1006,6 +1010,10 @@ def test_real_redis_quarantine_sidelines_unloadable_jobs(
         client.delete(*keys)
 
 
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
 def test_real_redis_manual_start_renews_a_lapsed_preview_deadline() -> None:
     assert REDIS_URL is not None
     client = Redis.from_url(REDIS_URL)
