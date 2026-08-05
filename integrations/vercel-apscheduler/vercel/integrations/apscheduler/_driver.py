@@ -32,6 +32,7 @@ __all__ = [
     "ClaimResult",
     "DriverSnapshot",
     "FinishResult",
+    "NamespaceFencedError",
     "RedisDriver",
     "StartDecision",
     "WakeToken",
@@ -40,6 +41,10 @@ __all__ = [
 
 class APSchedulerConfigurationError(RuntimeError):
     """Raised when a scheduler cannot satisfy the Vercel runtime contract."""
+
+
+class NamespaceFencedError(APSchedulerConfigurationError):
+    """Raised when a write is refused because another deployment owns the chain."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,6 +603,20 @@ redis.call(
 return 1
 """
 
+_MARK_RECONCILED_SCRIPT = """
+-- vercel-apscheduler-v1:mark-reconciled
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[1] then
+  return 0
+end
+redis.call(
+  "HSET",
+  KEYS[1],
+  "reconciled_deployment", ARGV[1],
+  "updated_at", ARGV[2]
+)
+return 1
+"""
+
 
 class RedisDriver:
     """Atomic driver state stored beside an APScheduler Redis job store."""
@@ -916,14 +935,20 @@ class RedisDriver:
         """Return the deployment that last synced declarations here."""
         return _optional_text(self.client.hget(self.key, "reconciled_deployment"))
 
-    def mark_reconciled(self, deployment: str, now: datetime) -> None:
-        self.client.hset(
-            self.key,
-            mapping={
-                "reconciled_deployment": deployment,
-                "updated_at": as_utc(now, name="now").isoformat(),
-            },
+    def mark_reconciled(self, deployment: str, now: datetime) -> bool:
+        """Record a completed declaration sync, only while owning the chain.
+
+        A deployment that lost the namespace mid-reconciliation must not
+        stamp it as reconciled: the marker would suppress the real owner's
+        own sync. The loser leaves the marker unset and the owner
+        reconciles on its next activation.
+        """
+        result = self._eval(
+            _MARK_RECONCILED_SCRIPT,
+            deployment,
+            as_utc(now, name="now").isoformat(),
         )
+        return bool(int(result))
 
     def renew(self, owner: str, now: datetime) -> bool:
         now_utc = as_utc(now, name="now")

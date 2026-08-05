@@ -17,6 +17,7 @@ from apscheduler.util import (  # type: ignore[import-untyped]
     datetime_to_utc_timestamp,
 )
 
+from ._driver import NamespaceFencedError
 from ._imports import RedisJobStore
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
@@ -32,6 +33,18 @@ PROVENANCE_DECLARED = "declared"
 PROVENANCE_RUNTIME = "runtime"
 
 __all__ = ["PROVENANCE_DECLARED", "PROVENANCE_RUNTIME", "RedisJobCoordinator"]
+
+
+# Shared head of the job write scripts: refuse the whole write when another
+# deployment owns the chain. A missing owner passes, so a fresh scope and a
+# preview's first materialization (which run before the driver records an
+# owner) still write. ARGV[8] is the writing deployment.
+_OWNER_FENCE_FRAGMENT = """
+local owner = redis.call("HGET", KEYS[4], "owner_deployment")
+if owner and owner ~= ARGV[8] then
+  return {"fenced", ""}
+end
+"""
 
 
 # Shared tail of the job write scripts: bump the store revision, persist the
@@ -80,6 +93,7 @@ return {"ok", tostring(revision)}
 
 _ADD_JOB_SCRIPT = f"""
 -- vercel-apscheduler-v1:add-job
+{_OWNER_FENCE_FRAGMENT}
 if redis.call("HEXISTS", KEYS[1], ARGV[1]) == 1 then
   return {{"conflict", ""}}
 end
@@ -90,6 +104,7 @@ redis.call("HSET", KEYS[5], ARGV[1], ARGV[7])
 
 _UPDATE_JOB_SCRIPT = f"""
 -- vercel-apscheduler-v1:update-job
+{_OWNER_FENCE_FRAGMENT}
 if redis.call("HEXISTS", KEYS[1], ARGV[1]) == 0 then
   return {{"missing", ""}}
 end
@@ -99,6 +114,10 @@ end
 
 _REMOVE_JOB_SCRIPT = """
 -- vercel-apscheduler-v1:remove-job
+local owner = redis.call("HGET", KEYS[4], "owner_deployment")
+if owner and owner ~= ARGV[2] then
+  return "fenced"
+end
 if redis.call("HEXISTS", KEYS[1], ARGV[1]) == 0 then
   return "missing"
 end
@@ -113,9 +132,13 @@ return "ok"
 
 _REMOVE_ALL_JOBS_SCRIPT = """
 -- vercel-apscheduler-v1:remove-all-jobs
+local owner = redis.call("HGET", KEYS[4], "owner_deployment")
+if owner and owner ~= ARGV[1] then
+  return "fenced"
+end
 redis.call("HINCRBY", KEYS[4], "job_revision", 1)
 redis.call("DEL", KEYS[1], KEYS[2], KEYS[3], KEYS[5])
-return 1
+return "ok"
 """
 
 
@@ -154,6 +177,10 @@ return result
 
 _CAS_UPDATE_JOB_SCRIPT = """
 -- vercel-apscheduler-v1:cas-update-job
+local owner = redis.call("HGET", KEYS[4], "owner_deployment")
+if owner and owner ~= ARGV[5] then
+  return -1
+end
 local current = tonumber(redis.call("HGET", KEYS[3], ARGV[1]) or "0")
 if redis.call("HEXISTS", KEYS[1], ARGV[1]) == 0 or current ~= tonumber(ARGV[2]) then
   return 0
@@ -172,6 +199,10 @@ return 1
 
 _CAS_REMOVE_JOB_SCRIPT = """
 -- vercel-apscheduler-v1:cas-remove-job
+local owner = redis.call("HGET", KEYS[4], "owner_deployment")
+if owner and owner ~= ARGV[3] then
+  return -1
+end
 local current = tonumber(redis.call("HGET", KEYS[3], ARGV[1]) or "0")
 if redis.call("HEXISTS", KEYS[1], ARGV[1]) == 0 or current ~= tonumber(ARGV[2]) then
   return 0
@@ -220,12 +251,15 @@ class RedisJobCoordinator:
 
     def add_job(self, job: Any) -> None:
         result = self._write(_ADD_JOB_SCRIPT, job, rearm=True)
+        state = _text(result[0])
+        if state == "fenced":
+            raise self._fenced(job.id)
         # Code declarations are materialized insert-if-absent. Concurrent cold
         # starts must retain the first durable value instead of replacing a
         # runtime mutation with a stale declaration. Runtime and in-wake adds
         # raise instead, so APScheduler's replace_existing fallback can update
         # the persisted job.
-        if _text(result[0]) == "conflict" and (
+        if state == "conflict" and (
             self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
         ):
             raise ConflictingIdError(job.id)
@@ -236,7 +270,10 @@ class RedisJobCoordinator:
             job,
             rearm=self.adapter.is_runtime_mutation,
         )
-        if _text(result[0]) == "missing":
+        state = _text(result[0])
+        if state == "fenced":
+            raise self._fenced(job.id)
+        if state == "missing":
             raise JobLookupError(job.id)
 
     def remove_job(self, job_id: str) -> None:
@@ -246,17 +283,25 @@ class RedisJobCoordinator:
                 len(self.keys),
                 *self.keys,
                 job_id,
+                self.driver.deployment,
             )
         )
+        if result == "fenced":
+            raise self._fenced(job_id)
         if result == "missing":
             raise JobLookupError(job_id)
 
     def remove_all_jobs(self) -> None:
-        self.redis.eval(
-            _REMOVE_ALL_JOBS_SCRIPT,
-            len(self.keys),
-            *self.keys,
+        result = _text(
+            self.redis.eval(
+                _REMOVE_ALL_JOBS_SCRIPT,
+                len(self.keys),
+                *self.keys,
+                self.driver.deployment,
+            )
         )
+        if result == "fenced":
+            raise self._fenced(None)
 
     def get_due_jobs_with_revisions(
         self,
@@ -311,31 +356,42 @@ class RedisJobCoordinator:
 
     def cas_update_job(self, job: Any, expected_revision: int) -> bool:
         state, score = self._serialized_job(job)
-        return bool(
-            int(
-                self.redis.eval(
-                    _CAS_UPDATE_JOB_SCRIPT,
-                    len(self.keys),
-                    *self.keys,
-                    job.id,
-                    str(expected_revision),
-                    state,
-                    score,
-                )
+        result = int(
+            self.redis.eval(
+                _CAS_UPDATE_JOB_SCRIPT,
+                len(self.keys),
+                *self.keys,
+                job.id,
+                str(expected_revision),
+                state,
+                score,
+                self.driver.deployment,
             )
         )
+        if result < 0:
+            raise self._fenced(job.id)
+        return bool(result)
 
     def cas_remove_job(self, job_id: str, expected_revision: int) -> bool:
-        return bool(
-            int(
-                self.redis.eval(
-                    _CAS_REMOVE_JOB_SCRIPT,
-                    len(self.keys),
-                    *self.keys,
-                    job_id,
-                    str(expected_revision),
-                )
+        result = int(
+            self.redis.eval(
+                _CAS_REMOVE_JOB_SCRIPT,
+                len(self.keys),
+                *self.keys,
+                job_id,
+                str(expected_revision),
+                self.driver.deployment,
             )
+        )
+        if result < 0:
+            raise self._fenced(job_id)
+        return bool(result)
+
+    def _fenced(self, job_id: str | None) -> NamespaceFencedError:
+        subject = f'job "{job_id}"' if job_id is not None else "the job store"
+        return NamespaceFencedError(
+            f'deployment "{self.driver.deployment}" no longer drives this '
+            f"scheduler; the write to {subject} was fenced"
         )
 
     def _write(self, script: str, job: Any, *, rearm: bool) -> Any:

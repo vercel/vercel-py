@@ -345,7 +345,8 @@ over automatically on its first request that arrives through an environment
 alias. From that moment the demoted deployment is fenced out of the
 namespace entirely: its deliveries still arrive but every claim turns stale
 and acks, it repairs and rearms nothing, its cold starts write no
-declarations, and its mutation APIs refuse loudly. Its queue simply drains.
+declarations, its mutation APIs refuse loudly, and every job-store write is
+refused atomically by owning deployment. Its queue simply drains.
 A rollback is the same operation in the other direction; the mechanism has
 no notion of old and new, only of who owns the chain now. An opted-in
 preview activates the same way and remains active only while requests renew
@@ -368,6 +369,16 @@ the new code (typically because its function moved) is rewritten from the
 declaration and restarts its schedule. A `runtime` job whose definition no
 longer loads is quarantined: it leaves the due index, keeps its record for
 the operator, and logs an error.
+
+Reconciliation completes only once it converges. A revision race with a
+concurrent owner write reruns the pass against fresh state, and only the
+owner marks the sync as done, after a clean pass; a reconciliation that
+cannot converge stays unmarked and retries on the next activation. In-flight
+work is never interrupted: the demoted deployment's running job finishes or
+dies with its instance, its late writes are fenced, and the new generation's
+first claim waits for the active-owner lease to be released or to lapse.
+Jobs that run long should enqueue their work to another queue and return, so
+a promote is never delayed behind them.
 
 A takeover strands the previous owner's in-flight wake: it is consumed by
 the demoted deployment and acked as stale, and the new owner's chain starts
@@ -403,7 +414,9 @@ expiry would make reliable pause semantics impossible.
 | retried mutation fails on a conflicting id | the pending wake is still republished |
 | takeover while a wake is in flight | the demoted deployment consumes it and acks it as stale |
 | the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
-| takeover reconciliation races a demoted deployment's handler | ownership and revision CAS keep exactly one writer per job |
+| takeover reconciliation races a demoted deployment's handler | the demoted write is fenced atomically by owning deployment |
+| reconciliation loses a revision race to a concurrent owner write | the pass reruns with fresh state; completion is marked only once converged |
+| a deployment loses the namespace mid-reconciliation | its writes fence, it cannot stamp the marker, and the owner reconciles |
 | concurrent first requests | one automatic generation and one start identity |
 | request arrives after explicit pause | idle deadline renews but state remains paused |
 | preview idle deadline expires before claim | message is stale and no job runs |

@@ -210,9 +210,12 @@ class FakeDriver:
     def reconciled_deployment(self) -> str | None:
         return self.reconciled
 
-    def mark_reconciled(self, deployment: str, now: datetime) -> None:
+    def mark_reconciled(self, deployment: str, now: datetime) -> bool:
         del now
+        if self.owner_deployment_value != deployment:
+            return False
         self.reconciled = deployment
+        return True
 
     def repair_overdue_wake(self, now: datetime, *, grace_seconds: int = 600) -> bool:
         with self.lock:
