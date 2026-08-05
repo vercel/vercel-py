@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -8,17 +9,22 @@ import respx
 
 from vercel.client import AsyncVercel, Vercel
 from vercel.project_routes import (
-    AddRouteRequestBody,
+    GeneratedPathCondition,
+    GeneratedRoute,
+    GeneratedRouteAction,
+    ProjectRoute,
     ProjectRoutesError,
     RewriteRoute,
     RouteInput,
-    StageRoutesRequestBody,
+    RouteLimit,
+    RouteVersion,
+    StagedRouteInput,
     get_routes,
     get_routes_async,
 )
 
 API_URL = "https://api.example.com"
-VERSION = {
+VERSION_JSON = {
     "id": "version_123",
     "s3Key": "project-routes/prj_123/version_123.json",
     "lastModified": 1_722_000_000_000,
@@ -26,7 +32,15 @@ VERSION = {
     "isStaging": True,
     "ruleCount": 1,
 }
-PROJECT_ROUTE = {
+VERSION = RouteVersion(
+    id="version_123",
+    last_modified=datetime.fromtimestamp(1_722_000_000, tz=timezone.utc),
+    created_by="user_123",
+    s3_key="project-routes/prj_123/version_123.json",
+    is_staging=True,
+    rule_count=1,
+)
+PROJECT_ROUTE_JSON = {
     "id": "route_123",
     "name": "Rewrite /old to /new",
     "enabled": True,
@@ -35,30 +49,40 @@ PROJECT_ROUTE = {
     "routeType": "rewrite",
     "route": {"src": "/old", "dest": "/new"},
 }
+PROJECT_ROUTE = ProjectRoute(
+    id="route_123",
+    name="Rewrite /old to /new",
+    route={"src": "/old", "dest": "/new"},
+    enabled=True,
+    staged=True,
+    src_syntax="equals",
+    route_type="rewrite",
+)
+STAGED_INPUT: StagedRouteInput = {
+    "id": "route_123",
+    "name": "Rewrite /old to /new",
+    "enabled": True,
+    "srcSyntax": "equals",
+    "route": {"src": "/old", "dest": "/new"},
+}
 ROUTE_INPUT: RouteInput = {
     "name": "Rewrite /old to /new",
     "srcSyntax": "equals",
     "route": {"src": "/old", "dest": "/new"},
 }
-ADD_BODY: AddRouteRequestBody = {"route": ROUTE_INPUT}
-STAGE_BODY: StageRoutesRequestBody = {
-    "overwrite": True,
-    "routes": [
-        {
-            "id": "route_123",
-            "name": "Rewrite /old to /new",
-            "srcSyntax": "equals",
-            "route": {"src": "/old", "dest": "/new"},
-        }
-    ],
-}
-GENERATED_ROUTE = {
+GENERATED_ROUTE_JSON = {
     "name": "Rewrite /old to /new",
     "description": "Rewrites the legacy path",
     "pathCondition": {"value": "/old", "syntax": "equals"},
     "conditions": [],
     "actions": [{"type": "rewrite", "dest": "/new"}],
 }
+GENERATED_ROUTE = GeneratedRoute(
+    name="Rewrite /old to /new",
+    description="Rewrites the legacy path",
+    path_condition=GeneratedPathCondition(value="/old", syntax="equals"),
+    actions=[GeneratedRouteAction(type="rewrite", dest="/new")],
+)
 
 
 def _install_routes() -> dict[str, respx.Route]:
@@ -69,43 +93,50 @@ def _install_routes() -> dict[str, respx.Route]:
             "versionId": "version_123",
             "q": "legacy",
             "filter": "rewrite",
-            "diff": "only",
         },
     ).mock(
         return_value=httpx.Response(
             200,
             json={
-                "routes": [PROJECT_ROUTE],
-                "version": VERSION,
+                "routes": [PROJECT_ROUTE_JSON],
+                "version": VERSION_JSON,
                 "limit": {"maxRoutes": 100, "currentRoutes": 1},
             },
         )
     )
     stage_route = respx.put(
         f"{API_URL}/v1/projects/prj_123/routes", params={"teamId": "team_123"}
-    ).mock(return_value=httpx.Response(200, json={"version": VERSION}))
+    ).mock(return_value=httpx.Response(200, json={"version": VERSION_JSON}))
     add_route = respx.post(
         f"{API_URL}/v1/projects/prj_123/routes", params={"teamId": "team_123"}
-    ).mock(return_value=httpx.Response(200, json={"route": PROJECT_ROUTE, "version": VERSION}))
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"route": PROJECT_ROUTE_JSON, "version": VERSION_JSON}
+        )
+    )
     delete_route = respx.delete(
         f"{API_URL}/v1/projects/prj_123/routes", params={"teamId": "team_123"}
-    ).mock(return_value=httpx.Response(200, json={"deletedCount": 1, "version": VERSION}))
+    ).mock(return_value=httpx.Response(200, json={"deletedCount": 1, "version": VERSION_JSON}))
     edit_route = respx.patch(
         f"{API_URL}/v1/projects/prj_123/routes/route_123",
         params={"teamId": "team_123"},
-    ).mock(return_value=httpx.Response(200, json={"route": PROJECT_ROUTE, "version": VERSION}))
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"route": PROJECT_ROUTE_JSON, "version": VERSION_JSON}
+        )
+    )
     generate_route = respx.post(
         f"{API_URL}/v1/projects/prj_123/routes/generate",
         params={"teamId": "team_123"},
-    ).mock(return_value=httpx.Response(200, json={"route": GENERATED_ROUTE}))
+    ).mock(return_value=httpx.Response(200, json={"route": GENERATED_ROUTE_JSON}))
     versions_route = respx.get(
         f"{API_URL}/v1/projects/prj_123/routes/versions",
         params={"teamId": "team_123"},
-    ).mock(return_value=httpx.Response(200, json={"versions": [VERSION]}))
+    ).mock(return_value=httpx.Response(200, json={"versions": [VERSION_JSON]}))
     update_route = respx.post(
         f"{API_URL}/v1/projects/prj_123/routes/versions",
         params={"teamId": "team_123"},
-    ).mock(return_value=httpx.Response(200, json={"version": VERSION}))
+    ).mock(return_value=httpx.Response(200, json={"version": VERSION_JSON}))
     return {
         "list": list_route,
         "stage": stage_route,
@@ -124,8 +155,15 @@ def _assert_requests(routes: dict[str, respx.Route]) -> None:
         assert route.calls.last.request.headers["authorization"] == "Bearer test-token"
 
     expected_bodies = {
-        "stage": STAGE_BODY,
-        "add": ADD_BODY,
+        "stage": {"routes": [STAGED_INPUT], "overwrite": True},
+        "add": {
+            "route": {
+                "name": "Rewrite /old to /new",
+                "srcSyntax": "equals",
+                "route": {"src": "/old", "dest": "/new"},
+            },
+            "position": {"placement": "start"},
+        },
         "delete": {"routeIds": ["route_123"]},
         "edit": {"restore": True},
         "generate": {"prompt": "Rewrite /old to /new"},
@@ -143,14 +181,13 @@ def test_sync_client_supports_every_project_routes_operation() -> None:
     listed = client.project_routes.get_routes(
         project_id="prj_123",
         version_id="version_123",
-        q="legacy",
-        filter="rewrite",
-        diff="only",
+        search="legacy",
+        route_type="rewrite",
         team_id="team_123",
     )
     staged = client.project_routes.stage_routes(
         project_id="prj_123",
-        routes=STAGE_BODY["routes"],
+        routes=[PROJECT_ROUTE],
         overwrite=True,
         team_id="team_123",
     )
@@ -162,6 +199,7 @@ def test_sync_client_supports_every_project_routes_operation() -> None:
             destination="/new",
             source_syntax="equals",
         ),
+        placement="start",
         team_id="team_123",
     )
     deleted = client.project_routes.delete_routes(
@@ -181,21 +219,24 @@ def test_sync_client_supports_every_project_routes_operation() -> None:
         team_id="team_123",
     )
     versions = client.project_routes.get_route_versions(project_id="prj_123", team_id="team_123")
-    updated = client.project_routes.update_route_versions(
+    updated = client.project_routes.update_route_version(
         project_id="prj_123",
         version_id="version_123",
         action="promote",
         team_id="team_123",
     )
 
-    assert listed["routes"] == [PROJECT_ROUTE]
-    assert staged["version"] == VERSION
-    assert added["route"] == PROJECT_ROUTE
-    assert deleted["deletedCount"] == 1
-    assert edited["route"] == PROJECT_ROUTE
-    assert generated["route"] == GENERATED_ROUTE
-    assert versions["versions"] == [VERSION]
-    assert updated["version"] == VERSION
+    assert listed.routes == [PROJECT_ROUTE]
+    assert listed.version == VERSION
+    assert listed.limit == RouteLimit(max_routes=100, current_routes=1)
+    assert staged == VERSION
+    assert added.route == PROJECT_ROUTE
+    assert added.version == VERSION
+    assert deleted.deleted_count == 1
+    assert edited.route == PROJECT_ROUTE
+    assert generated == GENERATED_ROUTE
+    assert versions == [VERSION]
+    assert updated == VERSION
     _assert_requests(routes)
 
 
@@ -208,19 +249,21 @@ async def test_async_client_supports_every_project_routes_operation() -> None:
     listed = await client.project_routes.get_routes(
         project_id="prj_123",
         version_id="version_123",
-        q="legacy",
-        filter="rewrite",
-        diff="only",
+        search="legacy",
+        route_type="rewrite",
         team_id="team_123",
     )
     staged = await client.project_routes.stage_routes(
         project_id="prj_123",
-        routes=STAGE_BODY["routes"],
+        routes=[STAGED_INPUT],
         overwrite=True,
         team_id="team_123",
     )
     added = await client.project_routes.add_route(
-        project_id="prj_123", route=ROUTE_INPUT, team_id="team_123"
+        project_id="prj_123",
+        route=ROUTE_INPUT,
+        placement="start",
+        team_id="team_123",
     )
     deleted = await client.project_routes.delete_routes(
         project_id="prj_123",
@@ -241,22 +284,51 @@ async def test_async_client_supports_every_project_routes_operation() -> None:
     versions = await client.project_routes.get_route_versions(
         project_id="prj_123", team_id="team_123"
     )
-    updated = await client.project_routes.update_route_versions(
+    updated = await client.project_routes.update_route_version(
         project_id="prj_123",
         version_id="version_123",
         action="promote",
         team_id="team_123",
     )
 
-    assert listed["routes"] == [PROJECT_ROUTE]
-    assert staged["version"] == VERSION
-    assert added["route"] == PROJECT_ROUTE
-    assert deleted["deletedCount"] == 1
-    assert edited["route"] == PROJECT_ROUTE
-    assert generated["route"] == GENERATED_ROUTE
-    assert versions["versions"] == [VERSION]
-    assert updated["version"] == VERSION
+    assert listed.routes == [PROJECT_ROUTE]
+    assert listed.version == VERSION
+    assert staged == VERSION
+    assert added.route == PROJECT_ROUTE
+    assert deleted.deleted_count == 1
+    assert edited.route == PROJECT_ROUTE
+    assert generated == GENERATED_ROUTE
+    assert versions == [VERSION]
+    assert updated == VERSION
     _assert_requests(routes)
+
+
+@respx.mock
+def test_get_routes_diff_only_parses_diff_count_and_null_version() -> None:
+    respx.get(f"{API_URL}/v1/projects/prj_123/routes", params={"diff": "only"}).mock(
+        return_value=httpx.Response(
+            200,
+            json={"routes": [PROJECT_ROUTE_JSON], "version": None, "diffCount": 1},
+        )
+    )
+
+    result = get_routes(project_id="prj_123", diff="only", token="test-token", base_url=API_URL)
+
+    assert result.routes == [PROJECT_ROUTE]
+    assert result.version is None
+    assert result.limit is None
+    assert result.diff_count == 1
+
+
+@respx.mock
+def test_generate_route_failure_raises() -> None:
+    respx.post(f"{API_URL}/v1/projects/prj_123/routes/generate").mock(
+        return_value=httpx.Response(200, json={"error": "could not generate a route"})
+    )
+    client = Vercel(access_token="test-token", base_url=API_URL)
+
+    with pytest.raises(ProjectRoutesError, match="could not generate a route"):
+        client.project_routes.generate_route(project_id="prj_123", prompt="do something")
 
 
 @respx.mock
@@ -276,6 +348,7 @@ async def test_sync_and_async_clients_map_structured_errors() -> None:
 
     for error in (sync_error.value, async_error.value):
         assert error.status_code == 403
+        assert error.code == "forbidden"
         assert error.response_body == {"error": {"code": "forbidden", "message": "Not allowed"}}
         assert "Not allowed" in str(error)
     assert route.call_count == 2

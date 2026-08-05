@@ -12,34 +12,101 @@ from vercel._internal.project_routes.core import (
 )
 from vercel.project_routes.types import (
     AddRouteRequestBody,
-    AddRouteResponse,
+    AddRouteResult,
     DeleteRoutesRequestBody,
-    DeleteRoutesResponse,
+    DeleteRoutesResult,
     EditRouteRequestBody,
+    EditRouteResult,
+    GeneratedRoute,
     GenerateRouteCurrent,
     GenerateRouteRequestBody,
-    GenerateRouteResponse,
-    GetRoutesResponse,
-    GetRouteVersionsResponse,
+    GetRoutesResult,
+    Placement,
     Position,
+    ProjectRoute,
+    RedirectRoute,
     RewriteRoute,
     RouteDiff,
-    RouteFilter,
     RouteInput,
+    RouteSpec,
+    RouteType,
+    RouteVersion,
+    SetStatusRoute,
     StagedRouteInput,
     StageRoutesRequestBody,
-    UpdateRouteVersionsRequestBody,
+    UpdateRouteVersionRequestBody,
     VersionAction,
-    VersionResponse,
 )
 
 _T = TypeVar("_T")
 
 
-def _route_input(route: RewriteRoute | RouteInput) -> RouteInput:
-    if isinstance(route, RewriteRoute):
+def _route_input(route: RouteSpec) -> RouteInput:
+    if isinstance(route, RewriteRoute | RedirectRoute | SetStatusRoute):
         return route.to_route_input()
     return route
+
+
+def _validate_get_routes(
+    *, search: str | None, route_type: RouteType | None, diff: RouteDiff | None
+) -> None:
+    if diff is not None and (search is not None or route_type is not None):
+        raise ValueError("diff cannot be combined with search or route_type.")
+
+
+def _stage_body(
+    routes: Sequence[ProjectRoute | StagedRouteInput], overwrite: bool | None
+) -> StageRoutesRequestBody:
+    body: StageRoutesRequestBody = {
+        "routes": [
+            route.to_staged_input() if isinstance(route, ProjectRoute) else route
+            for route in routes
+        ]
+    }
+    if overwrite is not None:
+        body["overwrite"] = overwrite
+    return body
+
+
+def _add_body(
+    route: RouteSpec, placement: Placement | None, reference_id: str | None
+) -> AddRouteRequestBody:
+    if placement in ("before", "after") and reference_id is None:
+        raise ValueError(f"placement={placement!r} requires reference_id.")
+    if reference_id is not None and placement not in ("before", "after"):
+        raise ValueError('reference_id requires placement="before" or "after".')
+    body: AddRouteRequestBody = {"route": _route_input(route)}
+    if placement is not None:
+        position: Position = {"placement": placement}
+        if reference_id is not None:
+            position["referenceId"] = reference_id
+        body["position"] = position
+    return body
+
+
+def _delete_body(route_ids: Sequence[str]) -> DeleteRoutesRequestBody:
+    if not route_ids:
+        raise ValueError("route_ids must not be empty.")
+    return {"routeIds": list(route_ids)}
+
+
+def _edit_body(route: RouteSpec | None, restore: bool) -> EditRouteRequestBody:
+    if (route is None) == (not restore):
+        raise ValueError("Pass either route or restore=True, not both.")
+    if route is not None:
+        return {"route": _route_input(route)}
+    return {"restore": True}
+
+
+def _generate_body(
+    prompt: str, current_route: GeneratedRoute | GenerateRouteCurrent | None
+) -> GenerateRouteRequestBody:
+    body: GenerateRouteRequestBody = {"prompt": prompt}
+    if isinstance(current_route, GeneratedRoute):
+        body["currentRoute"] = current_route.to_current_route()
+    elif current_route is not None:
+        body["currentRoute"] = current_route
+    return body
 
 
 def _run_sync(
@@ -61,22 +128,23 @@ def get_routes(
     *,
     project_id: str,
     version_id: str | None = None,
-    q: str | None = None,
-    filter: RouteFilter | None = None,
+    search: str | None = None,
+    route_type: RouteType | None = None,
     diff: RouteDiff | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> GetRoutesResponse:
-    """Get a project's routing rules, optionally filtered or diffed."""
+) -> GetRoutesResult:
+    """Get a project's routing rules, optionally searched, filtered, or diffed."""
+    _validate_get_routes(search=search, route_type=route_type, diff=diff)
     return _run_sync(
         lambda client: client.get_routes(
             project_id=project_id,
             version_id=version_id,
-            q=q,
-            filter=filter,
+            search=search,
+            route_type=route_type,
             diff=diff,
             team_id=team_id,
             slug=slug,
@@ -91,16 +159,17 @@ async def get_routes_async(
     *,
     project_id: str,
     version_id: str | None = None,
-    q: str | None = None,
-    filter: RouteFilter | None = None,
+    search: str | None = None,
+    route_type: RouteType | None = None,
     diff: RouteDiff | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> GetRoutesResponse:
+) -> GetRoutesResult:
     """Asynchronously get a project's routing rules."""
+    _validate_get_routes(search=search, route_type=route_type, diff=diff)
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -109,8 +178,8 @@ async def get_routes_async(
         return await client.get_routes(
             project_id=project_id,
             version_id=version_id,
-            q=q,
-            filter=filter,
+            search=search,
+            route_type=route_type,
             diff=diff,
             team_id=team_id,
             slug=slug,
@@ -120,24 +189,20 @@ async def get_routes_async(
 def stage_routes(
     *,
     project_id: str,
-    routes: Sequence[StagedRouteInput] | None = None,
+    routes: Sequence[ProjectRoute | StagedRouteInput],
     overwrite: bool | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> VersionResponse:
+) -> RouteVersion:
     """Stage routing rules, merging by ID unless ``overwrite`` is true."""
-    body: StageRoutesRequestBody = {}
-    if routes is not None:
-        body["routes"] = list(routes)
-    if overwrite is not None:
-        body["overwrite"] = overwrite
+    body = _stage_body(routes, overwrite)
     return _run_sync(
         lambda client: client.stage_routes(
             project_id=project_id,
-            body=body or None,
+            body=body,
             team_id=team_id,
             slug=slug,
         ),
@@ -150,20 +215,16 @@ def stage_routes(
 async def stage_routes_async(
     *,
     project_id: str,
-    routes: Sequence[StagedRouteInput] | None = None,
+    routes: Sequence[ProjectRoute | StagedRouteInput],
     overwrite: bool | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> VersionResponse:
+) -> RouteVersion:
     """Asynchronously stage routing rules."""
-    body: StageRoutesRequestBody = {}
-    if routes is not None:
-        body["routes"] = list(routes)
-    if overwrite is not None:
-        body["overwrite"] = overwrite
+    body = _stage_body(routes, overwrite)
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -171,7 +232,7 @@ async def stage_routes_async(
     ) as client:
         return await client.stage_routes(
             project_id=project_id,
-            body=body or None,
+            body=body,
             team_id=team_id,
             slug=slug,
         )
@@ -180,18 +241,21 @@ async def stage_routes_async(
 def add_route(
     *,
     project_id: str,
-    route: RewriteRoute | RouteInput,
-    position: Position | None = None,
+    route: RouteSpec,
+    placement: Placement | None = None,
+    reference_id: str | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> AddRouteResponse:
-    """Add one routing rule and stage the resulting version."""
-    body: AddRouteRequestBody = {"route": _route_input(route)}
-    if position is not None:
-        body["position"] = position
+) -> AddRouteResult:
+    """Add one routing rule and stage the resulting version.
+
+    ``placement`` positions the route ("start", "end", "before", "after");
+    "before" and "after" require ``reference_id``.
+    """
+    body = _add_body(route, placement, reference_id)
     return _run_sync(
         lambda client: client.add_route(
             project_id=project_id,
@@ -208,18 +272,17 @@ def add_route(
 async def add_route_async(
     *,
     project_id: str,
-    route: RewriteRoute | RouteInput,
-    position: Position | None = None,
+    route: RouteSpec,
+    placement: Placement | None = None,
+    reference_id: str | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> AddRouteResponse:
+) -> AddRouteResult:
     """Asynchronously add one routing rule."""
-    body: AddRouteRequestBody = {"route": _route_input(route)}
-    if position is not None:
-        body["position"] = position
+    body = _add_body(route, placement, reference_id)
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -242,9 +305,9 @@ def delete_routes(
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> DeleteRoutesResponse:
+) -> DeleteRoutesResult:
     """Delete routing rules by ID and stage the resulting version."""
-    body: DeleteRoutesRequestBody = {"routeIds": list(route_ids)}
+    body = _delete_body(route_ids)
     return _run_sync(
         lambda client: client.delete_routes(
             project_id=project_id,
@@ -267,9 +330,9 @@ async def delete_routes_async(
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> DeleteRoutesResponse:
+) -> DeleteRoutesResult:
     """Asynchronously delete routing rules by ID."""
-    body: DeleteRoutesRequestBody = {"routeIds": list(route_ids)}
+    body = _delete_body(route_ids)
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -287,20 +350,16 @@ def edit_route(
     *,
     project_id: str,
     route_id: str,
-    route: RewriteRoute | RouteInput | None = None,
-    restore: bool | None = None,
+    route: RouteSpec | None = None,
+    restore: bool = False,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> AddRouteResponse:
-    """Replace a routing rule or restore its production value."""
-    body: EditRouteRequestBody = {}
-    if route is not None:
-        body["route"] = _route_input(route)
-    if restore is not None:
-        body["restore"] = restore
+) -> EditRouteResult:
+    """Replace a routing rule, or restore its production value with ``restore=True``."""
+    body = _edit_body(route, restore)
     return _run_sync(
         lambda client: client.edit_route(
             project_id=project_id,
@@ -319,20 +378,16 @@ async def edit_route_async(
     *,
     project_id: str,
     route_id: str,
-    route: RewriteRoute | RouteInput | None = None,
-    restore: bool | None = None,
+    route: RouteSpec | None = None,
+    restore: bool = False,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> AddRouteResponse:
+) -> EditRouteResult:
     """Asynchronously replace or restore a routing rule."""
-    body: EditRouteRequestBody = {}
-    if route is not None:
-        body["route"] = _route_input(route)
-    if restore is not None:
-        body["restore"] = restore
+    body = _edit_body(route, restore)
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -351,17 +406,18 @@ def generate_route(
     *,
     project_id: str,
     prompt: str,
-    current_route: GenerateRouteCurrent | None = None,
+    current_route: GeneratedRoute | GenerateRouteCurrent | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> GenerateRouteResponse:
-    """Generate a routing-rule suggestion from natural language."""
-    body: GenerateRouteRequestBody = {"prompt": prompt}
-    if current_route is not None:
-        body["currentRoute"] = current_route
+) -> GeneratedRoute:
+    """Generate a routing-rule suggestion from natural language.
+
+    Pass a previous ``GeneratedRoute`` as ``current_route`` to refine it.
+    """
+    body = _generate_body(prompt, current_route)
     return _run_sync(
         lambda client: client.generate_route(
             project_id=project_id,
@@ -379,17 +435,15 @@ async def generate_route_async(
     *,
     project_id: str,
     prompt: str,
-    current_route: GenerateRouteCurrent | None = None,
+    current_route: GeneratedRoute | GenerateRouteCurrent | None = None,
     token: str | None = None,
     team_id: str | None = None,
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> GenerateRouteResponse:
+) -> GeneratedRoute:
     """Asynchronously generate a routing-rule suggestion."""
-    body: GenerateRouteRequestBody = {"prompt": prompt}
-    if current_route is not None:
-        body["currentRoute"] = current_route
+    body = _generate_body(prompt, current_route)
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
@@ -411,8 +465,8 @@ def get_route_versions(
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> GetRouteVersionsResponse:
-    """Get staged and production routing-rule versions."""
+) -> list[RouteVersion]:
+    """Get routing-rule versions, staged first, then newest production first."""
     return _run_sync(
         lambda client: client.get_route_versions(
             project_id=project_id,
@@ -433,7 +487,7 @@ async def get_route_versions_async(
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> GetRouteVersionsResponse:
+) -> list[RouteVersion]:
     """Asynchronously get routing-rule versions."""
     async with AsyncProjectRoutesOpsClient(
         token=token,
@@ -447,7 +501,7 @@ async def get_route_versions_async(
         )
 
 
-def update_route_versions(
+def update_route_version(
     *,
     project_id: str,
     version_id: str,
@@ -457,11 +511,11 @@ def update_route_versions(
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> VersionResponse:
+) -> RouteVersion:
     """Promote, restore, or discard a routing-rule version."""
-    body: UpdateRouteVersionsRequestBody = {"id": version_id, "action": action}
+    body: UpdateRouteVersionRequestBody = {"id": version_id, "action": action}
     return _run_sync(
-        lambda client: client.update_route_versions(
+        lambda client: client.update_route_version(
             project_id=project_id,
             body=body,
             team_id=team_id,
@@ -473,7 +527,7 @@ def update_route_versions(
     )
 
 
-async def update_route_versions_async(
+async def update_route_version_async(
     *,
     project_id: str,
     version_id: str,
@@ -483,15 +537,15 @@ async def update_route_versions_async(
     slug: str | None = None,
     base_url: str = DEFAULT_API_BASE_URL,
     timeout: float = 30.0,
-) -> VersionResponse:
+) -> RouteVersion:
     """Asynchronously promote, restore, or discard a version."""
-    body: UpdateRouteVersionsRequestBody = {"id": version_id, "action": action}
+    body: UpdateRouteVersionRequestBody = {"id": version_id, "action": action}
     async with AsyncProjectRoutesOpsClient(
         token=token,
         base_url=base_url,
         timeout=timedelta(seconds=timeout),
     ) as client:
-        return await client.update_route_versions(
+        return await client.update_route_version(
             project_id=project_id,
             body=body,
             team_id=team_id,
@@ -514,6 +568,6 @@ __all__ = [
     "get_routes_async",
     "stage_routes",
     "stage_routes_async",
-    "update_route_versions",
-    "update_route_versions_async",
+    "update_route_version",
+    "update_route_version_async",
 ]

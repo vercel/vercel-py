@@ -6,7 +6,7 @@ from vercel.project_routes.ops import (
     get_route_versions_async as get_route_versions,
     get_routes_async as get_routes,
     stage_routes_async as stage_routes,
-    update_route_versions_async as update_route_versions,
+    update_route_version_async as update_route_version,
 )
 
 __all__ = [
@@ -17,5 +17,5 @@ __all__ = [
     "get_route_versions",
     "get_routes",
     "stage_routes",
-    "update_route_versions",
+    "update_route_version",
 ]

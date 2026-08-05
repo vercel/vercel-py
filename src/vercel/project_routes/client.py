@@ -18,24 +18,24 @@ from vercel.project_routes.ops import (
     get_routes_async,
     stage_routes,
     stage_routes_async,
-    update_route_versions,
-    update_route_versions_async,
+    update_route_version,
+    update_route_version_async,
 )
 from vercel.project_routes.types import (
-    AddRouteResponse,
-    DeleteRoutesResponse,
+    AddRouteResult,
+    DeleteRoutesResult,
+    EditRouteResult,
+    GeneratedRoute,
     GenerateRouteCurrent,
-    GenerateRouteResponse,
-    GetRoutesResponse,
-    GetRouteVersionsResponse,
-    Position,
-    RewriteRoute,
+    GetRoutesResult,
+    Placement,
+    ProjectRoute,
     RouteDiff,
-    RouteFilter,
-    RouteInput,
+    RouteSpec,
+    RouteType,
+    RouteVersion,
     StagedRouteInput,
     VersionAction,
-    VersionResponse,
 )
 
 
@@ -57,17 +57,17 @@ class ProjectRoutesClient:
         *,
         project_id: str,
         version_id: str | None = None,
-        q: str | None = None,
-        filter: RouteFilter | None = None,
+        search: str | None = None,
+        route_type: RouteType | None = None,
         diff: RouteDiff | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> GetRoutesResponse:
+    ) -> GetRoutesResult:
         return get_routes(
             project_id=project_id,
             version_id=version_id,
-            q=q,
-            filter=filter,
+            search=search,
+            route_type=route_type,
             diff=diff,
             token=self._access_token,
             team_id=team_id,
@@ -80,11 +80,11 @@ class ProjectRoutesClient:
         self,
         *,
         project_id: str,
-        routes: Sequence[StagedRouteInput] | None = None,
+        routes: Sequence[ProjectRoute | StagedRouteInput],
         overwrite: bool | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> VersionResponse:
+    ) -> RouteVersion:
         return stage_routes(
             project_id=project_id,
             routes=routes,
@@ -100,15 +100,17 @@ class ProjectRoutesClient:
         self,
         *,
         project_id: str,
-        route: RewriteRoute | RouteInput,
-        position: Position | None = None,
+        route: RouteSpec,
+        placement: Placement | None = None,
+        reference_id: str | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> AddRouteResponse:
+    ) -> AddRouteResult:
         return add_route(
             project_id=project_id,
             route=route,
-            position=position,
+            placement=placement,
+            reference_id=reference_id,
             token=self._access_token,
             team_id=team_id,
             slug=slug,
@@ -123,7 +125,7 @@ class ProjectRoutesClient:
         route_ids: Sequence[str],
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> DeleteRoutesResponse:
+    ) -> DeleteRoutesResult:
         return delete_routes(
             project_id=project_id,
             route_ids=route_ids,
@@ -139,11 +141,11 @@ class ProjectRoutesClient:
         *,
         project_id: str,
         route_id: str,
-        route: RewriteRoute | RouteInput | None = None,
-        restore: bool | None = None,
+        route: RouteSpec | None = None,
+        restore: bool = False,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> AddRouteResponse:
+    ) -> EditRouteResult:
         return edit_route(
             project_id=project_id,
             route_id=route_id,
@@ -161,10 +163,10 @@ class ProjectRoutesClient:
         *,
         project_id: str,
         prompt: str,
-        current_route: GenerateRouteCurrent | None = None,
+        current_route: GeneratedRoute | GenerateRouteCurrent | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> GenerateRouteResponse:
+    ) -> GeneratedRoute:
         return generate_route(
             project_id=project_id,
             prompt=prompt,
@@ -182,7 +184,7 @@ class ProjectRoutesClient:
         project_id: str,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> GetRouteVersionsResponse:
+    ) -> list[RouteVersion]:
         return get_route_versions(
             project_id=project_id,
             token=self._access_token,
@@ -192,7 +194,7 @@ class ProjectRoutesClient:
             timeout=self._timeout,
         )
 
-    def update_route_versions(
+    def update_route_version(
         self,
         *,
         project_id: str,
@@ -200,8 +202,8 @@ class ProjectRoutesClient:
         action: VersionAction,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> VersionResponse:
-        return update_route_versions(
+    ) -> RouteVersion:
+        return update_route_version(
             project_id=project_id,
             version_id=version_id,
             action=action,
@@ -231,17 +233,17 @@ class AsyncProjectRoutesClient:
         *,
         project_id: str,
         version_id: str | None = None,
-        q: str | None = None,
-        filter: RouteFilter | None = None,
+        search: str | None = None,
+        route_type: RouteType | None = None,
         diff: RouteDiff | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> GetRoutesResponse:
+    ) -> GetRoutesResult:
         return await get_routes_async(
             project_id=project_id,
             version_id=version_id,
-            q=q,
-            filter=filter,
+            search=search,
+            route_type=route_type,
             diff=diff,
             token=self._access_token,
             team_id=team_id,
@@ -254,11 +256,11 @@ class AsyncProjectRoutesClient:
         self,
         *,
         project_id: str,
-        routes: Sequence[StagedRouteInput] | None = None,
+        routes: Sequence[ProjectRoute | StagedRouteInput],
         overwrite: bool | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> VersionResponse:
+    ) -> RouteVersion:
         return await stage_routes_async(
             project_id=project_id,
             routes=routes,
@@ -274,15 +276,17 @@ class AsyncProjectRoutesClient:
         self,
         *,
         project_id: str,
-        route: RewriteRoute | RouteInput,
-        position: Position | None = None,
+        route: RouteSpec,
+        placement: Placement | None = None,
+        reference_id: str | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> AddRouteResponse:
+    ) -> AddRouteResult:
         return await add_route_async(
             project_id=project_id,
             route=route,
-            position=position,
+            placement=placement,
+            reference_id=reference_id,
             token=self._access_token,
             team_id=team_id,
             slug=slug,
@@ -297,7 +301,7 @@ class AsyncProjectRoutesClient:
         route_ids: Sequence[str],
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> DeleteRoutesResponse:
+    ) -> DeleteRoutesResult:
         return await delete_routes_async(
             project_id=project_id,
             route_ids=route_ids,
@@ -313,11 +317,11 @@ class AsyncProjectRoutesClient:
         *,
         project_id: str,
         route_id: str,
-        route: RewriteRoute | RouteInput | None = None,
-        restore: bool | None = None,
+        route: RouteSpec | None = None,
+        restore: bool = False,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> AddRouteResponse:
+    ) -> EditRouteResult:
         return await edit_route_async(
             project_id=project_id,
             route_id=route_id,
@@ -335,10 +339,10 @@ class AsyncProjectRoutesClient:
         *,
         project_id: str,
         prompt: str,
-        current_route: GenerateRouteCurrent | None = None,
+        current_route: GeneratedRoute | GenerateRouteCurrent | None = None,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> GenerateRouteResponse:
+    ) -> GeneratedRoute:
         return await generate_route_async(
             project_id=project_id,
             prompt=prompt,
@@ -356,7 +360,7 @@ class AsyncProjectRoutesClient:
         project_id: str,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> GetRouteVersionsResponse:
+    ) -> list[RouteVersion]:
         return await get_route_versions_async(
             project_id=project_id,
             token=self._access_token,
@@ -366,7 +370,7 @@ class AsyncProjectRoutesClient:
             timeout=self._timeout,
         )
 
-    async def update_route_versions(
+    async def update_route_version(
         self,
         *,
         project_id: str,
@@ -374,8 +378,8 @@ class AsyncProjectRoutesClient:
         action: VersionAction,
         team_id: str | None = None,
         slug: str | None = None,
-    ) -> VersionResponse:
-        return await update_route_versions_async(
+    ) -> RouteVersion:
+        return await update_route_version_async(
             project_id=project_id,
             version_id=version_id,
             action=action,
