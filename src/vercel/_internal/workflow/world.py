@@ -106,7 +106,7 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 #   4  native attributes (`attr_set`)
 #   5  payloads may be zstd- or gzip-compressed
 #
-SPEC_VERSION_CURRENT = 2
+SPEC_VERSION_CURRENT: Literal[2] = 2
 
 
 class BaseModel(pydantic.BaseModel):
@@ -320,10 +320,9 @@ class BaseEvent(BaseModel):
     correlation_id: str | None = pydantic.Field(
         default=None, alias="correlationId", exclude_if=lambda e: e is None
     )
-    # Reading is deliberately unbounded: a run is a shared log, and whoever
-    # started it may be a newer TypeScript peer writing a version we have never
-    # heard of.
-    spec_version: int = pydantic.Field(default=SPEC_VERSION_CURRENT, alias="specVersion")
+    spec_version: Literal[1, 2, 3, 4, 5] = pydantic.Field(
+        default=SPEC_VERSION_CURRENT, alias="specVersion"
+    )
     server_props: ServerProps | None = pydantic.Field(default=None, exclude=True)
 
     @pydantic.model_validator(mode="before")
