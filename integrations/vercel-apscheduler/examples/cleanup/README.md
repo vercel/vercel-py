@@ -29,6 +29,15 @@ example:
 curl https://your-deployment.example/
 ```
 
+Previews are inactive by default. To keep a preview active while it is
+receiving traffic, add:
+
+```toml
+[tool.vercel.apscheduler.previews]
+enabled = true
+idle_timeout = "30m"
+```
+
 The example exposes authenticated `/scheduler/start`, `/scheduler/pause`, and
 `/scheduler/resume` routes for operational control. Do not expose these routes
 without authentication.

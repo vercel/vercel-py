@@ -63,7 +63,20 @@ Named environments (production and custom environments) additionally register
 an automatic activation hook during import. The Vercel Python Runtime
 executes it around the application's first real request, after request-scoped
 OIDC credentials are available. Automatic activation never overrides an
-explicitly paused driver.
+explicitly paused driver. Preview deployments register the same hook only
+when enabled in `pyproject.toml`:
+
+```toml
+[tool.vercel.apscheduler.previews]
+enabled = true
+idle_timeout = "30m"
+```
+
+Preview activation is recurring but request-driven. Eligible incoming requests
+renew the durable idle deadline, with process-local throttling capped at five
+minutes. There is no background timer and no activity Queue topic. Idle
+deadlines apply to previews only; a custom environment is a named environment
+and never idles.
 
 Outside Vercel, APScheduler's original methods are used.
 
@@ -77,8 +90,9 @@ state stays disposable.
 The driver stores one Redis hash per scope and scheduler:
 
 ```text
-state              running | paused
+state              running | paused | inactive
 generation         monotonically increasing integer
+idle_expires_at    preview idle deadline, when enabled
 start_status       pending | published | processing | active
 current_sequence   monotonically increasing within a generation
 current_logical_time
@@ -177,6 +191,35 @@ Completion is typed. `finish_start` and `finish_wake` atomically distinguish:
 The active-owner lease lasts fifteen minutes and is renewed every minute by
 the processing handler. A claim by a different owner succeeds only after the
 lease lapses.
+
+## Preview idle expiry
+
+An opted-in preview stores `idle_expires_at` in the same Redis driver hash.
+The first request starts the preview generation. Later requests renew the
+deadline without changing the generation.
+
+A manual `start()` renews the deadline in the same atomic transition that
+starts the generation. Without that renewal, a `start()` issued after the
+deadline lapsed would create a generation whose own start message is already
+stale. Outside an opted-in preview, activation clears any stored deadline.
+
+Start and wake claims check the deadline atomically before acquiring
+ownership. Start and wake completion check it again atomically before
+reserving a successor. If it expired, the transition sets the driver to
+`inactive`, clears the current token, and fails closed:
+
+- unclaimed Queue messages do no work;
+- work already in flight may finish, but cannot extend the chain; and
+- no periodic message keeps an abandoned preview alive.
+
+The next real request changes `inactive` to `running`, increments the
+generation, and publishes one start identity. Activation rebases persisted
+jobs to that request time, so the inactive interval is skipped rather than
+replayed as a burst.
+
+`paused` and `inactive` are deliberately distinct. `paused` records an
+explicit operator decision and automatic request activity only renews its
+deadline; it does not resume the scheduler.
 
 ## Pausing and resuming
 
@@ -295,7 +338,9 @@ namespace entirely: its deliveries still arrive but every claim turns stale
 and acks, it repairs and rearms nothing, its cold starts write no
 declarations, and its mutation APIs refuse loudly. Its queue simply drains.
 A rollback is the same operation in the other direction; the mechanism has
-no notion of old and new, only of who owns the chain now.
+no notion of old and new, only of who owns the chain now. An opted-in
+preview activates the same way and remains active only while requests renew
+its deadline.
 
 Automatic takeover is traffic-driven: it happens on the first request the
 promoted deployment serves through an environment alias. After promoting or
@@ -351,7 +396,11 @@ expiry would make reliable pause semantics impossible.
 | the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
 | takeover reconciliation races a demoted deployment's handler | ownership and revision CAS keep exactly one writer per job |
 | concurrent first requests | one automatic generation and one start identity |
-| request arrives after explicit pause | state remains paused |
+| request arrives after explicit pause | idle deadline renews but state remains paused |
+| preview idle deadline expires before claim | message is stale and no job runs |
+| preview idle deadline expires while work runs | current work may finish; no successor |
+| request arrives after preview expiry | one new generation; inactive time is skipped |
+| `start()` after the preview deadline lapsed | deadline renews; the new generation is claimable |
 
 These properties prevent parallel logical chains. They do not provide
 exactly-once job side effects. If a process dies after an external side effect

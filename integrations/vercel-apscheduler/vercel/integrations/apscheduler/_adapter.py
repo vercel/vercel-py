@@ -316,14 +316,22 @@ class SchedulerAdapter:
             self.driver.pause(now)
             self._pause_local()
             return
-        decision = self.driver.start(now)
+        decision = self.driver.start(
+            now,
+            idle_timeout_seconds=self._preview_idle_timeout_seconds(),
+        )
         self._reconcile_takeover(now)
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
 
-    def auto_activate(self, *, takeover_allowed: bool = False) -> None:
+    def auto_activate(
+        self,
+        *,
+        idle_timeout_seconds: int | None = None,
+        takeover_allowed: bool = False,
+    ) -> None:
         """Activate on request activity without overriding an explicit pause.
 
         ``takeover_allowed`` is true only when the triggering request arrived
@@ -335,7 +343,11 @@ class SchedulerAdapter:
         self._lifecycle_called = True
         self.ensure_local_started()
         now = datetime.now(UTC)
-        decision = self.driver.auto_activate(now, takeover_allowed=takeover_allowed)
+        decision = self.driver.auto_activate(
+            now,
+            idle_timeout_seconds=idle_timeout_seconds,
+            takeover_allowed=takeover_allowed,
+        )
         if not decision.owned:
             return
         self._reconcile_takeover(now)
@@ -357,6 +369,13 @@ class SchedulerAdapter:
     def resume(self) -> None:
         """Resume by creating one new durable generation."""
         self.start()
+
+    def _preview_idle_timeout_seconds(self) -> int | None:
+        # _automatic imports this module for the adapter registry; resolving
+        # at call time keeps the modules from importing each other at load.
+        from ._automatic import _preview_idle_timeout
+
+        return _preview_idle_timeout()
 
     def _publish_start_if_needed(
         self,

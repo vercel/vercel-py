@@ -3,4 +3,4 @@ patches `scheduler.start()`, `scheduler.pause()`, and `scheduler.resume()` with
 durable, deployment-scoped lifecycle transitions and atomic single-chain
 fencing. Paused occurrences are skipped on resume, and interrupted successor
 publication is repaired on retry. Production schedules activate on the first
-request.
+request, and opted-in previews stop after a durable idle timeout.

@@ -25,7 +25,7 @@ _SCOPE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 ClaimState = Literal["claimed", "busy", "stale"]
 FinishState = Literal["advanced", "fenced", "lost"]
-LifecycleState = Literal["running", "paused"]
+LifecycleState = Literal["running", "paused", "inactive"]
 
 __all__ = [
     "APSchedulerConfigurationError",
@@ -107,10 +107,48 @@ class DriverSnapshot:
     current_wake: WakeToken | None
 
 
+def _idle_demotion_block(*, now_ts: str, updated_at: str, clear_owner: bool, result: str) -> str:
+    """Lua that atomically demotes a running driver whose idle deadline lapsed."""
+    owner_fields = (
+        """,
+    "active_owner",
+    "active_kind",
+    "active_generation",
+    "active_sequence",
+    "active_lease_until\""""
+        if clear_owner
+        else ""
+    )
+    return f"""local idle_expiry = tonumber(redis.call("HGET", KEYS[1], "idle_expires_at") or "")
+if redis.call("HGET", KEYS[1], "state") == "running"
+  and idle_expiry
+  and idle_expiry <= tonumber({now_ts})
+then
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "state", "inactive",
+    "current_sequence", "0",
+    "updated_at", {updated_at}
+  )
+  redis.call(
+    "HDEL",
+    KEYS[1],
+    "start_status",
+    "activation_time",
+    "current_logical_time",
+    "current_status",
+    "dirty_logical_time"{owner_fields}
+  )
+  return {result}
+end"""
+
+
 _ACTIVATE_SCRIPT = """
 -- vercel-apscheduler-v1:activate
 -- ARGV[1] now (ISO-8601), ARGV[2] "1" = manual start, ARGV[3] this
--- deployment, ARGV[4] "1" = may take the chain from another deployment.
+-- deployment, ARGV[4] "1" = may take the chain from another deployment,
+-- ARGV[5] now (unix timestamp), ARGV[6] idle deadline (unix ts, "" = none).
 -- A manual start also activates a paused driver and always may take over.
 -- Taking over opens one new generation, fencing every message and handler
 -- of the previous owner, exactly like resuming from a pause. An automatic
@@ -141,7 +179,29 @@ if foreign and ARGV[2] ~= "1" and state == "paused" then
   return report("")
 end
 
-if not state or foreign or (ARGV[2] == "1" and state ~= "running") then
+if ARGV[6] ~= "" then
+  local prior_expiry = tonumber(redis.call("HGET", KEYS[1], "idle_expires_at") or "")
+  if state == "running" and prior_expiry and prior_expiry <= tonumber(ARGV[5]) then
+    state = "inactive"
+    redis.call(
+      "HDEL",
+      KEYS[1],
+      "start_status",
+      "activation_time",
+      "current_logical_time",
+      "current_status",
+      "dirty_logical_time"
+    )
+    redis.call("HSET", KEYS[1], "current_sequence", "0")
+  end
+  redis.call("HSET", KEYS[1], "idle_expires_at", ARGV[6])
+else
+  redis.call("HDEL", KEYS[1], "idle_expires_at")
+end
+
+if not state or state == "inactive" or foreign
+  or (ARGV[2] == "1" and state ~= "running")
+then
   generation = generation + 1
   changed = 1
   state = "running"
@@ -205,8 +265,17 @@ end
 return 1
 """
 
-_CLAIM_START_SCRIPT = """
+_CLAIM_START_SCRIPT = (
+    """
 -- vercel-apscheduler-v1:claim-start
+"""
+    + _idle_demotion_block(
+        now_ts="ARGV[3]",
+        updated_at="ARGV[5]",
+        clear_owner=False,
+        result='{"stale", ""}',
+    )
+    + """
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return {"stale", ""}
 end
@@ -243,8 +312,10 @@ redis.call(
 )
 return {"claimed", activation_time}
 """
+)
 
-_FINISH_START_SCRIPT = """
+_FINISH_START_SCRIPT = (
+    """
 -- vercel-apscheduler-v1:finish-start
 local owner = redis.call("HGET", KEYS[1], "active_owner")
 if owner ~= ARGV[2] then
@@ -257,6 +328,14 @@ if owner ~= ARGV[2] then
   return {"fenced", "", ""}
 end
 
+"""
+    + _idle_demotion_block(
+        now_ts="ARGV[5]",
+        updated_at="ARGV[4]",
+        clear_owner=True,
+        result='{"fenced", "", ""}',
+    )
+    + """
 if redis.call("HGET", KEYS[1], "state") ~= "running"
   or tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") ~= tonumber(ARGV[1])
 then
@@ -305,6 +384,7 @@ redis.call(
 )
 return {"advanced", logical_time ~= "" and "1" or "", logical_time}
 """
+)
 
 _MARK_WAKE_PUBLISHED_SCRIPT = """
 -- vercel-apscheduler-v1:mark-wake-published
@@ -328,8 +408,17 @@ end
 return 1
 """
 
-_CLAIM_WAKE_SCRIPT = """
+_CLAIM_WAKE_SCRIPT = (
+    """
 -- vercel-apscheduler-v1:claim-wake
+"""
+    + _idle_demotion_block(
+        now_ts="ARGV[5]",
+        updated_at="ARGV[7]",
+        clear_owner=False,
+        result='"stale"',
+    )
+    + """
 if redis.call("HGET", KEYS[1], "state") ~= "running" then
   return "stale"
 end
@@ -365,8 +454,10 @@ redis.call(
 )
 return "claimed"
 """
+)
 
-_FINISH_WAKE_SCRIPT = """
+_FINISH_WAKE_SCRIPT = (
+    """
 -- vercel-apscheduler-v1:finish-wake
 if redis.call("HGET", KEYS[1], "active_owner") ~= ARGV[3] then
   if redis.call("HGET", KEYS[1], "state") == "running"
@@ -379,6 +470,14 @@ if redis.call("HGET", KEYS[1], "active_owner") ~= ARGV[3] then
   return {"fenced", "", ""}
 end
 
+"""
+    + _idle_demotion_block(
+        now_ts="ARGV[7]",
+        updated_at="ARGV[6]",
+        clear_owner=True,
+        result='{"fenced", "", ""}',
+    )
+    + """
 if redis.call("HGET", KEYS[1], "state") ~= "running"
   or tonumber(redis.call("HGET", KEYS[1], "generation") or "-1") ~= tonumber(ARGV[1])
   or tonumber(redis.call("HGET", KEYS[1], "current_sequence") or "-1") ~= tonumber(ARGV[2])
@@ -437,6 +536,7 @@ return {
   logical_time
 }
 """
+)
 
 _REPAIR_OVERDUE_WAKE_SCRIPT = """
 -- vercel-apscheduler-v1:repair-overdue-wake
@@ -529,39 +629,68 @@ class RedisDriver:
         self.deployment = deployment
         self.key = f"vercel:apscheduler:{{{scope}:{scheduler_id}}}:driver"
 
-    def start(self, now: datetime) -> StartDecision:
-        """Atomically start, resume, or take over one durable generation."""
-        return self._activate(now, manual=True, takeover_allowed=True)
+    def start(
+        self,
+        now: datetime,
+        *,
+        idle_timeout_seconds: int | None = None,
+    ) -> StartDecision:
+        """Atomically start, resume, or take over one durable generation.
+
+        A manual start also renews the preview idle deadline; otherwise a
+        deadline that lapsed before the start could make the new generation
+        immediately stale.
+        """
+        return self._activate(
+            now,
+            idle_timeout_seconds=idle_timeout_seconds,
+            manual=True,
+            takeover_allowed=True,
+        )
 
     def auto_activate(
         self,
         now: datetime,
         *,
+        idle_timeout_seconds: int | None = None,
         takeover_allowed: bool = False,
     ) -> StartDecision:
-        """Start on request activity unless the scheduler was explicitly paused."""
-        return self._activate(now, manual=False, takeover_allowed=takeover_allowed)
+        """Renew activity and start unless the scheduler was explicitly paused."""
+        return self._activate(
+            now,
+            idle_timeout_seconds=idle_timeout_seconds,
+            manual=False,
+            takeover_allowed=takeover_allowed,
+        )
 
     def _activate(
         self,
         now: datetime,
         *,
+        idle_timeout_seconds: int | None,
         manual: bool,
         takeover_allowed: bool,
     ) -> StartDecision:
+        if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be a positive integer")
         now_utc = as_utc(now, name="now")
+        expires_at = (
+            now_utc.timestamp() + idle_timeout_seconds if idle_timeout_seconds is not None else None
+        )
         result = self._eval(
             _ACTIVATE_SCRIPT,
             now_utc.isoformat(),
             "1" if manual else "",
             self.deployment,
             "1" if takeover_allowed else "",
+            str(now_utc.timestamp()),
+            str(expires_at) if expires_at is not None else "",
         )
         if not isinstance(result, (list, tuple)) or len(result) != 8:
             raise RuntimeError("Redis returned an invalid APScheduler activation result")
         generation = int(_text(result[1]))
         state_raw = _text(result[2])
-        if state_raw not in {"running", "paused"}:
+        if state_raw not in {"running", "paused", "inactive"}:
             raise RuntimeError("Redis returned an unknown APScheduler lifecycle state")
         return StartDecision(
             generation=generation,
@@ -637,12 +766,14 @@ class RedisDriver:
             if next_logical_time is not None
             else None
         )
+        now_utc = as_utc(now, name="now")
         result = self._eval(
             _FINISH_START_SCRIPT,
             str(generation),
             owner,
             logical_time.isoformat() if logical_time is not None else "",
-            as_utc(now, name="now").isoformat(),
+            now_utc.isoformat(),
+            str(now_utc.timestamp()),
         )
         return _finish_result(
             result,
@@ -699,6 +830,7 @@ class RedisDriver:
             if next_logical_time is not None
             else None
         )
+        now_utc = as_utc(now, name="now")
         result = self._eval(
             _FINISH_WAKE_SCRIPT,
             str(token.generation),
@@ -706,7 +838,8 @@ class RedisDriver:
             owner,
             token.logical_time.isoformat(),
             logical_time.isoformat() if logical_time is not None else "",
-            as_utc(now, name="now").isoformat(),
+            now_utc.isoformat(),
+            str(now_utc.timestamp()),
         )
         return _finish_result(
             result,
@@ -726,7 +859,11 @@ class RedisDriver:
         if not isinstance(values, (list, tuple)) or len(values) != 6:
             raise RuntimeError("Redis returned an invalid APScheduler driver state")
         state_raw = _text(values[0])
-        state: LifecycleState = "running" if state_raw == "running" else "paused"
+        state: LifecycleState
+        if state_raw in {"running", "paused", "inactive"}:
+            state = cast("LifecycleState", state_raw)
+        else:
+            state = "paused"
         generation_raw = _text(values[1])
         generation = int(generation_raw) if generation_raw else 0
         return DriverSnapshot(

@@ -67,10 +67,31 @@ The integration is registered while the application imports, but the Redis
 transition and first Queue send are deferred until the runtime has installed
 that request's OIDC credentials. Builds never enqueue messages.
 
+Preview deployments are inactive by default. Opt a project into request-driven
+preview scheduling with:
+
+```toml
+[tool.vercel.apscheduler.previews]
+enabled = true
+idle_timeout = "30m"
+```
+
+Each active Function runtime renews the preview's durable Redis activity
+deadline on incoming requests, throttled to at most once every five minutes
+(or one third of a shorter timeout). This is not a background timer and it
+does not emit periodic Queue messages. If no request renews the deadline:
+
+- a queued start or wake becomes stale before it can run;
+- an in-flight wake may finish its current work but cannot publish a
+  successor; and
+- the next request creates one new generation and skips occurrences from the
+  inactive interval.
+
 An explicit `pause()` remains paused across later requests; automatic
-activation never overrides it. A deployment that has never received a request
-cannot start automatically because it has not received request-scoped OIDC
-credentials. Preview deployments do not activate automatically.
+activation never overrides it. Production scheduling has no idle timeout.
+In either environment, a deployment that has never received a request cannot
+start automatically because it has not received request-scoped OIDC
+credentials.
 
 ## Start, pause, and resume
 
@@ -125,7 +146,8 @@ heartbeat. `add_job()`, `modify_job()`, `reschedule_job()`, `pause_job()`,
 needed.
 
 Automatic activation establishes the runtime-mutation boundary before the
-user application handles a production request. In environments without
+user application handles a production request (or an opted-in preview
+request). In environments without
 automatic activation, call `scheduler.start()` first in each Function
 instance that changes jobs; before that boundary, `add_job()` calls are
 treated as module-level declarations. The call is idempotent:
@@ -173,6 +195,9 @@ previews. This gives the driver the following guarantees:
   with no live owner, and republished by the owner.
 - Concurrent first requests converge on one automatic generation and one
   start identity.
+- Preview idle expiry fences both claims and successor publication.
+- A later preview request creates one new generation; concurrent requests
+  converge on that generation.
 
 The scheduler's durable identity derives from its `RedisJobStore` `jobs_key`,
 so renaming variables or moving modules never orphans state. Two schedulers
