@@ -355,6 +355,8 @@ class FakeDriver:
 def runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_test")
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
     monkeypatch.setenv(
         "VERCEL_APSCHEDULER_SUBSCRIBERS",
@@ -456,11 +458,16 @@ class InMemoryJobCoordinator(RedisJobCoordinator):
     def get_due_jobs_with_revisions(self, now: datetime) -> list[tuple[Any, int]]:
         return [(job, self._versions.get(job.id, 0)) for job in self.store.get_due_jobs(now)]
 
-    def get_all_jobs_with_revisions(self) -> list[tuple[Any, int, str]]:
-        return [
-            (job, self._versions.get(job.id, 0), self._provenance.get(job.id, ""))
-            for job in self.store.get_all_jobs()
-        ]
+    def get_all_jobs_with_revisions(
+        self,
+    ) -> tuple[list[tuple[Any, int, str]], list[tuple[str, int, str]]]:
+        return (
+            [
+                (job, self._versions.get(job.id, 0), self._provenance.get(job.id, ""))
+                for job in self.store.get_all_jobs()
+            ],
+            [],
+        )
 
     def cas_update_job(self, job: Any, expected_revision: int) -> bool:
         if self._versions.get(job.id, 0) != expected_revision:
@@ -648,6 +655,35 @@ def test_named_environment_without_project_id_fails_loudly(
 
     with pytest.raises(APSchedulerConfigurationError, match="VERCEL_PROJECT_ID"):
         adapter._bind_runtime()
+
+
+def test_missing_environment_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent deployment-scope fallback would fork a chain per deployment."""
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={"default": InMemoryRedisJobStore()},
+    )
+    adapter = get_adapter(scheduler)
+    assert adapter is not None
+
+    with pytest.raises(APSchedulerConfigurationError, match="VERCEL_ENV"):
+        adapter._bind_runtime()
+
+
+def test_options_reject_limits_the_queue_cannot_serve() -> None:
+    """A wake the queue would refuse must fail at import, not at publish."""
+    with pytest.raises(ValueError, match="max_delay_seconds"):
+        VercelAPSchedulerOptions(max_delay_seconds=6 * 24 * 60 * 60)
+    with pytest.raises(ValueError, match="retention_seconds"):
+        VercelAPSchedulerOptions(retention_seconds=8 * 24 * 60 * 60)
+    with pytest.raises(ValueError, match="must exceed max_delay_seconds"):
+        # Raising the delay without also raising retention would publish
+        # wakes that expire before they become visible.
+        VercelAPSchedulerOptions(max_delay_seconds=3 * 24 * 60 * 60)
 
 
 def test_preview_state_stays_deployment_scoped(
