@@ -8,6 +8,7 @@ vector before the happy path is exercised at all.
 import base64
 import json
 import time
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -625,6 +626,63 @@ def test_unknown_kid_refetch_is_rate_limited_under_concurrency(
 
     # Exactly one refetch for the whole burst: more would be amplification, none
     # would mean rotation could never be picked up.
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_refetch_throttle_engages_before_the_claim_is_released(
+    signing_key: rsa.RSAPrivateKey,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic twin of the burst test above, pinned to the exact window.
+
+    The fetch claim used to be released in the fetch helper's `finally`, with the
+    throttle recorded only after key selection. A second unknown-kid caller
+    arriving in between claimed a fresh fetch, so a burst amplified anyway. Pause
+    the first caller's post-refetch selection and steer a second caller into that
+    window: it must wait on the claim, not fetch.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from vercel.oidc import verify as oidc_verify
+
+    route = jwks_route(signing_key)
+    clear_jwks_cache()
+    verify_vercel_oidc_token(sign(signing_key), **EXPECTATIONS)  # warm the cache
+    assert route.call_count == 1
+
+    original_select = oidc_verify._select_key
+    outcome_pending = threading.Event()
+    record_outcome = threading.Event()
+    first_kid_selections = 0
+
+    def paused_select(document: Mapping[str, Any], kid: str) -> Any:
+        nonlocal first_kid_selections
+        if kid == "forged-first":
+            first_kid_selections += 1
+            # Call 1 is the cache probe; call 2 inspects the refetched document,
+            # where the outcome (throttle) has not been recorded yet.
+            if first_kid_selections == 2:
+                outcome_pending.set()
+                assert record_outcome.wait(timeout=5)
+        return original_select(document, kid)
+
+    monkeypatch.setattr(oidc_verify, "_select_key", paused_select)
+
+    def attempt(kid: str) -> None:
+        with pytest.raises(VercelOidcVerificationError):
+            verify_vercel_oidc_token(sign(signing_key, kid=kid), **EXPECTATIONS)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(attempt, "forged-first")
+        assert outcome_pending.wait(timeout=5)
+        second = pool.submit(attempt, "forged-second")
+        time.sleep(0.25)  # let the second caller reach the fetch claim
+        record_outcome.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+
     assert route.call_count == 2
 
 
