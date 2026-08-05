@@ -8,6 +8,7 @@ import importlib
 import json
 import logging
 from os import environ
+from time import monotonic
 
 from ._driver import APSchedulerConfigurationError
 from ._imports import BaseScheduler
@@ -28,6 +29,13 @@ MAX_PREVIEW_RENEW_INTERVAL_SECONDS = 5 * 60
 # heals a wake whose queue message died (for example stranded by a rollback).
 HEAL_SWEEP_INTERVAL_SECONDS = 5 * 60
 
+# Whether the last sweep found a chain another deployment owns. While True,
+# the hook stays eligible on every invocation so the first alias-routed
+# request takes the chain over immediately, instead of waiting out a sweep
+# window consumed by a request that proved nothing.
+_unsettled = False
+_last_sweep: float | None = None
+
 
 def register_automatic_activation() -> None:
     """Buffer activation until the runtime has installed request credentials."""
@@ -36,15 +44,6 @@ def register_automatic_activation() -> None:
     if is_discovery_runtime() or is_queue_serving_runtime():
         return
 
-    timeout = _preview_idle_timeout()
-    interval = (
-        min(
-            float(MAX_PREVIEW_RENEW_INTERVAL_SECONDS),
-            timeout / 3,
-        )
-        if timeout is not None
-        else float(HEAL_SWEEP_INTERVAL_SECONDS)
-    )
     try:
         from vercel_runtime.invocation_hooks import (  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
             run_on_next_invocation,
@@ -58,15 +57,41 @@ def register_automatic_activation() -> None:
     run_on_next_invocation(
         ACTIVATION_HOOK_NAME,
         _automatic_activation_hook,
-        repeat_after_seconds=interval,
+        repeat_after_seconds=_sweep_interval(),
     )
 
 
-def _automatic_activation_hook() -> None:
-    _activate_configured_schedulers(
+def _sweep_interval() -> float:
+    """Return the settled cadence: heal sweeps plus preview deadline renewal."""
+    timeout = _preview_idle_timeout()
+    if timeout is not None:
+        return min(float(MAX_PREVIEW_RENEW_INTERVAL_SECONDS), timeout / 3)
+    return float(HEAL_SWEEP_INTERVAL_SECONDS)
+
+
+def _automatic_activation_hook() -> float | None:
+    """Sweep the configured schedulers; stay eager while a takeover is owed.
+
+    The return value sets the hook's next eligibility on runtimes that
+    support it. While another deployment owns the chain, only an
+    alias-routed request can change anything, so the hook stays eligible on
+    every invocation but touches Redis only when one arrives or when the
+    sweep interval lapses (the fallback that also resyncs after a manual
+    ``start()``). Once settled it returns to the registered cadence.
+    """
+    global _last_sweep, _unsettled  # noqa: PLW0603 - process-lifetime sweep state
+    now = monotonic()
+    alias_routed = _request_is_alias_routed()
+    recently_swept = _last_sweep is not None and now - _last_sweep < _sweep_interval()
+    if _unsettled and recently_swept and not alias_routed:
+        return 0.0
+    settled = _activate_configured_schedulers(
         _preview_idle_timeout(),
-        takeover_allowed=_request_is_alias_routed(),
+        takeover_allowed=alias_routed,
     )
+    _last_sweep = now
+    _unsettled = not settled
+    return 0.0 if not settled else None
 
 
 def _request_is_alias_routed() -> bool:
@@ -157,19 +182,23 @@ def _activate_configured_schedulers(
     idle_timeout_seconds: int | None,
     *,
     takeover_allowed: bool,
-) -> None:
+) -> bool:
+    """Sweep every configured scheduler; True when all are settled."""
     from ._adapter import get_adapter
 
+    settled = True
     for scheduler in _configured_schedulers():
         adapter = get_adapter(scheduler)
         if adapter is None:
             raise APSchedulerConfigurationError(
                 "configured APScheduler subscriber was not adopted by the integration"
             )
-        adapter.auto_activate(
+        if not adapter.auto_activate(
             idle_timeout_seconds=idle_timeout_seconds,
             takeover_allowed=takeover_allowed,
-        )
+        ):
+            settled = False
+    return settled
 
 
 def _configured_schedulers() -> list[BaseScheduler]:
