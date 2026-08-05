@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pickle  # noqa: S403 - mirrors the store's own persistence format
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from os import environ
@@ -10,6 +13,7 @@ from unittest.mock import patch
 import pytest
 from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.util import datetime_to_utc_timestamp
 from redis import Redis
 
 from vercel.integrations.apscheduler import (
@@ -546,7 +550,7 @@ def test_real_redis_cas_prevents_stale_overwrite_and_resurrection(
                 run_date=run_time,
                 id="mutable",
             )
-        [(stale_job, stale_revision)] = adapter.coordinator.get_all_jobs_with_revisions()
+        [(stale_job, stale_revision, _)] = adapter.coordinator.get_all_jobs_with_revisions()
 
         scheduler.modify_job("mutable", name="new-name")
         stale_job._modify(name="stale-name")
@@ -556,7 +560,7 @@ def test_real_redis_cas_prevents_stale_overwrite_and_resurrection(
         )
         assert scheduler.get_job("mutable").name == "new-name"
 
-        [(removed_job, removed_revision)] = adapter.coordinator.get_all_jobs_with_revisions()
+        [(removed_job, removed_revision, _)] = adapter.coordinator.get_all_jobs_with_revisions()
         scheduler.remove_job("mutable")
         assert not adapter.coordinator.cas_update_job(
             removed_job,
@@ -618,3 +622,141 @@ def _activate_dormant_scheduler(
     finish = driver.finish_start(1, "start-owner", None, now)
     assert finish.state == "advanced"
     assert finish.wake is None
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_takeover_reconciles_declared_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promoted deployment syncs declared jobs and keeps dynamic ones."""
+    assert REDIS_URL is not None
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_reconcile")
+    scheduler, adapter, client, keys = _real_scheduler(
+        monkeypatch,
+        deployment="dpl_reconcile_one",
+    )
+    try:
+        for job_id in ("keep", "gone", "changed"):
+            scheduler.add_job(
+                durable_test_job,
+                "interval",
+                hours=1,
+                id=job_id,
+                replace_existing=True,
+            )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            scheduler.start()
+            scheduler.add_job(
+                durable_test_job,
+                "date",
+                run_date=datetime.now(UTC) + timedelta(hours=2),
+                id="dynamic",
+            )
+        before = {
+            job.id: job.next_run_time
+            for job, _revision, _provenance in (adapter.coordinator.get_all_jobs_with_revisions())
+        }
+        assert adapter.driver.reconciled_deployment() == "dpl_reconcile_one"
+
+        # A new deployment cold-starts against the shared production scope.
+        _adapter_module._ACTIVE_IDENTITIES.clear()
+        monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_reconcile_two")
+        monkeypatch.delenv("VERCEL")
+        second = BlockingScheduler(
+            timezone=UTC,
+            jobstores={"default": _redis_job_store(REDIS_URL)},
+        )
+        modules[TEST_SCHEDULER_MODULE].__dict__["scheduler"] = second
+        monkeypatch.setenv("VERCEL", "1")
+        second.add_job(
+            durable_test_job,
+            "interval",
+            hours=1,
+            id="keep",
+            replace_existing=True,
+        )
+        second.add_job(
+            durable_test_job,
+            "interval",
+            hours=2,
+            id="changed",
+            replace_existing=True,
+        )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            second.start()
+        second_adapter = get_adapter(second)
+        assert second_adapter is not None
+
+        records = {
+            job.id: (job, provenance)
+            for job, _revision, provenance in (
+                second_adapter.coordinator.get_all_jobs_with_revisions()
+            )
+        }
+        assert set(records) == {"keep", "changed", "dynamic"}
+        assert records["keep"][0].next_run_time == before["keep"]
+        assert records["keep"][1] == "declared"
+        assert records["changed"][0].next_run_time != before["changed"]
+        assert records["changed"][0].trigger.interval == timedelta(hours=2)
+        assert records["dynamic"][1] == "runtime"
+        assert second_adapter.driver.reconciled_deployment() == "dpl_reconcile_two"
+    finally:
+        client.delete(*keys)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_quarantine_sidelines_unloadable_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record that no longer unpickles must not wedge the wake chain."""
+    assert REDIS_URL is not None
+    scheduler, adapter, client, keys = _real_scheduler(
+        monkeypatch,
+        deployment="dpl_quarantine",
+    )
+    try:
+        run_date = datetime.now(UTC) + timedelta(minutes=5)
+        scheduler.add_job(
+            durable_test_job,
+            "date",
+            run_date=run_date,
+            id="good",
+            replace_existing=True,
+        )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            scheduler.start()
+
+        store = scheduler._jobstores["default"]
+        raw: Any = client.hget(store.jobs_key, "good")
+        state = pickle.loads(raw)  # noqa: S301 - crafted by this test
+        state["id"] = "broken"
+        state["func"] = "missing_module:missing_function"
+        client.hset(store.jobs_key, mapping={"broken": pickle.dumps(state)})
+        client.zadd(
+            store.run_times_key,
+            {"broken": datetime_to_utc_timestamp(run_date)},
+        )
+
+        due = adapter.coordinator.get_due_jobs_with_revisions(run_date + timedelta(minutes=1))
+
+        assert [job.id for job, _revision in due] == ["good"]
+        assert client.zscore(store.run_times_key, "broken") is None
+        assert client.hexists(store.jobs_key, "broken")
+    finally:
+        client.delete(*keys)

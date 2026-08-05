@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+import logging
 import pickle
 from datetime import datetime, timezone
 
@@ -17,6 +18,8 @@ from apscheduler.util import (  # type: ignore[import-untyped]
 
 from ._imports import RedisJobStore
 
+LOGGER = logging.getLogger("vercel.integrations.apscheduler")
+
 if TYPE_CHECKING:
     from ._adapter import SchedulerAdapter
     from ._driver import RedisDriver
@@ -29,7 +32,7 @@ __all__ = ["RedisJobCoordinator"]
 # Shared tail of the job write scripts: bump the store revision, persist the
 # job, and rearm the wake token in the same atomic transaction. ARGV[4] is
 # "1" when the write may rearm, ARGV[5] the job's canonical wake candidate,
-# ARGV[6] the current time.
+# ARGV[6] the current time, ARGV[7] the provenance recorded on insert.
 _WRITE_JOB_FRAGMENT = """
 local revision = redis.call("HINCRBY", KEYS[4], "job_revision", 1)
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
@@ -73,6 +76,7 @@ _ADD_JOB_SCRIPT = f"""
 if redis.call("HEXISTS", KEYS[1], ARGV[1]) == 1 then
   return {{"conflict", ""}}
 end
+redis.call("HSET", KEYS[5], ARGV[1], ARGV[7])
 {_WRITE_JOB_FRAGMENT}
 """
 
@@ -95,6 +99,7 @@ redis.call("HINCRBY", KEYS[4], "job_revision", 1)
 redis.call("HDEL", KEYS[1], ARGV[1])
 redis.call("ZREM", KEYS[2], ARGV[1])
 redis.call("HDEL", KEYS[3], ARGV[1])
+redis.call("HDEL", KEYS[5], ARGV[1])
 return "ok"
 """
 
@@ -102,7 +107,7 @@ return "ok"
 _REMOVE_ALL_JOBS_SCRIPT = """
 -- vercel-apscheduler-v1:remove-all-jobs
 redis.call("HINCRBY", KEYS[4], "job_revision", 1)
-redis.call("DEL", KEYS[1], KEYS[2], KEYS[3])
+redis.call("DEL", KEYS[1], KEYS[2], KEYS[3], KEYS[5])
 return 1
 """
 
@@ -133,6 +138,7 @@ for _, id in ipairs(ids) do
     table.insert(result, id)
     table.insert(result, state)
     table.insert(result, redis.call("HGET", KEYS[2], id) or "0")
+    table.insert(result, redis.call("HGET", KEYS[3], id) or "")
   end
 end
 return result
@@ -167,6 +173,7 @@ redis.call("HINCRBY", KEYS[4], "job_revision", 1)
 redis.call("HDEL", KEYS[1], ARGV[1])
 redis.call("ZREM", KEYS[2], ARGV[1])
 redis.call("HDEL", KEYS[3], ARGV[1])
+redis.call("HDEL", KEYS[5], ARGV[1])
 return 1
 """
 
@@ -185,14 +192,16 @@ class RedisJobCoordinator:
         self.driver = driver
         self.adapter = adapter
         self.versions_key = f"{store.jobs_key}:versions"
+        self.provenance_key = f"{store.jobs_key}:provenance"
 
     @property
-    def keys(self) -> tuple[str, str, str, str]:
+    def keys(self) -> tuple[str, str, str, str, str]:
         return (
             self.store.jobs_key,
             self.store.run_times_key,
             self.versions_key,
             self.driver.key,
+            self.provenance_key,
         )
 
     def install(self) -> None:
@@ -254,16 +263,20 @@ class RedisJobCoordinator:
             self.versions_key,
             str(datetime_to_utc_timestamp(now)),
         )
-        return self._decode_versioned_jobs(raw)
+        return cast("list[tuple[Any, int]]", self._decode_versioned_jobs(raw))
 
-    def get_all_jobs_with_revisions(self) -> list[tuple[Any, int]]:
+    def get_all_jobs_with_revisions(self) -> list[tuple[Any, int, str]]:
         raw = self.redis.eval(
             _GET_ALL_WITH_REVISIONS_SCRIPT,
-            2,
+            3,
             self.store.jobs_key,
             self.versions_key,
+            self.provenance_key,
         )
-        jobs = self._decode_versioned_jobs(raw)
+        jobs = cast(
+            "list[tuple[Any, int, str]]",
+            self._decode_versioned_jobs(raw, stride=4),
+        )
         return sorted(
             jobs,
             key=lambda item: (
@@ -309,6 +322,13 @@ class RedisJobCoordinator:
             if next_run_time is not None
             else ""
         )
+        # Code owns "declared" jobs across deployments; the store owns
+        # "runtime" jobs. Takeover reconciliation reads this on promote.
+        provenance = (
+            "runtime"
+            if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
+            else "declared"
+        )
         now = datetime.now(UTC)
         return self.redis.eval(
             script,
@@ -320,6 +340,7 @@ class RedisJobCoordinator:
             "1" if rearm else "0",
             candidate,
             now.isoformat(),
+            provenance,
         )
 
     def _serialized_job(self, job: Any) -> tuple[bytes, str]:
@@ -328,15 +349,38 @@ class RedisJobCoordinator:
         score = str(datetime_to_utc_timestamp(next_run_time)) if next_run_time is not None else ""
         return state, score
 
-    def _decode_versioned_jobs(self, raw: Any) -> list[tuple[Any, int]]:
-        if not isinstance(raw, (list, tuple)) or len(raw) % 3:
+    def _decode_versioned_jobs(self, raw: Any, *, stride: int = 3) -> list[tuple[Any, ...]]:
+        if not isinstance(raw, (list, tuple)) or len(raw) % stride:
             raise RuntimeError("Redis returned invalid APScheduler versioned jobs")
-        jobs: list[tuple[Any, int]] = []
-        for index in range(0, len(raw), 3):
+        jobs: list[tuple[Any, ...]] = []
+        for index in range(0, len(raw), stride):
+            job_id = _text(raw[index])
             state = raw[index + 1]
             revision = int(_text(raw[index + 2]))
-            jobs.append((self.store._reconstitute_job(state), revision))
+            try:
+                job = self.store._reconstitute_job(state)
+            except Exception:  # noqa: BLE001 - any unpickling failure
+                self._quarantine_job(job_id)
+                continue
+            if stride == 3:
+                jobs.append((job, revision))
+            else:
+                jobs.append((job, revision, _text(raw[index + 3])))
         return jobs
+
+    def _quarantine_job(self, job_id: str) -> None:
+        """Sideline a job whose persisted state no longer reconstitutes.
+
+        Typically a dynamic job whose function was removed by a later
+        deployment. Removing it from the due index keeps the chain alive;
+        the record and its revision stay for an operator to fix or delete.
+        """
+        self.redis.zrem(self.store.run_times_key, job_id)
+        LOGGER.error(
+            'Quarantined APScheduler job "%s": its persisted definition can '
+            "no longer be loaded by this deployment's code",
+            job_id,
+        )
 
 
 def _text(value: Any) -> str:

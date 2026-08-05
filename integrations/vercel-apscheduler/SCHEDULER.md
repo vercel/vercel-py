@@ -29,12 +29,18 @@ two internal callbacks in `vercel.queue`:
 | wake | Evaluate due jobs and reserve the next wake |
 
 The builder extracts those callbacks and produces the Function and Queue
-triggers. It also injects a mapping from each declared `module:object`
-entrypoint to its stable subscriber ID. At runtime, calling a lifecycle method
-on the object uses that mapping to select its deployment-scoped Redis record.
+triggers. The entrypoint is a locator only: the scheduler's durable identity
+derives from its `RedisJobStore` `jobs_key` (dots become dashes), the one
+value that is refactor-stable and exactly as durable as the state it names.
+Renaming the variable or moving the module never orphans the Redis namespace
+or the queue topics; deliberately renaming `jobs_key` is an identity
+migration. The `scheduler_id` integration option pins an identity explicitly.
 
-The topic names and subscriber ID are implementation details. Applications do
-not configure or publish to them. Build-time imports run in discovery mode;
+Two schedulers whose keys collapse to one identity fail loudly at import;
+give each scheduler's store a distinct `jobs_key`.
+
+The topic names are implementation details. Applications do not configure or
+publish to them. Build-time imports run in discovery mode;
 calls to `start()`, `pause()`, or `resume()` during discovery have no external
 effect.
 
@@ -57,7 +63,12 @@ Outside Vercel, APScheduler's original methods are used.
 
 ## Durable state
 
-The driver stores one Redis hash per deployment and scheduler:
+State is scoped by environment for production and custom environments, and by
+deployment for previews and development. A named environment's schedules,
+dynamic jobs, and wake chain therefore survive promotions, while preview
+state stays disposable.
+
+The driver stores one Redis hash per scope and scheduler:
 
 ```text
 state              running | paused
@@ -68,14 +79,19 @@ current_logical_time
 current_status     pending | published | processing
 active_owner
 active_lease_until
+reconciled_deployment
 ```
 
 Redis Lua scripts update these fields atomically. Driver state has no TTL.
 
-The driver key carries a `{deployment:scheduler}` hash tag, so it always
-shares a Redis Cluster slot with the job-store keys that use the same
-namespace. Two deployments can use the same Redis database without sharing
-driver state.
+The driver key carries a `{scope:scheduler}` hash tag, so it always shares
+a Redis Cluster slot with the job-store keys that use the same namespace.
+Distinct scopes can use the same Redis database without sharing state.
+
+Each persisted job also records its provenance: `declared` for jobs
+materialized from code declarations, `runtime` for jobs added through the
+mutation APIs after `start()`. Code owns declared jobs across deployments;
+the store owns runtime jobs.
 
 ## Starting
 
@@ -225,9 +241,9 @@ occurrence must remain eligible should set an appropriate
 
 v1 supports exactly one job store named `default`. It must be APScheduler's
 Redis-backed `RedisJobStore`, and it is also the lifecycle coordinator. The
-integration namespaces the job-store keys with the deployment ID and
-subscriber ID, so two deployments can share a Redis database without sharing
-jobs or driver state.
+integration namespaces the job-store keys with the state scope and the
+scheduler identity, so distinct environments and previews can share a Redis
+database without sharing jobs or driver state.
 
 Runtime Cache is not suitable. It is evictable and cannot provide the durable
 atomic state needed for a pause to remain paused. Redis lifecycle state has no
@@ -249,12 +265,32 @@ calls to `add_job()` should pass `replace_existing=True`.
 
 ## Deployment behavior
 
-Every deployment has an independent job namespace, driver generation, and
-Queue partition. Creating or promoting a new deployment does not implicitly
-start it, and it does not move the old deployment's chain. Call
-`scheduler.start()` through an authenticated route on the new deployment when
-it should begin scheduling, and `scheduler.pause()` on an older deployment
-before retiring it when its schedules should stop.
+Production and custom environments share one durable namespace, and the
+platform aliases a promoted-away deployment's queue into its successor. The
+two compose into seamless succession: the old deployment's in-flight wake is
+delivered to the new deployment, the shared generation matches, and the chain
+continues on the new code at its very next wake. No request or manual step
+is needed for the chain itself.
+
+The first time a deployment touches a shared namespace it reconciles the
+store against its own declarations, before planning any due jobs: a job the
+code no longer declares is deleted and never runs, a changed trigger restarts
+its schedule, an unchanged job keeps its progress, and `runtime` jobs are
+never touched. A persisted job whose definition no longer loads under the new
+code (typically a runtime job whose function was removed) is quarantined: it
+leaves the due index, keeps its record for the operator, and logs an error.
+
+Rolling back re-promotes a deployment whose in-flight wake may be stranded in
+the newer deployment's queue, where no alias points. `published` and
+`processing` wakes well past their logical time with no live owner lease are
+therefore presumed lost and republished into the current deployment's queue.
+Within a queue the idempotency key makes a false-positive republish a no-op;
+across queues the claim fences duplicates. Repairs run from `start()`, from
+stale queue deliveries, and log a warning when they fire, since each one
+means a message actually died.
+
+Previews and development keep deployment-scoped namespaces: a preview chain
+dies with its deployment instead of following the branch.
 
 Deleting a deployment prevents its Functions from receiving further work.
 Redis records intentionally remain unless the operator removes them; automatic
@@ -276,6 +312,9 @@ expiry would make reliable pause semantics impossible.
 | concurrent runtime add/modify | one token is rearmed; no second chain |
 | handler finishes after a job mutation | revision check preserves the mutation |
 | retried mutation fails on a conflicting id | the pending wake is still republished |
+| promote while a wake is in flight | queue aliasing delivers it to the new deployment; the shared generation matches and the chain continues |
+| rollback strands the current wake's message | the overdue wake is presumed lost and republished |
+| takeover reconciliation races an old deployment's handler | revision CAS keeps exactly one writer per job |
 
 These properties prevent parallel logical chains. They do not provide
 exactly-once job side effects. If a process dies after an external side effect

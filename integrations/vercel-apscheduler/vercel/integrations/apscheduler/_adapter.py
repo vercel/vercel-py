@@ -141,6 +141,25 @@ def get_adapter(scheduler: Any) -> SchedulerAdapter | None:
     return cast("SchedulerAdapter | None", getattr(scheduler, ADAPTER_ATTR, None))
 
 
+def _trigger_fingerprint(trigger: Any) -> tuple[str, str, str]:
+    """Digest a trigger into its user-declared, comparable schedule.
+
+    ``IntervalTrigger`` without an explicit ``start_date`` auto-anchors at
+    declaration time, so that field would look changed on every deployment
+    and re-anchor unchanged schedules; it is excluded from the digest.
+    """
+    state: Any = trigger.__getstate__()
+    if isinstance(state, dict) and type(trigger).__name__ == "IntervalTrigger":
+        state = {key: value for key, value in state.items() if key != "start_date"}
+    return (
+        type(trigger).__module__,
+        type(trigger).__qualname__,
+        repr(sorted(state.items(), key=lambda item: str(item[0])))
+        if isinstance(state, dict)
+        else repr(state),
+    )
+
+
 class SchedulerAdapter:
     """Turns one durable APScheduler instance into one fenced Queue driver."""
 
@@ -155,6 +174,8 @@ class SchedulerAdapter:
         self._deployment: str | None = None
         self._scope: str | None = None
         self._registration_deferred = False
+        self._declared_jobs: dict[str, Any] = {}
+        self._reconciled = False
         self._driver: RedisDriver | None = None
         self._coordinator: RedisJobCoordinator | None = None
         self._job_definitions: dict[str, _JobDefinition] = {}
@@ -442,6 +463,7 @@ class SchedulerAdapter:
         self._bind_runtime()
         self._validate_durable_configuration()
         if self.scheduler.state != STATE_STOPPED:
+            self._reconcile_takeover(datetime.now(UTC))
             return
         self._inject_inline_executor()
         previous = self._suppress_wakeup
@@ -455,6 +477,7 @@ class SchedulerAdapter:
             raise
         finally:
             self._suppress_wakeup = previous
+        self._reconcile_takeover(datetime.now(UTC))
 
     def _pause_local(self) -> None:
         if self.scheduler.state != STATE_RUNNING:
@@ -537,6 +560,9 @@ class SchedulerAdapter:
             raise APSchedulerConfigurationError(
                 "jobs in a durable APScheduler store require an explicit stable id"
             )
+        if not (self.is_runtime_mutation or self.is_wake_mutation):
+            # Cold-start declarations are the reconciliation input on takeover.
+            self._declared_jobs[str(job.id)] = job
         if getattr(job, "executor", "default") != "default":
             raise APSchedulerConfigurationError(
                 f'job "{job.id}" must use the default Vercel inline executor'
@@ -550,6 +576,19 @@ class SchedulerAdapter:
             )
         if self.is_runtime_mutation or self.is_wake_mutation:
             return True
+        # The skipped write leaves the declared object without the defaults
+        # upstream _real_add_job would fill; reconciliation may persist it.
+        replacements: dict[str, Any] = {
+            key: value
+            for key, value in self.scheduler._job_defaults.items()
+            if not hasattr(job, key)
+        }
+        if not hasattr(job, "next_run_time"):
+            replacements["next_run_time"] = job.trigger.get_next_fire_time(
+                None,
+                datetime.now(self.scheduler.timezone),
+            )
+        job._modify(**replacements)
         job._jobstore_alias = jobstore_alias
         return False
 
@@ -652,9 +691,47 @@ class SchedulerAdapter:
                             f'job "{job.id}" in "{alias}" must use the default executor'
                         )
 
+    def _reconcile_takeover(self, now: datetime) -> None:
+        """Sync code-declared jobs into a namespace another deployment wrote.
+
+        Environment-scoped stores outlive deployments, so on the first touch
+        by a new deployment the code's declarations win for ``declared`` jobs:
+        removed declarations are deleted before any due planning, changed
+        triggers restart their schedule, unchanged jobs keep their progress.
+        ``runtime`` jobs belong to the store and are never touched.
+        """
+        if self._reconciled or self._scope == self._deployment:
+            return
+        if self.driver.reconciled_deployment() == self.deployment:
+            self._reconciled = True
+            return
+        with self.scheduler._jobstores_lock:
+            for job, revision, provenance in self.coordinator.get_all_jobs_with_revisions():
+                if provenance != "declared":
+                    continue
+                declared = self._declared_jobs.get(str(job.id))
+                if declared is None:
+                    self.coordinator.cas_remove_job(job.id, revision)
+                    self._logger.info(
+                        'Removed job "%s": this deployment no longer declares it',
+                        job.id,
+                    )
+                    continue
+                if _trigger_fingerprint(declared.trigger) == _trigger_fingerprint(job.trigger):
+                    next_run_time = job.next_run_time
+                else:
+                    next_run_time = declared.trigger.get_next_fire_time(
+                        None,
+                        now.astimezone(self.scheduler.timezone),
+                    )
+                declared._modify(next_run_time=next_run_time)
+                self.coordinator.cas_update_job(declared, revision)
+        self.driver.mark_reconciled(self.deployment, now)
+        self._reconciled = True
+
     def _rebase_before(self, activation_time: datetime) -> None:
         with self.scheduler._jobstores_lock:
-            for job, revision in self.coordinator.get_all_jobs_with_revisions():
+            for job, revision, _provenance in self.coordinator.get_all_jobs_with_revisions():
                 next_run_time = getattr(job, "next_run_time", None)
                 if next_run_time is None or next_run_time >= activation_time:
                     continue

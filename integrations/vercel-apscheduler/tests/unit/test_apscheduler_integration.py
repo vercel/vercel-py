@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -118,6 +118,7 @@ class FakeDriver:
         self.current: WakeToken | None = None
         self.last_sequence = 0
         self.owner: str | None = None
+        self.reconciled: str | None = None
 
     def start(
         self,
@@ -148,6 +149,13 @@ class FakeDriver:
             changed = self.state == "running"
             self.state = "paused"
             return changed
+
+    def reconciled_deployment(self) -> str | None:
+        return self.reconciled
+
+    def mark_reconciled(self, deployment: str, now: datetime) -> None:
+        del now
+        self.reconciled = deployment
 
     def repair_overdue_wake(self, now: datetime, *, grace_seconds: int = 600) -> bool:
         with self.lock:
@@ -364,16 +372,40 @@ def bind_test_scheduler(scheduler: BlockingScheduler) -> None:
 
 
 class InMemoryJobCoordinator(RedisJobCoordinator):
-    """Mirrors the coordinator's Lua semantics against the in-memory store."""
+    """Mirrors the coordinator's Lua semantics against the in-memory store.
+
+    Versions, provenance, and the original store methods live on the store
+    object so a second coordinator (a takeover by another deployment in one
+    test process) observes the first one's durable state.
+    """
 
     def __init__(self, store: Any, driver: Any, adapter: Any) -> None:
         super().__init__(store, driver, adapter)
-        self._original_add_job = store.add_job
-        self._original_update_job = store.update_job
-        self._original_remove_job = store.remove_job
-        self._original_remove_all_jobs = store.remove_all_jobs
-        self._versions: dict[str, int] = {}
-        self._revision = 0
+        originals = store.__dict__.setdefault(
+            "_test_original_methods",
+            {
+                "add_job": store.add_job,
+                "update_job": store.update_job,
+                "remove_job": store.remove_job,
+                "remove_all_jobs": store.remove_all_jobs,
+            },
+        )
+        self._original_add_job = originals["add_job"]
+        self._original_update_job = originals["update_job"]
+        self._original_remove_job = originals["remove_job"]
+        self._original_remove_all_jobs = originals["remove_all_jobs"]
+        self._state: dict[str, Any] = store.__dict__.setdefault(
+            "_test_durable_state",
+            {"versions": {}, "provenance": {}, "revision": 0},
+        )
+
+    @property
+    def _versions(self) -> dict[str, int]:
+        return cast("dict[str, int]", self._state["versions"])
+
+    @property
+    def _provenance(self) -> dict[str, str]:
+        return cast("dict[str, str]", self._state["provenance"])
 
     def add_job(self, job: Any) -> None:
         try:
@@ -383,6 +415,11 @@ class InMemoryJobCoordinator(RedisJobCoordinator):
                 raise
             return
         self._versions[job.id] = self._next_revision()
+        self._provenance[job.id] = (
+            "runtime"
+            if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
+            else "declared"
+        )
         self._rearm(job, rearm=True)
 
     def update_job(self, job: Any) -> None:
@@ -394,17 +431,22 @@ class InMemoryJobCoordinator(RedisJobCoordinator):
         self._original_remove_job(job_id)
         self._next_revision()
         self._versions.pop(job_id, None)
+        self._provenance.pop(job_id, None)
 
     def remove_all_jobs(self) -> None:
         self._original_remove_all_jobs()
         self._next_revision()
         self._versions.clear()
+        self._provenance.clear()
 
     def get_due_jobs_with_revisions(self, now: datetime) -> list[tuple[Any, int]]:
         return [(job, self._versions.get(job.id, 0)) for job in self.store.get_due_jobs(now)]
 
-    def get_all_jobs_with_revisions(self) -> list[tuple[Any, int]]:
-        return [(job, self._versions.get(job.id, 0)) for job in self.store.get_all_jobs()]
+    def get_all_jobs_with_revisions(self) -> list[tuple[Any, int, str]]:
+        return [
+            (job, self._versions.get(job.id, 0), self._provenance.get(job.id, ""))
+            for job in self.store.get_all_jobs()
+        ]
 
     def cas_update_job(self, job: Any, expected_revision: int) -> bool:
         if self._versions.get(job.id, 0) != expected_revision:
@@ -422,11 +464,12 @@ class InMemoryJobCoordinator(RedisJobCoordinator):
         self._original_remove_job(job_id)
         self._next_revision()
         self._versions.pop(job_id, None)
+        self._provenance.pop(job_id, None)
         return True
 
     def _next_revision(self) -> int:
-        self._revision += 1
-        return self._revision
+        self._state["revision"] += 1
+        return cast("int", self._state["revision"])
 
     def _rearm(self, job: Any, *, rearm: bool) -> None:
         if not rearm:
@@ -582,6 +625,67 @@ def test_preview_state_stays_deployment_scoped(
     _scheduler, adapter, _driver = scheduler_with_driver()
 
     assert adapter.scope == "dpl_test"
+
+
+def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promote syncs code-declared jobs and never touches runtime jobs.
+
+    Environment-scoped production state outlives deployments, so the new
+    deployment's first touch must delete undeclared jobs before any wake
+    plans them, restart changed schedules, and preserve progress for
+    unchanged ones.
+    """
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_123")
+
+    first, _first_adapter, driver = scheduler_with_driver()
+    first.add_job(durable_noop_job, "interval", hours=1, id="keep", replace_existing=True)
+    first.add_job(durable_noop_job, "interval", hours=1, id="gone", replace_existing=True)
+    first.add_job(durable_noop_job, "interval", hours=1, id="changed", replace_existing=True)
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg",
+    ):
+        first.start()
+        first.add_job(
+            durable_noop_job,
+            "date",
+            run_date=datetime.now(UTC) + timedelta(hours=2),
+            id="dynamic",
+        )
+    store: Any = first._jobstores["default"]
+    kept_run_time = store.jobs["keep"].next_run_time
+    changed_run_time = store.jobs["changed"].next_run_time
+    assert driver.reconciled == "dpl_test"
+
+    # A new deployment takes over the shared store and driver.
+    _clear_scheduler_registrations()
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_two")
+    second = BlockingScheduler(timezone=UTC, jobstores={"default": store})
+    second.add_job(durable_noop_job, "interval", hours=1, id="keep", replace_existing=True)
+    second.add_job(durable_noop_job, "interval", hours=2, id="changed", replace_existing=True)
+    second_adapter = get_adapter(second)
+    assert second_adapter is not None
+    with patch(
+        "vercel.integrations.apscheduler._adapter.RedisJobCoordinator",
+        InMemoryJobCoordinator,
+    ):
+        second_adapter._bind_runtime()
+    second_adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    second_adapter.coordinator.driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg",
+    ):
+        second.start()
+
+    assert set(store.jobs) == {"keep", "changed", "dynamic"}
+    assert store.jobs["keep"].next_run_time == kept_run_time
+    assert store.jobs["changed"].next_run_time != changed_run_time
+    assert store.jobs["changed"].trigger.interval == timedelta(hours=2)
+    assert driver.reconciled == "dpl_two"
 
 
 def test_two_schedulers_sharing_a_store_key_collide_loudly() -> None:

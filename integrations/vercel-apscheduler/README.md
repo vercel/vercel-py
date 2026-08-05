@@ -133,8 +133,9 @@ the APScheduler Redis keys bypass that transaction and are unsupported.
 
 ## Guarantees
 
-Redis atomically stores one lifecycle generation and one current wake token per
-deployment and subscriber. This gives the driver the following guarantees:
+Redis atomically stores one lifecycle generation and one current wake token
+per scheduler, scoped by environment in production and by deployment in
+previews. This gives the driver the following guarantees:
 
 - Concurrent or repeated `start()` calls converge on one start message.
 - Only the current wake token can run and reserve one successor.
@@ -148,6 +149,17 @@ deployment and subscriber. This gives the driver the following guarantees:
 - A crash between reserving and publishing a successor is repaired by a retry.
 - Occurrences during a pause are skipped on resume instead of replayed in a
   catch-up burst.
+- Production schedules, dynamically added jobs, and the wake chain survive
+  promotions; the new deployment picks up the chain at its next wake and
+  syncs the store to its own declarations first, so a job deleted from code
+  never runs again and a changed trigger takes effect.
+- A wake whose queue message died (for example stranded by a rollback) is
+  presumed lost once it is well past due with no live owner, and republished.
+
+The scheduler's durable identity derives from its `RedisJobStore` `jobs_key`,
+so renaming variables or moving modules never orphans state. Two schedulers
+need distinct `jobs_key` values; the `scheduler_id` option pins an identity
+explicitly.
 
 `start()` and job mutation calls are durable after they return successfully.
 If a process dies before returning, an idempotent `start()` repairs any pending
