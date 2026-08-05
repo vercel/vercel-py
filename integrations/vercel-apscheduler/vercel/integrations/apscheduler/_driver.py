@@ -20,6 +20,8 @@ DRIVER_RENEW_INTERVAL_SECONDS = 60
 # activation sweep.
 WAKE_REPAIR_GRACE_SECONDS = 10 * 60
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+# Scopes are either a deployment id or "<project>:<environment>".
+_SCOPE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
 ClaimState = Literal["claimed", "busy", "stale"]
 FinishState = Literal["advanced", "fenced", "lost"]
@@ -466,21 +468,22 @@ class RedisDriver:
         self,
         client: Any,
         *,
-        deployment: str,
+        scope: str,
         scheduler_id: str,
     ) -> None:
-        if not _IDENTIFIER_PATTERN.fullmatch(deployment):
+        if not _SCOPE_PATTERN.fullmatch(scope):
             raise ValueError(
-                "VERCEL_DEPLOYMENT_ID must contain only letters, digits, underscores, and hyphens"
+                "state scope must contain only letters, digits, dots, colons, "
+                "underscores, and hyphens"
             )
         if not _IDENTIFIER_PATTERN.fullmatch(scheduler_id):
             raise ValueError(
                 "scheduler identity must contain only letters, digits, underscores, and hyphens"
             )
         self.client = client
-        self.deployment = deployment
+        self.scope = scope
         self.scheduler_id = scheduler_id
-        self.key = f"vercel:apscheduler:{{{deployment}:{scheduler_id}}}:driver"
+        self.key = f"vercel:apscheduler:{{{scope}:{scheduler_id}}}:driver"
 
     def start(self, now: datetime) -> StartDecision:
         """Atomically start or resume one durable generation."""
@@ -691,6 +694,19 @@ class RedisDriver:
             now_utc.isoformat(),
         )
         return bool(int(result))
+
+    def reconciled_deployment(self) -> str | None:
+        """Return the deployment that last synced declarations here."""
+        return _optional_text(self.client.hget(self.key, "reconciled_deployment"))
+
+    def mark_reconciled(self, deployment: str, now: datetime) -> None:
+        self.client.hset(
+            self.key,
+            mapping={
+                "reconciled_deployment": deployment,
+                "updated_at": as_utc(now, name="now").isoformat(),
+            },
+        )
 
     def renew(self, owner: str, now: datetime) -> bool:
         now_utc = as_utc(now, name="now")

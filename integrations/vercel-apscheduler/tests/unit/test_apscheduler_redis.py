@@ -12,7 +12,10 @@ from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
 from redis import Redis
 
-from vercel.integrations.apscheduler import install_vercel_apscheduler_integration
+from vercel.integrations.apscheduler import (
+    _adapter as _adapter_module,
+    install_vercel_apscheduler_integration,
+)
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
 from vercel.integrations.apscheduler._driver import RedisDriver
 
@@ -49,7 +52,7 @@ def test_real_redis_driver_fences_concurrent_lifecycle_transitions() -> None:
     client = Redis.from_url(REDIS_URL)
     driver = RedisDriver(
         client,
-        deployment="dpl_driver_test",
+        scope="dpl_driver_test",
         scheduler_id="scheduler",
     )
     client.delete(driver.key)
@@ -130,7 +133,7 @@ def test_real_redis_dormant_start_reserves_no_wake() -> None:
     client = Redis.from_url(REDIS_URL)
     driver = RedisDriver(
         client,
-        deployment="dpl_dormant_test",
+        scope="dpl_dormant_test",
         scheduler_id="scheduler",
     )
     client.delete(driver.key)
@@ -157,7 +160,7 @@ def test_real_redis_lost_owner_is_not_mistaken_for_fence() -> None:
     client = Redis.from_url(REDIS_URL)
     driver = RedisDriver(
         client,
-        deployment="dpl_lost_owner_test",
+        scope="dpl_lost_owner_test",
         scheduler_id="scheduler",
     )
     client.delete(driver.key)
@@ -206,7 +209,7 @@ def test_real_redis_overdue_published_wake_is_repaired() -> None:
     client = Redis.from_url(REDIS_URL)
     driver = RedisDriver(
         client,
-        deployment="dpl_repair_test",
+        scope="dpl_repair_test",
         scheduler_id="scheduler",
     )
     client.delete(driver.key)
@@ -382,6 +385,9 @@ def test_real_redis_cold_declaration_rearms_an_already_dormant_driver(
         assert REDIS_URL is not None
         second_store = _redis_job_store(REDIS_URL)
         monkeypatch.delenv("VERCEL")
+        # The second scheduler models a separate cold-started process; the
+        # per-process identity registry does not span processes.
+        _adapter_module._ACTIVE_IDENTITIES.clear()
         second_scheduler = BlockingScheduler(
             timezone=UTC,
             jobstores={"default": second_store},
@@ -575,6 +581,7 @@ def _real_scheduler(
     )
     monkeypatch.delenv("VERCEL", raising=False)
     install_vercel_apscheduler_integration(register_queues=False)
+    _adapter_module._ACTIVE_IDENTITIES.clear()
     store = _redis_job_store(REDIS_URL)
     scheduler = BlockingScheduler(
         timezone=UTC,

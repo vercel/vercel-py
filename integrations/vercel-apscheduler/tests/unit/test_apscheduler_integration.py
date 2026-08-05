@@ -18,11 +18,12 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from vercel.integrations.apscheduler import (
     APSchedulerConfigurationError,
+    _adapter as _adapter_module,
     _subscriber,
     install_vercel_apscheduler_integration,
     is_scheduler_subscriber,
 )
-from vercel.integrations.apscheduler._adapter import get_adapter
+from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
 from vercel.integrations.apscheduler._driver import (
     ClaimResult,
     DriverSnapshot,
@@ -31,6 +32,7 @@ from vercel.integrations.apscheduler._driver import (
     WakeToken,
 )
 from vercel.integrations.apscheduler._jobstore import RedisJobCoordinator
+from vercel.integrations.apscheduler._options import VercelAPSchedulerOptions
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
 from vercel.integrations.apscheduler._subscriber import register_scheduler
 from vercel.queue import (
@@ -44,7 +46,8 @@ from vercel.queue.testing import clear_subscriptions
 
 UTC = timezone.utc
 TEST_SCHEDULER_MODULE = "test_scheduler"
-TEST_SCHEDULER_ID = "scheduler_scheduler"
+# Identity derives from the store's jobs_key ("apscheduler.jobs" by default).
+TEST_SCHEDULER_ID = "apscheduler-jobs"
 
 
 def durable_noop_job() -> None:
@@ -52,8 +55,8 @@ def durable_noop_job() -> None:
 
 
 class InMemoryRedisJobStore(RedisJobStore):
-    def __init__(self) -> None:
-        self.jobs_key = "apscheduler.jobs"
+    def __init__(self, jobs_key: str = "apscheduler.jobs") -> None:
+        self.jobs_key = jobs_key
         self.run_times_key = "apscheduler.run_times"
         self.redis = object()
         self.jobs: dict[str, Any] = {}
@@ -145,6 +148,23 @@ class FakeDriver:
             changed = self.state == "running"
             self.state = "paused"
             return changed
+
+    def repair_overdue_wake(self, now: datetime, *, grace_seconds: int = 600) -> bool:
+        with self.lock:
+            if (
+                self.state != "running"
+                or self.current is None
+                or self.current.status not in {"published", "processing"}
+                or self.owner is not None
+                or self.current.logical_time >= now - timedelta(seconds=grace_seconds)
+            ):
+                return False
+            self.current = WakeToken(
+                self.current.generation,
+                self.current.sequence,
+                self.current.logical_time,
+            )
+            return True
 
     def mark_start_published(self, generation: int, now: datetime) -> None:
         del now
@@ -332,8 +352,11 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
 def _clear_scheduler_registrations() -> None:
     clear_subscriptions()
     _subscriber._registered_schedulers.clear()
-    _subscriber._registered_identities.clear()
     _subscriber._registered_callbacks.clear()
+    _adapter_module._ACTIVE_IDENTITIES.clear()
+    # install() latches register_queues once any caller passes True; reset so
+    # test ordering cannot change when registration happens.
+    _adapter_module._PATCH_STATE.register_queues = False
 
 
 def bind_test_scheduler(scheduler: BlockingScheduler) -> None:
@@ -418,10 +441,12 @@ class InMemoryJobCoordinator(RedisJobCoordinator):
         )
 
 
-def scheduler_with_driver() -> tuple[BlockingScheduler, Any, FakeDriver]:
+def scheduler_with_driver(
+    jobs_key: str = "apscheduler.jobs",
+) -> tuple[BlockingScheduler, Any, FakeDriver]:
     scheduler = BlockingScheduler(
         timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore()},
+        jobstores={"default": InMemoryRedisJobStore(jobs_key)},
     )
     bind_test_scheduler(scheduler)
     adapter = get_adapter(scheduler)
@@ -501,71 +526,119 @@ def test_scheduler_lifecycle_remains_native_outside_vercel(
         scheduler.shutdown()
 
 
-def test_runtime_registry_binds_the_loaded_subscriber_object(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
-    monkeypatch.setenv(
-        "VERCEL_APSCHEDULER_SUBSCRIBERS",
-        (
-            '[{"id":"other_scheduler","entrypoint":"not_loaded:scheduler"},'
-            '{"id":"scheduler_scheduler","entrypoint":"test_scheduler:scheduler"}]'
-        ),
-    )
+def test_identity_derives_from_the_job_store_key() -> None:
+    """Variable and module renames never move a scheduler's durable identity."""
+    _scheduler, adapter, _driver = scheduler_with_driver()
+
+    assert adapter.identity.scheduler_id == TEST_SCHEDULER_ID
+    assert adapter.identity.wakeup_topic == f"__aps_{TEST_SCHEDULER_ID}_wakeup"
+    assert adapter.identity.start_topic == f"__aps_{TEST_SCHEDULER_ID}_start"
+    assert adapter.identity.consumer_group == f"apscheduler-{TEST_SCHEDULER_ID}"
+
+
+def test_scheduler_id_option_pins_the_identity() -> None:
     scheduler = BlockingScheduler(
         timezone=UTC,
         jobstores={"default": InMemoryRedisJobStore()},
     )
-    module = ModuleType("test_scheduler")
-    module.__dict__["scheduler"] = scheduler
-    monkeypatch.setitem(modules, module.__name__, module)
-    adapter = get_adapter(scheduler)
-    assert adapter is not None
+    adapter = SchedulerAdapter(
+        scheduler,
+        VercelAPSchedulerOptions(scheduler_id="pinned-id"),
+    )
 
-    adapter._bind_runtime()
-
-    assert adapter.identity.scheduler_id == "scheduler_scheduler"
+    assert adapter.identity.scheduler_id == "pinned-id"
 
 
-def test_deliveries_route_to_the_designated_scheduler(
+def test_production_state_is_environment_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One module defining several schedulers serves each subscriber correctly.
+    """Production namespaces survive promotes; previews stay disposable."""
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_123")
+    _scheduler, adapter, _driver = scheduler_with_driver()
 
-    In a subscriber Function every constructed scheduler adopts the Function's
-    identity, and the queue runtime invokes only the first registered handler,
-    so that handler must route the delivery to the entrypoint's scheduler.
+    assert adapter.scope == "prj_123:production"
+    store = adapter.scheduler._jobstores["default"]
+    assert store.jobs_key == ("apscheduler.jobs:{prj_123:production:apscheduler-jobs}:jobs")
+
+
+def test_custom_environment_state_is_environment_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.setenv("VERCEL_TARGET_ENV", "staging")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_123")
+    _scheduler, adapter, _driver = scheduler_with_driver()
+
+    assert adapter.scope == "prj_123:staging"
+
+
+def test_preview_state_stays_deployment_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.setenv("VERCEL_TARGET_ENV", "preview")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_123")
+    _scheduler, adapter, _driver = scheduler_with_driver()
+
+    assert adapter.scope == "dpl_test"
+
+
+def test_two_schedulers_sharing_a_store_key_collide_loudly() -> None:
+    """Distinct durable schedulers require distinct jobs_key values.
+
+    Depending on whether the runtime registers queue handlers at
+    construction, the collision surfaces at ``__init__`` (failing the build
+    during introspection) or at the first identity use; both are loud.
     """
-    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "second_scheduler")
-    monkeypatch.setenv(
-        "VERCEL_APSCHEDULER_SUBSCRIBERS",
-        (
-            '[{"id":"first_scheduler","entrypoint":"test_scheduler:first"},'
-            '{"id":"second_scheduler","entrypoint":"test_scheduler:second"}]'
-        ),
+    scheduler_with_driver()
+
+    def build_second_scheduler_and_use_its_identity() -> None:
+        second = BlockingScheduler(
+            timezone=UTC,
+            jobstores={"default": InMemoryRedisJobStore()},
+        )
+        second_adapter = get_adapter(second)
+        assert second_adapter is not None
+        _ = second_adapter.identity
+
+    with pytest.raises(APSchedulerConfigurationError, match="distinct jobs_key"):
+        build_second_scheduler_and_use_its_identity()
+
+
+def test_deliveries_reach_each_scheduler_by_intrinsic_identity() -> None:
+    """Two schedulers in one module each serve their own subscriptions."""
+    first_scheduler, _first_adapter, first_driver = scheduler_with_driver(
+        jobs_key="reports",
     )
-    first_scheduler, _first_adapter, first_driver = scheduler_with_driver()
-    second_scheduler, _second_adapter, second_driver = scheduler_with_driver()
-    module = modules[TEST_SCHEDULER_MODULE]
-    module.__dict__["first"] = first_scheduler
-    module.__dict__["second"] = second_scheduler
+    second_scheduler, _second_adapter, second_driver = scheduler_with_driver(
+        jobs_key="cleanup",
+    )
     register_scheduler(first_scheduler)
     register_scheduler(second_scheduler)
 
+    topics = {subscription.topic for subscription in get_subscriptions()}
+    assert topics == {
+        "__aps_reports_start",
+        "__aps_reports_wakeup",
+        "__aps_cleanup_start",
+        "__aps_cleanup_wakeup",
+    }
+
     # The web Function durably started the second scheduler and published this.
     second_driver.start(datetime.now(UTC))
-    start_payload = StartPayload(
-        scheduler_id="second_scheduler",
-        generation=1,
-    ).to_payload()
-
-    first_registration = get_subscriptions()[0]
-    first_registration.func(
+    start_payload = StartPayload(scheduler_id="cleanup", generation=1).to_payload()
+    start_subscription = next(
+        subscription
+        for subscription in get_subscriptions()
+        if subscription.topic == "__aps_cleanup_start"
+    )
+    start_subscription.func(
         message(
             start_payload,
             message_id="start",
-            topic=first_registration.topic,
-            consumer_group=first_registration.consumer_group,
+            topic=start_subscription.topic,
+            consumer_group=start_subscription.consumer_group,
         )
     )
 
@@ -911,7 +984,7 @@ def test_pause_racing_with_wakeup_prevents_successor() -> None:
         wake_subscription.func(
             message(
                 WakeupPayload.from_token(
-                    "scheduler_scheduler",
+                    TEST_SCHEDULER_ID,
                     token,
                 ).to_payload(),
                 message_id="wake",
@@ -940,7 +1013,7 @@ def test_stale_wakeup_runs_no_jobs_and_publishes_no_successor() -> None:
         wake_subscription.func(
             message(
                 WakeupPayload.from_token(
-                    "scheduler_scheduler",
+                    TEST_SCHEDULER_ID,
                     old,
                 ).to_payload(),
                 message_id="stale",
@@ -984,7 +1057,7 @@ def test_lost_wakeup_owner_retries_instead_of_acknowledging() -> None:
         wake_subscription.func(
             message(
                 WakeupPayload.from_token(
-                    "scheduler_scheduler",
+                    TEST_SCHEDULER_ID,
                     token,
                 ).to_payload(),
                 message_id="lost",

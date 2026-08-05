@@ -7,15 +7,20 @@ from pathlib import Path
 
 import pytest
 
-from vercel.integrations.apscheduler import install_vercel_apscheduler_integration
+from vercel.integrations.apscheduler import (
+    _adapter as _adapter_module,
+    _subscriber,
+    install_vercel_apscheduler_integration,
+)
 from vercel.queue import get_subscriptions
 from vercel.queue.testing import clear_subscriptions
 
 EXAMPLE_ROOT = Path(__file__).parents[2] / "examples" / "cleanup"
 SCHEDULER_PATH = "scheduler.py"
-START_TOPIC = "__aps_scheduler_scheduler_start"
-WAKEUP_TOPIC = "__aps_scheduler_scheduler_wakeup"
-CONSUMER_GROUP = "apscheduler-scheduler_scheduler"
+# Identity derives from the example store's default jobs_key.
+START_TOPIC = "__aps_apscheduler-jobs_start"
+WAKEUP_TOPIC = "__aps_apscheduler-jobs_wakeup"
+CONSUMER_GROUP = "apscheduler-apscheduler-jobs"
 
 
 def test_cleanup_example_uses_pyproject_subscriber_contract() -> None:
@@ -86,4 +91,8 @@ def test_cleanup_scheduler_registers_introspectable_queue_subscriptions(
         ]
     finally:
         clear_subscriptions()
+        _subscriber._registered_schedulers.clear()
+        _subscriber._registered_callbacks.clear()
+        _adapter_module._ACTIVE_IDENTITIES.clear()
+        _adapter_module._PATCH_STATE.register_queues = False
         sys.modules.pop(module_name, None)

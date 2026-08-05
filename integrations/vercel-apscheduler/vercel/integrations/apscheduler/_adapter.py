@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-import json
 import logging
 import math
 from collections.abc import Callable, Iterator
@@ -12,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from os import environ
 from sys import modules
 from types import MethodType
+from weakref import WeakValueDictionary
 
 import vercel.queue as vqs
 import vercel.queue.sync as vqs_sync
@@ -36,12 +36,12 @@ from ._imports import (
 )
 from ._jobstore import RedisJobCoordinator
 from ._options import (
-    SUBSCRIBER_ID_ENV,
     VercelAPSchedulerOptions,
     _SchedulerIdentity,
     is_discovery_runtime,
     is_queue_serving_runtime,
     is_vercel_runtime,
+    resolve_state_scope,
 )
 from ._payload import StartPayload, WakeupPayload
 from ._time import as_utc, canonical_scheduled_logical_time, earliest
@@ -52,6 +52,12 @@ ADAPTER_ATTR = "_vercel_apscheduler_adapter"
 DEPLOYMENT_ENV = "VERCEL_DEPLOYMENT_ID"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 WAKEUP_KEY_PREFIX = "aps"
+RAW_STORE_KEY_ATTR = "_vercel_apscheduler_raw_jobs_key"
+
+# One live adapter per durable identity. Two schedulers whose stores collapse
+# to the same identity would interleave one namespace, so the second claim
+# fails loudly instead.
+_ACTIVE_IDENTITIES: WeakValueDictionary[str, SchedulerAdapter] = WeakValueDictionary()
 
 __all__ = [
     "ADAPTER_ATTR",
@@ -145,9 +151,10 @@ class SchedulerAdapter:
     ) -> None:
         self.scheduler = scheduler
         self.options = options
-        self.identity = _SchedulerIdentity.from_env()
-        self._identity_bound = environ.get(SUBSCRIBER_ID_ENV) is not None
+        self._identity: _SchedulerIdentity | None = None
         self._deployment: str | None = None
+        self._scope: str | None = None
+        self._registration_deferred = False
         self._driver: RedisDriver | None = None
         self._coordinator: RedisJobCoordinator | None = None
         self._job_definitions: dict[str, _JobDefinition] = {}
@@ -160,9 +167,59 @@ class SchedulerAdapter:
         self._adopt_instance_methods()
 
     @property
+    def identity(self) -> _SchedulerIdentity:
+        """The scheduler's durable identity, derived from its job store.
+
+        The configured ``jobs_key`` is refactor-stable and exactly as durable
+        as the state it names, so renaming the scheduler's variable or moving
+        its module never orphans the Redis namespace or the queue topics. The
+        ``scheduler_id`` option pins the identity explicitly instead.
+        """
+        if self._identity is None:
+            self._identity = self._claim_identity(self._derive_identity())
+        return self._identity
+
+    def _derive_identity(self) -> _SchedulerIdentity:
+        if self.options.scheduler_id is not None:
+            try:
+                return _SchedulerIdentity.from_scheduler_id(self.options.scheduler_id)
+            except ValueError as exc:
+                raise APSchedulerConfigurationError(str(exc)) from exc
+        store = self.scheduler._jobstores.get("default")
+        if not isinstance(store, RedisJobStore):
+            raise APSchedulerConfigurationError(
+                "vercel-apscheduler requires a configured default RedisJobStore"
+            )
+        raw_key = store.__dict__.setdefault(RAW_STORE_KEY_ATTR, store.jobs_key)
+        try:
+            return _SchedulerIdentity.from_store_key(raw_key)
+        except ValueError as exc:
+            raise APSchedulerConfigurationError(str(exc)) from exc
+
+    def _claim_identity(self, identity: _SchedulerIdentity) -> _SchedulerIdentity:
+        existing = _ACTIVE_IDENTITIES.get(identity.scheduler_id)
+        if existing is not None and existing is not self:
+            raise APSchedulerConfigurationError(
+                f'two schedulers derive the durable identity "{identity.scheduler_id}"; '
+                "give each scheduler's RedisJobStore a distinct jobs_key"
+            )
+        _ACTIVE_IDENTITIES[identity.scheduler_id] = self
+        return identity
+
+    @property
     def deployment(self) -> str:
         self._bind_runtime()
         return cast("str", self._deployment)
+
+    @property
+    def scope(self) -> str:
+        """Durable state namespace.
+
+        Named environments share one namespace across deployments; previews
+        and development are deployment-scoped.
+        """
+        self._bind_runtime()
+        return cast("str", self._scope)
 
     @property
     def driver(self) -> RedisDriver:
@@ -220,13 +277,8 @@ class SchedulerAdapter:
             return
         decision = self.driver.start(now)
         self._publish_start_if_needed(decision, now=now)
-        if (
-            not decision.changed
-            and decision.start_status == "active"
-            and decision.current_wake is not None
-            and decision.current_wake.status == "pending"
-        ):
-            self.publish_wakeup(decision.current_wake, now=now)
+        if not decision.changed and decision.start_status == "active":
+            self.repair_wakeup(now=now)
         self._resume_local_if_paused()
 
     def pause(self) -> None:
@@ -255,7 +307,7 @@ class SchedulerAdapter:
             generation=decision.generation,
         ).to_payload()
         idempotency_key = (
-            f"{WAKEUP_KEY_PREFIX}:start:{self.deployment}:"
+            f"{WAKEUP_KEY_PREFIX}:start:{self.scope}:"
             f"{self.identity.scheduler_id}:{decision.generation}"
         )
         try:
@@ -283,7 +335,7 @@ class SchedulerAdapter:
             math.ceil((token.logical_time - now_utc).total_seconds()),
         )
         idempotency_key = (
-            f"{WAKEUP_KEY_PREFIX}:wake:{self.deployment}:"
+            f"{WAKEUP_KEY_PREFIX}:wake:{self.scope}:"
             f"{self.identity.scheduler_id}:{token.generation}:{token.sequence}"
         )
         payload = WakeupPayload.from_token(
@@ -320,6 +372,25 @@ class SchedulerAdapter:
         if snapshot.state != "running" or wake is None or wake.status != "pending":
             return None
         return self.publish_wakeup(wake)
+
+    def repair_wakeup(self, *, now: datetime | None = None) -> PublishedWakeup | None:
+        """Publish a reserved-but-unsent wake, resurrecting an overdue one first.
+
+        A ``published`` wake whose message died (a rollback strands it in a
+        queue with no forward alias; alias or retention expiry drops it) is
+        demoted back to ``pending`` and republished into the current
+        deployment's queue. Loud on purpose: a repair firing means a message
+        actually died, which an operator may want to correlate with a
+        rollback or an incident.
+        """
+        now_utc = as_utc(now or datetime.now(UTC), name="now")
+        if self.driver.repair_overdue_wake(now_utc):
+            self._logger.warning(
+                "Republishing the current wake for scheduler %r: its queue "
+                "message is overdue and presumed lost",
+                self.identity.scheduler_id,
+            )
+        return self.publish_pending_wakeup()
 
     def canonical_wakeup_time(
         self,
@@ -501,9 +572,6 @@ class SchedulerAdapter:
         )
 
     def _bind_runtime(self) -> None:
-        if not self._identity_bound:
-            self.identity = _resolve_identity(self.scheduler)
-            self._identity_bound = True
         deployment = environ.get(DEPLOYMENT_ENV)
         if not deployment:
             raise APSchedulerConfigurationError(
@@ -515,10 +583,12 @@ class SchedulerAdapter:
             )
         self._deployment = deployment
         stores = self._validate_durable_configuration()
-        tag = f"{{{deployment}:{self.identity.scheduler_id}}}"
+        scope = resolve_state_scope(deployment)
+        self._scope = scope
+        tag = f"{{{scope}:{self.identity.scheduler_id}}}"
         for alias, store in stores.items():
             namespace = getattr(store, "_vercel_apscheduler_namespace", None)
-            expected_namespace = (deployment, self.identity.scheduler_id)
+            expected_namespace = (scope, self.identity.scheduler_id)
             if namespace is not None and namespace != expected_namespace:
                 raise APSchedulerConfigurationError(
                     f'job store "{alias}" is already bound to another scheduler'
@@ -534,7 +604,7 @@ class SchedulerAdapter:
         if self._driver is None:
             self._driver = RedisDriver(
                 stores["default"].redis,
-                deployment=deployment,
+                scope=scope,
                 scheduler_id=self.identity.scheduler_id,
             )
         if self._coordinator is None:
@@ -705,41 +775,6 @@ class SchedulerAdapter:
         return logging.getLogger(f"{LOGGER.name}.{self.identity.scheduler_id}")
 
 
-def _resolve_identity(scheduler: BaseScheduler) -> _SchedulerIdentity:
-    raw = environ.get(SUBSCRIBERS_ENV)
-    if not raw:
-        raise APSchedulerConfigurationError(
-            f"{SUBSCRIBERS_ENV} is not set. Declare the scheduler in [[tool.vercel.subscribers]]."
-        )
-    try:
-        entries = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise APSchedulerConfigurationError(f"{SUBSCRIBERS_ENV} must contain JSON") from exc
-    if not isinstance(entries, list):
-        raise APSchedulerConfigurationError(f"{SUBSCRIBERS_ENV} must contain a JSON array")
-
-    matches: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        subscriber_id = entry.get("id")
-        entrypoint = entry.get("entrypoint")
-        if not isinstance(subscriber_id, str) or not isinstance(entrypoint, str):
-            continue
-        module_name, separator, variable_name = entrypoint.partition(":")
-        if not separator:
-            continue
-        module = modules.get(module_name)
-        if module is not None and getattr(module, variable_name, None) is scheduler:
-            matches.append(subscriber_id)
-    if len(matches) != 1:
-        raise APSchedulerConfigurationError(
-            "scheduler.start()/pause()/resume() must be called on exactly one "
-            "object declared in [[tool.vercel.subscribers]]"
-        )
-    return _SchedulerIdentity.from_subscriber_id(matches[0])
-
-
 def is_scheduler_subscriber(module_name: str, variable_name: str) -> bool:
     """Whether the imported module declares a scheduler adopted by this integration.
 
@@ -770,10 +805,37 @@ def _patched_init(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
     options = VercelAPSchedulerOptions.from_value(_PATCH_STATE.default_options)
     adapter = SchedulerAdapter(self, options)
     setattr(self, ADAPTER_ATTR, adapter)
-    if is_vercel_runtime() and (_PATCH_STATE.register_queues or is_queue_serving_runtime()):
-        from ._subscriber import register_scheduler
+    _register_queues_when_ready(self, adapter)
+    return result
 
-        register_scheduler(self, options=options)
+
+def _register_queues_when_ready(
+    scheduler: BaseScheduler,
+    adapter: SchedulerAdapter,
+) -> None:
+    """Register queue handlers once the durable identity is derivable.
+
+    Identity comes from the default job store, which may be configured after
+    construction (``add_jobstore``); registration is deferred until it
+    appears so both configuration styles register during module import.
+    """
+    if not (is_vercel_runtime() and (_PATCH_STATE.register_queues or is_queue_serving_runtime())):
+        return
+    store = scheduler._jobstores.get("default")
+    if adapter.options.scheduler_id is None and not isinstance(store, RedisJobStore):
+        adapter._registration_deferred = True
+        return
+    from ._subscriber import register_scheduler
+
+    register_scheduler(scheduler, options=adapter.options)
+    adapter._registration_deferred = False
+
+
+def _patched_add_jobstore(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
+    result = _original("add_jobstore")(self, *args, **kwargs)
+    adapter = get_adapter(self)
+    if adapter is not None and adapter._registration_deferred:
+        _register_queues_when_ready(self, adapter)
     return result
 
 
@@ -925,6 +987,7 @@ def install_vercel_apscheduler_integration(
     _PATCH_STATE.originals = {
         "init": BaseScheduler.__init__,
         "add_job": BaseScheduler.add_job,
+        "add_jobstore": BaseScheduler.add_jobstore,
         "real_add_job": BaseScheduler._real_add_job,
         "modify_job": BaseScheduler.modify_job,
         "remove_job": BaseScheduler.remove_job,
@@ -935,6 +998,7 @@ def install_vercel_apscheduler_integration(
         "resume": BaseScheduler.resume,
     }
     BaseScheduler.__init__ = _patched_init  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+    BaseScheduler.add_jobstore = _patched_add_jobstore  # type: ignore[method-assign]
     BaseScheduler.add_job = _patched_add_job  # type: ignore[method-assign]
     BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]
     BaseScheduler.modify_job = _patched_mutation("modify_job")  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
