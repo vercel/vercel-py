@@ -50,7 +50,7 @@ async def _populate(world) -> str:
     await world.events_create(
         run_id,
         w.StepCreatedEventData(
-            stepName="step//./src/wf//pay", input=ser.dehydrate(ser.step_arguments({}))
+            stepName="step//./src/wf//pay", input=ser.dehydrate(ser.step_arguments((), {}))
         ).into_event("step_0"),
     )
     await world.events_create(run_id, w.StepStartedEventData().into_event("step_0"))

@@ -38,7 +38,7 @@ def _context(
 
 def _args(**kwargs: Any) -> bytes:
     """A step input payload, encoded the way the runtime encodes one."""
-    return ser.dehydrate(ser.step_arguments(kwargs))
+    return ser.dehydrate(ser.step_arguments((), kwargs))
 
 
 def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:

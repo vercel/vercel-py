@@ -216,18 +216,20 @@ registry = core.Workflows(as_vercel_job=False)
 
 @registry.step
 async def charge(*, amount: int) -> int:
+    """A named parameter, so the call is recorded name-keyed: `[{"amount": 21}]`."""
     return amount * 2
 
 
 @registry.step
-async def notify(*, total: int) -> str:
+async def notify(total: int, /) -> str:
+    """Positional-only, so the call is recorded the way TS records `[42]`."""
     return f"charged {total}"
 
 
 @registry.workflow
-async def checkout(*, amount: int) -> str:
+async def checkout(amount: int) -> str:
     total = await charge(amount=amount)
-    return await notify(total=total)
+    return await notify(total)
 
 
 @pytest.fixture(autouse=True)
@@ -257,7 +259,7 @@ async def py_run(tmp_path, monkeypatch) -> tuple[Path, str]:
     runtime.step_entrypoint(registry)
 
     try:
-        run = await runtime.start(checkout, amount=21)
+        run = await runtime.start(checkout, 21)
         result = await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
 
         # Guard the premise: if Python itself did not finish the run, a later
@@ -357,9 +359,9 @@ async def test_cli_hydrates_the_payloads_python_wrote(workflow_cli, py_run) -> N
     ``{}`` rather than erroring -- so this is the assertion that would notice a
     payload-format regression. The other tests here would not.
 
-    The values are also the ones TypeScript would have written: a call is
-    recorded as the single object it records for a one-argument call, so
-    ``input`` here is what ``start(wf, {amount: 21})`` writes.
+    The values are also the ones TypeScript would have written: ``checkout``
+    names its parameter, so ``input`` here is what ``start(wf, [{amount: 21}])``
+    writes -- the single object a JavaScript callee receives.
     """
     data_dir, run_id = py_run
 
@@ -376,7 +378,9 @@ async def test_cli_hydrates_the_step_payloads_python_wrote(workflow_cli, py_run)
     steps = _inspect(workflow_cli, data_dir, "steps", f"--runId={run_id}", "--withData")
     by_name = {step["stepName"]: step for step in steps}
 
+    # Both encodings, side by side, as the CLI hydrates them: a named parameter
+    # is name-keyed, a positional-only one is the bare array TS writes.
     assert by_name[charge.name]["input"] == {"args": [{"amount": 21}]}
     assert by_name[charge.name]["output"] == 42
-    assert by_name[notify.name]["input"] == {"args": [{"total": 42}]}
+    assert by_name[notify.name]["input"] == {"args": [42]}
     assert by_name[notify.name]["output"] == "charged 42"

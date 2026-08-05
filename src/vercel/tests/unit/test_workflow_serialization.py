@@ -125,55 +125,75 @@ def test_the_circular_marker_still_loads_as_text() -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_a_call_is_recorded_as_ts_records_a_one_object_call() -> None:
-    # `start(wf, {amount: 21})` on the TypeScript side writes exactly this.
-    assert ser.argument_array({"amount": 21}) == [{"amount": 21}]
-    # ...and a call with no arguments writes the empty array TS writes, not an
-    # empty object a JavaScript callee would receive as a stray parameter.
-    assert ser.argument_array({}) == []
+CALLS: list[tuple[tuple[Any, ...], dict[str, Any], list[Any]]] = [
+    ((), {}, []),
+    ((21,), {}, [21]),
+    ((21, "usd"), {}, [21, "usd"]),
+    ((), {"amount": 21}, [{"amount": 21}]),
+    ((), {"amount": 21, "tier": "pro"}, [{"amount": 21, "tier": "pro"}]),
+    ((21,), {"currency": "usd"}, [21, {"currency": "usd"}]),
+    # A trailing positional object gets the empty one that keeps the rule
+    # unconditional; a JS callee reads it as a stray parameter and ignores it.
+    (({"a": 1},), {}, [{"a": 1}, {}]),
+    (({"a": 1},), {"x": 2}, [{"a": 1}, {"x": 2}]),
+    ((21, {"a": 1}), {}, [21, {"a": 1}, {}]),
+    # A dict with a non-string key cannot be a JavaScript object, so it needs no
+    # disambiguation. (Python cannot write one -- `dehydrate` refuses it -- but a
+    # devalue `Map` from a JavaScript caller arrives as one.)
+    (({1: "x"},), {}, [{1: "x"}]),
+]
 
 
-@pytest.mark.parametrize("kwargs", [{}, {"amount": 21}, {"amount": 21, "tier": "pro"}])
-def test_arguments_round_trip(kwargs) -> None:
-    assert ser.keyword_arguments(ser.argument_array(kwargs), what="a call") == kwargs
+@pytest.mark.parametrize(("args", "kwargs", "array"), CALLS)
+def test_a_call_is_recorded_as_ts_records_the_same_one(args, kwargs, array) -> None:
+    # `[{"amount": 21}]` is what `start(wf, [{amount: 21}])` writes on the
+    # TypeScript side, and `[]` the empty array TS writes for a call with no
+    # arguments -- not an empty object a JS callee would take as a parameter.
+    assert ser.argument_array(args, kwargs) == array
+
+
+@pytest.mark.parametrize(("args", "kwargs", "array"), CALLS)
+def test_arguments_round_trip(args, kwargs, array) -> None:
+    assert ser.call_arguments(array, what="a call") == (list(args), kwargs)
 
 
 def test_a_step_call_is_wrapped_the_way_ts_wraps_one() -> None:
     # A step's arguments live under `args`, where a workflow's are the payload
     # itself. TS's reader takes `.args` and defaults the siblings it also
     # writes (`closureVars`, `thisVal`), so those are left out.
-    assert ser.step_arguments({"amount": 21}) == {"args": [{"amount": 21}]}
-    assert ser.step_arguments({}) == {"args": []}
+    assert ser.step_arguments((), {"amount": 21}) == {"args": [{"amount": 21}]}
+    assert ser.step_arguments((21,), {}) == {"args": [21]}
+    assert ser.step_arguments((), {}) == {"args": []}
 
 
-@pytest.mark.parametrize("kwargs", [{}, {"amount": 21}])
-def test_step_arguments_round_trip(kwargs) -> None:
-    recorded = ser.step_arguments(kwargs)
-    assert ser.step_keyword_arguments(recorded, what="a step call") == kwargs
+@pytest.mark.parametrize(("args", "kwargs", "array"), CALLS)
+def test_step_arguments_round_trip(args, kwargs, array) -> None:
+    recorded = ser.step_arguments(args, kwargs)
+    assert ser.step_call_arguments(recorded, what="a step call") == (list(args), kwargs)
 
 
 def test_a_ts_written_step_input_is_read_through_its_args() -> None:
     # The siblings TS writes are ignored rather than rejected.
     data: dict[str, Any] = {"args": [{"amount": 21}], "closureVars": {}, "thisVal": None}
 
-    assert ser.step_keyword_arguments(data, what="a step call") == {"amount": 21}
+    assert ser.step_call_arguments(data, what="a step call") == ([], {"amount": 21})
 
 
 def test_a_step_input_that_is_not_an_object_is_reported() -> None:
     with pytest.raises(ser.SerializationError, match="not a step argument object"):
-        ser.step_keyword_arguments([{"amount": 21}], what="the input of step step_1")
+        ser.step_call_arguments([{"amount": 21}], what="the input of step step_1")
 
 
-def test_a_javascript_positional_call_is_reported_as_such() -> None:
-    # What a JS caller of a Python step writes if it passes its arguments
-    # positionally. Without this the mismatch surfaces as a TypeError inside
-    # the user's function, naming neither side.
-    with pytest.raises(ser.SerializationError, match="2 positional argument"):
-        ser.keyword_arguments([21, "usd"], what="the input of step step_1")
-    with pytest.raises(ser.SerializationError, match="1 positional argument"):
-        ser.keyword_arguments([21], what="the input of step step_1")
+def test_a_javascript_positional_call_lands_on_positional_parameters() -> None:
+    # `start(wf, [123])` in the TypeScript e2e suite. A JS caller has no kwargs
+    # to express, so its array is positional throughout...
+    assert ser.call_arguments([21, "usd"], what="the input of step step_1") == ([21, "usd"], {})
+    # ...except for the idiomatic single-object call, which is the one shape
+    # that lands as keyword arguments -- so `start(wf, [{amount: 21}])` reaches
+    # `async def checkout(*, amount: int)`.
+    assert ser.call_arguments([{"amount": 21}], what="a call") == ([], {"amount": 21})
 
 
 def test_a_non_array_argument_payload_is_rejected() -> None:
     with pytest.raises(ser.SerializationError, match="not an argument array"):
-        ser.keyword_arguments({"amount": 21}, what="the input of run wrun_1")
+        ser.call_arguments({"amount": 21}, what="the input of run wrun_1")

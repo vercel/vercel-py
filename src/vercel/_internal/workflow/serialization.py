@@ -14,6 +14,7 @@ material, and `gzip`/`zstd` wrap another prefixed payload.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from vercel._internal import devalue
@@ -86,53 +87,84 @@ def hydrate(data: Any, *, what: str) -> Any:
     raise SerializationError(f"{what} has an unknown serialization format: {prefix!r}")
 
 
-def argument_array(kwargs: dict[str, Any]) -> list[dict[str, Any]]:
-    """The positional-argument array a call is recorded as.
+def _is_argument_object(value: Any) -> bool:
+    """Whether :func:`call_arguments` would read *value* as the kwargs object.
+
+    A dict with a non-string key cannot be a JavaScript object — it is a
+    devalue `Map`, so a positional argument. `dehydrate` refuses to write one,
+    so that case only arises reading a payload a JavaScript caller wrote.
+    """
+    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
+
+
+def argument_array(args: Sequence[Any], kwargs: Mapping[str, Any]) -> list[Any]:
+    """The argument array a call is recorded as.
 
     `@workflow/core` records a call as the array of its positional arguments
-    and spreads it back into the callee (`workflowFn(...args)`). Workflows and
-    steps here take keyword arguments only, so that array is a single object —
-    which is exactly what `start(wf, {…})` writes on the TypeScript side, and
-    the object argument a JavaScript callee expects. A call with no arguments
-    records the empty array TS writes for one, rather than an empty object a
-    JavaScript callee would receive as a stray parameter.
+    and spreads it back into the callee (`workflowFn(...args)`). A Python call
+    also carries keyword arguments, and the array has one slot per value with
+    nowhere to name anything — so the keyword arguments ride in a single object
+    appended after the positional ones. Takes the two halves
+    `core._bind_arguments` produced, not a raw call:
+
+    ================  ==========================  ==========================
+    positional        keyword                     array
+    ================  ==========================  ==========================
+    ``()``            ``{}``                      ``[]``
+    ``(21,)``         ``{}``                      ``[21]``
+    ``()``            ``{"amount": 21}``          ``[{"amount": 21}]``
+    ``(21,)``         ``{"currency": "usd"}``     ``[21, {"currency": "usd"}]``
+    ``({"a": 1},)``   ``{}``                      ``[{"a": 1}, {}]``
+    ================  ==========================  ==========================
+
+    :func:`call_arguments` reads that back by taking a trailing object as the
+    keyword arguments. The one call that rule would misread is one whose last
+    *positional* argument is itself an object, so the encoder appends an empty
+    object in that case and the rule holds unconditionally. A JavaScript callee
+    receives one extra ``{}`` argument there, which is harmless.
+
+    Both ends of the table are what TypeScript writes for the same call:
+    ``[{"amount": 21}]`` is `start(wf, [{amount: 21}])`, the object argument a
+    JavaScript callee expects, and ``[]`` is the empty array TS writes for a
+    call with no arguments rather than an empty object a JavaScript callee
+    would receive as a stray parameter.
     """
-    return [kwargs] if kwargs else []
+    encoded = list(args)
+    if kwargs:
+        encoded.append(dict(kwargs))
+    elif encoded and _is_argument_object(encoded[-1]):
+        encoded.append({})
+    return encoded
 
 
-def keyword_arguments(args: Any, *, what: str) -> dict[str, Any]:
+def call_arguments(args: Any, *, what: str) -> tuple[list[Any], dict[str, Any]]:
     """Read an argument array back, the inverse of :func:`argument_array`.
 
-    Anything else in the array is a real positional argument, which can only
-    have come from a JavaScript caller — so the error names the convention
-    rather than letting the mismatch surface as a ``TypeError`` inside the
-    user's function.
+    Returns the positional arguments and the keyword arguments, to be splatted
+    into the workflow or step function. An array a JavaScript caller wrote
+    carries positional arguments only — except for the idiomatic single-object
+    call, which arrives as keyword arguments and so lands on a Python callee
+    declaring the matching parameters.
     """
     if not isinstance(args, list):
         raise SerializationError(f"{what} is not an argument array: {type(args).__name__}")
-    if not args:
-        return {}
-    if len(args) == 1 and isinstance(args[0], dict) and all(isinstance(k, str) for k in args[0]):
-        return args[0]
-    raise SerializationError(
-        f"{what} carries {len(args)} positional argument(s); Python workflows and "
-        f"steps are called with keyword arguments only, so a caller has to pass "
-        f"a single object"
-    )
+    if args and _is_argument_object(args[-1]):
+        return args[:-1], args[-1]
+    return args, {}
 
 
-def step_arguments(kwargs: dict[str, Any]) -> dict[str, Any]:
+def step_arguments(args: Sequence[Any], kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """The object `@workflow/core` records a *step* call as.
 
     A step's arguments are wrapped where a workflow's are not. TS puts
     ``closureVars`` and ``thisVal`` in the same object, neither of which has a
     Python analogue; its reader defaults both when they are absent.
     """
-    return {"args": argument_array(kwargs)}
+    return {"args": argument_array(args, kwargs)}
 
 
-def step_keyword_arguments(data: Any, *, what: str) -> dict[str, Any]:
+def step_call_arguments(data: Any, *, what: str) -> tuple[list[Any], dict[str, Any]]:
     """Read a step's recorded call back, the inverse of :func:`step_arguments`."""
     if not isinstance(data, dict):
         raise SerializationError(f"{what} is not a step argument object: {type(data).__name__}")
-    return keyword_arguments(data.get("args"), what=what)
+    return call_arguments(data.get("args"), what=what)
