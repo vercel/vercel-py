@@ -25,7 +25,7 @@ class WorkflowLoop(asyncio.BaseEventLoop):
             handle._run()
         handle = None  # Needed to break cycles when an exception occurs.
 
-        if self.idle_hook:
+        if self.idle_hook and not self._stopping:
             self.idle_hook()
 
     def _write_to_self(self):
