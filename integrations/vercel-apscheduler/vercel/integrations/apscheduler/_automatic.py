@@ -134,7 +134,7 @@ def _automatic_environment() -> bool:
 
 
 def _preview_idle_timeout() -> int | None:
-    """The idle deadline for previews; named environments never idle."""
+    """Return the idle deadline for previews; named environments never idle."""
     if resolve_environment().casefold() != "preview":
         return None
     raw = environ.get(PREVIEW_IDLE_TIMEOUT_ENV)

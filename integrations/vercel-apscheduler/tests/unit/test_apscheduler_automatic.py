@@ -208,6 +208,7 @@ def test_automatic_activation_hook_uses_current_preview_timeout(
 ) -> None:
     calls: list[int | None] = []
     monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.setenv(_automatic.PREVIEW_IDLE_TIMEOUT_ENV, "120")
 
     def record_activation(timeout: int | None, *, takeover_allowed: bool) -> None:
@@ -255,7 +256,23 @@ def test_preview_timeout_must_be_positive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.setenv(_automatic.PREVIEW_IDLE_TIMEOUT_ENV, "0")
 
     with pytest.raises(APSchedulerConfigurationError, match="positive integer"):
         _automatic._preview_idle_timeout()
+
+
+def test_custom_environments_never_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom environment reports VERCEL_ENV=preview but must not idle.
+
+    Its chain is environment-scoped and behaves like production; applying a
+    preview idle deadline would silently stop its jobs between requests.
+    """
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.setenv("VERCEL_TARGET_ENV", "staging")
+    monkeypatch.setenv(_automatic.PREVIEW_IDLE_TIMEOUT_ENV, "120")
+
+    assert _automatic._preview_idle_timeout() is None
