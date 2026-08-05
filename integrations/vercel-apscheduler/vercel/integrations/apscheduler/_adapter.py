@@ -323,12 +323,22 @@ class SchedulerAdapter:
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
 
-    def auto_activate(self) -> None:
-        """Activate on request activity without overriding an explicit pause."""
+    def auto_activate(self, *, takeover_allowed: bool = False) -> None:
+        """Activate on request activity without overriding an explicit pause.
+
+        ``takeover_allowed`` is true only when the triggering request arrived
+        through an environment alias, which routes exclusively to the
+        currently promoted deployment. Traffic to a deployment's own URL
+        proves nothing about promotion, so it may drive an owned chain but
+        never adopt someone else's.
+        """
         self._lifecycle_called = True
         self.ensure_local_started()
         now = datetime.now(UTC)
-        decision = self.driver.auto_activate(now)
+        decision = self.driver.auto_activate(now, takeover_allowed=takeover_allowed)
+        if not decision.owned:
+            return
+        self._reconcile_takeover(now)
         if decision.state != "running":
             self._pause_local()
             return

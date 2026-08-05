@@ -56,6 +56,58 @@ def test_registers_request_driven_automatic_activation(
     ]
 
 
+@pytest.mark.parametrize(
+    ("forwarded_host", "expected"),
+    [
+        # Environment aliases route only to the promoted deployment.
+        ("test-app.vercel.app", True),
+        ("www.example.com", True),
+        # The deployment's own URL reaches it forever; proves nothing.
+        ("app-abc123-team.vercel.app", False),
+        # The branch URL tracks the branch's newest deployment, which is
+        # exactly wrong during a rollback.
+        ("app-git-main-team.vercel.app", False),
+        (None, False),
+    ],
+)
+def test_alias_routed_requests_are_the_takeover_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    forwarded_host: str | None,
+    expected: bool,  # noqa: FBT001 - parametrized expectation
+) -> None:
+    invocation_hooks = ModuleType("vercel_runtime.invocation_hooks")
+    invocation_hooks.__dict__["current_forwarded_host"] = lambda: forwarded_host
+    runtime = ModuleType("vercel_runtime")
+    runtime.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
+    monkeypatch.setitem(
+        sys.modules,
+        "vercel_runtime.invocation_hooks",
+        invocation_hooks,
+    )
+    monkeypatch.setenv("VERCEL_URL", "app-abc123-team.vercel.app")
+    monkeypatch.setenv("VERCEL_BRANCH_URL", "app-git-main-team.vercel.app")
+
+    assert _automatic._request_is_alias_routed() is expected
+
+
+def test_runtime_without_host_support_disables_takeover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invocation_hooks = ModuleType("vercel_runtime.invocation_hooks")
+    runtime = ModuleType("vercel_runtime")
+    runtime.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "vercel_runtime", runtime)
+    monkeypatch.setitem(
+        sys.modules,
+        "vercel_runtime.invocation_hooks",
+        invocation_hooks,
+    )
+    monkeypatch.setattr(_automatic, "_takeover_warning_emitted", False)
+
+    assert _automatic._request_is_alias_routed() is False
+
+
 def test_malformed_subscriber_entry_fails_loudly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -112,11 +164,11 @@ def test_subscriber_request_does_not_register_automatic_activation(
 def test_automatic_activation_calls_every_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
+    calls: list[bool] = []
 
     class FakeAdapter:
-        def auto_activate(self) -> None:
-            calls.append("activated")
+        def auto_activate(self, *, takeover_allowed: bool) -> None:
+            calls.append(takeover_allowed)
 
     monkeypatch.setattr(
         _automatic,
@@ -125,6 +177,6 @@ def test_automatic_activation_calls_every_adapter(
     )
     monkeypatch.setattr(_adapter, "get_adapter", lambda scheduler: FakeAdapter())
 
-    _automatic._activate_configured_schedulers()
+    _automatic._activate_configured_schedulers(takeover_allowed=True)
 
-    assert calls == ["activated", "activated"]
+    assert calls == [True, True]

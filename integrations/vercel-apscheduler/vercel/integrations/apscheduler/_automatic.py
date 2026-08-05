@@ -6,6 +6,7 @@ from typing import Any
 
 import importlib
 import json
+import logging
 from os import environ
 
 from ._driver import APSchedulerConfigurationError
@@ -15,6 +16,8 @@ from ._options import (
     is_queue_serving_runtime,
     is_vercel_runtime,
 )
+
+LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
 ENVIRONMENT_ENV = "VERCEL_ENV"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
@@ -49,7 +52,51 @@ def register_automatic_activation() -> None:
 
 
 def _automatic_activation_hook() -> None:
-    _activate_configured_schedulers()
+    _activate_configured_schedulers(takeover_allowed=_request_is_alias_routed())
+
+
+def _request_is_alias_routed() -> bool:
+    """Whether the current request arrived through an environment alias.
+
+    Environment aliases (the production domain and custom domains) route
+    exclusively to the currently promoted deployment, so such a request
+    proves this deployment is current and may take the chain over. The
+    deployment's own URL and its branch URL prove nothing: the branch URL
+    tracks the newest deployment of the branch, which is exactly wrong
+    during a rollback.
+    """
+    try:
+        from vercel_runtime.invocation_hooks import (  # type: ignore[import-not-found]  # ty: ignore[unresolved-import]
+            current_forwarded_host,
+        )
+    except ImportError:
+        _warn_takeover_unavailable()
+        return False
+    host = (current_forwarded_host() or "").strip().casefold()
+    if not host:
+        return False
+    own_hosts = {
+        value.strip().casefold()
+        for value in (environ.get("VERCEL_URL"), environ.get("VERCEL_BRANCH_URL"))
+        if value
+    }
+    return host not in own_hosts
+
+
+_takeover_warning_emitted = False
+
+
+def _warn_takeover_unavailable() -> None:
+    global _takeover_warning_emitted  # noqa: PLW0603 - process-lifetime warn-once
+    if _takeover_warning_emitted:
+        return
+    _takeover_warning_emitted = True
+    LOGGER.warning(
+        "This Vercel Python Runtime does not expose the request host; a "
+        "promoted deployment will not take over the scheduler chain "
+        "automatically. Upgrade the runtime or call scheduler.start() "
+        "explicitly after promoting."
+    )
 
 
 def _automatic_environment() -> bool:
@@ -59,7 +106,7 @@ def _automatic_environment() -> bool:
     return environment == "production"
 
 
-def _activate_configured_schedulers() -> None:
+def _activate_configured_schedulers(*, takeover_allowed: bool) -> None:
     from ._adapter import get_adapter
 
     for scheduler in _configured_schedulers():
@@ -68,7 +115,7 @@ def _activate_configured_schedulers() -> None:
             raise APSchedulerConfigurationError(
                 "configured APScheduler subscriber was not adopted by the integration"
             )
-        adapter.auto_activate()
+        adapter.auto_activate(takeover_allowed=takeover_allowed)
 
 
 def _configured_schedulers() -> list[BaseScheduler]:
