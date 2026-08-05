@@ -87,6 +87,7 @@ from vercel.sandbox._internal.state import (
     RuntimeSessionStopState,
     SandboxRuntimeSessionState,
     SandboxState,
+    SnapshotSessionState,
     SnapshotState,
 )
 from vercel.sandbox._internal.sync_filesystem_handle import (
@@ -1094,8 +1095,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
 
     async def _ensure_active(self) -> str:
         """Ensure an active current session before binding a lazy stream."""
-        await self._await_shared_resume()
-        return self.current_session_id
+        return (await self._acquire_session()).id
 
     async def _acquire_session(self) -> SyncSandboxRuntimeSession:
         target = self._capture_recovery_target()
@@ -1305,44 +1305,63 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         The service rejects durations shorter than one second.
         """
         parsed_duration = parse_required_duration_seconds(duration)
-        payload = iter_coroutine(
-            execute_with_sandbox_recovery(
-                lambda session_id: self._service.extend_runtime_session_timeout(
-                    session_id=session_id,
-                    duration=parsed_duration,
-                ),
-                coordinator=self,
+
+        async def extend(
+            session_id: str,
+        ) -> tuple[str, SandboxRuntimeSessionState]:
+            payload = await self._service.extend_runtime_session_timeout(
+                session_id=session_id,
+                duration=parsed_duration,
             )
-        )
-        return self._apply_current_session_payload(payload)
+            return session_id, payload
+
+        target_id, payload = iter_coroutine(execute_with_sandbox_recovery(extend, coordinator=self))
+        return self._apply_current_session_payload_if_current(payload, target_id)
 
     def update_network_policy(self, network_policy: NetworkPolicy) -> SyncSandboxRuntimeSession:
         """Replace the current session's network policy."""
-        payload = iter_coroutine(
-            execute_with_sandbox_recovery(
-                lambda session_id: self._service.update_runtime_session_network_policy(
-                    session_id=session_id,
-                    network_policy=network_policy,
-                ),
-                coordinator=self,
+
+        async def update(
+            session_id: str,
+        ) -> tuple[str, SandboxRuntimeSessionState]:
+            payload = await self._service.update_runtime_session_network_policy(
+                session_id=session_id,
+                network_policy=network_policy,
             )
-        )
-        return self._apply_current_session_payload(payload)
+            return session_id, payload
+
+        target_id, payload = iter_coroutine(execute_with_sandbox_recovery(update, coordinator=self))
+        return self._apply_current_session_payload_if_current(payload, target_id)
 
     def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
         """Create a filesystem snapshot from the current session."""
         parsed_expiration = _parse_snapshot_expiration(expiration)
-        result = iter_coroutine(
-            execute_with_sandbox_recovery(
-                lambda session_id: self._service.create_snapshot(
-                    session_id=session_id,
-                    expiration=parsed_expiration,
-                ),
-                coordinator=self,
+
+        async def create(session_id: str) -> tuple[str, SnapshotSessionState]:
+            result = await self._service.create_snapshot(
+                session_id=session_id,
+                expiration=parsed_expiration,
             )
-        )
-        self._apply_current_session_payload(result.session)
+            return session_id, result
+
+        target_id, result = iter_coroutine(execute_with_sandbox_recovery(create, coordinator=self))
+        self._apply_current_session_payload_if_current(result.session, target_id)
         return SyncSnapshot(payload=result.snapshot, service=self._service)
+
+    def _apply_current_session_payload_if_current(
+        self, payload: SandboxRuntimeSessionState, target_id: str
+    ) -> SyncSandboxRuntimeSession:
+        """Ignore an operation reply superseded by a concurrent recovery."""
+        with self._recovery_condition:
+            if target_id == self.current_session_id:
+                return self._apply_current_session_payload(payload)
+            session = self.current_session
+            if session is None:
+                raise SandboxResponseError(
+                    "Sandbox current-session operation returned a different session identity",
+                    data=payload,
+                )
+            return session
 
     def stop(self) -> Self:
         """Stop the current session and return this sandbox handle."""

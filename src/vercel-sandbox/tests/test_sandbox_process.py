@@ -5,6 +5,7 @@ import signal
 import subprocess
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from threading import Event, Lock
 
 import httpx
@@ -1230,6 +1231,60 @@ def test_sync_recovery_shares_failure_and_clears_slot_for_retry() -> None:
     service.first_resume_error = None
     assert box.query_processes() == []
     assert service.resume_count == 2
+
+
+class _SyncSupersededMutationService:
+    def __init__(self) -> None:
+        self.allow_mutation = Event()
+        self.mutation_started = Event()
+
+    async def extend_runtime_session_timeout(
+        self, *, session_id: str, duration: timedelta
+    ) -> SandboxRuntimeSessionState:
+        assert session_id == "sbx_old"
+        assert duration == timedelta(seconds=2)
+        self.mutation_started.set()
+        assert self.allow_mutation.wait(timeout=5)
+        return SandboxRuntimeSessionState(id="sbx_old", status=sandbox.SandboxStatus.RUNNING)
+
+    async def query_processes(self, *, session_id: str) -> list[object]:
+        if session_id == "sbx_old":
+            raise _stopped_error()
+        assert session_id == "sbx_new"
+        return []
+
+    async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
+        return SandboxState(
+            name="preview",
+            current_session_id="sbx_new",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_new", status=sandbox.SandboxStatus.RUNNING
+            ),
+        )
+
+
+def test_sync_mutation_reply_superseded_by_recovery_keeps_current_session() -> None:
+    service = _SyncSupersededMutationService()
+    box = sandbox_sync.SyncSandbox(
+        payload=SandboxState(
+            name="preview",
+            current_session_id="sbx_old",
+            current_session=SandboxRuntimeSessionState(
+                id="sbx_old", status=sandbox.SandboxStatus.RUNNING
+            ),
+        ),
+        service=service,  # type: ignore[arg-type]
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        mutation = executor.submit(box.extend_execution_time_limit, 2)
+        assert service.mutation_started.wait(timeout=5)
+        assert box.query_processes() == []
+        service.allow_mutation.set()
+        result = mutation.result(timeout=5)
+
+    assert result.id == "sbx_new"
+    assert box.current_session_id == "sbx_new"
 
 
 class _AsyncTransitionCoordinationService:

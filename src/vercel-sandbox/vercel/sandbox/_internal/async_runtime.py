@@ -953,8 +953,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
 
     async def _ensure_active(self) -> str:
         """Ensure an active current session before binding a lazy stream."""
-        await self._await_shared_resume()
-        return self.current_session_id
+        return (await self._acquire_session()).id
 
     async def _acquire_session(self) -> SandboxRuntimeSession:
         target = self._capture_recovery_target()

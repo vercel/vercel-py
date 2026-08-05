@@ -519,6 +519,72 @@ def test_sync_active_writer_finish_lifecycle_failure_does_not_resume(
 
 @respx.mock
 @pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize("error_code", ["sandbox_stopping", "sandbox_snapshotting"])
+async def test_stream_binding_polls_transition_before_pinning_session(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+    error_code: str,
+) -> None:
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    if sync:
+        monkeypatch.setattr("vercel.sandbox._internal.sync_runtime.time.sleep", lambda _delay: None)
+    else:
+        monkeypatch.setattr("vercel.sandbox._internal.async_runtime.asyncio.sleep", no_delay)
+
+    attempts = 0
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.params["resume"] == "false":
+            return httpx.Response(200, json=_sandbox_response("sbx_old"))
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                409,
+                json={"error": {"code": error_code, "message": "transitioning"}},
+            )
+        return httpx.Response(200, json=_sandbox_response("sbx_new"))
+
+    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=sandbox_handler
+    )
+    old_session = cast(dict[str, object], _sandbox_response("sbx_old")["session"])
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": {
+                    **old_session,
+                    "status": "stopped",
+                }
+            },
+        )
+    )
+    write_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/write").mock(
+        return_value=httpx.Response(204)
+    )
+
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            sync_box = sandbox_sync.get_sandbox(name="preview")
+            with sync_box.fs.open("stream.txt", "wb", size=4) as sync_writer:
+                sync_writer.write(b"data")
+    else:
+        async with session(service_options=_session_options()):
+            async_box = await sandbox.get_sandbox(name="preview")
+            async with async_box.fs.open("stream.txt", "wb", size=4) as async_writer:
+                await async_writer.write(b"data")
+
+    assert sandbox_route.call_count == 3
+    assert poll_route.call_count == 1
+    assert write_route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
 async def test_unsized_writer_recovers_at_publish(
     mock_env_clear: None,
     sync: bool,
