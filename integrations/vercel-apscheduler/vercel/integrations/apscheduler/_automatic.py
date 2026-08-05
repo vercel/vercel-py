@@ -84,27 +84,34 @@ def _configured_schedulers() -> list[BaseScheduler]:
     if not isinstance(entries, list):
         raise APSchedulerConfigurationError(f"{SUBSCRIBERS_ENV} must contain a JSON array")
 
-    schedulers: list[BaseScheduler] = []
-    for entry in entries:
-        scheduler = _scheduler_from_entry(entry)
-        if scheduler is not None:
-            schedulers.append(scheduler)
-    if not schedulers:
+    if not entries:
         raise APSchedulerConfigurationError(
             f"{SUBSCRIBERS_ENV} does not contain an APScheduler entrypoint"
         )
-    return schedulers
+    return [_scheduler_from_entry(entry) for entry in entries]
 
 
-def _scheduler_from_entry(entry: Any) -> BaseScheduler | None:
-    if not isinstance(entry, dict):
-        return None
-    entrypoint = entry.get("entrypoint")
-    if not isinstance(entrypoint, str):
-        return None
+def _scheduler_from_entry(entry: Any) -> BaseScheduler:
+    """Resolve one builder-written subscriber entry to its scheduler.
+
+    The builder owns this environment variable, so a malformed entry or an
+    entrypoint that does not name a scheduler is a build regression; failing
+    loudly here beats silently skipping a scheduler that should activate.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("entrypoint"), str):
+        raise APSchedulerConfigurationError(
+            f"{SUBSCRIBERS_ENV} contains a malformed subscriber entry"
+        )
+    entrypoint = entry["entrypoint"]
     module_name, separator, variable_name = entrypoint.partition(":")
     if not separator or not module_name or not variable_name:
-        return None
+        raise APSchedulerConfigurationError(
+            f'{SUBSCRIBERS_ENV} entrypoint "{entrypoint}" is not "module:variable"'
+        )
     module = importlib.import_module(module_name)
     scheduler = getattr(module, variable_name, None)
-    return scheduler if isinstance(scheduler, BaseScheduler) else None
+    if not isinstance(scheduler, BaseScheduler):
+        raise APSchedulerConfigurationError(
+            f'{SUBSCRIBERS_ENV} entrypoint "{entrypoint}" does not name an APScheduler scheduler'
+        )
+    return scheduler

@@ -325,8 +325,6 @@ class SchedulerAdapter:
 
     def auto_activate(self) -> None:
         """Activate on request activity without overriding an explicit pause."""
-        self._bind_runtime()
-        self._validate_durable_configuration()
         self._lifecycle_called = True
         self.ensure_local_started()
         now = datetime.now(UTC)

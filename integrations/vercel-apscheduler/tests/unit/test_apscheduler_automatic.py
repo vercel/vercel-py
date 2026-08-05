@@ -7,7 +7,11 @@ from types import ModuleType
 
 import pytest
 
-from vercel.integrations.apscheduler import _adapter, _automatic
+from vercel.integrations.apscheduler import (
+    APSchedulerConfigurationError,
+    _adapter,
+    _automatic,
+)
 from vercel.integrations.apscheduler._options import is_queue_serving_runtime
 
 
@@ -50,6 +54,16 @@ def test_registers_request_driven_automatic_activation(
             _automatic.HEAL_SWEEP_INTERVAL_SECONDS,
         )
     ]
+
+
+def test_malformed_subscriber_entry_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The builder owns this variable; a bad entry is a regression, not noise."""
+    monkeypatch.setenv(_automatic.SUBSCRIBERS_ENV, '[{"id":"scheduler"}]')
+
+    with pytest.raises(APSchedulerConfigurationError, match="malformed"):
+        _automatic._configured_schedulers()
 
 
 def test_preview_deployments_do_not_activate_automatically(
