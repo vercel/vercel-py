@@ -96,6 +96,19 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
     )
 
 
+# Spec versions, mirroring `@workflow/world`'s `spec-version.ts`. The number a
+# row carries is a capability claim read by the *other* SDK, not a stamp of
+# which SDK wrote it:
+#
+#   1  legacy: direct entity mutation, unprefixed JSON payloads
+#   2  event sourcing, format-prefixed (`devl`) payloads
+#   3  CBOR queue transport
+#   4  native attributes (`attr_set`)
+#   5  payloads may be zstd- or gzip-compressed
+#
+SPEC_VERSION_CURRENT = 2
+
+
 class BaseModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(serialize_by_alias=True)
 
@@ -307,9 +320,10 @@ class BaseEvent(BaseModel):
     correlation_id: str | None = pydantic.Field(
         default=None, alias="correlationId", exclude_if=lambda e: e is None
     )
-    spec_version: Literal[1, 2] = pydantic.Field(
-        default=2, alias="specVersion"
-    )  # 1: legacy JSON, 2: devalue
+    # Reading is deliberately unbounded: a run is a shared log, and whoever
+    # started it may be a newer TypeScript peer writing a version we have never
+    # heard of.
+    spec_version: int = pydantic.Field(default=SPEC_VERSION_CURRENT, alias="specVersion")
     server_props: ServerProps | None = pydantic.Field(default=None, exclude=True)
 
     @pydantic.model_validator(mode="before")

@@ -216,3 +216,61 @@ async def test_hook_token_claim_matches_the_ts_sidecar(tmp_path, monkeypatch) ->
         "eventId": result.event.server_props.event_id,
     }
     assert " " not in text, "the claim sidecar is written compactly, as in TS"
+
+
+async def test_reads_a_log_written_at_a_newer_spec_version(tmp_path, monkeypatch) -> None:
+    # `start()` is a world write, not an HTTP call, so the client that starts a
+    # run writes its first event -- and a current TypeScript client writes
+    # specVersion 5. Whoever *executes* the run then reads a log it did not
+    # open, so a version we have never heard of must not fail validation: we
+    # only read what the payload prefix tells us, never what the run claims.
+    world = _world(tmp_path, monkeypatch)
+    future = w.SPEC_VERSION_CURRENT + 3
+
+    result = await world.events_create(
+        None,
+        w.RunCreatedEvent(
+            eventData=w.RunCreatedEventData(
+                deploymentId="dpl_1",
+                workflowName="workflow//./src/wf//main",
+                input=ser.dehydrate([]),
+            ),
+            specVersion=future,
+        ),
+    )
+    assert result.run is not None
+    run_id = result.run.run_id
+
+    # The row a foreign event opens inherits that event's version rather than
+    # being relabelled with ours, which is what TS's world-local does too.
+    assert result.run.spec_version == future
+    assert json.loads((world.data_dir / "runs" / f"{run_id}.json").read_text())["specVersion"] == (
+        future
+    )
+
+    # And the log reads back, which is the part that used to raise before the
+    # runtime saw a single event.
+    events = await world.events_list(run_id)
+    assert [event.spec_version for event in events.data] == [future]
+
+    # Our own writes into that run keep the run's version intact.
+    await world.events_create(run_id, w.RunStartedEvent())
+    assert (await world.runs_get(run_id)).spec_version == future
+
+
+async def test_python_written_rows_claim_the_version_we_implement(tmp_path, monkeypatch) -> None:
+    # The number is a capability claim: a TS peer sharing the run reads it to
+    # decide whether it may compress payloads (>= 5) or write native attributes
+    # (>= 4). We implement neither, so every row we open says 2.
+    world = _world(tmp_path, monkeypatch)
+    run_id = await _populate(world)
+
+    assert w.SPEC_VERSION_CURRENT == 2
+    rows = {
+        "run": world.data_dir / "runs" / f"{run_id}.json",
+        "step": world.data_dir / "steps" / f"{run_id}-step_0.json",
+        "hook": world.data_dir / "hooks" / "hook_0.json",
+    }
+    for kind, path in rows.items():
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        assert stored["specVersion"] == w.SPEC_VERSION_CURRENT, f"{kind} row"

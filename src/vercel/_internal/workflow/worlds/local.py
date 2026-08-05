@@ -531,7 +531,12 @@ class LocalWorld(w.World):
                 deploymentId=run_data.deployment_id,
                 status="pending",
                 workflowName=run_data.workflow_name,
-                specVersion=2,
+                # The event carries the version, and the row it opens inherits
+                # it — `@workflow/world-local` propagates it the same way
+                # (`storage/events-storage.ts` `effectiveSpecVersion`), so a run
+                # this world creates is labelled by whoever wrote the event
+                # rather than by which SDK happens to be storing it.
+                specVersion=data.spec_version,
                 executionContext=run_data.execution_context,
                 input=run_data.input,
                 createdAt=now,
@@ -656,7 +661,7 @@ class LocalWorld(w.World):
                 attempt=0,
                 createdAt=now,
                 updatedAt=now,
-                specVersion=2,
+                specVersion=data.spec_version,
             )
             step_composite_key = f"{effective_run_id}-{data.correlation_id}"
             step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
@@ -794,7 +799,7 @@ class LocalWorld(w.World):
                 projectId="local-project",
                 environment="local",
                 createdAt=now,
-                specVersion=2,
+                specVersion=data.spec_version,
                 isWebhook=False,
                 isSystem=False,
             )
