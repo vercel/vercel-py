@@ -177,6 +177,9 @@ lease lapses.
 
 Resuming reuses `start()`: it atomically creates one new generation. Old
 messages remain permanently stale because their generation no longer matches.
+Occurrences that became due while paused are skipped, regardless of misfire
+settings: the new generation rebases every job to its next occurrence at or
+after the resume.
 
 The active-owner lease is deliberately not removed by pause or resume. If an
 old handler is still executing, the new generation's start delivery retries
@@ -266,9 +269,12 @@ calls to `add_job()` should pass `replace_existing=True`.
 ## Deployment behavior
 
 Production and custom environments share one durable namespace, owned by
-exactly one deployment at a time. Queue messages are delivered to the
-deployment that sent them, promoted or not, so ownership is what decides who
-may act: `start()` on a non-owner is a takeover that transfers ownership and
+exactly one deployment at a time. Queue delivery routing is advisory and may
+change underneath this design: today a message is delivered to the deployment
+that sent it, promoted or not; when the platform enables queue aliasing for a
+project, in-flight messages are instead handed to the environment's current
+deployment. Ownership therefore decides who may act, never who received a
+delivery: `start()` on a non-owner is a takeover that transfers ownership and
 opens a new generation in one atomic step. From that moment the demoted
 deployment is fenced out of the namespace entirely: its deliveries still
 arrive but every claim turns stale and acks, it repairs and rearms nothing,
@@ -281,9 +287,11 @@ On takeover the new owner reconciles the
 store against its own declarations, before planning any due jobs: a job the
 code no longer declares is deleted and never runs, a changed trigger restarts
 its schedule, an unchanged job keeps its progress, and `runtime` jobs are
-never touched. A persisted job whose definition no longer loads under the new
-code (typically a runtime job whose function was removed) is quarantined: it
-leaves the due index, keeps its record for the operator, and logs an error.
+never touched. A declared job whose persisted record no longer loads under
+the new code (typically because its function moved) is rewritten from the
+declaration and restarts its schedule. A `runtime` job whose definition no
+longer loads is quarantined: it leaves the due index, keeps its record for
+the operator, and logs an error.
 
 A takeover strands the previous owner's in-flight wake: it is consumed by
 the demoted deployment and acked as stale, and the new owner's chain starts
