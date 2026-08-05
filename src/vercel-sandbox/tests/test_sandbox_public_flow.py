@@ -8,6 +8,7 @@ from itertools import islice
 from threading import Event
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 import respx
@@ -2217,17 +2218,21 @@ async def _run_async_unrecovered_operation(handle: sandbox.Sandbox, operation: s
 
 
 @respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_transition_polling_is_cancellable(
-    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    anyio_backend: str,
 ) -> None:
-    poll_waiting = asyncio.Event()
-    never_release = asyncio.Event()
+    poll_waiting = anyio.Event()
+    never_release = anyio.Event()
 
     async def blocked_delay(_delay: float) -> None:
         poll_waiting.set()
         await never_release.wait()
 
-    monkeypatch.setattr(sandbox_async_runtime.asyncio, "sleep", blocked_delay)
+    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", blocked_delay)
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
     )
@@ -2243,11 +2248,16 @@ async def test_async_transition_polling_is_cancellable(
 
     async with session(service_options=_session_options()):
         handle = await sandbox.get_sandbox(name="preview")
-        operation = asyncio.create_task(handle.query_processes())
-        await poll_waiting.wait()
-        operation.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await operation
+        cancel_scope = anyio.CancelScope()
+
+        async def query() -> None:
+            with cancel_scope:
+                await handle.query_processes()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(query)
+            await poll_waiting.wait()
+            cancel_scope.cancel()
 
     assert poll_route.call_count == 0
 
@@ -2295,7 +2305,7 @@ async def test_async_transition_poll_failure_propagates_without_resuming(
     async def no_delay(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr(sandbox_async_runtime.asyncio, "sleep", no_delay)
+    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", no_delay)
     sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
     )
@@ -2724,7 +2734,7 @@ async def test_async_session_acquisition_polls_transition_then_retries_once(
     async def no_delay(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr(sandbox_async_runtime.asyncio, "sleep", no_delay)
+    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", no_delay)
     attempts = 0
 
     def sandbox_handler(request: httpx.Request) -> httpx.Response:
@@ -2818,11 +2828,14 @@ def test_sync_session_acquisition_polls_transition_then_retries_once(
 
 
 @respx.mock
-async def test_async_session_entry_cancellation_owns_no_cleanup(
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_session_entry_cancellation_abandons_resume_and_owns_no_cleanup(
     mock_env_clear: None,
+    anyio_backend: str,
 ) -> None:
-    resume_started = asyncio.Event()
-    release_resume = asyncio.Event()
+    resume_started = anyio.Event()
+    release_resume = anyio.Event()
 
     respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
         return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
@@ -2842,34 +2855,39 @@ async def test_async_session_entry_cancellation_owns_no_cleanup(
 
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
+        cancel_scope = anyio.CancelScope()
+        entry_done = anyio.Event()
 
         async def enter() -> None:
-            async with box.session():
-                raise AssertionError("cancelled entry must not yield")
+            with cancel_scope:
+                try:
+                    async with box.session():
+                        raise AssertionError("cancelled entry must not yield")
+                finally:
+                    entry_done.set()
 
-        task = asyncio.create_task(enter())
-        await resume_started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        release_resume.set()
-        for _ in range(10):
-            if box.current_session_id == "sbx_new":
-                break
-            await asyncio.sleep(0)
-        assert box.current_session_id == "sbx_new"
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(enter)
+            await resume_started.wait()
+            cancel_scope.cancel()
+            await entry_done.wait()
+            release_resume.set()
+        assert box.current_session_id == "sbx_old"
 
     assert stop_route.call_count == 0
 
 
 @respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_session_cleanup_finishes_before_cancellation_propagates(
     mock_env_clear: None,
+    anyio_backend: str,
 ) -> None:
-    entered = asyncio.Event()
-    stop_started = asyncio.Event()
-    release_stop = asyncio.Event()
-    block_forever = asyncio.Event()
+    entered = anyio.Event()
+    stop_started = anyio.Event()
+    release_stop = anyio.Event()
+    block_forever = anyio.Event()
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -2885,20 +2903,25 @@ async def test_async_session_cleanup_finishes_before_cancellation_propagates(
 
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
+        cancel_scope = anyio.CancelScope()
+        managed_done = anyio.Event()
 
         async def managed() -> None:
-            async with box.session():
-                entered.set()
-                await block_forever.wait()
+            with cancel_scope:
+                try:
+                    async with box.session():
+                        entered.set()
+                        await block_forever.wait()
+                finally:
+                    managed_done.set()
 
-        task = asyncio.create_task(managed())
-        await entered.wait()
-        task.cancel()
-        await stop_started.wait()
-        assert not task.done()
-        release_stop.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(managed)
+            await entered.wait()
+            cancel_scope.cancel()
+            await stop_started.wait()
+            assert not managed_done.is_set()
+            release_stop.set()
 
     assert stop_route.call_count == 1
 
@@ -2936,11 +2959,14 @@ def test_listed_sync_session_cleanup_has_no_parent_linkage(mock_env_clear: None)
 
 
 @respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_session_acquisition_shares_implicit_resume(
     mock_env_clear: None,
+    anyio_backend: str,
 ) -> None:
-    resume_started = asyncio.Event()
-    release_resume = asyncio.Event()
+    resume_started = anyio.Event()
+    release_resume = anyio.Event()
     respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
         return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
     )
@@ -2965,14 +2991,26 @@ async def test_async_session_acquisition_shares_implicit_resume(
 
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
-        implicit = asyncio.create_task(box.query_processes())
-        await resume_started.wait()
-        explicit = asyncio.ensure_future(box.session())
-        await asyncio.sleep(0)
-        release_resume.set()
-        processes, acquired = await asyncio.gather(implicit, explicit)
+        processes: list[sandbox.Process] | None = None
+        acquired: sandbox.SandboxRuntimeSession | None = None
+
+        async def query() -> None:
+            nonlocal processes
+            processes = await box.query_processes()
+
+        async def acquire() -> None:
+            nonlocal acquired
+            acquired = await box.session()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(query)
+            await resume_started.wait()
+            task_group.start_soon(acquire)
+            await anyio.sleep(0)
+            release_resume.set()
 
     assert processes == []
+    assert acquired is not None
     assert acquired is box.current_session
     assert acquired.id == "sbx_new"
     assert resume_route.call_count == 1
@@ -3122,11 +3160,14 @@ def test_sync_successful_block_wraps_unrelated_cleanup_failure(
 
 
 @respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_cancellation_with_cleanup_failure_warns_structured_error(
     mock_env_clear: None,
+    anyio_backend: str,
 ) -> None:
-    entered = asyncio.Event()
-    block_forever = asyncio.Event()
+    entered = anyio.Event()
+    block_forever = anyio.Event()
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -3139,18 +3180,19 @@ async def test_async_cancellation_with_cleanup_failure_warns_structured_error(
 
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
+        cancel_scope = anyio.CancelScope()
 
         async def managed() -> None:
-            async with box.session():
-                entered.set()
-                await block_forever.wait()
+            with cancel_scope:
+                async with box.session():
+                    entered.set()
+                    await block_forever.wait()
 
-        task = asyncio.create_task(managed())
-        await entered.wait()
         with pytest.warns(RuntimeWarning) as warnings_info:
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(managed)
+                await entered.wait()
+                cancel_scope.cancel()
 
     cleanup_error = warnings_info[0].source
     assert isinstance(cleanup_error, SandboxCleanupError)

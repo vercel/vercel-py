@@ -532,7 +532,7 @@ async def test_stream_binding_polls_transition_before_pinning_session(
     if sync:
         monkeypatch.setattr("vercel.sandbox._internal.sync_runtime.time.sleep", lambda _delay: None)
     else:
-        monkeypatch.setattr("vercel.sandbox._internal.async_runtime.asyncio.sleep", no_delay)
+        monkeypatch.setattr("vercel.sandbox._internal.async_runtime.anyio.sleep", no_delay)
 
     attempts = 0
 

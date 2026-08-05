@@ -1,6 +1,5 @@
 """Async runtime handles and entry points for Sandbox operations."""
 
-import asyncio
 import signal as signal_module
 import subprocess
 import time
@@ -10,6 +9,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
+
+import anyio
 
 from vercel._internal.core.byte_stream import AsyncByteStreamRuntime
 from vercel._internal.core.polyfills import Self
@@ -892,6 +893,13 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         return self
 
 
+@dataclass(slots=True)
+class _AsyncRecoveryAttempt:
+    completed: anyio.Event
+    status: Literal["in_flight", "succeeded", "failed", "abandoned"] = "in_flight"
+    error: BaseException | None = None
+
+
 class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     """Control an asynchronous Vercel Sandbox.
 
@@ -902,7 +910,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
     permanently remove the sandbox.
     """
 
-    __slots__ = ("_recovery_task", "_service", "fs")
+    __slots__ = ("_recovery_attempt", "_recovery_lock", "_service", "fs")
 
     def __init__(
         self,
@@ -917,7 +925,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             include_system_routes=include_system_routes,
         )
         self._service = service
-        self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_lock = anyio.Lock()
+        self._recovery_attempt: _AsyncRecoveryAttempt | None = None
         self.fs = SandboxFilesystem(
             service=service,
             execution=FilesystemOperationBinding(
@@ -929,27 +938,51 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             write_files_cwd=self._write_files_cwd,
         )
 
-    async def _resume_for_recovery(self) -> None:
-        payload = await self._service.resume_sandbox(
-            name=self.name,
-            project_id=self.project_id,
-            include_system_routes=self._include_system_routes,
-        )
-        self._apply_payload(payload)
-
-    def _clear_recovery_task(self, task: asyncio.Task[None]) -> None:
-        if self._recovery_task is task:
-            self._recovery_task = None
-        if not task.cancelled():
-            task.exception()
-
     async def _await_shared_resume(self) -> None:
-        task = self._recovery_task
-        if task is None:
-            task = asyncio.create_task(self._resume_for_recovery())
-            self._recovery_task = task
-            task.add_done_callback(self._clear_recovery_task)
-        await asyncio.shield(task)
+        while True:
+            async with self._recovery_lock:
+                attempt = self._recovery_attempt
+                if attempt is None:
+                    attempt = _AsyncRecoveryAttempt(completed=anyio.Event())
+                    self._recovery_attempt = attempt
+                    owns_attempt = True
+                else:
+                    owns_attempt = False
+
+            if not owns_attempt:
+                await attempt.completed.wait()
+                if attempt.status == "succeeded":
+                    return
+                if attempt.status == "failed":
+                    assert attempt.error is not None
+                    raise attempt.error
+                continue
+
+            outcome: Literal["succeeded", "failed", "abandoned"] = "abandoned"
+            attempt_error: BaseException | None = None
+            try:
+                payload = await self._service.resume_sandbox(
+                    name=self.name,
+                    project_id=self.project_id,
+                    include_system_routes=self._include_system_routes,
+                )
+                self._apply_payload(payload)
+            except Exception as error:
+                if not isinstance(error, InterruptedError):
+                    outcome = "failed"
+                    attempt_error = error
+                raise
+            else:
+                outcome = "succeeded"
+            finally:
+                with anyio.CancelScope(shield=True):
+                    async with self._recovery_lock:
+                        attempt.status = outcome
+                        attempt.error = attempt_error
+                        if self._recovery_attempt is attempt:
+                            self._recovery_attempt = None
+                        attempt.completed.set()
+            return
 
     async def _ensure_active(self) -> str:
         """Ensure an active current session before binding a lazy stream."""
@@ -992,7 +1025,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
                     f"Sandbox session {target.session_id!r} did not leave a "
                     f"transitional state within {TRANSITION_TIMEOUT}s"
                 )
-            await asyncio.sleep(TRANSITION_POLL_INTERVAL)
+            await anyio.sleep(TRANSITION_POLL_INTERVAL)
             payload = await self._service.get_runtime_session(session_id=target.session_id)
             self._apply_recovery_session_payload(target, payload)
             if payload.status not in {
@@ -1353,19 +1386,13 @@ class SandboxSessionOperation:
         handle = self._handle
         if handle is None:
             return None
-        cleanup_task = asyncio.create_task(_cleanup_exact_session(handle))
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
             try:
-                await cleanup_task
+                await _cleanup_exact_session(handle)
             except SandboxCleanupError as cleanup_error:
+                if exc is None:
+                    raise
                 _warn_cleanup_after_block(cleanup_error)
-            raise
-        except SandboxCleanupError as cleanup_error:
-            if exc is None:
-                raise
-            _warn_cleanup_after_block(cleanup_error)
         return None
 
     def __del__(self) -> None:

@@ -1,4 +1,3 @@
-import asyncio
 import io
 import json
 import signal
@@ -8,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Event, Lock
 
+import anyio
 import httpx
 import pytest
 import respx
@@ -968,10 +968,10 @@ def _transition_error() -> sandbox.SandboxApiError:
 
 class _AsyncCoordinatedRecoveryService:
     def __init__(self, *, resume_error: BaseException | None = None) -> None:
-        self.allow_resume = asyncio.Event()
-        self.resume_started = asyncio.Event()
-        self.resume_finished = asyncio.Event()
-        self.second_failure = asyncio.Event()
+        self.allow_resume = anyio.Event()
+        self.resume_started = anyio.Event()
+        self.resume_finished = anyio.Event()
+        self.second_failure = anyio.Event()
         self.operation_count = 0
         self.resume_count = 0
         self.resume_error = resume_error
@@ -1016,54 +1016,108 @@ def _async_coordinated_box(
     )
 
 
-async def test_async_recovery_shares_resume_when_initiating_waiter_is_cancelled() -> None:
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_recovery_shares_success(anyio_backend: str) -> None:
     service = _AsyncCoordinatedRecoveryService()
     box = _async_coordinated_box(service)
+    results: list[list[sandbox.Process]] = []
 
-    initiating = asyncio.create_task(box.query_processes())
-    await service.resume_started.wait()
-    waiting = asyncio.create_task(box.query_processes())
-    await service.second_failure.wait()
-    initiating.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await initiating
-    service.allow_resume.set()
+    async def query() -> None:
+        results.append(await box.query_processes())
 
-    assert await waiting == []
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(query)
+        await service.resume_started.wait()
+        task_group.start_soon(query)
+        await service.second_failure.wait()
+        service.allow_resume.set()
+
+    assert results == [[], []]
     assert service.resume_count == 1
     assert box.current_session_id == "sbx_new"
 
 
-async def test_async_recovery_finishes_and_applies_state_after_all_waiters_cancel() -> None:
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_recovery_waiter_re_elects_after_owner_cancellation(
+    anyio_backend: str,
+) -> None:
     service = _AsyncCoordinatedRecoveryService()
     box = _async_coordinated_box(service)
+    owner_scope = anyio.CancelScope()
+    owner_done = anyio.Event()
+    waiter_result: list[sandbox.Process] | None = None
 
-    first = asyncio.create_task(box.query_processes())
-    await service.resume_started.wait()
-    second = asyncio.create_task(box.query_processes())
-    await service.second_failure.wait()
-    first.cancel()
-    second.cancel()
-    results = await asyncio.gather(first, second, return_exceptions=True)
-    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    async def own_recovery() -> None:
+        with owner_scope:
+            try:
+                await box.query_processes()
+            finally:
+                owner_done.set()
 
-    service.allow_resume.set()
-    await service.resume_finished.wait()
-    assert service.resume_count == 1
+    async def wait_for_recovery() -> None:
+        nonlocal waiter_result
+        waiter_result = await box.query_processes()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(own_recovery)
+        await service.resume_started.wait()
+        task_group.start_soon(wait_for_recovery)
+        await service.second_failure.wait()
+        owner_scope.cancel()
+        await owner_done.wait()
+        service.allow_resume.set()
+
+    assert waiter_result == []
+    assert service.resume_count == 2
     assert box.current_session_id == "sbx_new"
 
 
-async def test_async_recovery_shares_failure_and_clears_slot_for_retry() -> None:
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_recovery_is_abandoned_when_all_callers_cancel(
+    anyio_backend: str,
+) -> None:
+    service = _AsyncCoordinatedRecoveryService()
+    box = _async_coordinated_box(service)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(box.query_processes)
+        await service.resume_started.wait()
+        task_group.start_soon(box.query_processes)
+        await service.second_failure.wait()
+        task_group.cancel_scope.cancel()
+
+    service.allow_resume.set()
+    await anyio.sleep(0)
+    assert not service.resume_finished.is_set()
+    assert service.resume_count == 1
+    assert box.current_session_id == "sbx_old"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_recovery_shares_failure_and_clears_slot_for_retry(
+    anyio_backend: str,
+) -> None:
     resume_error = RuntimeError("resume failed")
     service = _AsyncCoordinatedRecoveryService(resume_error=resume_error)
     box = _async_coordinated_box(service)
+    results: list[BaseException] = []
 
-    first = asyncio.create_task(box.query_processes())
-    await service.resume_started.wait()
-    second = asyncio.create_task(box.query_processes())
-    await service.second_failure.wait()
-    service.allow_resume.set()
-    results = await asyncio.gather(first, second, return_exceptions=True)
+    async def query() -> None:
+        try:
+            await box.query_processes()
+        except BaseException as error:
+            results.append(error)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(query)
+        await service.resume_started.wait()
+        task_group.start_soon(query)
+        await service.second_failure.wait()
+        service.allow_resume.set()
 
     assert results == [resume_error, resume_error]
     assert service.resume_count == 1
@@ -1074,8 +1128,8 @@ async def test_async_recovery_shares_failure_and_clears_slot_for_retry() -> None
 
 class _DelayedLifecycleFailureService:
     def __init__(self) -> None:
-        self.arrived = (asyncio.Event(), asyncio.Event())
-        self.release = (asyncio.Event(), asyncio.Event())
+        self.arrived = (anyio.Event(), anyio.Event())
+        self.release = (anyio.Event(), anyio.Event())
         self.old_operation_count = 0
         self.resume_count = 0
 
@@ -1099,7 +1153,11 @@ class _DelayedLifecycleFailureService:
         )
 
 
-async def test_delayed_async_lifecycle_failure_may_resume_again_after_slot_clears() -> None:
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_delayed_async_lifecycle_failure_may_resume_again_after_slot_clears(
+    anyio_backend: str,
+) -> None:
     service = _DelayedLifecycleFailureService()
     box = sandbox.Sandbox(
         payload=SandboxState(
@@ -1112,14 +1170,22 @@ async def test_delayed_async_lifecycle_failure_may_resume_again_after_slot_clear
         service=service,  # type: ignore[arg-type]
     )
 
-    first = asyncio.create_task(box.query_processes())
-    second = asyncio.create_task(box.query_processes())
-    await asyncio.gather(*(event.wait() for event in service.arrived))
-    service.release[0].set()
-    assert await first == []
-    service.release[1].set()
-    assert await second == []
+    results: list[list[sandbox.Process]] = []
 
+    async def query() -> None:
+        results.append(await box.query_processes())
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(query)
+        task_group.start_soon(query)
+        await service.arrived[0].wait()
+        await service.arrived[1].wait()
+        service.release[0].set()
+        while len(results) < 1:
+            await anyio.sleep(0)
+        service.release[1].set()
+
+    assert results == [[], []]
     assert service.resume_count == 2
     assert box.current_session_id == "sbx_new"
 
@@ -1289,10 +1355,10 @@ def test_sync_mutation_reply_superseded_by_recovery_keeps_current_session() -> N
 
 class _AsyncTransitionCoordinationService:
     def __init__(self) -> None:
-        self.allow_resume = asyncio.Event()
-        self.resume_started = asyncio.Event()
-        self.second_poll_arrived = asyncio.Event()
-        self.second_poll_returning = asyncio.Event()
+        self.allow_resume = anyio.Event()
+        self.resume_started = anyio.Event()
+        self.second_poll_arrived = anyio.Event()
+        self.second_poll_returning = anyio.Event()
         self.operation_count = 0
         self.poll_count = 0
         self.resume_count = 0
@@ -1328,13 +1394,16 @@ class _AsyncTransitionCoordinationService:
         )
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_transition_callers_poll_independently_and_share_resume(
+    anyio_backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_delay(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr(asyncio, "sleep", no_delay)
+    monkeypatch.setattr(anyio, "sleep", no_delay)
     service = _AsyncTransitionCoordinationService()
     box = sandbox.Sandbox(
         payload=SandboxState(
@@ -1347,12 +1416,18 @@ async def test_async_transition_callers_poll_independently_and_share_resume(
         service=service,  # type: ignore[arg-type]
     )
 
-    first = asyncio.create_task(box.query_processes())
-    second = asyncio.create_task(box.query_processes())
-    await service.second_poll_returning.wait()
-    service.allow_resume.set()
+    results: list[list[sandbox.Process]] = []
 
-    assert await asyncio.gather(first, second) == [[], []]
+    async def query() -> None:
+        results.append(await box.query_processes())
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(query)
+        task_group.start_soon(query)
+        await service.second_poll_returning.wait()
+        service.allow_resume.set()
+
+    assert results == [[], []]
     assert service.poll_count == 2
     assert service.resume_count == 1
     assert service.operation_count == 4

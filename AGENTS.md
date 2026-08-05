@@ -3,6 +3,8 @@
 - `uv` for package management, virtual environment construction, and running scripts
 - `ruff` for linting and formatting
 - `mypy` for type checking
+- Implementation code uses AnyIO primitives. Direct `asyncio` usage is allowed only in tests,
+  examples, and documentation.
 
 # Commands
 
