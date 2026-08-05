@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from vercel._internal.core.http import DEFAULT_API_BASE_URL
 from vercel.project_routes.ops import (
@@ -26,7 +27,6 @@ from vercel.project_routes.types import (
     DeleteRoutesResult,
     EditRouteResult,
     GeneratedRoute,
-    GenerateRouteCurrent,
     GetRoutesResult,
     Placement,
     ProjectRoute,
@@ -80,7 +80,7 @@ class ProjectRoutesClient:
         self,
         *,
         project_id: str,
-        routes: Sequence[ProjectRoute | StagedRouteInput],
+        routes: Sequence[ProjectRoute | StagedRouteInput | Mapping[str, Any]],
         overwrite: bool | None = None,
         team_id: str | None = None,
         slug: str | None = None,
@@ -163,7 +163,7 @@ class ProjectRoutesClient:
         *,
         project_id: str,
         prompt: str,
-        current_route: GeneratedRoute | GenerateRouteCurrent | None = None,
+        current_route: GeneratedRoute | Mapping[str, Any] | None = None,
         team_id: str | None = None,
         slug: str | None = None,
     ) -> GeneratedRoute:
@@ -256,7 +256,7 @@ class AsyncProjectRoutesClient:
         self,
         *,
         project_id: str,
-        routes: Sequence[ProjectRoute | StagedRouteInput],
+        routes: Sequence[ProjectRoute | StagedRouteInput | Mapping[str, Any]],
         overwrite: bool | None = None,
         team_id: str | None = None,
         slug: str | None = None,
@@ -339,7 +339,7 @@ class AsyncProjectRoutesClient:
         *,
         project_id: str,
         prompt: str,
-        current_route: GeneratedRoute | GenerateRouteCurrent | None = None,
+        current_route: GeneratedRoute | Mapping[str, Any] | None = None,
         team_id: str | None = None,
         slug: str | None = None,
     ) -> GeneratedRoute:

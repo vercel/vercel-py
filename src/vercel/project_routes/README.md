@@ -37,9 +37,9 @@ vercel.project_routes.add_route(
 ```
 
 `placement="start"`, `"end"`, `"before"`, or `"after"` positions the route;
-the last two take a `reference_id`. Anything the dataclasses do not cover
-(conditions, transforms, headers) uses a raw `RouteInput` mapping, in the same
-shape as `routes` in `vercel.json`:
+the last two take a `reference_id`. Anything the authoring models do not cover
+(conditions, transforms, headers) can be passed as a plain mapping in the same
+shape as `routes` in `vercel.json`; it is validated into a `RouteInput` model:
 
 ```python
 vercel.project_routes.add_route(
@@ -58,12 +58,12 @@ vercel.project_routes.add_route(
 
 ## Inspecting and editing
 
-Results are typed dataclasses; the routing rule itself stays a mapping:
+Results are typed Pydantic models:
 
 ```python
 result = vercel.project_routes.get_routes(project_id="prj_123")
 for route in result.routes:
-    print(route.name, route.route_type, route.route["src"], route.staged)
+    print(route.name, route.route_type, route.route.src, route.staged)
 
 rewrites = vercel.project_routes.get_routes(
     project_id="prj_123", search="legacy", route_type="rewrite"

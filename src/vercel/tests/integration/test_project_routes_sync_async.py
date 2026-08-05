@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 import pytest
@@ -15,10 +16,9 @@ from vercel.project_routes import (
     ProjectRoute,
     ProjectRoutesError,
     RewriteRoute,
-    RouteInput,
+    RouteDefinition,
     RouteLimit,
     RouteVersion,
-    StagedRouteInput,
     get_routes,
     get_routes_async,
 )
@@ -52,20 +52,20 @@ PROJECT_ROUTE_JSON = {
 PROJECT_ROUTE = ProjectRoute(
     id="route_123",
     name="Rewrite /old to /new",
-    route={"src": "/old", "dest": "/new"},
+    route=RouteDefinition(src="/old", dest="/new"),
     enabled=True,
     staged=True,
     src_syntax="equals",
     route_type="rewrite",
 )
-STAGED_INPUT: StagedRouteInput = {
+STAGED_INPUT: dict[str, Any] = {
     "id": "route_123",
     "name": "Rewrite /old to /new",
     "enabled": True,
     "srcSyntax": "equals",
     "route": {"src": "/old", "dest": "/new"},
 }
-ROUTE_INPUT: RouteInput = {
+ROUTE_INPUT: dict[str, Any] = {
     "name": "Rewrite /old to /new",
     "srcSyntax": "equals",
     "route": {"src": "/old", "dest": "/new"},

@@ -6,6 +6,7 @@ from vercel.client import AsyncVercel, Vercel
 from vercel.project_routes import (
     AsyncProjectRoutesClient,
     ProjectRoute,
+    RouteDefinition,
     ProjectRoutesClient,
     RedirectRoute,
     RewriteRoute,
@@ -27,7 +28,7 @@ def test_rewrite_route_serializes_to_api_shape() -> None:
         enabled=False,
     )
 
-    assert route.to_route_input() == {
+    assert route.to_route_input().to_wire() == {
         "name": "Rewrite /old to /new",
         "description": "Keep old links working",
         "enabled": False,
@@ -45,7 +46,7 @@ def test_redirect_route_serializes_to_api_shape() -> None:
         source_syntax="equals",
     )
 
-    assert route.to_route_input() == {
+    assert route.to_route_input().to_wire() == {
         "name": "Redirect /old to /new",
         "srcSyntax": "equals",
         "route": {"src": "/old", "dest": "/new", "status": 302},
@@ -60,7 +61,7 @@ def test_redirect_route_rejects_non_redirect_status() -> None:
 def test_set_status_route_serializes_to_api_shape() -> None:
     route = SetStatusRoute(name="Gone", source="/legacy", status=410)
 
-    assert route.to_route_input() == {
+    assert route.to_route_input().to_wire() == {
         "name": "Gone",
         "route": {"src": "/legacy", "status": 410},
     }
@@ -70,13 +71,13 @@ def test_project_route_round_trips_to_staged_input() -> None:
     route = ProjectRoute(
         id="route_123",
         name="Rewrite /old to /new",
-        route={"src": "/old", "dest": "/new"},
+        route=RouteDefinition(src="/old", dest="/new"),
         description="Keep old links working",
         enabled=True,
         src_syntax="equals",
     )
 
-    assert route.to_staged_input() == {
+    assert route.to_staged_input().to_wire() == {
         "id": "route_123",
         "name": "Rewrite /old to /new",
         "description": "Keep old links working",

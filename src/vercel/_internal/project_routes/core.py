@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta, timezone
+from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any, TypeVar, cast
 from urllib.parse import quote
+
+import pydantic
 
 from vercel._internal.core.http import (
     DEFAULT_API_BASE_URL,
@@ -20,30 +22,30 @@ from vercel._internal.core.http import (
 )
 from vercel.project_routes.errors import ProjectRoutesError
 from vercel.project_routes.types import (
-    AddRouteRequestBody,
     AddRouteResult,
-    DeleteRoutesRequestBody,
     DeleteRoutesResult,
-    EditRouteRequestBody,
     EditRouteResult,
-    GeneratedPathCondition,
     GeneratedRoute,
-    GeneratedRouteAction,
-    GeneratedRouteCondition,
-    GeneratedRouteHeader,
-    GenerateRouteRequestBody,
     GetRoutesResult,
-    ProjectRoute,
-    RouteDefinition,
     RouteDiff,
-    RouteLimit,
     RouteType,
     RouteVersion,
-    StageRoutesRequestBody,
-    UpdateRouteVersionRequestBody,
 )
 
-_T = TypeVar("_T")
+_ModelT = TypeVar("_ModelT", bound=pydantic.BaseModel)
+
+
+class _VersionEnvelope(pydantic.BaseModel):
+    version: RouteVersion
+
+
+class _VersionsEnvelope(pydantic.BaseModel):
+    versions: list[RouteVersion]
+
+
+class _GenerateEnvelope(pydantic.BaseModel):
+    route: GeneratedRoute | None = None
+    error: str | None = None
 
 
 def _require_token(token: str | None) -> str:
@@ -76,119 +78,14 @@ def _error_code(parsed: object | None) -> str | None:
     return None
 
 
-def _parse(payload: dict[str, Any], parser: Callable[[dict[str, Any]], _T]) -> _T:
+def _validate(payload: dict[str, Any], model: type[_ModelT]) -> _ModelT:
     try:
-        return parser(payload)
-    except (KeyError, TypeError, ValueError) as exc:
+        return model.model_validate(payload)
+    except pydantic.ValidationError as exc:
         raise ProjectRoutesError(
             "Project routes API returned an unexpected response body.",
             response_body=payload,
         ) from exc
-
-
-def _parse_version(data: dict[str, Any]) -> RouteVersion:
-    return RouteVersion(
-        id=data["id"],
-        last_modified=datetime.fromtimestamp(data["lastModified"] / 1000, tz=timezone.utc),
-        created_by=data["createdBy"],
-        s3_key=data["s3Key"],
-        is_staging=data.get("isStaging"),
-        is_live=data.get("isLive"),
-        rule_count=data.get("ruleCount"),
-        alias=data.get("alias"),
-    )
-
-
-def _parse_route(data: dict[str, Any]) -> ProjectRoute:
-    return ProjectRoute(
-        id=data["id"],
-        name=data["name"],
-        route=cast(RouteDefinition, data["route"]),
-        description=data.get("description"),
-        enabled=data.get("enabled"),
-        staged=data.get("staged"),
-        raw_src=data.get("rawSrc"),
-        raw_dest=data.get("rawDest"),
-        src_syntax=data.get("srcSyntax"),
-        route_type=data.get("routeType"),
-    )
-
-
-def _parse_get_routes(payload: dict[str, Any]) -> GetRoutesResult:
-    version = payload.get("version")
-    limit = payload.get("limit")
-    return GetRoutesResult(
-        routes=[_parse_route(route) for route in payload.get("routes", [])],
-        version=_parse_version(version) if version is not None else None,
-        limit=(
-            RouteLimit(max_routes=limit["maxRoutes"], current_routes=limit["currentRoutes"])
-            if limit is not None
-            else None
-        ),
-        diff_count=payload.get("diffCount"),
-    )
-
-
-def _parse_add_route(payload: dict[str, Any]) -> AddRouteResult:
-    return AddRouteResult(
-        route=_parse_route(payload["route"]),
-        version=_parse_version(payload["version"]),
-    )
-
-
-def _parse_edit_route(payload: dict[str, Any]) -> EditRouteResult:
-    route = payload.get("route")
-    return EditRouteResult(
-        version=_parse_version(payload["version"]),
-        route=_parse_route(route) if route is not None else None,
-    )
-
-
-def _parse_delete_routes(payload: dict[str, Any]) -> DeleteRoutesResult:
-    return DeleteRoutesResult(
-        deleted_count=payload["deletedCount"],
-        version=_parse_version(payload["version"]),
-    )
-
-
-def _parse_generated_header(data: dict[str, Any]) -> GeneratedRouteHeader:
-    return GeneratedRouteHeader(key=data["key"], op=data["op"], value=data.get("value"))
-
-
-def _parse_generated_action(data: dict[str, Any]) -> GeneratedRouteAction:
-    return GeneratedRouteAction(
-        type=data["type"],
-        sub_type=data.get("subType"),
-        dest=data.get("dest"),
-        status=data.get("status"),
-        headers=[_parse_generated_header(header) for header in data.get("headers", [])],
-    )
-
-
-def _parse_generated_condition(data: dict[str, Any]) -> GeneratedRouteCondition:
-    return GeneratedRouteCondition(
-        field=data["field"],
-        operator=data["operator"],
-        missing=data.get("missing", False),
-        key=data.get("key"),
-        value=data.get("value"),
-    )
-
-
-def _parse_generated_route(data: dict[str, Any]) -> GeneratedRoute:
-    path_condition = data["pathCondition"]
-    return GeneratedRoute(
-        name=data["name"],
-        description=data["description"],
-        path_condition=GeneratedPathCondition(
-            value=path_condition["value"],
-            syntax=path_condition["syntax"],
-        ),
-        actions=[_parse_generated_action(action) for action in data["actions"]],
-        conditions=[
-            _parse_generated_condition(condition) for condition in data.get("conditions", [])
-        ],
-    )
 
 
 class ProjectRoutesRequestClient:
@@ -322,13 +219,13 @@ class BaseProjectRoutesOpsClient:
             f"v1/projects/{_path_part(project_id)}/routes",
             params=params,
         )
-        return _parse(payload, _parse_get_routes)
+        return _validate(payload, GetRoutesResult)
 
     async def stage_routes(
         self,
         *,
         project_id: str,
-        body: StageRoutesRequestBody,
+        body: Mapping[str, Any],
         team_id: str | None = None,
         slug: str | None = None,
     ) -> RouteVersion:
@@ -338,13 +235,13 @@ class BaseProjectRoutesOpsClient:
             params=_params(team_id=team_id, slug=slug),
             body=body,
         )
-        return _parse(payload, lambda data: _parse_version(data["version"]))
+        return _validate(payload, _VersionEnvelope).version
 
     async def add_route(
         self,
         *,
         project_id: str,
-        body: AddRouteRequestBody,
+        body: Mapping[str, Any],
         team_id: str | None = None,
         slug: str | None = None,
     ) -> AddRouteResult:
@@ -354,13 +251,13 @@ class BaseProjectRoutesOpsClient:
             params=_params(team_id=team_id, slug=slug),
             body=body,
         )
-        return _parse(payload, _parse_add_route)
+        return _validate(payload, AddRouteResult)
 
     async def delete_routes(
         self,
         *,
         project_id: str,
-        body: DeleteRoutesRequestBody,
+        body: Mapping[str, Any],
         team_id: str | None = None,
         slug: str | None = None,
     ) -> DeleteRoutesResult:
@@ -370,14 +267,14 @@ class BaseProjectRoutesOpsClient:
             params=_params(team_id=team_id, slug=slug),
             body=body,
         )
-        return _parse(payload, _parse_delete_routes)
+        return _validate(payload, DeleteRoutesResult)
 
     async def edit_route(
         self,
         *,
         project_id: str,
         route_id: str,
-        body: EditRouteRequestBody,
+        body: Mapping[str, Any],
         team_id: str | None = None,
         slug: str | None = None,
     ) -> EditRouteResult:
@@ -387,13 +284,13 @@ class BaseProjectRoutesOpsClient:
             params=_params(team_id=team_id, slug=slug),
             body=body,
         )
-        return _parse(payload, _parse_edit_route)
+        return _validate(payload, EditRouteResult)
 
     async def generate_route(
         self,
         *,
         project_id: str,
-        body: GenerateRouteRequestBody,
+        body: Mapping[str, Any],
         team_id: str | None = None,
         slug: str | None = None,
     ) -> GeneratedRoute:
@@ -403,14 +300,13 @@ class BaseProjectRoutesOpsClient:
             params=_params(team_id=team_id, slug=slug),
             body=body,
         )
-        error = payload.get("error")
-        route = payload.get("route")
-        if error or route is None:
+        result = _validate(payload, _GenerateEnvelope)
+        if result.error or result.route is None:
             raise ProjectRoutesError(
-                f"Route generation failed: {error or 'no route was returned'}",
+                f"Route generation failed: {result.error or 'no route was returned'}",
                 response_body=payload,
             )
-        return _parse(payload, lambda data: _parse_generated_route(data["route"]))
+        return result.route
 
     async def get_route_versions(
         self,
@@ -424,16 +320,13 @@ class BaseProjectRoutesOpsClient:
             f"v1/projects/{_path_part(project_id)}/routes/versions",
             params=_params(team_id=team_id, slug=slug),
         )
-        return _parse(
-            payload,
-            lambda data: [_parse_version(version) for version in data["versions"]],
-        )
+        return _validate(payload, _VersionsEnvelope).versions
 
     async def update_route_version(
         self,
         *,
         project_id: str,
-        body: UpdateRouteVersionRequestBody,
+        body: Mapping[str, Any],
         team_id: str | None = None,
         slug: str | None = None,
     ) -> RouteVersion:
@@ -443,7 +336,7 @@ class BaseProjectRoutesOpsClient:
             params=_params(team_id=team_id, slug=slug),
             body=body,
         )
-        return _parse(payload, lambda data: _parse_version(data["version"]))
+        return _validate(payload, _VersionEnvelope).version
 
 
 class SyncProjectRoutesOpsClient(BaseProjectRoutesOpsClient):

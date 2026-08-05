@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import sys
-from dataclasses import dataclass, field
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal, TypeAlias, TypedDict
+from typing import Any, Literal, TypeAlias
 
-if sys.version_info >= (3, 11):
-    from typing import Required
-else:
-    from typing_extensions import Required
+import pydantic
+from pydantic import Field
+from pydantic.alias_generators import to_camel
 
 SrcSyntax: TypeAlias = Literal["equals", "path-to-regexp", "regex"]
 RouteType: TypeAlias = Literal["rewrite", "redirect", "set_status", "transform"]
@@ -22,49 +20,57 @@ VersionAction: TypeAlias = Literal["promote", "restore", "discard"]
 REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
 
 
-class RouteCondition(TypedDict, total=False):
+class _Model(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(frozen=True, populate_by_name=True, alias_generator=to_camel)
+
+
+class RouteCondition(_Model):
+    """A request condition (``has``/``missing``) on a routing rule."""
+
     type: ConditionType
-    key: str
-    value: str
+    key: str | None = None
+    value: str | None = None
 
 
-class RouteTransform(TypedDict, total=False):
+class RouteTransform(_Model):
+    """A request or response transformation on a routing rule."""
+
     type: TransformType
     op: TransformOperation
-    target: dict[str, object]
-    args: object
-    env: list[str]
+    target: dict[str, Any]
+    args: Any = None
+    env: list[str] | None = None
 
 
-class RouteDefinition(TypedDict, total=False):
-    """The wire representation of a routing rule, as accepted by the API.
+class RouteDefinition(_Model):
+    """A routing rule, in the same shape as ``routes`` in ``vercel.json``.
 
-    This is the same shape used for ``routes`` in ``vercel.json``, restricted
-    to the fields the project routes API accepts.
+    Restricted to the fields the project routes API accepts.
     """
 
-    src: Required[str]
-    dest: str
-    headers: dict[str, str]
-    caseSensitive: bool
-    status: int
-    has: list[RouteCondition]
-    missing: list[RouteCondition]
-    transforms: list[RouteTransform]
-    respectOriginCacheControl: bool
+    src: str
+    dest: str | None = None
+    headers: dict[str, str] | None = None
+    case_sensitive: bool | None = None
+    status: int | None = None
+    has: list[RouteCondition] | None = None
+    missing: list[RouteCondition] | None = None
+    transforms: list[RouteTransform] | None = None
+    respect_origin_cache_control: bool | None = None
 
 
-class _RouteInputOptional(TypedDict, total=False):
-    description: str
-    enabled: bool
-    srcSyntax: SrcSyntax
-
-
-class RouteInput(_RouteInputOptional):
-    """The wire representation of a route to create or replace."""
+class RouteInput(_Model):
+    """A route to create or replace."""
 
     name: str
     route: RouteDefinition
+    description: str | None = None
+    enabled: bool | None = None
+    src_syntax: SrcSyntax | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """Return the request representation expected by the Vercel API."""
+        return self.model_dump(by_alias=True, exclude_none=True)
 
 
 class StagedRouteInput(RouteInput):
@@ -73,26 +79,7 @@ class StagedRouteInput(RouteInput):
     id: str
 
 
-def _base_route_input(
-    *,
-    name: str,
-    route: RouteDefinition,
-    source_syntax: SrcSyntax | None,
-    description: str | None,
-    enabled: bool | None,
-) -> RouteInput:
-    result: RouteInput = {"name": name, "route": route}
-    if source_syntax is not None:
-        result["srcSyntax"] = source_syntax
-    if description is not None:
-        result["description"] = description
-    if enabled is not None:
-        result["enabled"] = enabled
-    return result
-
-
-@dataclass(frozen=True, slots=True)
-class RewriteRoute:
+class RewriteRoute(_Model):
     """A project route that rewrites one path to another."""
 
     name: str
@@ -103,18 +90,16 @@ class RewriteRoute:
     enabled: bool | None = None
 
     def to_route_input(self) -> RouteInput:
-        """Return the request representation expected by the Vercel API."""
-        return _base_route_input(
+        return RouteInput(
             name=self.name,
-            route={"src": self.source, "dest": self.destination},
-            source_syntax=self.source_syntax,
+            route=RouteDefinition(src=self.source, dest=self.destination),
+            src_syntax=self.source_syntax,
             description=self.description,
             enabled=self.enabled,
         )
 
 
-@dataclass(frozen=True, slots=True)
-class RedirectRoute:
+class RedirectRoute(_Model):
     """A project route that redirects one path to another."""
 
     name: str
@@ -125,26 +110,26 @@ class RedirectRoute:
     description: str | None = None
     enabled: bool | None = None
 
-    def __post_init__(self) -> None:
-        if self.status not in REDIRECT_STATUS_CODES:
+    @pydantic.field_validator("status")
+    @classmethod
+    def _check_status(cls, status: int) -> int:
+        if status not in REDIRECT_STATUS_CODES:
             raise ValueError(
-                f"Redirect status must be one of {sorted(REDIRECT_STATUS_CODES)}, "
-                f"got {self.status}."
+                f"Redirect status must be one of {sorted(REDIRECT_STATUS_CODES)}, got {status}."
             )
+        return status
 
     def to_route_input(self) -> RouteInput:
-        """Return the request representation expected by the Vercel API."""
-        return _base_route_input(
+        return RouteInput(
             name=self.name,
-            route={"src": self.source, "dest": self.destination, "status": self.status},
-            source_syntax=self.source_syntax,
+            route=RouteDefinition(src=self.source, dest=self.destination, status=self.status),
+            src_syntax=self.source_syntax,
             description=self.description,
             enabled=self.enabled,
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SetStatusRoute:
+class SetStatusRoute(_Model):
     """A project route that answers a path with a fixed status code."""
 
     name: str
@@ -155,22 +140,22 @@ class SetStatusRoute:
     enabled: bool | None = None
 
     def to_route_input(self) -> RouteInput:
-        """Return the request representation expected by the Vercel API."""
-        return _base_route_input(
+        return RouteInput(
             name=self.name,
-            route={"src": self.source, "status": self.status},
-            source_syntax=self.source_syntax,
+            route=RouteDefinition(src=self.source, status=self.status),
+            src_syntax=self.source_syntax,
             description=self.description,
             enabled=self.enabled,
         )
 
 
-RouteSpec: TypeAlias = RewriteRoute | RedirectRoute | SetStatusRoute | RouteInput
-"""A route to create: an authoring dataclass or a raw ``RouteInput`` mapping."""
+RouteSpec: TypeAlias = (
+    RewriteRoute | RedirectRoute | SetStatusRoute | RouteInput | Mapping[str, Any]
+)
+"""A route to create: an authoring model or a ``vercel.json``-shaped mapping."""
 
 
-@dataclass(frozen=True, slots=True)
-class RouteVersion:
+class RouteVersion(_Model):
     """One version of a project's routing rules."""
 
     id: str
@@ -182,9 +167,15 @@ class RouteVersion:
     rule_count: int | None = None
     alias: str | None = None
 
+    @pydantic.field_validator("last_modified", mode="before")
+    @classmethod
+    def _from_epoch_millis(cls, value: object) -> object:
+        if isinstance(value, int | float):
+            return value / 1000
+        return value
 
-@dataclass(frozen=True, slots=True)
-class ProjectRoute:
+
+class ProjectRoute(_Model):
     """A routing rule as returned by the API."""
 
     id: str
@@ -200,36 +191,27 @@ class ProjectRoute:
 
     def to_route_input(self) -> RouteInput:
         """Return this route as the input shape used by add and edit."""
-        return _base_route_input(
+        return RouteInput(
             name=self.name,
             route=self.route,
-            source_syntax=self.src_syntax,
+            src_syntax=self.src_syntax,
             description=self.description,
             enabled=self.enabled,
         )
 
     def to_staged_input(self) -> StagedRouteInput:
         """Return this route as the input shape used by stage_routes."""
-        staged: StagedRouteInput = {"id": self.id, "name": self.name, "route": self.route}
-        if self.src_syntax is not None:
-            staged["srcSyntax"] = self.src_syntax
-        if self.description is not None:
-            staged["description"] = self.description
-        if self.enabled is not None:
-            staged["enabled"] = self.enabled
-        return staged
+        return StagedRouteInput(id=self.id, **dict(self.to_route_input()))
 
 
-@dataclass(frozen=True, slots=True)
-class RouteLimit:
+class RouteLimit(_Model):
     """How many routes the project uses out of its allowance."""
 
     max_routes: int
     current_routes: int
 
 
-@dataclass(frozen=True, slots=True)
-class GetRoutesResult:
+class GetRoutesResult(_Model):
     """Routing rules for a project version.
 
     ``version`` is ``None`` when the project has no staged or published
@@ -238,85 +220,40 @@ class GetRoutesResult:
     """
 
     routes: list[ProjectRoute]
-    version: RouteVersion | None
+    version: RouteVersion | None = None
     limit: RouteLimit | None = None
     diff_count: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class AddRouteResult:
+class AddRouteResult(_Model):
     """The added route and the staged version containing it."""
 
     route: ProjectRoute
     version: RouteVersion
 
 
-@dataclass(frozen=True, slots=True)
-class EditRouteResult:
+class EditRouteResult(_Model):
     """The edited route (when returned) and the staged version containing it."""
 
     version: RouteVersion
     route: ProjectRoute | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class DeleteRoutesResult:
+class DeleteRoutesResult(_Model):
     """How many routes were deleted and the staged version without them."""
 
     deleted_count: int
     version: RouteVersion
 
 
-class CurrentRoutePathCondition(TypedDict, total=False):
-    value: str
-    syntax: str
-
-
-class CurrentRouteCondition(TypedDict, total=False):
-    field: str
-    operator: str
-    key: str
-    value: str
-    missing: bool
-
-
-class CurrentRouteHeader(TypedDict, total=False):
-    key: str
-    value: str
-    op: str
-
-
-class CurrentRouteAction(TypedDict, total=False):
-    type: str
-    subType: str
-    dest: str
-    status: int
-    headers: list[CurrentRouteHeader]
-
-
-class _GenerateRouteCurrentOptional(TypedDict, total=False):
-    name: str
-    description: str
-    conditions: list[CurrentRouteCondition]
-
-
-class GenerateRouteCurrent(_GenerateRouteCurrentOptional):
-    """The wire representation of an existing route to refine with a prompt."""
-
-    pathCondition: CurrentRoutePathCondition
-    actions: list[CurrentRouteAction]
-
-
-@dataclass(frozen=True, slots=True)
-class GeneratedPathCondition:
+class GeneratedPathCondition(_Model):
     """The path a generated route matches."""
 
     value: str
     syntax: str
 
 
-@dataclass(frozen=True, slots=True)
-class GeneratedRouteCondition:
+class GeneratedRouteCondition(_Model):
     """A request condition on a generated route."""
 
     field: str
@@ -326,8 +263,7 @@ class GeneratedRouteCondition:
     value: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class GeneratedRouteHeader:
+class GeneratedRouteHeader(_Model):
     """A header manipulation on a generated route action."""
 
     key: str
@@ -335,130 +271,38 @@ class GeneratedRouteHeader:
     value: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class GeneratedRouteAction:
+class GeneratedRouteAction(_Model):
     """One action a generated route performs."""
 
     type: str
     sub_type: str | None = None
     dest: str | None = None
     status: int | None = None
-    headers: list[GeneratedRouteHeader] = field(default_factory=list)
+    headers: list[GeneratedRouteHeader] = Field(default_factory=list)
 
 
-@dataclass(frozen=True, slots=True)
-class GeneratedRoute:
-    """A route suggestion produced from a natural-language prompt."""
+class GeneratedRoute(_Model):
+    """A route suggestion produced from a natural-language prompt.
+
+    Pass it back to ``generate_route`` as ``current_route`` to refine it.
+    """
 
     name: str
     description: str
     path_condition: GeneratedPathCondition
     actions: list[GeneratedRouteAction]
-    conditions: list[GeneratedRouteCondition] = field(default_factory=list)
+    conditions: list[GeneratedRouteCondition] = Field(default_factory=list)
 
-    def to_current_route(self) -> GenerateRouteCurrent:
-        """Return this suggestion as input for a follow-up generate call."""
-        current: GenerateRouteCurrent = {
-            "name": self.name,
-            "description": self.description,
-            "pathCondition": {
-                "value": self.path_condition.value,
-                "syntax": self.path_condition.syntax,
-            },
-            "actions": [_current_action(action) for action in self.actions],
-        }
-        if self.conditions:
-            current["conditions"] = [_current_condition(condition) for condition in self.conditions]
-        return current
-
-
-def _current_action(action: GeneratedRouteAction) -> CurrentRouteAction:
-    result: CurrentRouteAction = {"type": action.type}
-    if action.sub_type is not None:
-        result["subType"] = action.sub_type
-    if action.dest is not None:
-        result["dest"] = action.dest
-    if action.status is not None:
-        result["status"] = action.status
-    if action.headers:
-        result["headers"] = [_current_header(header) for header in action.headers]
-    return result
-
-
-def _current_header(header: GeneratedRouteHeader) -> CurrentRouteHeader:
-    result: CurrentRouteHeader = {"key": header.key, "op": header.op}
-    if header.value is not None:
-        result["value"] = header.value
-    return result
-
-
-def _current_condition(condition: GeneratedRouteCondition) -> CurrentRouteCondition:
-    result: CurrentRouteCondition = {
-        "field": condition.field,
-        "operator": condition.operator,
-        "missing": condition.missing,
-    }
-    if condition.key is not None:
-        result["key"] = condition.key
-    if condition.value is not None:
-        result["value"] = condition.value
-    return result
-
-
-class Position(TypedDict, total=False):
-    placement: Placement
-    referenceId: str
-
-
-class _AddRouteRequestBodyOptional(TypedDict, total=False):
-    position: Position
-
-
-class AddRouteRequestBody(_AddRouteRequestBodyOptional):
-    route: RouteInput
-
-
-class StageRoutesRequestBody(TypedDict, total=False):
-    overwrite: bool
-    routes: Required[list[StagedRouteInput]]
-
-
-class DeleteRoutesRequestBody(TypedDict):
-    routeIds: list[str]
-
-
-class EditRouteRequestBody(TypedDict, total=False):
-    route: RouteInput
-    restore: bool
-
-
-class UpdateRouteVersionRequestBody(TypedDict):
-    id: str
-    action: VersionAction
-
-
-class _GenerateRouteRequestBodyOptional(TypedDict, total=False):
-    currentRoute: GenerateRouteCurrent
-
-
-class GenerateRouteRequestBody(_GenerateRouteRequestBodyOptional):
-    prompt: str
+    def to_wire(self) -> dict[str, Any]:
+        """Return the ``current_route`` representation expected by the API."""
+        return self.model_dump(by_alias=True, exclude_none=True)
 
 
 __all__ = [
-    "AddRouteRequestBody",
     "AddRouteResult",
     "ConditionType",
-    "CurrentRouteAction",
-    "CurrentRouteCondition",
-    "CurrentRouteHeader",
-    "CurrentRoutePathCondition",
-    "DeleteRoutesRequestBody",
     "DeleteRoutesResult",
-    "EditRouteRequestBody",
     "EditRouteResult",
-    "GenerateRouteCurrent",
-    "GenerateRouteRequestBody",
     "GeneratedPathCondition",
     "GeneratedRoute",
     "GeneratedRouteAction",
@@ -466,7 +310,6 @@ __all__ = [
     "GeneratedRouteHeader",
     "GetRoutesResult",
     "Placement",
-    "Position",
     "ProjectRoute",
     "RedirectRoute",
     "RewriteRoute",
@@ -481,10 +324,8 @@ __all__ = [
     "RouteVersion",
     "SetStatusRoute",
     "SrcSyntax",
-    "StageRoutesRequestBody",
     "StagedRouteInput",
     "TransformOperation",
     "TransformType",
-    "UpdateRouteVersionRequestBody",
     "VersionAction",
 ]
