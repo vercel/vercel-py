@@ -1,4 +1,4 @@
-from vercel._internal.workflow.core import FatalError
+from vercel._internal.workflow.errors import FatalError
 from vercel._internal.workflow.serialization import SerializationError
 from vercel._internal.workflow.world import (
     EntityConflictError,

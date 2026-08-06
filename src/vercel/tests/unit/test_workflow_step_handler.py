@@ -292,7 +292,7 @@ async def test_a_fatal_failure_gives_up_on_the_first_attempt(registry: core.Work
     (failed,) = fake.events
     # No retry count: none were spent, and the phrasing would be misleading.
     assert failed.event_data.error == (
-        f"Step '{my_step.name}' failed: vercel._internal.workflow.core.FatalError: card declined"
+        f"Step '{my_step.name}' failed: vercel._internal.workflow.errors.FatalError: card declined"
     )
 
 

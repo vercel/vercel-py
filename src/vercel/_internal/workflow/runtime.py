@@ -19,7 +19,7 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, loop, nanoid, serialization as ser, ulid, world as w
+from . import core, errors, loop, nanoid, serialization as ser, ulid, world as w
 from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
@@ -888,7 +888,7 @@ async def _execute_step(
         current_attempt = step_run.attempt
         error_text = "".join(traceback.format_exception_only(type(e), e)).strip()
 
-        fatal = isinstance(e, core.FatalError)
+        fatal = isinstance(e, errors.FatalError)
         if fatal or current_attempt >= step.max_retries + 1:
             if fatal:
                 error_message = f"Step '{step.name}' failed: {error_text}"
@@ -896,7 +896,7 @@ async def _execute_step(
                     "[Workflows] '%s' - Encountered Error "
                     "while executing step '%s' (attempt %d): %s"
                     "\n\n  Error is fatal\n  Bubbling error to parent workflow",
-                    req.workflow_run_id,
+                    req.run_id,
                     step.name,
                     step_run.attempt,
                     e,
