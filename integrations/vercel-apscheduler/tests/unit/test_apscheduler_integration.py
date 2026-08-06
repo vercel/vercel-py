@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import logging
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from sys import modules
@@ -726,6 +727,76 @@ def test_options_reject_limits_the_queue_cannot_serve() -> None:
         # Raising the delay without also raising retention would publish
         # wakes that expire before they become visible.
         VercelAPSchedulerOptions(max_delay_seconds=3 * 24 * 60 * 60)
+
+
+def test_unset_misfire_grace_defaults_to_none() -> None:
+    """Stock one-second grace is calibrated to in-process wakeup precision.
+
+    Queue delivery rounds wake delays up to whole seconds and adds dispatch
+    latency, so keeping the stock default would skip occurrences as misfires
+    on routine jitter.
+    """
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={"default": InMemoryRedisJobStore()},
+    )
+
+    assert scheduler._job_defaults["misfire_grace_time"] is None
+
+
+def test_explicit_misfire_grace_default_is_preserved() -> None:
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        job_defaults={"misfire_grace_time": 15},
+        jobstores={"default": InMemoryRedisJobStore()},
+    )
+
+    assert scheduler._job_defaults["misfire_grace_time"] == 15
+
+
+def test_gconfig_misfire_grace_default_is_preserved() -> None:
+    scheduler = BlockingScheduler(
+        {"apscheduler.job_defaults.misfire_grace_time": "7"},
+        timezone=UTC,
+        jobstores={"default": InMemoryRedisJobStore()},
+    )
+
+    assert scheduler._job_defaults["misfire_grace_time"] == 7
+
+
+def test_misfire_grace_stays_stock_outside_vercel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={"default": InMemoryRedisJobStore()},
+    )
+
+    assert scheduler._job_defaults["misfire_grace_time"] == 1
+
+
+def test_short_explicit_misfire_grace_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An explicit sub-transport grace is honored but named for what it is."""
+    scheduler, adapter, _driver = scheduler_with_driver()
+    scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        hours=1,
+        id="tight",
+        misfire_grace_time=1,
+        replace_existing=True,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        adapter.ensure_local_started()
+
+    assert any("misfire_grace_time=1" in record.getMessage() for record in caplog.records)
+    persisted = scheduler.get_job("tight")
+    assert persisted is not None
+    assert persisted.misfire_grace_time == 1
 
 
 def test_preview_state_stays_deployment_scoped(

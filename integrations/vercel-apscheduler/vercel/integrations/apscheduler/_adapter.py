@@ -54,6 +54,9 @@ DEPLOYMENT_ENV = "VERCEL_DEPLOYMENT_ID"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 WAKEUP_KEY_PREFIX = "aps"
 RAW_STORE_KEY_ATTR = "_vercel_apscheduler_raw_jobs_key"
+# Queue delivery rounds wake delays up to whole seconds and adds dispatch
+# latency, so a grace below this cannot be met and skips occurrences.
+MIN_QUEUE_MISFIRE_GRACE_SECONDS = 5
 
 # One live adapter per durable identity. Two schedulers whose stores collapse
 # to the same identity would interleave one namespace, so the second claim
@@ -184,6 +187,7 @@ class SchedulerAdapter:
         self._runtime_mutation_depth = 0
         self._lifecycle_called = False
         self._queue_lifecycle_warning_emitted = False
+        self._short_grace_warned: set[str] = set()
         self._suppress_wakeup = False
         self._native_wakeup = scheduler.wakeup
         self._adopt_instance_methods()
@@ -630,6 +634,23 @@ class SchedulerAdapter:
             raise APSchedulerConfigurationError(
                 "jobs in a durable APScheduler store require an explicit stable id"
             )
+        # Before defaults fill, the attribute exists only when the job chose
+        # its own grace; the scheduler-level default is checked at configure.
+        grace = getattr(job, "misfire_grace_time", None)
+        if (
+            grace is not None
+            and grace < MIN_QUEUE_MISFIRE_GRACE_SECONDS
+            and str(job.id) not in self._short_grace_warned
+        ):
+            self._short_grace_warned.add(str(job.id))
+            self._logger.warning(
+                'Job "%s" sets misfire_grace_time=%s; queue delivery cannot '
+                "meet a grace below %s seconds, so occurrences may be "
+                "skipped as misfires",
+                job.id,
+                grace,
+                MIN_QUEUE_MISFIRE_GRACE_SECONDS,
+            )
         if not (self.is_runtime_mutation or self.is_wake_mutation):
             # Cold-start declarations are the reconciliation input on takeover.
             self._declared_jobs[str(job.id)] = job
@@ -1020,6 +1041,64 @@ def adopt_scheduler(
     return adapter
 
 
+def _grace_explicitly_configured(
+    gconfig: dict[str, Any],
+    prefix: str,
+    options: dict[str, Any],
+) -> bool:
+    """Whether this configure call chooses a misfire grace itself."""
+    job_defaults = options.get("job_defaults")
+    if isinstance(job_defaults, str):
+        # An opaque textual reference; assume it is a deliberate choice.
+        return True
+    if isinstance(job_defaults, dict) and "misfire_grace_time" in job_defaults:
+        return True
+    prefix_length = len(prefix) if prefix else 0
+    for key, value in gconfig.items():
+        name = str(key)
+        if prefix:
+            if not name.startswith(prefix):
+                continue
+            name = name[prefix_length:]
+        if name == "job_defaults.misfire_grace_time":
+            return True
+        if name == "job_defaults" and (
+            isinstance(value, str) or (isinstance(value, dict) and "misfire_grace_time" in value)
+        ):
+            return True
+    return False
+
+
+def _patched_configure(
+    self: BaseScheduler,
+    gconfig: dict[str, Any] | None = None,
+    prefix: str = "apscheduler.",
+    **options: Any,
+) -> Any:
+    resolved_gconfig: dict[str, Any] = {} if gconfig is None else gconfig
+    result = _original("configure")(self, resolved_gconfig, prefix, **options)
+    if not is_vercel_runtime():
+        return result
+    if _grace_explicitly_configured(resolved_gconfig, prefix, options):
+        value = self._job_defaults.get("misfire_grace_time")
+        if value is not None and value < MIN_QUEUE_MISFIRE_GRACE_SECONDS:
+            LOGGER.warning(
+                "job_defaults sets misfire_grace_time=%s; queue delivery "
+                "cannot meet a grace below %s seconds, so occurrences may "
+                "be skipped as misfires",
+                value,
+                MIN_QUEUE_MISFIRE_GRACE_SECONDS,
+            )
+    else:
+        # Stock APScheduler calibrates its one-second default grace to
+        # in-process wakeup precision, which queue delivery cannot meet:
+        # keeping it would skip occurrences on routine dispatch jitter.
+        # Unset grace on Vercel means occurrences run whenever their wake
+        # arrives; a finite grace is the explicit opt-in for skip-if-late.
+        self._job_defaults["misfire_grace_time"] = None
+    return result
+
+
 def _patched_init(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
     result = _original("init")(self, *args, **kwargs)
     options = VercelAPSchedulerOptions.from_value(_PATCH_STATE.default_options)
@@ -1209,6 +1288,7 @@ def install_vercel_apscheduler_integration(
 
     _PATCH_STATE.originals = {
         "init": BaseScheduler.__init__,
+        "configure": BaseScheduler.configure,
         "add_job": BaseScheduler.add_job,
         "add_jobstore": BaseScheduler.add_jobstore,
         "real_add_job": BaseScheduler._real_add_job,
@@ -1221,6 +1301,7 @@ def install_vercel_apscheduler_integration(
         "resume": BaseScheduler.resume,
     }
     BaseScheduler.__init__ = _patched_init  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+    BaseScheduler.configure = _patched_configure  # type: ignore[method-assign]
     BaseScheduler.add_jobstore = _patched_add_jobstore  # type: ignore[method-assign]
     BaseScheduler.add_job = _patched_add_job  # type: ignore[method-assign]
     BaseScheduler._real_add_job = _patched_real_add_job  # type: ignore[method-assign]

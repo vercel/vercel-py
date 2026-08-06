@@ -210,8 +210,9 @@ publication, and repeating an interrupted mutation republishes the pending
 wake even when the retry itself fails on a conflicting job id. With no idle
 heartbeat, an ambiguous failure while publishing the first wake for a dormant
 scheduler is repaired by a later `start()` or mutation call, not by a periodic
-timer. Set an appropriate `misfire_grace_time` (or `None`) for jobs whose
-occurrences must remain eligible after a delayed repair.
+timer. Unless a job chooses its own `misfire_grace_time`, occurrences run when
+their wake arrives, however late; set a finite `misfire_grace_time` on jobs
+that must not run late.
 
 These are chain guarantees, not exactly-once job execution. Vercel Queues is
 at-least-once, so a delivery interrupted after a job's side effect may run that

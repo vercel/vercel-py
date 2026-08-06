@@ -292,9 +292,8 @@ republishes the pending token. Repeating an interrupted mutation is also safe:
 a retried mutation republishes the pending wake even when the retry itself
 fails, for example on a conflicting job id. A completely dormant scheduler
 does not wake periodically to repair an otherwise unobserved ambiguous
-failure. A delayed repair can pass a job's default misfire window; jobs whose
-occurrence must remain eligible should set an appropriate
-`misfire_grace_time` or `None`.
+failure. A delayed repair can pass a finite misfire window; jobs that opt
+into one and must remain eligible after repairs should size it accordingly.
 
 ## Redis and execution requirements
 
@@ -315,6 +314,16 @@ Jobs use the integration's inline executor so that a wake remains active until
 the job has completed and the durable job-store update has happened. Custom
 executors are rejected in v1. A scheduled function can enqueue longer work to
 another queue.
+
+Queue delivery cannot honor APScheduler's stock one-second misfire grace:
+wake delays are rounded up to whole seconds and dispatch adds latency, so a
+routine delivery lands about a second late and would skip its occurrence as a
+misfire. On Vercel a job whose `misfire_grace_time` is not chosen explicitly
+(on the job or in `job_defaults`) therefore defaults to `None`: an occurrence
+runs when its wake arrives, however late, and the default `coalesce` collapses
+any backlog into one run. Jobs that must not run late opt in with a finite
+`misfire_grace_time`; explicit values below five seconds cannot be met by
+queue transport and log a warning.
 
 Code-declared jobs require explicit stable IDs. If a job with that ID is
 already persisted, the declaration must permit replacement, but materializing
