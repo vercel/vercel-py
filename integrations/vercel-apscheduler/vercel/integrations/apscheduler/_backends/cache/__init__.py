@@ -30,7 +30,12 @@ from typing import Any
 from dataclasses import dataclass
 from os import environ
 
-from ..._options import SUBSCRIBER_ID_ENV, _SchedulerIdentity
+from ..._options import (
+    SUBSCRIBER_ID_ENV,
+    SUBSCRIBERS_ENV,
+    _SchedulerIdentity,
+    resolve_declared_subscriber_id,
+)
 from ..._types import APSchedulerConfigurationError
 from .._protocols import Driver, JobCoordinator
 from ._driver import CacheDriver
@@ -71,12 +76,27 @@ class CacheBackend:
         return isinstance(store, CacheJobStore)
 
     def identity_ready(self, scheduler: Any) -> bool:
-        return True
+        # Queue-serving and discovery processes are told their id outright.
+        # A publishing process with a declared-subscriber mapping must wait
+        # until the declaring module finishes importing, or import-time
+        # registration would cache the "default" fallback and publish to
+        # topics nothing serves. Without a mapping the fallback is the
+        # identity everywhere, so it is always ready.
+        if environ.get(SUBSCRIBER_ID_ENV):
+            return True
+        if not environ.get(SUBSCRIBERS_ENV):
+            return True
+        return resolve_declared_subscriber_id(scheduler) is not None
 
     def derive_identity(self, scheduler: Any) -> _SchedulerIdentity:
         # No store key to derive from; the builder-assigned subscriber id is
-        # the durable identity, "default" outside Vercel.
-        subscriber_id = environ.get(SUBSCRIBER_ID_ENV) or "default"
+        # the durable identity. Sidecars receive it as an environment
+        # variable; publishing processes reverse-look it up from the declared
+        # {id, entrypoint} mapping; "default" covers undeclared schedulers
+        # and use outside Vercel.
+        subscriber_id = (
+            environ.get(SUBSCRIBER_ID_ENV) or resolve_declared_subscriber_id(scheduler) or "default"
+        )
         try:
             return _SchedulerIdentity.from_scheduler_id(subscriber_id)
         except ValueError as exc:

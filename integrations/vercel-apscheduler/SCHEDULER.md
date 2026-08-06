@@ -354,6 +354,31 @@ the declaration does not overwrite the persisted runtime value. The
 `scheduled_job()` decorator enables replacement automatically; declaration
 calls to `add_job()` should pass `replace_existing=True`.
 
+## Development under `vercel dev`
+
+`vercel dev` runs each declared subscriber as a local queue-serving sidecar
+against the CLI's in-process queue broker, which honors the same delays and
+idempotency keys as the hosted queue. Without deployed cache credentials the
+Runtime Cache client falls back to per-process memory, so the cache backend
+becomes a zero-infrastructure development mode with the sidecar as the
+effective scheduler process.
+
+Activation follows the production rule: the first request to the app
+registers and runs the activation hook, which publishes the durable start,
+and the hook re-runs on the heal cadence while traffic continues. Declared
+jobs therefore start ticking after the app is hit once per `vercel dev`
+session. `vercel dev` deliberately sets no
+`VERCEL_DEPLOYMENT_ID` (SDKs read its presence as "deployed"), so the
+integration derives a stable synthetic id from the project directory every
+dev process is spawned in. It is shared by the web process and every
+sidecar, names the development state scope, and keeps two projects apart
+when development points them at one shared Redis database.
+
+Identity is builder-assigned in every mode: sidecars receive their
+subscriber id directly, and publishing processes (web functions) resolve it
+from the declared `{id, entrypoint}` mapping, so a `pause()` from a request
+handler reaches the same topics the sidecar serves.
+
 ## Deployment behavior
 
 Production and custom environments share one durable namespace, owned by

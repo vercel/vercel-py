@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
 import re
 from dataclasses import dataclass
+from hashlib import sha256
 from os import environ
+from pathlib import Path
+from sys import modules
 
 DEFAULT_MAX_DELAY_SECONDS = 23 * 60 * 60
 DEFAULT_RETRY_AFTER_SECONDS = 30
@@ -18,6 +22,7 @@ VQS_MAX_DELAY_SECONDS = 5 * 24 * 60 * 60
 VQS_MAX_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DISCOVERY_ENV = "VERCEL_APSCHEDULER_DISCOVERY"
 SUBSCRIBER_ID_ENV = "VERCEL_PYTHON_SUBSCRIBER_ID"
+SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 _SCHEDULER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 # The identity slug maps "." to "-", so both charsets collapse into the VQS
 # name alphabet. Two keys that collapse to the same slug are rejected as an
@@ -28,10 +33,13 @@ __all__ = [
     "DEFAULT_MAX_DELAY_SECONDS",
     "DEFAULT_RETRY_AFTER_SECONDS",
     "RETENTION_MARGIN_SECONDS",
+    "SUBSCRIBERS_ENV",
     "VercelAPSchedulerOptions",
+    "development_deployment_id",
     "is_discovery_runtime",
     "is_queue_serving_runtime",
     "is_vercel_runtime",
+    "resolve_declared_subscriber_id",
     "resolve_environment",
     "resolve_state_scope",
 ]
@@ -85,6 +93,62 @@ def resolve_environment() -> str:
     activation can never disagree about what a deployment is.
     """
     return (environ.get("VERCEL_TARGET_ENV") or environ.get("VERCEL_ENV") or "").strip()
+
+
+def resolve_declared_subscriber_id(scheduler: Any) -> str | None:
+    """Reverse-look up a scheduler's builder-assigned subscriber id.
+
+    The builder writes the ``{id, entrypoint}`` mapping into every process of
+    a deployment, but only queue-serving sidecars additionally receive
+    ``VERCEL_PYTHON_SUBSCRIBER_ID`` (which doubles as the queue-serving
+    marker). A publishing process finds its durable identity by matching the
+    declared entrypoint that names this exact scheduler object. Returns None
+    while the declaring module is still importing (its variable is not bound
+    yet) or when the scheduler is not declared; the loud validation of the
+    mapping itself stays with automatic activation.
+    """
+    raw = environ.get(SUBSCRIBERS_ENV)
+    if not raw:
+        return None
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        subscriber_id = entry.get("id")
+        entrypoint = entry.get("entrypoint")
+        if not isinstance(subscriber_id, str) or not isinstance(entrypoint, str):
+            continue
+        module_name, separator, variable_name = entrypoint.partition(":")
+        if not separator:
+            continue
+        module = modules.get(module_name)
+        if module is not None and getattr(module, variable_name, None) is scheduler:
+            return subscriber_id
+    return None
+
+
+# Captured at import, before user module code could chdir: every python
+# process of one `vercel dev` project starts in the project directory.
+_DEV_PROJECT_DIR = str(Path.cwd())
+
+
+def development_deployment_id() -> str:
+    """Return a stable synthetic deployment id for ``vercel dev``.
+
+    ``vercel dev`` deliberately does not set ``VERCEL_DEPLOYMENT_ID`` — its
+    mere presence makes SDKs believe they are deployed. Development state is
+    deployment-scoped, and the web process and queue sidecars of one project
+    must agree on the scope, so the id is derived from the project directory
+    they are all spawned in. The hash also keeps two projects apart when
+    development points them at one shared Redis database.
+    """
+    digest = sha256(_DEV_PROJECT_DIR.encode()).hexdigest()[:12]
+    return f"dpl_dev_{digest}"
 
 
 def resolve_state_scope(deployment: str) -> str:

@@ -21,6 +21,7 @@ from vercel.integrations.apscheduler._options import is_queue_serving_runtime
         ("production", None, 300.0),
         ("preview", "1800", 300.0),
         ("preview", "60", 20.0),
+        ("development", None, 300.0),
     ],
 )
 def test_registers_request_driven_automatic_activation(
