@@ -2,8 +2,12 @@
 
 import signal as signal_module
 import subprocess
+import time
+import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
+from threading import Condition
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
 
@@ -12,15 +16,18 @@ from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.polyfills import Self
 from vercel._internal.core.time import parse_duration_seconds, parse_required_duration_seconds
 from vercel.sandbox._internal.errors import (
+    SandboxApiError,
     SandboxCleanupError,
     SandboxResponseError,
     SandboxTerminalStateError,
+    SandboxTimeoutError,
 )
 from vercel.sandbox._internal.filesystem_handle_common import _validate_open_options
 from vercel.sandbox._internal.filesystem_handle_core import (
     BinaryReaderCore,
     BinaryWriterCore,
     FilesystemHandleBinding,
+    FilesystemOperationBinding,
     TextReaderCore,
     TextWriterCore,
 )
@@ -34,6 +41,7 @@ from vercel.sandbox._internal.models import (
     SandboxQuery,
     SandboxResources,
     SandboxSource,
+    SandboxStatus,
     SnapshotExpirationInput,
     SnapshotRetention,
     SnapshotRetentionUpdate,
@@ -52,6 +60,14 @@ from vercel.sandbox._internal.process_output import (
     ProcessOutputRouter,
     _validate_reader_destination,
 )
+from vercel.sandbox._internal.recovery import (
+    TRANSITION_POLL_INTERVAL,
+    TRANSITION_TIMEOUT,
+    SandboxLifecycle,
+    SandboxRecoveryTarget,
+    classify_sandbox_lifecycle_error,
+    execute_with_sandbox_recovery,
+)
 from vercel.sandbox._internal.runtime_common import (
     RemotePath,
     RuntimeSessionHandleBase,
@@ -68,8 +84,10 @@ from vercel.sandbox._internal.runtime_common import (
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
     ProcessState,
+    RuntimeSessionStopState,
     SandboxRuntimeSessionState,
     SandboxState,
+    SnapshotSessionState,
     SnapshotState,
 )
 from vercel.sandbox._internal.sync_filesystem_handle import (
@@ -208,17 +226,17 @@ class SyncSnapshot(SnapshotHandleBase):
 class SyncSandboxFilesystem:
     """Perform synchronous filesystem operations in a sandbox session."""
 
-    __slots__ = ("_service", "_session_id", "_write_files_cwd")
+    __slots__ = ("_execution", "_service", "_write_files_cwd")
 
     def __init__(
         self,
         *,
         service: SandboxService,
-        session_id: Callable[[], str],
+        execution: FilesystemOperationBinding,
         write_files_cwd: Callable[[RemotePath | None], str],
     ) -> None:
         self._service = service
-        self._session_id = session_id
+        self._execution = execution
         self._write_files_cwd = write_files_cwd
 
     @overload
@@ -308,7 +326,7 @@ class SyncSandboxFilesystem:
         binding = FilesystemHandleBinding(
             service=self._service,
             runtime=self._service.staging_file_runtime,
-            session_id=self._session_id,
+            execution=self._execution,
             write_files_cwd=self._write_files_cwd,
             path=path,
             cwd=normalized_cwd,
@@ -351,12 +369,16 @@ class SyncSandboxFilesystem:
             SandboxPathNotFoundError: If a parent directory is missing and
                 ``recursive`` is false.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         iter_coroutine(
-            self._service.mkdir(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                recursive=recursive,
+            self._execution.execute(
+                lambda session_id: self._service.mkdir(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    recursive=recursive,
+                )
             )
         )
 
@@ -373,12 +395,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxPathNotFoundError: If the file does not exist.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.read_bytes(
-                operation="read_bytes",
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
+            self._execution.execute(
+                lambda session_id: self._service.read_bytes(
+                    operation="read_bytes",
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                )
             )
         )
 
@@ -464,27 +490,35 @@ class SyncSandboxFilesystem:
         )
 
     def _write_files(self, files: Sequence[_WriteFile], *, cwd: RemotePath | None = None) -> None:
+        """Upload an in-memory write set with deliberate at-least-once replay.
+
+        Sandbox-level lifecycle recovery may replay the full archive once. The
+        first non-atomic upload may already have written some paths when it
+        reports a recognized lifecycle failure.
+        """
         for file in files:
             _validate_file_mode(file.mode)
-        resolved_cwd = self._write_files_cwd(cwd)
-        entries = [
-            _UploadFileEntry(
-                path=f.path,
-                size=len(f.content),
-                source=SyncByteStreamRuntime.reader(f.content),
-                mode=f.mode,
-                archive_path=_normalize_tar_path(f.path, cwd=resolved_cwd),
-            )
-            for f in files
-        ]
-        iter_coroutine(
-            self._service.write_stream_archive(
-                session_id=self._session_id(),
+
+        async def write(session_id: str) -> None:
+            resolved_cwd = self._write_files_cwd(cwd)
+            entries = [
+                _UploadFileEntry(
+                    path=file.path,
+                    size=len(file.content),
+                    source=SyncByteStreamRuntime.reader(file.content),
+                    mode=file.mode,
+                    archive_path=_normalize_tar_path(file.path, cwd=resolved_cwd),
+                )
+                for file in files
+            ]
+            await self._service.write_stream_archive(
+                session_id=session_id,
                 entries=entries,
                 paths=tuple(entry.path for entry in entries),
                 cwd=resolved_cwd,
             )
-        )
+
+        iter_coroutine(self._execution.execute(write))
 
     def batch(self, *, cwd: RemotePath | None = None) -> "SyncSandboxFilesystemBatch":
         """Create a context manager that stages files for one write request.
@@ -508,12 +542,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the remote check fails.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.exists(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.exists(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -523,12 +561,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the remote check fails.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.is_file(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.is_file(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -538,12 +580,16 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the remote check fails.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.is_dir(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.is_dir(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -563,12 +609,16 @@ class SyncSandboxFilesystem:
             SandboxFilesystemCommandError: If the listing fails, including
                 when the directory does not exist.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         return iter_coroutine(
-            self._service.listdir(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.listdir(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -592,14 +642,18 @@ class SyncSandboxFilesystem:
             SandboxFilesystemCommandError: If removal fails, including when
                 the path is missing and ``missing_ok`` is false.
         """
+        remote_path = _coerce_remote_path(path)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         iter_coroutine(
-            self._service.remove(
-                session_id=self._session_id(),
-                path=_coerce_remote_path(path),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                recursive=recursive,
-                missing_ok=missing_ok,
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.remove(
+                    session_id=session_id,
+                    path=remote_path,
+                    cwd=remote_cwd,
+                    recursive=recursive,
+                    missing_ok=missing_ok,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -620,13 +674,18 @@ class SyncSandboxFilesystem:
         Raises:
             SandboxFilesystemCommandError: If the rename fails.
         """
+        remote_source = _coerce_remote_path(source)
+        remote_destination = _coerce_remote_path(destination)
+        remote_cwd = None if cwd is None else _coerce_remote_path(cwd)
         iter_coroutine(
-            self._service.rename(
-                session_id=self._session_id(),
-                source=_coerce_remote_path(source),
-                destination=_coerce_remote_path(destination),
-                cwd=None if cwd is None else _coerce_remote_path(cwd),
-                collect_output=self._collect_output,
+            self._execution.execute(
+                lambda session_id: self._service.rename(
+                    session_id=session_id,
+                    source=remote_source,
+                    destination=remote_destination,
+                    cwd=remote_cwd,
+                    collect_output=self._collect_output,
+                )
             )
         )
 
@@ -675,7 +734,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         self._service = service
         self.fs = SyncSandboxFilesystem(
             service=service,
-            session_id=lambda: self.id,
+            execution=FilesystemOperationBinding.direct(self.id),
             write_files_cwd=self._write_files_cwd,
         )
 
@@ -689,15 +748,16 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         traceback: TracebackType | None,
     ) -> None:
         try:
-            payload = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
-            self._apply_payload(payload)
-        except Exception as cleanup_exc:
-            raise SandboxCleanupError(
-                f"Failed to clean up sandbox runtime session {self.id!r}",
-                resource_type="sandbox_runtime_session",
-                resource_id=self.id,
-                cause=cleanup_exc,
-            ) from cleanup_exc
+            _cleanup_exact_sync_session(self)
+        except SandboxCleanupError as cleanup_error:
+            if exc is None:
+                raise
+            warnings.warn(
+                str(cleanup_error),
+                RuntimeWarning,
+                source=cleanup_error,
+                stacklevel=2,
+            )
 
     def run_process(
         self,
@@ -834,7 +894,7 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
                 session_id=self.id, include_system_routes=include_system_routes
             )
         )
-        self._apply_payload(payload)
+        self._apply_payload_with_parent(payload)
         return self
 
     def extend_execution_time_limit(self, duration: DurationInput) -> Self:
@@ -872,35 +932,222 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
 
     def stop(self) -> Self:
         """Stop this runtime session and refresh the handle."""
-        payload = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
-        self._apply_payload(payload)
+        result = iter_coroutine(self._service.stop_runtime_session(session_id=self.id))
+        self._apply_stop_result(result)
         return self
+
+
+def _cleanup_exact_sync_session(handle: SyncSandboxRuntimeSession) -> None:
+    if handle.status == SandboxStatus.STOPPED:
+        return
+    try:
+        result = iter_coroutine(handle._service.stop_runtime_session(session_id=handle.id))
+        handle._apply_stop_result(result)
+    except SandboxApiError as error:
+        if classify_sandbox_lifecycle_error(error) is SandboxLifecycle.STOPPED:
+            handle._mark_stopped()
+            return
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox runtime session {handle.id!r}",
+            resource_type="sandbox_runtime_session",
+            resource_id=handle.id,
+            cause=error,
+        ) from error
+    except Exception as error:
+        raise SandboxCleanupError(
+            f"Failed to clean up sandbox runtime session {handle.id!r}",
+            resource_type="sandbox_runtime_session",
+            resource_id=handle.id,
+            cause=error,
+        ) from error
+
+
+@dataclass(slots=True)
+class _SyncRecoveryAttempt:
+    status: Literal["in_flight", "succeeded", "failed", "abandoned"] = "in_flight"
+    error: BaseException | None = None
 
 
 class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     """Control a synchronous Vercel Sandbox.
 
     A sandbox has at most one active current session. Process and filesystem
-    operations target the session recorded by this handle. Use
-    ``sandbox.resume_sandbox`` to ensure the sandbox has an active session,
-    ``stop`` to stop it, and ``destroy`` to permanently remove the sandbox.
+    session-bound operations lazily resume when needed and update this handle's
+    canonical current session. Use ``session`` for an explicit exact-session
+    lifecycle, ``stop`` to stop the current session, and ``destroy`` to
+    permanently remove the sandbox.
     """
 
-    __slots__ = ("_service", "fs")
+    __slots__ = ("_recovery_attempt", "_recovery_condition", "_service", "fs")
 
-    def __init__(self, *, payload: SandboxState, service: SandboxService) -> None:
+    def __init__(
+        self,
+        *,
+        payload: SandboxState,
+        service: SandboxService,
+        include_system_routes: bool | None = None,
+    ) -> None:
+        self._recovery_condition = Condition()
         super().__init__(
             payload,
             session_factory=lambda session: SyncSandboxRuntimeSession(
                 payload=session, service=service
             ),
+            include_system_routes=include_system_routes,
         )
         self._service = service
+        self._recovery_attempt: _SyncRecoveryAttempt | None = None
         self.fs = SyncSandboxFilesystem(
             service=service,
-            session_id=lambda: self.current_session_id,
+            execution=FilesystemOperationBinding(
+                execute=lambda operation: execute_with_sandbox_recovery(
+                    operation, coordinator=self
+                ),
+                bind=self._ensure_active,
+            ),
             write_files_cwd=self._write_files_cwd,
         )
+
+    def _apply_payload(self, payload: SandboxState) -> None:
+        with self._recovery_condition:
+            super()._apply_payload(payload)
+
+    def _apply_current_session_payload(
+        self, payload: SandboxRuntimeSessionState
+    ) -> SyncSandboxRuntimeSession:
+        with self._recovery_condition:
+            return super()._apply_current_session_payload(payload)
+
+    def _apply_session_payload_from_child(
+        self,
+        child: RuntimeSessionHandleBase,
+        payload: SandboxRuntimeSessionState,
+    ) -> None:
+        with self._recovery_condition:
+            super()._apply_session_payload_from_child(child, payload)
+
+    def _apply_session_stop_from_child(
+        self,
+        child: RuntimeSessionHandleBase,
+        result: RuntimeSessionStopState,
+    ) -> None:
+        with self._recovery_condition:
+            super()._apply_session_stop_from_child(child, result)
+
+    def _capture_recovery_target(self) -> SandboxRecoveryTarget:
+        with self._recovery_condition:
+            return super()._capture_recovery_target()
+
+    def _apply_recovery_session_payload(
+        self,
+        target: SandboxRecoveryTarget,
+        payload: SandboxRuntimeSessionState,
+    ) -> None:
+        with self._recovery_condition:
+            super()._apply_recovery_session_payload(target, payload)
+
+    async def _await_shared_resume(self) -> None:
+        while True:
+            with self._recovery_condition:
+                attempt = self._recovery_attempt
+                if attempt is None:
+                    attempt = _SyncRecoveryAttempt()
+                    self._recovery_attempt = attempt
+                    owns_attempt = True
+                else:
+                    owns_attempt = False
+
+                if not owns_attempt:
+                    while attempt.status == "in_flight":
+                        self._recovery_condition.wait()
+                    if attempt.status == "succeeded":
+                        return
+                    if attempt.status == "failed":
+                        assert attempt.error is not None
+                        raise attempt.error
+                    continue
+
+            outcome: Literal["succeeded", "failed", "abandoned"] = "abandoned"
+            attempt_error: BaseException | None = None
+            try:
+                payload = await self._service.resume_sandbox(
+                    name=self.name,
+                    project_id=self.project_id,
+                    include_system_routes=self._include_system_routes,
+                )
+                with self._recovery_condition:
+                    self._apply_payload(payload)
+            except Exception as error:
+                if not isinstance(error, InterruptedError):
+                    outcome = "failed"
+                    attempt_error = error
+                raise
+            else:
+                outcome = "succeeded"
+            finally:
+                with self._recovery_condition:
+                    attempt.status = outcome
+                    attempt.error = attempt_error
+                    if self._recovery_attempt is attempt:
+                        self._recovery_attempt = None
+                    self._recovery_condition.notify_all()
+            return
+
+    async def _ensure_active(self) -> str:
+        """Ensure an active current session before binding a lazy stream."""
+        return (await self._acquire_session()).id
+
+    async def _acquire_session(self) -> SyncSandboxRuntimeSession:
+        target = self._capture_recovery_target()
+        try:
+            await self._await_shared_resume()
+        except Exception as error:
+            lifecycle = classify_sandbox_lifecycle_error(error)
+            if lifecycle not in {
+                SandboxLifecycle.STOPPING,
+                SandboxLifecycle.SNAPSHOTTING,
+            }:
+                raise
+            await self._wait_for_transition(target)
+            await self._await_shared_resume()
+        session = self.current_session
+        if session is None:
+            raise SandboxResponseError(
+                "Sandbox resume response is missing the current-session attachment",
+                data=self.raw,
+            )
+        return session
+
+    def session(self) -> SyncSandboxRuntimeSession:
+        """Acquire and return the canonical active runtime session eagerly.
+
+        Entering the returned handle does not reacquire it and stops only that
+        exact session identity on exit.
+        """
+        return iter_coroutine(self._acquire_session())
+
+    async def _wait_for_transition(self, target: SandboxRecoveryTarget) -> None:
+        deadline = time.monotonic() + TRANSITION_TIMEOUT
+        while True:
+            if time.monotonic() >= deadline:
+                raise SandboxTimeoutError(
+                    f"Sandbox session {target.session_id!r} did not leave a "
+                    f"transitional state within {TRANSITION_TIMEOUT}s"
+                )
+            time.sleep(TRANSITION_POLL_INTERVAL)
+            payload = await self._service.get_runtime_session(session_id=target.session_id)
+            self._apply_recovery_session_payload(target, payload)
+            if payload.status not in {
+                SandboxStatus.STOPPING,
+                SandboxStatus.SNAPSHOTTING,
+            }:
+                return
+
+    async def _recover(self, lifecycle: SandboxLifecycle, target: SandboxRecoveryTarget) -> bool:
+        if lifecycle in {SandboxLifecycle.STOPPING, SandboxLifecycle.SNAPSHOTTING}:
+            await self._wait_for_transition(target)
+        await self._await_shared_resume()
+        return True
 
     def run_process(
         self,
@@ -923,16 +1170,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         output_router = ProcessOutputRouter(
             stdout=stdout, stderr=stderr, capture_output=capture_output
         )
+        parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
-            self._service.run_process(
-                session_id=self.current_session_id,
-                command=command,
-                args=args,
-                cwd=cwd,
-                env=env,
-                sudo=sudo,
-                kill_after=parse_duration_seconds(kill_after),
-                output_router=output_router,
+            execute_with_sandbox_recovery(
+                lambda session_id: self._service.run_process(
+                    session_id=session_id,
+                    command=command,
+                    args=args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    kill_after=parsed_kill_after,
+                    output_router=output_router,
+                ),
+                coordinator=self,
             )
         )
         assert state.process.returncode is not None
@@ -972,15 +1223,20 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         """
         stdout = _validate_reader_destination(stdout, name="stdout")
         stderr = _validate_reader_destination(stderr, name="stderr", allow_stdout_merge=True)
+        parsed_args = list(args) if args is not None else None
+        parsed_kill_after = parse_duration_seconds(kill_after)
         state = iter_coroutine(
-            self._service.create_process(
-                session_id=self.current_session_id,
-                command=command,
-                args=list(args) if args is not None else None,
-                cwd=cwd,
-                env=env,
-                sudo=sudo,
-                kill_after=parse_duration_seconds(kill_after),
+            execute_with_sandbox_recovery(
+                lambda session_id: self._service.create_process(
+                    session_id=session_id,
+                    command=command,
+                    args=parsed_args,
+                    cwd=cwd,
+                    env=env,
+                    sudo=sudo,
+                    kill_after=parsed_kill_after,
+                ),
+                coordinator=self,
             )
         )
         return SyncProcess(payload=state, service=self._service, stdout=stdout, stderr=stderr)
@@ -988,15 +1244,25 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
     def get_process(self, process_id: str, *, wait: bool = False) -> SyncProcess:
         """Get a process from the current session."""
         state = iter_coroutine(
-            self._service.get_process(
-                session_id=self.current_session_id, process_id=process_id, wait=wait
+            execute_with_sandbox_recovery(
+                lambda session_id: self._service.get_process(
+                    session_id=session_id,
+                    process_id=process_id,
+                    wait=wait,
+                ),
+                coordinator=self,
             )
         )
         return SyncProcess(payload=state, service=self._service)
 
     def query_processes(self) -> list[SyncProcess]:
         """Return handles for processes in the current session."""
-        states = iter_coroutine(self._service.query_processes(session_id=self.current_session_id))
+        states = iter_coroutine(
+            execute_with_sandbox_recovery(
+                lambda session_id: self._service.query_processes(session_id=session_id),
+                coordinator=self,
+            )
+        )
         return [SyncProcess(payload=state, service=self._service) for state in states]
 
     def list_sessions(
@@ -1038,40 +1304,84 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
 
         The service rejects durations shorter than one second.
         """
-        payload = iter_coroutine(
-            self._service.extend_runtime_session_timeout(
-                session_id=self.current_session_id,
-                duration=parse_required_duration_seconds(duration),
+        parsed_duration = parse_required_duration_seconds(duration)
+
+        async def extend(
+            session_id: str,
+        ) -> tuple[str, SandboxRuntimeSessionState]:
+            payload = await self._service.extend_runtime_session_timeout(
+                session_id=session_id,
+                duration=parsed_duration,
             )
-        )
-        return self._apply_current_session_payload(payload)
+            return session_id, payload
+
+        target_id, payload = iter_coroutine(execute_with_sandbox_recovery(extend, coordinator=self))
+        return self._apply_current_session_payload_if_current(payload, target_id)
 
     def update_network_policy(self, network_policy: NetworkPolicy) -> SyncSandboxRuntimeSession:
         """Replace the current session's network policy."""
-        payload = iter_coroutine(
-            self._service.update_runtime_session_network_policy(
-                session_id=self.current_session_id, network_policy=network_policy
+
+        async def update(
+            session_id: str,
+        ) -> tuple[str, SandboxRuntimeSessionState]:
+            payload = await self._service.update_runtime_session_network_policy(
+                session_id=session_id,
+                network_policy=network_policy,
             )
-        )
-        return self._apply_current_session_payload(payload)
+            return session_id, payload
+
+        target_id, payload = iter_coroutine(execute_with_sandbox_recovery(update, coordinator=self))
+        return self._apply_current_session_payload_if_current(payload, target_id)
 
     def snapshot(self, *, expiration: SnapshotExpirationInput = None) -> SyncSnapshot:
         """Create a filesystem snapshot from the current session."""
-        result = iter_coroutine(
-            self._service.create_snapshot(
-                session_id=self.current_session_id,
-                expiration=_parse_snapshot_expiration(expiration),
+        parsed_expiration = _parse_snapshot_expiration(expiration)
+
+        async def create(session_id: str) -> tuple[str, SnapshotSessionState]:
+            result = await self._service.create_snapshot(
+                session_id=session_id,
+                expiration=parsed_expiration,
             )
-        )
-        self._apply_current_session_payload(result.session)
+            return session_id, result
+
+        target_id, result = iter_coroutine(execute_with_sandbox_recovery(create, coordinator=self))
+        self._apply_current_session_payload_if_current(result.session, target_id)
         return SyncSnapshot(payload=result.snapshot, service=self._service)
+
+    def _apply_current_session_payload_if_current(
+        self, payload: SandboxRuntimeSessionState, target_id: str
+    ) -> SyncSandboxRuntimeSession:
+        """Ignore an operation reply superseded by a concurrent recovery."""
+        with self._recovery_condition:
+            if target_id == self.current_session_id:
+                return self._apply_current_session_payload(payload)
+            session = self.current_session
+            if session is None:
+                raise SandboxResponseError(
+                    "Sandbox current-session operation returned a different session identity",
+                    data=payload,
+                )
+            return session
 
     def stop(self) -> Self:
         """Stop the current session and return this sandbox handle."""
-        payload = iter_coroutine(
-            self._service.stop_runtime_session(session_id=self.current_session_id)
-        )
-        self._apply_current_session_payload(payload)
+        with self._recovery_condition:
+            session = self.current_session
+            target_id = self.current_session_id
+        result = iter_coroutine(self._service.stop_runtime_session(session_id=target_id))
+        if session is None:
+            with self._recovery_condition:
+                if self.current_session_id != target_id:
+                    return self
+                self._apply_current_session_payload(result.session)
+                if (
+                    result._sandbox_attached
+                    and result.sandbox is not None
+                    and result.sandbox.current_session_id == result.session.id
+                ):
+                    self._apply_payload(result.sandbox)
+        else:
+            session._apply_stop_result(result)
         return self
 
     def destroy(self) -> Self:
@@ -1162,8 +1472,13 @@ class _ManagedSyncSandbox(SyncSandbox):
         payload: SandboxState,
         service: SandboxService,
         destroy_on_exit: bool,
+        include_system_routes: bool | None = None,
     ) -> None:
-        super().__init__(payload=payload, service=service)
+        super().__init__(
+            payload=payload,
+            service=service,
+            include_system_routes=include_system_routes,
+        )
         self._destroy_on_exit = destroy_on_exit
 
     def __enter__(self) -> Self:
@@ -1223,8 +1538,26 @@ def create_sandbox(
         raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
 
 
-def get_sandbox(service: SandboxService, **kwargs: Any) -> SyncSandbox:
-    return SyncSandbox(payload=iter_coroutine(service.get_sandbox(**kwargs)), service=service)
+def get_sandbox(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    resume: bool = False,
+    include_system_routes: bool | None = None,
+) -> SyncSandbox:
+    return SyncSandbox(
+        payload=iter_coroutine(
+            service.get_sandbox(
+                name=name,
+                project_id=project_id,
+                resume=resume,
+                include_system_routes=include_system_routes,
+            )
+        ),
+        service=service,
+        include_system_routes=include_system_routes,
+    )
 
 
 def get_or_create_sandbox(
@@ -1266,16 +1599,43 @@ def get_or_create_sandbox(
                 snapshot_retention=snapshot_retention,
             )
         )
-        return SyncSandbox(payload=state, service=service), created
+        return (
+            SyncSandbox(
+                payload=state,
+                service=service,
+                include_system_routes=include_system_routes,
+            ),
+            created,
+        )
     except _SandboxTerminalState as error:
-        raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
+        raise _terminal_error(
+            error,
+            SyncSandbox(
+                payload=error.sandbox,
+                service=service,
+                include_system_routes=include_system_routes,
+            ),
+        ) from error
 
 
-def resume_sandbox(service: SandboxService, **kwargs: Any) -> _ManagedSyncSandbox:
+def resume_sandbox(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    include_system_routes: bool | None = None,
+) -> _ManagedSyncSandbox:
     return _ManagedSyncSandbox(
-        payload=iter_coroutine(service.resume_sandbox(**kwargs)),
+        payload=iter_coroutine(
+            service.resume_sandbox(
+                name=name,
+                project_id=project_id,
+                include_system_routes=include_system_routes,
+            )
+        ),
         service=service,
         destroy_on_exit=False,
+        include_system_routes=include_system_routes,
     )
 
 

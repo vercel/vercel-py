@@ -89,6 +89,15 @@ class SandboxState:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeSessionStopState:
+    """State returned after stopping one exact runtime session."""
+
+    session: SandboxRuntimeSessionState
+    sandbox: SandboxState | None = None
+    _sandbox_attached: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotState:
     id: str
     source_session_id: str

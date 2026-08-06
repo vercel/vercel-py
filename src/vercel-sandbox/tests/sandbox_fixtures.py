@@ -12,13 +12,20 @@ def sandbox_service_options(
     token: str = "token",
     team_id: str = "team_123",
     project_id: str = "prj_123",
+    sync: bool | None = None,
 ) -> list[ServiceOptions]:
     """Build Sandbox options for the test's current session mode."""
     credentials = SandboxCredentials(token=token, team_id=team_id, project_id=project_id)
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
+    if sync is None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            sync = True
+        else:
+            sync = False
+
+    if sync:
 
         def sync_credentials_factory() -> SandboxCredentials:
             return credentials

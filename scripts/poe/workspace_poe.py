@@ -226,6 +226,7 @@ class WorkspaceRunner:
         uv_scope = ("--all-packages",) if scope.package == "root" else ("--package", scope.package)
         env = self.base_env()
         env["WORKSPACE_POE_PACKAGE"] = scope.package
+        env["WORKSPACE_POE_SCOPE_TASK"] = task
         if task in PYTEST_TASKS:
             env["WORKSPACE_POE_LOGRAIL_PROGRESS"] = "1"
         if scope.paths:

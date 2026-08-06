@@ -17,6 +17,7 @@ from vercel.sandbox._internal.errors import (
     SandboxResponseError,
     SandboxStreamError,
     SandboxTerminalStateError,
+    SandboxTimeoutError as SandboxTimeoutError,
     SandboxUploadSizeMismatchError,
 )
 from vercel.sandbox._internal.models import (
@@ -207,6 +208,10 @@ def get_sandbox(
     include_system_routes: bool | None = None,
 ) -> SyncSandbox:
     """Fetch a sandbox by name without resuming it.
+
+    Session-bound operations on the returned handle resume lazily when needed.
+    Use ``current_session`` for passive inspection or ``session()`` for an
+    authoritative exact-session acquisition and optional managed scope.
 
     Args:
         name: Sandbox name.

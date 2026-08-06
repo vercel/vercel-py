@@ -1,7 +1,8 @@
 """Shared state machines for sync and async Sandbox file handles."""
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any, TypeVar, cast
 
 from vercel._internal.core.byte_stream import (
     StagingFileRuntime,
@@ -16,6 +17,7 @@ from vercel.sandbox._internal.filesystem_handle_common import (
 from vercel.sandbox._internal.filesystem_write import (
     _BoundWrite,
     _FilesystemWriteTargetSource,
+    _SpooledWriteTargetSource,
     _WriteTarget,
     _WriteTargetSource,
 )
@@ -26,6 +28,41 @@ from vercel.sandbox._internal.runtime_common import (
 from vercel.sandbox._internal.service import SandboxService
 
 _CHUNK_SIZE = 64 * 1024
+_ResultT = TypeVar("_ResultT")
+
+
+class FilesystemOperationBinding:
+    """Execute whole filesystem operations and bind one stream session."""
+
+    __slots__ = ("_bind", "_execute")
+
+    def __init__(
+        self,
+        *,
+        execute: Callable[..., Awaitable[Any]],
+        bind: Callable[[], Awaitable[str]],
+    ) -> None:
+        self._execute = execute
+        self._bind = bind
+
+    @classmethod
+    def direct(cls, session_id: str) -> "FilesystemOperationBinding":
+        """Return a non-recovering binding fixed to one runtime session."""
+
+        async def execute(operation: Callable[[str], Awaitable[Any]]) -> Any:
+            return await operation(session_id)
+
+        async def bind() -> str:
+            return session_id
+
+        return cls(execute=execute, bind=bind)
+
+    async def execute(self, operation: Callable[[str], Awaitable[_ResultT]]) -> _ResultT:
+        return cast(_ResultT, await self._execute(operation))
+
+    async def bind(self) -> str:
+        """Best-effort ensure activity, then pin an unreplayable stream session."""
+        return await self._bind()
 
 
 class FilesystemHandleBinding:
@@ -34,31 +71,33 @@ class FilesystemHandleBinding:
         *,
         service: SandboxService,
         runtime: StagingFileRuntime,
-        session_id: Callable[[], str],
+        execution: FilesystemOperationBinding,
         write_files_cwd: Callable[[RemotePath | None], str],
         path: str,
         cwd: RemotePath | None,
     ) -> None:
         self.service = service
         self.runtime = runtime
-        self._session_id = session_id
+        self._execution = execution
         self._write_files_cwd = write_files_cwd
         self.path = path
         self.cwd = None if cwd is None else str(cwd)
 
     async def open_response(self) -> StreamingResponse:
-        return await self.service.open_read_response(
-            operation="open",
-            session_id=self._session_id(),
-            path=self.path,
-            cwd=self.cwd,
+        return await self._execution.execute(
+            lambda session_id: self.service.open_read_response(
+                operation="open",
+                session_id=session_id,
+                path=self.path,
+                cwd=self.cwd,
+            )
         )
 
-    def bind_write(self) -> _BoundWrite:
+    def bound_write(self, session_id: str) -> _BoundWrite:
         cwd = self._write_files_cwd(self.cwd)
         return _BoundWrite(
             service=self.service,
-            session_id=self._session_id(),
+            session_id=session_id,
             path=self.path,
             cwd=cwd,
             archive_path=_normalize_tar_path(self.path, cwd=cwd),
@@ -67,10 +106,21 @@ class FilesystemHandleBinding:
     def write_target_source(
         self, *, size: int | None, permissions: int | None
     ) -> _WriteTargetSource:
+        if size is None:
+            return _SpooledWriteTargetSource(
+                name=self.path,
+                runtime=self.runtime,
+                execution=self._execution.execute,
+                bound_write=self.bound_write,
+                permissions=permissions,
+            )
+
+        async def bind_write() -> _BoundWrite:
+            return self.bound_write(await self._execution.bind())
+
         return _FilesystemWriteTargetSource(
             name=self.path,
-            runtime=self.runtime,
-            bind=self.bind_write,
+            bind=bind_write,
             size=size,
             permissions=permissions,
         )

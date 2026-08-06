@@ -53,6 +53,7 @@ from vercel.sandbox._internal.state import (
     CompletedProcessState,
     ProcessState,
     RuntimeSessionsPageState,
+    RuntimeSessionStopState,
     SandboxesPageState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -433,15 +434,15 @@ class SandboxService:
             )
         return sandbox
 
-    async def stop_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
+    async def stop_runtime_session(self, *, session_id: str) -> RuntimeSessionStopState:
         self._ensure_open()
-        session = await self._api_client.stop_runtime_session(session_id=session_id)
-        if session.id != session_id:
+        result = await self._api_client.stop_runtime_session(session_id=session_id)
+        if result.session.id != session_id:
             raise SandboxResponseError(
                 "Sandbox current-session operation returned a different session identity",
-                data=session,
+                data=result.session,
             )
-        return session
+        return result
 
     async def get_runtime_session(
         self, *, session_id: str, include_system_routes: bool | None = None

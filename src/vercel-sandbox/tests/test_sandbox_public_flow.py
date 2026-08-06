@@ -2,10 +2,13 @@ import asyncio
 import gc
 import json
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
+from threading import Event
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 import respx
@@ -37,6 +40,7 @@ from vercel.sandbox import (
     SandboxSource,
     SandboxStatus,
     SandboxTerminalStateError,
+    SandboxTimeoutError,
     SnapshotExpiration,
     SnapshotRetention,
     SnapshotRetentionState,
@@ -45,8 +49,15 @@ from vercel.sandbox import (
     TarballSource,
     sync as sandbox_sync,
 )
+from vercel.sandbox._internal import (
+    async_runtime as sandbox_async_runtime,
+    sync_runtime as sandbox_sync_runtime,
+)
 from vercel.sandbox._internal.service import get_sandbox_service
-from vercel.sandbox._internal.state import SandboxRuntimeSessionState, SandboxState
+from vercel.sandbox._internal.state import (
+    SandboxRuntimeSessionState,
+    SandboxState,
+)
 
 
 def _sandbox_response(
@@ -1880,142 +1891,459 @@ def test_sync_create_cleanup_attempts_destroy_after_stop_failure(
     assert exc_info.value.cause.code == "stop_failed"
 
 
-@respx.mock
-async def test_destroyed_async_handles_continue_issuing_requests(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
+def _install_public_recovery_smoke_routes() -> list[str]:
+    events: list[str] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        resume = request.url.params["resume"] == "true"
+        events.append("resume" if resume else "lookup")
+        session_id = "sbx_new" if resume else "sbx_old"
+        return httpx.Response(200, json=_sandbox_response(session_id=session_id))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
         return_value=httpx.Response(
-            200, json=_sandbox_response(status="stopped", session_status="stopped")
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
         )
     )
-    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response())
+
+    def replacement_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replay")
+        return httpx.Response(200, json=_command_response(session_id="sbx_new"))
+
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        side_effect=replacement_handler
+    )
+    return events
+
+
+@respx.mock
+async def test_stopped_async_sandbox_recovers_one_public_operation(
+    mock_env_clear: None,
+) -> None:
+    events = _install_public_recovery_smoke_routes()
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        process = await handle.create_process("python", ["--version"])
+
+    assert process.session_id == handle.current_session_id == "sbx_new"
+    assert events == ["lookup", "resume", "replay"]
+
+
+@respx.mock
+def test_stopped_sync_sandbox_recovers_one_public_operation(
+    mock_env_clear: None,
+) -> None:
+    events = _install_public_recovery_smoke_routes()
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        process = handle.create_process("python", ["--version"])
+
+    assert process.session_id == handle.current_session_id == "sbx_new"
+    assert events == ["lookup", "resume", "replay"]
+
+
+_RECOVERABLE_SANDBOX_OPERATIONS = (
+    (
+        "get_process",
+        "get",
+        "v2/sandboxes/sessions/sbx_old/cmd/cmd_123",
+        "v2/sandboxes/sessions/sbx_new/cmd/cmd_123",
+    ),
+    (
+        "query_processes",
+        "get",
+        "v2/sandboxes/sessions/sbx_old/cmd",
+        "v2/sandboxes/sessions/sbx_new/cmd",
+    ),
+    (
+        "extend_execution_time_limit",
+        "post",
+        "v2/sandboxes/sessions/sbx_old/extend-timeout",
+        "v2/sandboxes/sessions/sbx_new/extend-timeout",
+    ),
+    (
+        "update_network_policy",
+        "post",
+        "v2/sandboxes/sessions/sbx_old/network-policy",
+        "v2/sandboxes/sessions/sbx_new/network-policy",
+    ),
+    (
+        "snapshot",
+        "post",
+        "v2/sandboxes/sessions/sbx_old/snapshot",
+        "v2/sandboxes/sessions/sbx_new/snapshot",
+    ),
+)
+
+
+def _recovery_success_response(operation: str, *, session_id: str) -> httpx.Response:
+    session = _sandbox_response(session_id=session_id)["session"]
+    if operation in {"get_process", "query_processes"}:
+        command = _command_response(session_id=session_id)["command"]
+        if operation == "get_process":
+            return httpx.Response(200, json={"command": command})
+        return httpx.Response(200, json={"commands": [command]})
+    if operation == "snapshot":
+        return httpx.Response(
+            201,
+            json={
+                "snapshot": _snapshot_response(session_id=session_id)["snapshot"],
+                "session": session,
+            },
+        )
+    return httpx.Response(200, json={"session": session})
+
+
+async def _run_async_recoverable_operation(handle: sandbox.Sandbox, operation: str) -> object:
+    if operation == "get_process":
+        return await handle.get_process("cmd_123")
+    if operation == "query_processes":
+        return await handle.query_processes()
+    if operation == "extend_execution_time_limit":
+        return await handle.extend_execution_time_limit(2)
+    if operation == "update_network_policy":
+        return await handle.update_network_policy(NetworkPolicy.allow_all())
+    if operation == "snapshot":
+        return await handle.snapshot()
+    raise AssertionError(f"Unexpected operation: {operation}")
+
+
+def _run_sync_recoverable_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
+    if operation == "get_process":
+        return handle.get_process("cmd_123")
+    if operation == "query_processes":
+        return handle.query_processes()
+    if operation == "extend_execution_time_limit":
+        return handle.extend_execution_time_limit(2)
+    if operation == "update_network_policy":
+        return handle.update_network_policy(NetworkPolicy.allow_all())
+    if operation == "snapshot":
+        return handle.snapshot()
+    raise AssertionError(f"Unexpected operation: {operation}")
+
+
+@pytest.mark.parametrize(
+    ("operation", "method", "old_path", "replacement_path"),
+    _RECOVERABLE_SANDBOX_OPERATIONS,
+)
+@respx.mock
+async def test_async_sandbox_replays_each_remaining_covered_operation(
+    mock_env_clear: None,
+    operation: str,
+    method: str,
+    old_path: str,
+    replacement_path: str,
+) -> None:
+    events: list[str] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            events.append("lookup")
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        events.append("resume")
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+
+    def old_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    def replacement_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement")
+        return _recovery_success_response(operation, session_id="sbx_new")
+
+    getattr(respx, method)(f"https://sandbox.test/{old_path}").mock(side_effect=old_handler)
+    getattr(respx, method)(f"https://sandbox.test/{replacement_path}").mock(
+        side_effect=replacement_handler
     )
 
     async with session(service_options=_session_options()):
-        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
-        assert await handle.destroy() is handle
-        assert handle.status is SandboxStatus.STOPPED
-        assert (await handle.create_process("python", ["--version"])).id == "cmd_123"
+        handle = await sandbox.get_sandbox(name="preview")
+        result = await _run_async_recoverable_operation(handle, operation)
 
-    assert command_route.called
+    assert result is not None
+    assert handle.current_session_id == "sbx_new"
+    assert events == ["lookup", "old", "resume", "replacement"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "method", "old_path", "replacement_path"),
+    _RECOVERABLE_SANDBOX_OPERATIONS,
+)
+@respx.mock
+def test_sync_sandbox_replays_each_remaining_covered_operation(
+    mock_env_clear: None,
+    operation: str,
+    method: str,
+    old_path: str,
+    replacement_path: str,
+) -> None:
+    events: list[str] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["resume"] == "false":
+            events.append("lookup")
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        events.append("resume")
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+
+    def old_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("old")
+        return httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
+        )
+
+    def replacement_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("replacement")
+        return _recovery_success_response(operation, session_id="sbx_new")
+
+    getattr(respx, method)(f"https://sandbox.test/{old_path}").mock(side_effect=old_handler)
+    getattr(respx, method)(f"https://sandbox.test/{replacement_path}").mock(
+        side_effect=replacement_handler
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.get_sandbox(name="preview")
+        result = _run_sync_recoverable_operation(handle, operation)
+
+    assert result is not None
+    assert handle.current_session_id == "sbx_new"
+    assert events == ["lookup", "old", "resume", "replacement"]
 
 
 @respx.mock
-async def test_stopped_async_sandbox_is_inspectable_and_backend_authoritative(
+async def test_async_sparse_sandbox_lookup_targets_current_session_without_resume(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+    events: list[str] = []
+    sparse_response = _sandbox_response(session_id="sbx_sparse")
+    del sparse_response["session"]
+
+    def lookup_handler(request: httpx.Request) -> httpx.Response:
+        events.append("lookup")
+        assert request.url.params["resume"] == "false"
+        return httpx.Response(200, json=sparse_response)
+
+    lookup_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lookup_handler
     )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
-        return_value=httpx.Response(
+
+    def operation_handler(_request: httpx.Request) -> httpx.Response:
+        events.append("operation")
+        return httpx.Response(200, json=_command_response(session_id="sbx_sparse"))
+
+    operation_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_sparse/cmd").mock(
+        side_effect=operation_handler
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        assert handle.current_session_id == "sbx_sparse"
+        assert handle.current_session is None
+        process = await handle.create_process("python")
+
+    assert process.session_id == "sbx_sparse"
+    assert lookup_route.call_count == operation_route.call_count == 1
+    assert events == ["lookup", "operation"]
+
+
+@pytest.mark.parametrize(
+    ("include_system_routes", "expected_projection"),
+    [(True, "true"), (False, "false"), (None, None)],
+)
+@respx.mock
+async def test_async_sandbox_recovery_preserves_route_projection(
+    mock_env_clear: None,
+    include_system_routes: bool | None,
+    expected_projection: str | None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        session_id = "sbx_old" if request.url.params["resume"] == "false" else "sbx_new"
+        return httpx.Response(
             200,
-            json={
-                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
-            },
+            json=_sandbox_response(session_id=session_id, project_id="prj_bound"),
         )
-    )
-    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
         return_value=httpx.Response(
             409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+            json={"error": {"code": "sandbox_stopped", "message": "session is stopped"}},
         )
     )
-    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json=_command_response(session_id="sbx_new"))
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(
+            name="preview",
+            project_id="prj_bound",
+            include_system_routes=include_system_routes,
+        )
+        await handle.create_process("python")
+
+    assert [request.url.params["resume"] for request in requests] == ["false", "true"]
+    for request in requests:
+        assert request.url.params["projectId"] == "prj_bound"
+        assert request.url.params.get("__includeSystemRoutes") == expected_projection
+
+
+async def _run_async_unrecovered_operation(handle: sandbox.Sandbox, operation: str) -> object:
+    if operation == "update":
+        return await handle.update(runtime="node22")
+    if operation == "stop":
+        return await handle.stop()
+    if operation == "destroy":
+        return await handle.destroy()
+    if operation == "list_sessions":
+        return await handle.list_sessions()
+    if operation == "list_snapshots":
+        return await handle.list_snapshots()
+    raise AssertionError(f"Unexpected operation: {operation}")
+
+
+@respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_transition_polling_is_cancellable(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    anyio_backend: str,
+) -> None:
+    poll_waiting = anyio.Event()
+    never_release = anyio.Event()
+
+    async def blocked_delay(_delay: float) -> None:
+        poll_waiting.set()
+        await never_release.wait()
+
+    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", blocked_delay)
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
         return_value=httpx.Response(
             409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
+            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
+        )
+    )
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(500)
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.get_sandbox(name="preview")
+        cancel_scope = anyio.CancelScope()
+
+        async def query() -> None:
+            with cancel_scope:
+                await handle.query_processes()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(query)
+            await poll_waiting.wait()
+            cancel_scope.cancel()
+
+    assert poll_route.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+async def test_transition_polling_has_deadline(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    sync: bool,
+) -> None:
+    runtime = sandbox_sync_runtime if sync else sandbox_async_runtime
+    monkeypatch.setattr(runtime, "TRANSITION_TIMEOUT", -1.0)
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
+        )
+    )
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(500)
+    )
+
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            sync_handle = sandbox_sync.get_sandbox(name="preview")
+            with pytest.raises(SandboxTimeoutError, match="within -1.0s"):
+                sync_handle.query_processes()
+    else:
+        async with session(service_options=_session_options()):
+            async_handle = await sandbox.get_sandbox(name="preview")
+            with pytest.raises(SandboxTimeoutError, match="within -1.0s"):
+                await async_handle.query_processes()
+
+    assert poll_route.call_count == 0
+
+
+@respx.mock
+async def test_async_transition_poll_failure_propagates_without_resuming(
+    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", no_delay)
+    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            409,
+            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
+        )
+    )
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(
+            503,
+            json={"error": {"code": "poll_failed", "message": "poll failed"}},
         )
     )
 
     async with session(service_options=_session_options()):
-        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
-        retained_session = handle.current_session
-        assert retained_session is not None
-        assert await handle.stop() is handle
-        assert handle.current_session is retained_session
-        assert handle.current_session.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
-            await handle.create_process("python", ["--version"])
-        with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
-            await handle.fs.read_bytes("message.txt")
+        handle = await sandbox.get_sandbox(name="preview")
+        with pytest.raises(SandboxApiError) as exc_info:
+            await handle.query_processes()
 
-    assert command_route.called
-    assert read_route.called
-    assert process_exc.value.code == "session_stopped"
-    assert fs_exc.value.code == "session_stopped"
+    assert exc_info.value.code == "poll_failed"
+    assert poll_route.call_count == 1
+    assert sandbox_route.call_count == 1
 
 
-@respx.mock
-def test_destroyed_sync_handles_continue_issuing_requests(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(
-            200, json=_sandbox_response(status="stopped", session_status="stopped")
-        )
-    )
-    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
-        return_value=httpx.Response(200, json=_command_response())
-    )
-
-    with session(service_options=_session_options()):
-        handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
-        assert handle.destroy() is handle
-        assert handle.status is SandboxStatus.STOPPED
-        assert handle.create_process("python", ["--version"]).id == "cmd_123"
-
-    assert command_route.called
-
-
-@respx.mock
-def test_stopped_sync_sandbox_is_inspectable_and_backend_authoritative(
-    mock_env_clear: None,
-) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
-    )
-    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "session": _sandbox_response(status="stopped", session_status="stopped")["session"]
-            },
-        )
-    )
-    command_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/cmd").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
-        )
-    )
-    read_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/fs/read").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "session_stopped", "message": "session is stopped"}},
-        )
-    )
-
-    with session(service_options=_session_options()):
-        handle = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
-        retained_session = handle.current_session
-        assert retained_session is not None
-        assert handle.stop() is handle
-        assert handle.current_session is retained_session
-        assert handle.current_session.status is SandboxStatus.STOPPED
-        with pytest.raises(SandboxApiError, match="session is stopped") as process_exc:
-            handle.create_process("python", ["--version"])
-        with pytest.raises(SandboxApiError, match="session is stopped") as fs_exc:
-            handle.fs.read_bytes("message.txt")
-
-    assert command_route.called
-    assert read_route.called
-    assert process_exc.value.code == "session_stopped"
-    assert fs_exc.value.code == "session_stopped"
+def _run_sync_unrecovered_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
+    if operation == "update":
+        return handle.update(runtime="node22")
+    if operation == "stop":
+        return handle.stop()
+    if operation == "destroy":
+        return handle.destroy()
+    if operation == "list_sessions":
+        return handle.list_sessions()
+    if operation == "list_snapshots":
+        return handle.list_snapshots()
+    raise AssertionError(f"Unexpected operation: {operation}")
 
 
 @respx.mock
@@ -2129,3 +2457,1025 @@ def test_sync_query_sandboxes_paginates_and_supports_early_consumers(
             "tags": "env:prod",
         },
     ]
+
+
+def _stop_response(
+    session_id: str,
+    *,
+    sandbox_session_id: str | None = None,
+) -> dict[str, object]:
+    response: dict[str, object] = {
+        "session": _sandbox_response(
+            session_id=session_id,
+            status="stopped",
+            session_status="stopped",
+        )["session"]
+    }
+    if sandbox_session_id is not None:
+        response["sandbox"] = {
+            "name": "preview",
+            "currentSessionId": sandbox_session_id,
+            "status": "stopped",
+            "updatedAt": 99,
+        }
+    return response
+
+
+@respx.mock
+async def test_async_box_session_acquires_authoritatively_and_canonicalizes(
+    mock_env_clear: None,
+) -> None:
+    calls = iter(
+        [
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_new"),
+        ]
+    )
+    route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lambda _request: httpx.Response(200, json=next(calls))
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview", include_system_routes=True)
+        old = box.current_session
+        assert old is not None
+        acquired = await box.session()
+        assert acquired is old is box.current_session
+        replacement = await box.session()
+        assert replacement is box.current_session
+        assert replacement is not old
+
+    assert route.call_count == 3
+    assert [call.request.url.params["resume"] for call in route.calls] == [
+        "false",
+        "true",
+        "true",
+    ]
+    assert all(call.request.url.params["__includeSystemRoutes"] == "true" for call in route.calls)
+
+
+@respx.mock
+def test_sync_box_session_direct_and_managed_identity(mock_env_clear: None) -> None:
+    calls = iter(
+        [
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_new"),
+        ]
+    )
+    resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lambda _request: httpx.Response(200, json=next(calls))
+    )
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_old"))
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.get_sandbox(name="preview")
+        old = box.current_session
+        assert old is not None
+        acquired = box.session()
+        assert acquired is old is box.current_session
+        with acquired as entered:
+            assert entered is acquired
+            replacement = box.session()
+            assert replacement is box.current_session
+            assert replacement is not acquired
+
+    assert resume_route.call_count == 3
+    assert stop_route.call_count == 1
+    assert stop_route.calls[0].request.url.path.endswith("/sbx_old/stop")
+    assert replacement.status is SandboxStatus.RUNNING
+
+
+@respx.mock
+async def test_async_managed_session_applies_matching_stop_metadata(
+    mock_env_clear: None,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json=_stop_response("sbx_123", sandbox_session_id="sbx_123"),
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        routes = box.routes
+        raw = box.raw
+        project_id = box.project_id
+        async with box.session() as acquired:
+            assert acquired is box.current_session
+        assert acquired.status is SandboxStatus.STOPPED
+        assert box.status is SandboxStatus.STOPPED
+        assert box.updated_at == 99
+        assert box.routes == routes
+        assert box.raw is not None
+        assert raw is not None
+        assert box.project_id == project_id == "prj_123"
+        assert box.current_session is acquired
+
+    assert stop_route.call_count == 1
+
+
+@respx.mock
+async def test_async_managed_session_cleanup_never_rolls_back_replacement(
+    mock_env_clear: None,
+) -> None:
+    responses = iter(
+        [
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_new"),
+        ]
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lambda _request: httpx.Response(200, json=next(responses))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+    old_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json=_stop_response("sbx_old", sandbox_session_id="sbx_old"),
+        )
+    )
+    new_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_new"))
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        async with box.session() as acquired:
+            assert await box.query_processes() == []
+            replacement = box.current_session
+            assert replacement is not None and replacement.id == "sbx_new"
+        assert acquired.status is SandboxStatus.STOPPED
+        assert box.current_session is replacement
+        assert replacement.status is SandboxStatus.RUNNING
+
+    assert old_stop.call_count == 1
+    assert new_stop.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("sync", [False, True])
+@pytest.mark.parametrize(
+    ("status_code", "data"),
+    [
+        (409, {"error": {"code": "sandbox_stopped", "message": "stopped"}}),
+        (410, {"error": {"message": "gone"}}),
+    ],
+)
+async def test_session_cleanup_suppresses_already_stopped(
+    mock_env_clear: None,
+    sync: bool,
+    status_code: int,
+    data: dict[str, object],
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            status_code,
+            json=data,
+        )
+    )
+
+    acquired_status: SandboxStatus | None
+    if sync:
+        with session(service_options=_session_options(sync=True)):
+            sync_box = sandbox_sync.get_sandbox(name="preview")
+            with sync_box.session() as sync_acquired:
+                pass
+            with sync_acquired:
+                pass
+            acquired_status = sync_acquired.status
+    else:
+        async with session(service_options=_session_options()):
+            async_box = await sandbox.get_sandbox(name="preview")
+            async with async_box.session() as async_acquired:
+                pass
+            acquired_status = async_acquired.status
+
+    assert acquired_status is SandboxStatus.STOPPED
+    assert stop_route.call_count == 1
+
+
+@respx.mock
+async def test_async_session_cleanup_preserves_block_error_and_warns(
+    mock_env_clear: None,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            500,
+            json={"error": {"code": "stop_failed", "message": "failed"}},
+        )
+    )
+    original = ValueError("block failed")
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        with pytest.warns(RuntimeWarning) as warnings_info:
+            with pytest.raises(ValueError) as exc_info:
+                async with box.session():
+                    raise original
+
+    assert exc_info.value is original
+    cleanup_error = warnings_info[0].source
+    assert isinstance(cleanup_error, SandboxCleanupError)
+    assert cleanup_error.resource_type == "sandbox_runtime_session"
+    assert cleanup_error.resource_id == "sbx_123"
+    assert isinstance(cleanup_error.cause, SandboxApiError)
+
+
+@respx.mock
+async def test_async_session_operation_is_single_use_and_warns_unconsumed(
+    mock_env_clear: None,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        operation = box.session()
+        await operation
+        with pytest.raises(RuntimeError, match="can only be used once"):
+            await operation
+        with pytest.warns(RuntimeWarning, match=r"await box\.session"):
+            unconsumed = box.session()
+            del unconsumed
+            gc.collect()
+
+
+@respx.mock
+@pytest.mark.parametrize("error_code", ["sandbox_stopping", "sandbox_snapshotting"])
+async def test_async_session_acquisition_polls_transition_then_retries_once(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+) -> None:
+    async def no_delay(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", no_delay)
+    attempts = 0
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.params["resume"] == "false":
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                409,
+                json={
+                    "error": {
+                        "code": error_code,
+                        "message": "transitioning",
+                    }
+                },
+            )
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=sandbox_handler
+    )
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(
+                    session_id="sbx_old", status="stopped", session_status="stopped"
+                )["session"]
+            },
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        acquired = await box.session()
+
+    assert acquired.id == "sbx_new"
+    assert sandbox_route.call_count == 3
+    assert poll_route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("error_code", ["sandbox_stopping", "sandbox_snapshotting"])
+def test_sync_session_acquisition_polls_transition_then_retries_once(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+) -> None:
+    monkeypatch.setattr(sandbox_sync_runtime.time, "sleep", lambda _delay: None)
+    attempts = 0
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.params["resume"] == "false":
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                409,
+                json={
+                    "error": {
+                        "code": error_code,
+                        "message": "transitioning",
+                    }
+                },
+            )
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=sandbox_handler
+    )
+    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(
+                    session_id="sbx_old", status="stopped", session_status="stopped"
+                )["session"]
+            },
+        )
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.get_sandbox(name="preview")
+        acquired = box.session()
+
+    assert acquired.id == "sbx_new"
+    assert sandbox_route.call_count == 3
+    assert poll_route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_session_entry_cancellation_abandons_resume_and_owns_no_cleanup(
+    mock_env_clear: None,
+    anyio_backend: str,
+) -> None:
+    resume_started = anyio.Event()
+    release_resume = anyio.Event()
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+
+    async def resume_handler(_request: httpx.Request) -> httpx.Response:
+        resume_started.set()
+        await release_resume.wait()
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}).mock(
+        side_effect=resume_handler
+    )
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_new"))
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        cancel_scope = anyio.CancelScope()
+        entry_done = anyio.Event()
+
+        async def enter() -> None:
+            with cancel_scope:
+                try:
+                    async with box.session():
+                        raise AssertionError("cancelled entry must not yield")
+                finally:
+                    entry_done.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(enter)
+            await resume_started.wait()
+            cancel_scope.cancel()
+            await entry_done.wait()
+            release_resume.set()
+        assert box.current_session_id == "sbx_old"
+
+    assert stop_route.call_count == 0
+
+
+@respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_session_cleanup_finishes_before_cancellation_propagates(
+    mock_env_clear: None,
+    anyio_backend: str,
+) -> None:
+    entered = anyio.Event()
+    stop_started = anyio.Event()
+    release_stop = anyio.Event()
+    block_forever = anyio.Event()
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async def stop_handler(_request: httpx.Request) -> httpx.Response:
+        stop_started.set()
+        await release_stop.wait()
+        return httpx.Response(200, json=_stop_response("sbx_123"))
+
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        side_effect=stop_handler
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        cancel_scope = anyio.CancelScope()
+        managed_done = anyio.Event()
+
+        async def managed() -> None:
+            with cancel_scope:
+                try:
+                    async with box.session():
+                        entered.set()
+                        await block_forever.wait()
+                finally:
+                    managed_done.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(managed)
+            await entered.wait()
+            cancel_scope.cancel()
+            await stop_started.wait()
+            assert not managed_done.is_set()
+            release_stop.set()
+
+    assert stop_route.call_count == 1
+
+
+@respx.mock
+def test_listed_sync_session_cleanup_has_no_parent_linkage(mock_env_clear: None) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sessions": [_sandbox_response(session_id="sbx_old")["session"]],
+                "pagination": {"count": 1, "next": None, "prev": None},
+            },
+        )
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json=_stop_response("sbx_old", sandbox_session_id="sbx_old"),
+        )
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.get_sandbox(name="preview")
+        historical = box.list_sessions()[0]
+        with historical:
+            pass
+
+    assert historical.status is SandboxStatus.STOPPED
+    assert box.status is SandboxStatus.RUNNING
+    assert box.current_session_id == "sbx_123"
+
+
+@respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_session_acquisition_shares_implicit_resume(
+    mock_env_clear: None,
+    anyio_backend: str,
+) -> None:
+    resume_started = anyio.Event()
+    release_resume = anyio.Event()
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+
+    async def resume_handler(_request: httpx.Request) -> httpx.Response:
+        resume_started.set()
+        await release_resume.wait()
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    resume_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}
+    ).mock(side_effect=resume_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        processes: list[sandbox.Process] | None = None
+        acquired: sandbox.SandboxRuntimeSession | None = None
+
+        async def query() -> None:
+            nonlocal processes
+            processes = await box.query_processes()
+
+        async def acquire() -> None:
+            nonlocal acquired
+            acquired = await box.session()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(query)
+            await resume_started.wait()
+            task_group.start_soon(acquire)
+            await anyio.sleep(0)
+            release_resume.set()
+
+    assert processes == []
+    assert acquired is not None
+    assert acquired is box.current_session
+    assert acquired.id == "sbx_new"
+    assert resume_route.call_count == 1
+
+
+@respx.mock
+def test_sync_managed_session_cleanup_never_rolls_back_replacement(
+    mock_env_clear: None,
+) -> None:
+    responses = iter(
+        [
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_new"),
+        ]
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lambda _request: httpx.Response(200, json=next(responses))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+    old_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json=_stop_response("sbx_old", sandbox_session_id="sbx_old"),
+        )
+    )
+    new_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_new"))
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.get_sandbox(name="preview")
+        with box.session() as acquired:
+            assert box.query_processes() == []
+            replacement = box.current_session
+            assert replacement is not None and replacement.id == "sbx_new"
+
+    assert acquired.status is SandboxStatus.STOPPED
+    assert box.current_session is replacement
+    assert replacement.status is SandboxStatus.RUNNING
+    assert old_stop.call_count == 1
+    assert new_stop.call_count == 0
+
+
+@pytest.mark.parametrize("sandbox_session_id", [None, "sbx_other"])
+@respx.mock
+def test_sync_session_cleanup_ignores_sparse_nonmatching_metadata(
+    mock_env_clear: None,
+    sandbox_session_id: str | None,
+) -> None:
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json=_stop_response("sbx_123", sandbox_session_id=sandbox_session_id),
+        )
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.get_sandbox(name="preview")
+        with box.session() as acquired:
+            pass
+
+    assert acquired.status is SandboxStatus.STOPPED
+    assert box.status is SandboxStatus.RUNNING
+    assert box.current_session_id == "sbx_123"
+    assert get_route.call_count == 2
+
+
+def _incoherent_stop_response() -> dict[str, object]:
+    response = _stop_response("sbx_123", sandbox_session_id="sbx_123")
+    sandbox_payload = response["sandbox"]
+    assert isinstance(sandbox_payload, dict)
+    sandbox_payload["name"] = "other"
+    return response
+
+
+@pytest.mark.parametrize("block_fails", [False, True])
+@respx.mock
+async def test_async_cleanup_wraps_stop_result_application_failure(
+    mock_env_clear: None,
+    block_fails: bool,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(200, json=_incoherent_stop_response())
+    )
+    original = ValueError("block failed")
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        if block_fails:
+            with pytest.warns(RuntimeWarning) as warnings_info:
+                with pytest.raises(ValueError) as exc_info:
+                    async with box.session():
+                        raise original
+            assert exc_info.value is original
+            cleanup_error = warnings_info[0].source
+        else:
+            with pytest.raises(SandboxCleanupError) as cleanup_info:
+                async with box.session():
+                    pass
+            cleanup_error = cleanup_info.value
+
+    assert isinstance(cleanup_error, SandboxCleanupError)
+    assert cleanup_error.resource_type == "sandbox_runtime_session"
+    assert cleanup_error.resource_id == "sbx_123"
+    assert isinstance(cleanup_error.cause, SandboxResponseError)
+
+
+@respx.mock
+def test_sync_successful_block_wraps_unrelated_cleanup_failure(
+    mock_env_clear: None,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            503,
+            json={"error": {"code": "unavailable", "message": "unavailable"}},
+        )
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.get_sandbox(name="preview")
+        with pytest.raises(SandboxCleanupError) as exc_info:
+            with box.session():
+                pass
+
+    assert exc_info.value.resource_type == "sandbox_runtime_session"
+    assert exc_info.value.resource_id == "sbx_123"
+    assert isinstance(exc_info.value.cause, SandboxApiError)
+    assert exc_info.value.cause.code == "unavailable"
+
+
+@respx.mock
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_cancellation_with_cleanup_failure_warns_structured_error(
+    mock_env_clear: None,
+    anyio_backend: str,
+) -> None:
+    entered = anyio.Event()
+    block_forever = anyio.Event()
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
+        return_value=httpx.Response(
+            503,
+            json={"error": {"code": "stop_failed", "message": "failed"}},
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        cancel_scope = anyio.CancelScope()
+
+        async def managed() -> None:
+            with cancel_scope:
+                async with box.session():
+                    entered.set()
+                    await block_forever.wait()
+
+        with pytest.warns(RuntimeWarning) as warnings_info:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(managed)
+                await entered.wait()
+                cancel_scope.cancel()
+
+    cleanup_error = warnings_info[0].source
+    assert isinstance(cleanup_error, SandboxCleanupError)
+    assert cleanup_error.resource_id == "sbx_123"
+    assert isinstance(cleanup_error.cause, SandboxApiError)
+    assert cleanup_error.cause.code == "stop_failed"
+
+
+@respx.mock
+def test_sync_session_acquisition_shares_implicit_resume(mock_env_clear: None) -> None:
+    resume_started = Event()
+    release_resume = Event()
+    respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+
+    def resume_handler(_request: httpx.Request) -> httpx.Response:
+        resume_started.set()
+        assert release_resume.wait(timeout=5)
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    resume_route = respx.get(
+        "https://sandbox.test/v2/sandboxes/preview", params={"resume": "true"}
+    ).mock(side_effect=resume_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.get_sandbox(name="preview")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            implicit = executor.submit(box.query_processes)
+            assert resume_started.wait(timeout=5)
+            explicit = executor.submit(box.session)
+            release_resume.set()
+            assert implicit.result(timeout=5) == []
+            acquired = explicit.result(timeout=5)
+
+    assert acquired is box.current_session
+    assert acquired.id == "sbx_new"
+    assert resume_route.call_count == 1
+
+
+@respx.mock
+def test_sync_managed_resume_sandbox_stops_adopted_replacement(
+    mock_env_clear: None,
+) -> None:
+    responses = iter(
+        [
+            _sandbox_response(session_id="sbx_old"),
+            _sandbox_response(session_id="sbx_new"),
+        ]
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        side_effect=lambda _request: httpx.Response(200, json=next(responses))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+    old_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_old"))
+    )
+    new_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_new"))
+    )
+
+    with session(service_options=_session_options()):
+        with sandbox_sync.resume_sandbox(name="preview") as box:
+            assert box.query_processes() == []
+            assert box.current_session_id == "sbx_new"
+
+    assert old_stop.call_count == 0
+    assert new_stop.call_count == 1
+
+
+@respx.mock
+async def test_managed_create_sandbox_stops_replacement_before_destroy(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+    old_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_old"))
+    )
+    new_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_new"))
+    )
+    destroy_route = respx.delete("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(
+                session_id="sbx_new", status="stopped", session_status="stopped"
+            ),
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        async with sandbox.create_sandbox(name="preview", runtime="python3.13") as box:
+            assert await box.query_processes() == []
+
+    assert old_stop.call_count == 0
+    assert new_stop.call_count == 1
+    assert destroy_route.call_count == 1
+
+
+@respx.mock
+async def test_async_managed_exit_does_not_wait_for_racing_recovery(
+    mock_env_clear: None,
+) -> None:
+    resume_started = asyncio.Event()
+    release_resume = asyncio.Event()
+    resume_count = 0
+
+    async def sandbox_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal resume_count
+        resume_count += 1
+        if resume_count == 1:
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        resume_started.set()
+        await release_resume.wait()
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+    old_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_old"))
+    )
+    new_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_new"))
+    )
+
+    async with session(service_options=_session_options()):
+        async with sandbox.resume_sandbox(name="preview") as box:
+            operation = asyncio.create_task(box.query_processes())
+            await resume_started.wait()
+        assert old_stop.call_count == 1
+        release_resume.set()
+        assert await operation == []
+
+    assert box.current_session_id == "sbx_new"
+    assert box.current_session is not None
+    assert box.current_session.status is SandboxStatus.RUNNING
+    assert new_stop.call_count == 0
+
+
+@respx.mock
+async def test_async_sparse_stop_ignores_concurrent_recovery(
+    mock_env_clear: None,
+) -> None:
+    resume_started = asyncio.Event()
+    release_resume = asyncio.Event()
+    stop_started = asyncio.Event()
+    replacement_used = asyncio.Event()
+    resume_count = 0
+
+    async def sandbox_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal resume_count
+        resume_count += 1
+        response = _sandbox_response(session_id="sbx_old")
+        if resume_count == 1:
+            del response["session"]
+            return httpx.Response(200, json=response)
+        resume_started.set()
+        await release_resume.wait()
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    async def stop_handler(_request: httpx.Request) -> httpx.Response:
+        stop_started.set()
+        await replacement_used.wait()
+        return httpx.Response(200, json=_stop_response("sbx_old"))
+
+    def replacement_handler(_request: httpx.Request) -> httpx.Response:
+        replacement_used.set()
+        return httpx.Response(200, json={"commands": []})
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        side_effect=replacement_handler
+    )
+    old_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        side_effect=stop_handler
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="preview")
+        assert box.current_session is None
+        operation = asyncio.create_task(box.query_processes())
+        await resume_started.wait()
+        stopping = asyncio.create_task(box.stop())
+        await stop_started.wait()
+        release_resume.set()
+        assert await operation == []
+        assert await stopping is box
+
+    assert old_stop.call_count == 1
+    assert box.current_session_id == "sbx_new"
+    assert box.current_session is not None
+    assert box.current_session.status is SandboxStatus.RUNNING
+
+
+@respx.mock
+def test_sync_managed_exit_does_not_wait_for_racing_recovery(
+    mock_env_clear: None,
+) -> None:
+    resume_started = Event()
+    release_resume = Event()
+    resume_count = 0
+
+    def sandbox_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal resume_count
+        resume_count += 1
+        if resume_count == 1:
+            return httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
+        resume_started.set()
+        assert release_resume.wait(timeout=5)
+        return httpx.Response(200, json=_sandbox_response(session_id="sbx_new"))
+
+    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=sandbox_handler)
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "sandbox_stopped", "message": "stopped"}},
+        )
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_new/cmd").mock(
+        return_value=httpx.Response(200, json={"commands": []})
+    )
+    old_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_old/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_old"))
+    )
+    new_stop = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/stop").mock(
+        return_value=httpx.Response(200, json=_stop_response("sbx_new"))
+    )
+
+    with session(service_options=_session_options()):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with sandbox_sync.resume_sandbox(name="preview") as box:
+                operation = executor.submit(box.query_processes)
+                assert resume_started.wait(timeout=5)
+            assert old_stop.call_count == 1
+            release_resume.set()
+            assert operation.result(timeout=5) == []
+
+    assert box.current_session_id == "sbx_new"
+    assert box.current_session is not None
+    assert box.current_session.status is SandboxStatus.RUNNING
+    assert new_stop.call_count == 0

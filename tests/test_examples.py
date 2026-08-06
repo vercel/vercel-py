@@ -30,10 +30,17 @@ def _discover_examples(directory: Path) -> list[Path]:
     selected = []
     for scope_arg in scope_args:
         candidate = (Path.cwd() / scope_arg).resolve()
+        if candidate == Path(__file__).resolve():
+            return examples
         if candidate == directory:
             return examples
         if candidate.parent == directory and candidate in examples:
             selected.append(candidate)
+    if not selected and os.getenv("WORKSPACE_POE_SCOPE_TASK") == "test-examples":
+        raise pytest.UsageError(
+            f"no example scripts under {directory} matched the requested scope: "
+            f"{' '.join(scope_args)}"
+        )
     return selected or examples
 
 

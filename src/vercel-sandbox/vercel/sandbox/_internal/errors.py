@@ -71,6 +71,10 @@ class SandboxResponseError(SandboxError):
         self.data = data
 
 
+class SandboxTimeoutError(SandboxError):
+    """Raised when a Sandbox lifecycle transition exceeds its deadline."""
+
+
 class SandboxCredentialsError(SandboxError):
     """Raised when Sandbox credentials cannot be resolved."""
 

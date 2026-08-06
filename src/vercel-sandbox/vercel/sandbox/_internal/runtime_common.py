@@ -3,12 +3,13 @@
 import copy
 import posixpath
 import signal as signal_module
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import Enum, auto
 from pathlib import PurePosixPath
-from typing import Generic, Literal, TypeAlias, TypeVar
+from typing import Any, Generic, Literal, TypeAlias, TypeVar
 
 from vercel._internal.core.byte_stream import ReadableByteStream
 from vercel.sandbox._internal.errors import SandboxResponseError
@@ -19,8 +20,10 @@ from vercel.sandbox._internal.models import (
     SandboxStatus,
     _WriteFile,
 )
+from vercel.sandbox._internal.recovery import SandboxRecoveryTarget
 from vercel.sandbox._internal.state import (
     ProcessState,
+    RuntimeSessionStopState,
     SandboxRouteState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -301,10 +304,11 @@ class SnapshotHandleBase:
 
 
 class RuntimeSessionHandleBase:
-    __slots__ = ("_payload",)
+    __slots__ = ("_parent_ref", "_payload")
 
     def __init__(self, payload: SandboxRuntimeSessionState) -> None:
         self._payload = payload
+        self._parent_ref: weakref.ReferenceType[SandboxHandleBase[Any]] | None = None
 
     @property
     def id(self) -> str:
@@ -370,27 +374,61 @@ class RuntimeSessionHandleBase:
             )
         self._payload = payload
 
+    def _set_parent(self, parent: "SandboxHandleBase[Any]") -> None:
+        self._parent_ref = weakref.ref(parent)
+
+    def _apply_payload_with_parent(self, payload: SandboxRuntimeSessionState) -> None:
+        self._apply_payload(payload)
+        parent = None if self._parent_ref is None else self._parent_ref()
+        if parent is not None:
+            parent._apply_session_payload_from_child(self, payload)
+
+    def _apply_stop_result(self, result: RuntimeSessionStopState) -> None:
+        self._apply_payload(result.session)
+        parent = None if self._parent_ref is None else self._parent_ref()
+        if parent is not None:
+            parent._apply_session_stop_from_child(self, result)
+
+    def _mark_stopped(self) -> None:
+        self._apply_payload_with_parent(replace(self._payload, status=SandboxStatus.STOPPED))
+
     def _write_files_cwd(self, cwd: RemotePath | None) -> str:
         return _resolve_write_files_cwd(cwd, default=self.cwd or "/vercel/sandbox")
 
 
 class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
-    __slots__ = ("_payload", "_current_session", "_session_factory")
+    __slots__ = (
+        "_payload",
+        "_current_session",
+        "_session_factory",
+        "_handle_include_system_routes",
+        "__weakref__",
+    )
 
     def __init__(
         self,
         payload: SandboxState,
         session_factory: Callable[[SandboxRuntimeSessionState], RuntimeSessionHandleT],
+        *,
+        include_system_routes: bool | None = None,
     ) -> None:
         self._payload = payload
         self._session_factory = session_factory
+        self._handle_include_system_routes = include_system_routes
         self._current_session = (
             None if payload.current_session is None else session_factory(payload.current_session)
         )
+        if self._current_session is not None:
+            self._current_session._set_parent(self)
 
     @property
     def current_session(self) -> RuntimeSessionHandleT | None:
         return self._current_session
+
+    @property
+    def _include_system_routes(self) -> bool | None:
+        """Return the route projection selected when this handle was created."""
+        return self._handle_include_system_routes
 
     @property
     def name(self) -> str:
@@ -496,6 +534,7 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
                 self._current_session._apply_payload(returned_session)
             else:
                 self._current_session = self._session_factory(returned_session)
+                self._current_session._set_parent(self)
         elif (
             payload._current_session_attached
             or payload.current_session_id != self._payload.current_session_id
@@ -521,9 +560,61 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
             )
         if self._current_session is None:
             self._current_session = self._session_factory(payload)
+            self._current_session._set_parent(self)
         else:
             self._current_session._apply_payload(payload)
+        self._payload = replace(self._payload, current_session=payload)
         return self._current_session
+
+    def _apply_session_payload_from_child(
+        self,
+        child: RuntimeSessionHandleBase,
+        payload: SandboxRuntimeSessionState,
+    ) -> None:
+        if self.current_session_id != child.id or self._current_session is not child:
+            return
+        self._payload = replace(self._payload, current_session=payload)
+
+    def _apply_session_stop_from_child(
+        self,
+        child: RuntimeSessionHandleBase,
+        result: RuntimeSessionStopState,
+    ) -> None:
+        if self.current_session_id != child.id or self._current_session is not child:
+            return
+        self._payload = replace(self._payload, current_session=result.session)
+        sandbox = result.sandbox
+        if (
+            result._sandbox_attached
+            and sandbox is not None
+            and sandbox.current_session_id == child.id
+        ):
+            self._apply_payload(sandbox)
+
+    def _capture_recovery_target(self) -> SandboxRecoveryTarget:
+        session = self._current_session
+        if session is not None and session.id != self.current_session_id:
+            session = None
+        return SandboxRecoveryTarget(session_id=self.current_session_id, session=session)
+
+    def _apply_recovery_session_payload(
+        self,
+        target: SandboxRecoveryTarget,
+        payload: SandboxRuntimeSessionState,
+    ) -> None:
+        """Refresh an old bound session without replacing a newer current session."""
+        if payload.id != target.session_id:
+            raise SandboxResponseError(
+                "Sandbox recovery poll returned a different session identity",
+                data=payload,
+            )
+        target_session = target.session
+        if target_session is not None:
+            assert isinstance(target_session, RuntimeSessionHandleBase)
+            target_session._apply_payload(payload)
+        if self.current_session_id == target.session_id:
+            if self._current_session is not target_session:
+                self._apply_current_session_payload(payload)
 
     def _write_files_cwd(self, cwd: RemotePath | None) -> str:
         if self.current_session is not None and self.current_session.cwd is not None:
