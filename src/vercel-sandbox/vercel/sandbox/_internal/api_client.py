@@ -134,6 +134,7 @@ class _CreateSandboxRequest(_ApiRequestModel):
     project_id: str = Field(serialization_alias="projectId")
     name: str | None = None
     runtime: str | None = None
+    image: str | None = None
     source: SandboxSource | None = None
     ports: list[int] | None = None
     timeout: timedelta | None = None
@@ -373,6 +374,7 @@ class _SandboxPayload(_ApiModel):
         validation_alias=AliasChoices("current_session_id", "currentSessionId"),
         serialization_alias="currentSessionId",
     )
+    image: str | None = None
     runtime: str | None = None
     status: SandboxStatus | None = None
     persistent: bool | None = None
@@ -573,6 +575,8 @@ class _SandboxResponse(_ApiModel):
                 "execution_time_limit",
                 "network_policy",
             ):
+                if name == "runtime" and payload.image is not None:
+                    continue
                 if getattr(payload, name) is None:
                     updates[name] = getattr(session, name)
         payload = payload.model_copy(update=updates)
@@ -683,6 +687,7 @@ def _sandbox_state(
     return SandboxState(
         name=payload.name,
         current_session_id=payload.current_session_id,
+        image=payload.image,
         runtime=payload.runtime,
         status=payload.status,
         persistent=payload.persistent,
@@ -909,6 +914,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         name: str | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
@@ -925,6 +931,7 @@ class SandboxApiClient:
             project_id=project_id or credentials.project_id,
             name=name,
             runtime=runtime,
+            image=image,
             source=source,
             ports=ports,
             timeout=execution_time_limit,

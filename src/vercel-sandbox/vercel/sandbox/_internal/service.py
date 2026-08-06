@@ -37,6 +37,7 @@ from vercel.sandbox._internal.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     TagFilter,
+    _validate_image_and_runtime,
 )
 from vercel.sandbox._internal.options import (
     SandboxCredentials,
@@ -254,6 +255,7 @@ class SandboxService:
         project_id: str | None = None,
         name: str | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
@@ -265,11 +267,13 @@ class SandboxService:
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
     ) -> SandboxState:
+        _validate_image_and_runtime(image=image, runtime=runtime)
         self._ensure_open()
         sandbox = await self._api_client.create_sandbox(
             project_id=project_id,
             name=name,
             runtime=runtime,
+            image=image,
             source=source,
             ports=ports,
             execution_time_limit=execution_time_limit,
@@ -307,6 +311,7 @@ class SandboxService:
         resume: bool = True,
         include_system_routes: bool | None = None,
         runtime: str | None = None,
+        image: str | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
@@ -319,6 +324,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
     ) -> tuple[SandboxState, bool]:
         """Return a named sandbox and whether it had to be created."""
+        _validate_image_and_runtime(image=image, runtime=runtime)
         try:
             sandbox = await self.get_sandbox(
                 name=name,
@@ -344,6 +350,7 @@ class SandboxService:
             name=name,
             project_id=project_id,
             runtime=runtime,
+            image=image,
             source=source,
             ports=ports,
             execution_time_limit=execution_time_limit,

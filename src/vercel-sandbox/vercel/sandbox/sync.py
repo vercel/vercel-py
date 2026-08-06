@@ -90,6 +90,7 @@ def create_sandbox(
     project_id: str | None = None,
     name: str | None = None,
     runtime: str | None = None,
+    image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -113,6 +114,8 @@ def create_sandbox(
             when omitted.
         name: Requested sandbox name. The service generates one when omitted.
         runtime: Runtime image or runtime identifier.
+        image: Vercel Container Registry image reference. Mutually exclusive
+            with ``runtime``; the backend validates and resolves the reference.
         source: Git, tarball, or snapshot source used to initialize the sandbox.
         ports: Ports to expose from the sandbox.
         execution_time_limit: Maximum session runtime in seconds or as a
@@ -139,6 +142,7 @@ def create_sandbox(
         project_id=project_id,
         name=name,
         runtime=runtime,
+        image=image,
         source=source,
         ports=ports,
         execution_time_limit=execution_time_limit,
@@ -160,6 +164,7 @@ def get_or_create_sandbox(
     resume: bool = True,
     include_system_routes: bool | None = None,
     runtime: str | None = None,
+    image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -176,6 +181,10 @@ def get_or_create_sandbox(
     The existing-sandbox lookup resumes by default. If its latest snapshot is
     missing, the stale named sandbox is destroyed and recreated.
 
+    Args:
+        image: Vercel Container Registry image reference used only when the
+            sandbox must be created. Mutually exclusive with ``runtime``.
+
     Returns:
         A ``(sandbox, created)`` tuple. ``created`` is true when this call
         created or recreated the sandbox, and false when it returned an
@@ -188,6 +197,7 @@ def get_or_create_sandbox(
         resume=resume,
         include_system_routes=include_system_routes,
         runtime=runtime,
+        image=image,
         source=source,
         ports=ports,
         execution_time_limit=execution_time_limit,

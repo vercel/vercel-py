@@ -443,6 +443,10 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         return self._payload.runtime
 
     @property
+    def image(self) -> str | None:
+        return self._payload.image
+
+    @property
     def status(self) -> SandboxStatus | None:
         return self._payload.status
 

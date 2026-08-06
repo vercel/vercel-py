@@ -64,6 +64,7 @@ class SnapshotRetentionState:
 class SandboxState:
     name: str
     current_session_id: str
+    image: str | None = None
     runtime: str | None = None
     status: SandboxStatus | None = None
     persistent: bool | None = None

@@ -108,6 +108,27 @@ def _sandbox_response(
     }
 
 
+def _image_sandbox_response(
+    *,
+    image: str = "my-repository@sha256:resolved",
+    name: str = "preview",
+    session_id: str = "sbx_123",
+    project_id: str = "prj_123",
+) -> dict[str, Any]:
+    response = _sandbox_response(
+        name=name,
+        session_id=session_id,
+        project_id=project_id,
+    )
+    sandbox_payload = response["sandbox"]
+    session_payload = response["session"]
+    assert isinstance(sandbox_payload, dict)
+    assert isinstance(session_payload, dict)
+    sandbox_payload["image"] = image
+    sandbox_payload["runtime"] = None
+    return response
+
+
 def _command_response(
     *,
     command_id: str = "cmd_123",
@@ -775,6 +796,59 @@ async def test_public_create_sandbox_serializes_source_variants(
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    "image",
+    [
+        "my-repository",
+        "my-repository:latest",
+        "my-repository@sha256:request-digest",
+        "vcr.vercel.com/team-slug/project-slug/my-repository:latest",
+    ],
+)
+async def test_public_create_sandbox_serializes_image_without_runtime(
+    mock_env_clear: None,
+    image: str,
+) -> None:
+    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_image_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", image=image)
+
+    assert json.loads(route.calls.last.request.content) == {
+        "projectId": "prj_123",
+        "name": "preview",
+        "image": image,
+    }
+    assert handle.image == "my-repository@sha256:resolved"
+    assert handle.runtime is None
+    assert handle.current_session is not None
+    assert handle.current_session.runtime == "python3.13"
+
+
+@respx.mock
+def test_sync_create_sandbox_serializes_image_without_runtime(mock_env_clear: None) -> None:
+    image = "my-repository:latest"
+    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_image_sandbox_response())
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(name="preview", image=image)
+
+    assert json.loads(route.calls.last.request.content) == {
+        "projectId": "prj_123",
+        "name": "preview",
+        "image": image,
+    }
+    assert handle.image == "my-repository@sha256:resolved"
+    assert handle.runtime is None
+    assert handle.current_session is not None
+    assert handle.current_session.runtime == "python3.13"
+
+
+@respx.mock
 async def test_public_create_rejects_malformed_success_response(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v2/sandboxes").mock(return_value=httpx.Response(200, json={}))
 
@@ -1328,6 +1402,7 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         existing, existing_created = await sandbox.get_or_create_sandbox(
             name="existing",
             project_id="prj_other",
+            image="existing-repository:latest",
         )
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
@@ -1344,6 +1419,56 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
     assert existing_get.calls.last.request.url.params["resume"] == "true"
     assert missing_get.calls.last.request.url.params["resume"] == "true"
     assert create_route.call_count == 1
+
+
+@respx.mock
+async def test_async_get_or_create_forwards_image_only_when_creating(
+    mock_env_clear: None,
+) -> None:
+    existing_get = respx.get("https://sandbox.test/v2/sandboxes/existing-image").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_image_sandbox_response(name="existing-image", session_id="sbx_existing"),
+                "resumed": True,
+            },
+        )
+    )
+    missing_get = respx.get("https://sandbox.test/v2/sandboxes/missing-image").mock(
+        return_value=httpx.Response(
+            404,
+            json={"error": {"code": "not_found", "message": "not found"}},
+        )
+    )
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json=_image_sandbox_response(name="missing-image", session_id="sbx_missing"),
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        existing, existing_created = await sandbox.get_or_create_sandbox(
+            name="existing-image",
+            image="ignored-repository:latest",
+        )
+        created, created_flag = await sandbox.get_or_create_sandbox(
+            name="missing-image",
+            image="requested-repository:latest",
+        )
+
+    assert existing_created is False
+    assert existing.image == "my-repository@sha256:resolved"
+    assert created_flag is True
+    assert created.image == "my-repository@sha256:resolved"
+    assert existing_get.called
+    assert missing_get.called
+    assert create_route.call_count == 1
+    assert json.loads(create_route.calls.last.request.content) == {
+        "projectId": "prj_123",
+        "name": "missing-image",
+        "image": "requested-repository:latest",
+    }
 
 
 @respx.mock
@@ -1390,18 +1515,29 @@ async def test_async_get_or_create_recreates_stale_snapshot(mock_env_clear: None
             json={"error": {"code": "not_found", "message": "already deleted"}},
         )
     )
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "projectId": "prj_123",
+            "name": "stale",
+            "image": "stale-repository:latest",
+        }
+        return httpx.Response(
             200,
-            json=_sandbox_response(name="stale", session_id="sbx_recreated"),
+            json=_image_sandbox_response(name="stale", session_id="sbx_recreated"),
         )
-    )
+
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
 
     async with session(service_options=_session_options()):
-        recreated, created = await sandbox.get_or_create_sandbox(name="stale")
+        recreated, created = await sandbox.get_or_create_sandbox(
+            name="stale", image="stale-repository:latest"
+        )
 
     assert recreated.name == "stale"
     assert created is True
+    assert recreated.image == "my-repository@sha256:resolved"
+    assert recreated.runtime is None
     assert get_route.calls.last.request.url.params["resume"] == "true"
     assert delete_route.call_count == 1
     assert create_route.call_count == 1
@@ -1448,16 +1584,27 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
 
     respx.get("https://sandbox.test/v2/sandboxes/existing").mock(side_effect=get_handler)
     respx.get("https://sandbox.test/v2/sandboxes/missing").mock(side_effect=get_handler)
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "projectId": "prj_123",
+            "name": "missing",
+            "image": "missing-repository:latest",
+        }
+        return httpx.Response(
             200,
-            json=_sandbox_response(name="missing", session_id="sbx_missing"),
+            json=_image_sandbox_response(name="missing", session_id="sbx_missing"),
         )
-    )
+
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
 
     with session(service_options=_session_options()):
-        existing, existing_created = sandbox_sync.get_or_create_sandbox(name="existing")
-        created, was_created = sandbox_sync.get_or_create_sandbox(name="missing")
+        existing, existing_created = sandbox_sync.get_or_create_sandbox(
+            name="existing", image="existing-repository:latest"
+        )
+        created, was_created = sandbox_sync.get_or_create_sandbox(
+            name="missing", image="missing-repository:latest"
+        )
 
     assert existing.name == "existing"
     assert existing_created is False
@@ -1465,8 +1612,67 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
     assert was_created is True
     assert not hasattr(existing, "__enter__")
     assert not hasattr(created, "__enter__")
+    assert created.image == "my-repository@sha256:resolved"
     assert [request.url.params["resume"] for request in requests] == ["true", "true"]
     assert create_route.call_count == 1
+
+
+@respx.mock
+async def test_async_create_rejects_image_with_runtime_before_requests(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/conflict").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="conflict"))
+    )
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match="image and runtime"):
+            sandbox.create_sandbox(
+                name="conflict",
+                image="my-repository:latest",
+                runtime="python3.13",
+            )
+        with pytest.raises(ValueError, match="image and runtime"):
+            await sandbox.get_or_create_sandbox(
+                name="conflict",
+                image="my-repository:latest",
+                runtime="python3.13",
+            )
+
+    assert not create_route.called
+    assert not get_route.called
+
+
+@respx.mock
+def test_sync_create_rejects_image_with_runtime_before_requests(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/conflict").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="conflict"))
+    )
+
+    with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match="image and runtime"):
+            sandbox_sync.create_sandbox(
+                name="conflict",
+                image="my-repository:latest",
+                runtime="python3.13",
+            )
+        with pytest.raises(ValueError, match="image and runtime"):
+            sandbox_sync.get_or_create_sandbox(
+                name="conflict",
+                image="my-repository:latest",
+                runtime="python3.13",
+            )
+
+    assert not create_route.called
+    assert not get_route.called
 
 
 @respx.mock

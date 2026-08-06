@@ -26,6 +26,45 @@ with session():
         print(process.stdout)
 ```
 
+## Custom images
+
+Create a sandbox from a Vercel Container Registry (VCR) image with the
+`image` keyword. The image reference is sent to the Sandbox API unchanged;
+the backend validates access, resolves the image, and waits for it to be
+ready.
+
+```python
+from vercel import sandbox
+from vercel.api import session
+
+async with session():
+    async with sandbox.create_sandbox(image="my-repository:latest") as instance:
+        result = await instance.run_process("my-command", capture_output=True)
+        print(result.stdout)
+        print(instance.image)  # The resolved digest-pinned image reference
+```
+
+The same option is available synchronously:
+
+```python
+from vercel.api import session
+from vercel.sandbox import sync as sandbox
+
+with session():
+    with sandbox.create_sandbox(image="my-repository:latest") as instance:
+        result = instance.run_process("my-command", capture_output=True)
+        print(result.stdout)
+        print(instance.image)  # The resolved digest-pinned image reference
+```
+
+Image references may be a bare repository (`my-repository`), a tagged image
+(`my-repository:latest`), a digest-pinned image
+(`my-repository@sha256:<digest>`), or a fully qualified VCR reference such as
+`vcr.vercel.com/team-slug/project-slug/my-repository:latest`. Use `image`
+instead of `runtime`; the two options are mutually exclusive. For an
+image-backed sandbox, `Sandbox.image` contains the returned image metadata and
+`Sandbox.runtime` remains `None`.
+
 Installing this package also provides the `vercel-sandbox` and `sandbox`
 console commands. Both are aliases that delegate all arguments to `npx sandbox`;
 they require Node.js with npm and `npx` installed. Node.js is not required when

@@ -46,6 +46,7 @@ from vercel.sandbox._internal.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     _parse_snapshot_expiration,
+    _validate_image_and_runtime,
     _WriteFile,
 )
 from vercel.sandbox._internal.pagination import (
@@ -1499,6 +1500,7 @@ def create_sandbox(
     project_id: str | None = None,
     name: str | None = None,
     runtime: str | None = None,
+    image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -1517,6 +1519,7 @@ def create_sandbox(
                 project_id=project_id,
                 name=name,
                 runtime=runtime,
+                image=image,
                 source=source,
                 ports=ports,
                 execution_time_limit=parse_duration_seconds(execution_time_limit),
@@ -1568,6 +1571,7 @@ def get_or_create_sandbox(
     resume: bool = True,
     include_system_routes: bool | None = None,
     runtime: str | None = None,
+    image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -1579,6 +1583,7 @@ def get_or_create_sandbox(
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
 ) -> tuple[SyncSandbox, bool]:
+    _validate_image_and_runtime(image=image, runtime=runtime)
     try:
         state, created = iter_coroutine(
             service.get_or_create_sandbox(
@@ -1587,6 +1592,7 @@ def get_or_create_sandbox(
                 resume=resume,
                 include_system_routes=include_system_routes,
                 runtime=runtime,
+                image=image,
                 source=source,
                 ports=ports,
                 execution_time_limit=parse_duration_seconds(execution_time_limit),

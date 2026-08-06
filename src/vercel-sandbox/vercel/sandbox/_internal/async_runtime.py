@@ -53,6 +53,7 @@ from vercel.sandbox._internal.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     _parse_snapshot_expiration,
+    _validate_image_and_runtime,
     _WriteFile,
 )
 from vercel.sandbox._internal.pagination import (
@@ -1411,6 +1412,7 @@ class _CreateSandboxParams:
     project_id: str | None = None
     name: str | None = None
     runtime: str | None = None
+    image: str | None = None
     source: SandboxSource | None = None
     ports: list[int] | None = None
     execution_time_limit: timedelta | None = None
@@ -1457,6 +1459,7 @@ class CreateSandboxOperation:
             project_id=self._params.project_id,
             name=self._params.name,
             runtime=self._params.runtime,
+            image=self._params.image,
             source=self._params.source,
             ports=self._params.ports,
             execution_time_limit=self._params.execution_time_limit,
@@ -1599,6 +1602,7 @@ def create_sandbox_operation(
     project_id: str | None = None,
     name: str | None = None,
     runtime: str | None = None,
+    image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -1611,12 +1615,14 @@ def create_sandbox_operation(
     snapshot_retention: SnapshotRetention | None = None,
     destroy: bool = True,
 ) -> CreateSandboxOperation:
+    _validate_image_and_runtime(image=image, runtime=runtime)
     return CreateSandboxOperation(
         service=service,
         params=_CreateSandboxParams(
             project_id=project_id,
             name=name,
             runtime=runtime,
+            image=image,
             source=source,
             ports=ports,
             execution_time_limit=parse_duration_seconds(execution_time_limit),
@@ -1660,6 +1666,7 @@ async def get_or_create_sandbox(
     resume: bool = True,
     include_system_routes: bool | None = None,
     runtime: str | None = None,
+    image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
     execution_time_limit: DurationInput = None,
@@ -1678,6 +1685,7 @@ async def get_or_create_sandbox(
             resume=resume,
             include_system_routes=include_system_routes,
             runtime=runtime,
+            image=image,
             source=source,
             ports=ports,
             execution_time_limit=parse_duration_seconds(execution_time_limit),
