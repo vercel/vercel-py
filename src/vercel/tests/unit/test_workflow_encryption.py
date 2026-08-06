@@ -35,6 +35,7 @@ from vercel._internal.workflow import (
 from vercel._internal.workflow.worlds import vercel as vercel_world
 from vercel._internal.workflow.worlds.vercel import VercelWorld
 from vercel.oidc import VercelOidcTokenError
+from vercel.tests.world_stubs import NoStreams
 
 DEPLOYMENT_KEY = bytes(range(32))
 PROJECT_ID = "prj_test"
@@ -508,7 +509,7 @@ def _run(**overrides) -> w.WorkflowRun:
     )
 
 
-class _CountingWorld(w.World):
+class _CountingWorld(NoStreams, w.World):
     """A world that records how often the runtime asked it for a key."""
 
     def __init__(self, key: bytes | None) -> None:

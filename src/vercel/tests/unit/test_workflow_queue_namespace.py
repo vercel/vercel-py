@@ -7,6 +7,7 @@ import pytest
 
 from vercel._internal.core.polyfills import UTC
 from vercel._internal.workflow import core, runtime, world as w
+from vercel.tests.world_stubs import NoStreams
 from vercel.workflow import Workflows
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -38,7 +39,7 @@ def _hook() -> w.Hook:
     )
 
 
-class FakeWorld(w.World):
+class FakeWorld(NoStreams, w.World):
     def __init__(
         self,
         *,
