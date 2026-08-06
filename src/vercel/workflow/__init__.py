@@ -7,8 +7,15 @@ from vercel._internal.workflow.core import (
     sleep,
     time_ns,
 )
-from vercel._internal.workflow.runtime import Run, StepInfo, get_step_metadata, start
+from vercel._internal.workflow.runtime import (
+    Run,
+    StepInfo,
+    get_step_metadata,
+    get_writable,
+    start,
+)
 from vercel._internal.workflow.serde import register_serializable, serializable
+from vercel._internal.workflow.streams import WorkflowStreamWriter
 
 from . import sandbox
 from .errors import (
@@ -33,6 +40,8 @@ __all__ = [
     "BaseHook",
     "HookEvent",
     "get_step_metadata",
+    "get_writable",
+    "WorkflowStreamWriter",
     "StepInfo",
     "serializable",
     "register_serializable",
