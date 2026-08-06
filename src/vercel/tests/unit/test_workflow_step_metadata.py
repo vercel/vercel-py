@@ -15,11 +15,11 @@ from vercel.workflow import StepInfo, Workflows, get_step_metadata
 
 
 def _run_input(**kwargs) -> bytes:
-    return ser.dehydrate(ser.argument_array(kwargs))
+    return ser.dehydrate(ser.argument_array((), kwargs))
 
 
 def _step_input(**kwargs) -> bytes:
-    return ser.dehydrate(ser.step_arguments(kwargs))
+    return ser.dehydrate(ser.step_arguments((), kwargs))
 
 
 class _RecordingLocalWorld(LocalWorld):

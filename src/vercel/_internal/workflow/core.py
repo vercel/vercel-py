@@ -25,30 +25,74 @@ T = TypeVar("T")
 DEFAULT_MAX_RETRIES = 3
 
 
-def _require_keyword_only(func: Callable[..., Any], kind: str) -> None:
-    """Reject a workflow or step whose parameters could be passed positionally.
+def _bind_arguments(
+    signature: inspect.Signature,
+    qualname: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Split a call by what the callee's parameters can be *named*.
 
-    Calls are recorded as the single object `@workflow/core` records for a
-    call with one argument, so there is nowhere for a positional argument to
-    go. Declaring the parameters keyword-only is what makes that visible in the
-    signature -- and it lets the type checker reject a positional call, since
-    `start()` and `Step.__call__` forward a `ParamSpec`.
+    A value whose parameter has a usable name is recorded by name; only a
+    parameter that cannot be named -- positional-only (before a `/`) or
+    `*args` -- is recorded by position. So against
+    `async def charge(amount=1, currency="usd", *, tier="basic")`:
 
-    Raised at registration rather than at call time so the whole codebase
-    reports at import, each error pointing at its own definition.
+        charge(21)                  -> [{"amount": 21}]
+        charge(amount=21)           -> [{"amount": 21}]
+        charge(21, "eur")           -> [{"amount": 21, "currency": "eur"}]
+        charge(21, currency="eur")  -> [{"amount": 21, "currency": "eur"}]
+        charge(currency="eur")      -> [{"currency": "eur"}]
+
+    ...and against `async def notify(total, /, *rest)`:
+
+        notify(42)                  -> [42]
+        notify(42, "now")           -> [42, "now"]
+
+    So the same values record the same bytes however the call was spelled, which
+    matters because the step-input determinism check compares recorded bytes
+    against freshly encoded ones: rewriting `charge(21)` as `charge(amount=21)`
+    stays cosmetic instead of failing an in-flight run.
+
+    Recording by name also survives a reorder -- swapping two parameters cannot
+    silently swap the values of a run already in flight, and a rename fails
+    loudly. Recording by position gives that up in exchange for the shape
+    TypeScript writes, which is why it takes a `/` to ask for.
+
+    Defaults are deliberately not applied, so an omitted default stays off the
+    wire and adding a parameter with one remains replay-safe.
+
+    `bind` is here to resolve values to parameter names, and for its arity check,
+    which reports a bad call as an ordinary `TypeError` here rather than inside
+    the decoder or during replay. The split below is recomputed from each
+    parameter's kind rather than taken from `BoundArguments.args` / `.kwargs`,
+    which split on position instead.
     """
-    positional = [
-        name
-        for name, param in inspect.signature(func).parameters.items()
-        if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD, param.VAR_POSITIONAL)
-    ]
-    if positional:
-        raise TypeError(
-            f"{kind} {func.__qualname__} takes positional parameter(s) "
-            f"{', '.join(positional)}; workflows and steps are called with keyword "
-            f"arguments only. Declare them keyword-only: "
-            f"async def {func.__name__}(*, {positional[0]}: ...)"
-        )
+    try:
+        bound = signature.bind(*args, **kwargs)
+    except TypeError as error:
+        # `bind` phrases these as "missing a required argument: 'amount'"; the
+        # name is what the caller lacks, since `start(wf, ...)` and a step call
+        # both put the traceback frame somewhere other than the definition.
+        raise TypeError(f"{qualname}() {error}") from None
+
+    positional: list[Any] = []
+    keyword: dict[str, Any] = {}
+    # Signature order, so a positional-only parameter keeps its slot ahead of
+    # whatever `*args` contributes.
+    for name, param in signature.parameters.items():
+        if name not in bound.arguments:
+            continue
+        value = bound.arguments[name]
+        if param.kind is param.POSITIONAL_ONLY:
+            positional.append(value)
+        elif param.kind is param.VAR_POSITIONAL:
+            positional.extend(value)
+        elif param.kind is param.VAR_KEYWORD:
+            keyword.update(value)
+        else:
+            keyword[name] = value
+    return tuple(positional), keyword
 
 
 class Workflow(Generic[P, T]):
@@ -63,6 +107,12 @@ class Workflow(Generic[P, T]):
         self.module = func.__module__
         self.qualname = func.__qualname__
         self.workflow_id = f"workflow//{self.module}//{self.qualname}"
+        self._signature = inspect.signature(func)
+
+    def bind_arguments(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return _bind_arguments(self._signature, self.qualname, args, kwargs)
 
     def _resolve_queue_namespace(self) -> str | None:
         return self._registry.namespace
@@ -75,15 +125,16 @@ class Step(Generic[P, T]):
         self.func = func
         self.name = f"step//{func.__module__}//{func.__qualname__}"
         self.max_retries = max_retries
+        self._signature = inspect.signature(func)
         functools.update_wrapper(self, func)
+
+    def bind_arguments(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return _bind_arguments(self._signature, self.func.__qualname__, args, kwargs)
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         from . import runtime
-
-        if args:
-            raise TypeError(
-                f"{self.name} takes keyword arguments only; got {len(args)} positional argument(s)"
-            )
 
         try:
             ctx = runtime.WorkflowOrchestratorContext.current()
@@ -242,7 +293,6 @@ class Workflows:
         return self._namespace
 
     def workflow(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
-        _require_keyword_only(func, "workflow")
         rv = Workflow(func, registry=self)
         assert rv.workflow_id not in self._workflows, f"Duplicate workflow ID: {rv.workflow_id}"
         self._workflows[rv.workflow_id] = rv
@@ -266,7 +316,6 @@ class Workflows:
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> Step[P, T] | Callable[[Callable[P, Coroutine[Any, Any, T]]], Step[P, T]]:
         def register(f: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
-            _require_keyword_only(f, "step")
             rv = Step(f, max_retries=max_retries)
             assert rv.name not in self._steps, f"Duplicate step name: {rv.name}"
             self._steps[rv.name] = rv
