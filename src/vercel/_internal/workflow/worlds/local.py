@@ -9,7 +9,7 @@ import pathlib
 import tempfile
 import threading
 import traceback
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Any, TypeVar, cast
@@ -1007,10 +1007,10 @@ class LocalWorld(w.World):
 
     def streams_get(
         self, run_id: str, name: str, start_index: int | None = None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         return self._iter_stream(name, start_index)
 
-    async def _iter_stream(self, name: str, start_index: int | None) -> AsyncIterator[bytes]:
+    async def _iter_stream(self, name: str, start_index: int | None) -> AsyncGenerator[bytes, None]:
         delivered: set[str] = set()
         files = self._chunk_files(name)
         start = self._resolve_start_index(files, start_index)

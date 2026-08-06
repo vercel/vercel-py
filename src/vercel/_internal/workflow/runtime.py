@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import functools
@@ -10,7 +11,7 @@ import re
 import sys
 import traceback
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
@@ -150,23 +151,31 @@ class _StepStreams:
     """
 
     run_id: str
-    writers: dict[str, streams.WorkflowStreamWriter] = dataclasses.field(default_factory=dict)
+    writers: dict[tuple[str, str], streams.WorkflowStreamWriter] = dataclasses.field(
+        default_factory=dict
+    )
 
     def writer(self, namespace: str | None) -> streams.WorkflowStreamWriter:
-        """The writer for this run's *namespace* stream, created on first use.
+        """The writer for this run's *namespace* stream."""
+        return self.writer_for(self.run_id, streams.workflow_run_stream_id(self.run_id, namespace))
+
+    def writer_for(self, run_id: str, name: str) -> streams.WorkflowStreamWriter:
+        """The writer for one stream, created on first use.
 
         One writer per stream per step, deliberately. Handing out a fresh writer
         each call would give each its own buffer over the same stream, and two
         buffers flushing independently interleave their chunks by whichever
         request happens to win -- so `get_writable()` twice in a loop would
         scramble the order the caller wrote in. Sharing one serial sink makes
-        that pattern correct instead of subtly wrong.
+        that pattern correct instead of subtly wrong, and it is why a handle the
+        workflow passed in resolves to the same writer the step would have got
+        by asking for the stream itself.
         """
-        name = streams.workflow_run_stream_id(self.run_id, namespace)
-        writer = self.writers.get(name)
+        key = (run_id, name)
+        writer = self.writers.get(key)
         if writer is None:
-            writer = streams.WorkflowStreamWriter(w.get_world(), self.run_id, name)
-            self.writers[name] = writer
+            writer = streams.WorkflowStreamWriter(w.get_world(), run_id, name)
+            self.writers[key] = writer
         return writer
 
     async def drain(self) -> None:
@@ -202,33 +211,60 @@ def get_step_metadata() -> StepInfo:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
 
 
-def get_writable(*, namespace: str | None = None) -> streams.WorkflowStreamWriter:
-    """The run's writable stream, for streaming output as the step runs.
+def get_writable(*, namespace: str | None = None) -> streams.WorkflowWritable:
+    """The run's writable stream, for streaming output while the run works.
 
-    Chunks become readable immediately -- through ``run.readable`` on the
-    TypeScript side, the dashboard, or ``workflow inspect stream`` -- without
-    waiting for the step or the run to finish. This SDK has no reader of its own
-    yet; :meth:`vercel._internal.workflow.world.World.streams_get` is the
-    unstable way in.
+    Chunks are readable straight away, through :meth:`Run.readable`, the
+    TypeScript SDK, the dashboard or ``workflow inspect stream`` -- no waiting
+    for the step or the run to finish.
+
+    In a step this is a :class:`~.streams.WorkflowStreamWriter`, ready to write.
+    In a workflow body it is a :class:`~.streams.WorkflowStreamHandle`, which
+    names the stream but cannot write to it: that body re-executes on every
+    replay and its sandbox has no network. Pass the handle to a step and it
+    arrives as the writer -- the same one the step would get by asking for the
+    stream itself, so ordering holds however the step obtained it.
 
     Pass *namespace* to write to a second, independent stream on the same run.
 
-    Must be called from within a step body; raises ``RuntimeError`` otherwise.
-    A workflow body cannot stream: unlike the TypeScript SDK it cannot even take
-    a handle to pass into a step, which is why a streaming step calls this
-    itself.
-
-    Nothing closes the stream implicitly. Call :meth:`close` on the writer when
+    Nothing closes the stream implicitly. Call ``close()`` on the writer when
     the run has nothing more to say, or readers will wait until the run expires.
     """
     try:
         state = _step_streams_ctx.get()
     except LookupError:
+        pass
+    else:
+        return state.writer(namespace)
+
+    try:
+        ctx = WorkflowOrchestratorContext.current()
+    except LookupError:
         raise RuntimeError(
-            "get_writable() can only be called inside a step; a workflow body "
-            "cannot write to a stream directly"
+            "get_writable() can only be called inside a workflow or a step"
         ) from None
-    return state.writer(namespace)
+    return ctx.stream_handle(namespace)
+
+
+def open_writable(run_id: str | None, name: str) -> streams.WorkflowStreamWriter:
+    """Turn a serialized stream reference back into a writer.
+
+    The reviving half of the ``WritableStream`` tag, so a handle a workflow put
+    in a step's arguments arrives as something the step can write to. Inside a
+    step the writer is registered with that step, which is what gets it drained
+    before the step is recorded complete; outside one -- a client hydrating a
+    payload that happens to carry a stream -- it is a bare writer whose
+    durability is the caller's business.
+    """
+    try:
+        state = _step_streams_ctx.get()
+    except LookupError:
+        if run_id is None:
+            raise ser.SerializationError(
+                f"stream {name!r} arrived without a run id and there is no step to take it from"
+            ) from None
+        return streams.WorkflowStreamWriter(w.get_world(), run_id, name)
+    return state.writer_for(run_id or state.run_id, name)
 
 
 if sys.version_info >= (3, 11):
@@ -311,8 +347,15 @@ class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
     def __init__(
-        self, events: list[w.Event], *, seed: str, started_at: int, registry: core.Workflows
+        self,
+        events: list[w.Event],
+        *,
+        run_id: str,
+        seed: str,
+        started_at: int,
+        registry: core.Workflows,
     ):
+        self.run_id = run_id
         self.events = events
         # List of Out-of-order HookReceivedEvent: such events may arrive at any time unexpectedly,
         # so we stash them separately for delayed consumption
@@ -390,6 +433,16 @@ class WorkflowOrchestratorContext:
 
     def random(self) -> random.Random:
         return self._user_random
+
+    def stream_handle(self, namespace: str | None) -> streams.WorkflowStreamHandle:
+        """A reference to one of this run's streams, for a step to write to.
+
+        Deterministic, so a replay of the body produces the same handle rather
+        than pointing a later attempt at a different stream.
+        """
+        return streams.WorkflowStreamHandle(
+            self.run_id, streams.workflow_run_stream_id(self.run_id, namespace)
+        )
 
     def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
         hook = Hook(
@@ -699,7 +752,11 @@ async def workflow_handler(
             return None
 
     context = WorkflowOrchestratorContext(
-        events, seed=run_id, started_at=workflow_started_at, registry=registry
+        events,
+        run_id=run_id,
+        seed=run_id,
+        started_at=workflow_started_at,
+        registry=registry,
     )
     try:
         output = context.run_workflow(workflow_run)
@@ -931,6 +988,11 @@ async def step_handler(
     # managed to write before it raised.
     step_streams = _StepStreams(run_id=req.workflow_run_id)
 
+    # Installed around the whole invocation, not just the body: a stream the
+    # workflow passed in is revived while the input is hydrated, and it has to
+    # register with this step or nothing would ever drain it.
+    streams_token = _step_streams_ctx.set(step_streams)
+
     try:
         if not step_run.started_at:
             raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
@@ -956,13 +1018,11 @@ async def step_handler(
                 attempt=current_attempt,
             )
         )
-        streams_token = _step_streams_ctx.set(step_streams)
         # Execute the step function
         try:
             result = await step.func(*args, **kwargs)
         finally:
             _step_ctx.reset(token)
-            _step_streams_ctx.reset(streams_token)
 
         # A stream write returns as soon as it is buffered, so the chunks this
         # step wrote are not durable yet. Force them out before recording the
@@ -1054,6 +1114,9 @@ async def step_handler(
 
             # Return timeout to keep message visible for retry
             return w.QueueContinuation(delay_seconds=1.0)
+
+    finally:
+        _step_streams_ctx.reset(streams_token)
 
     # Re-invoke the workflow to continue execution
     await world.queue(
@@ -1199,6 +1262,95 @@ class Run:
 
             else:
                 await asyncio.sleep(1)
+
+    def readable(
+        self, *, namespace: str | None = None, start_index: int | None = None
+    ) -> AsyncGenerator[Any, None]:
+        """Read what the run's steps stream, as they stream it.
+
+        Yields one value per :meth:`~vercel.workflow.WorkflowStreamWriter.write`,
+        in write order, and ends when a step closes the stream. A run that never
+        closes its stream leaves this waiting until the run expires.
+
+        *start_index* skips that many chunks; a negative value reads that many
+        back from the end. Positive values resume exactly, which is what makes
+        this usable behind a reconnecting client -- hand back the index you last
+        saw and pass it in next time. A negative one cannot: it resolves against
+        wherever the tail was at connect time, so the read is single-shot and
+        will not survive a dropped connection.
+
+        A method rather than a property, because each call opens its own read:
+        iterating a property twice would quietly start a second one.
+        """
+
+        async def values() -> AsyncGenerator[Any, None]:
+            name = streams.workflow_run_stream_id(self._run_id, namespace)
+            frames = streams.reconnecting_frames(self._world, self._run_id, name, start_index)
+            async with contextlib.aclosing(frames):
+                index = start_index or 0
+                async for payload in frames:
+                    yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
+                    index += 1
+
+        return values()
+
+    def readable_bytes(
+        self, *, namespace: str | None = None, start_index: int | None = None
+    ) -> AsyncGenerator[bytes, None]:
+        """:meth:`readable`, for a stream of nothing but ``bytes``.
+
+        The shape an HTTP body wants, so a route can hand this straight to a
+        streaming response. A chunk that is not ``bytes`` is an error here
+        rather than something for the response layer to trip over.
+        """
+
+        async def data() -> AsyncGenerator[bytes, None]:
+            source = self.readable(namespace=namespace, start_index=start_index)
+            async with contextlib.aclosing(source):
+                async for value in source:
+                    if not isinstance(value, bytes | bytearray):
+                        raise ser.SerializationError(
+                            f"Stream chunk is {type(value).__name__}, not bytes; use "
+                            f"readable() for a stream of values"
+                        )
+                    yield bytes(value)
+
+        return data()
+
+    async def stream_info(self, *, namespace: str | None = None) -> w.StreamInfo:
+        """The stream's last chunk index and whether it has been closed.
+
+        ``tail_index`` is ``-1`` when nothing has been written yet, so a caller
+        deriving a start index from it has to handle that rather than treat it
+        as a position.
+        """
+        name = streams.workflow_run_stream_id(self._run_id, namespace)
+        return await self._world.streams_get_info(self._run_id, name)
+
+    async def list_streams(self) -> list[str]:
+        """Every stream this run has written to, namespaced ones included."""
+        return await self._world.streams_list(self._run_id)
+
+
+def read_stream(
+    run_id: str, name: str, *, start_index: int | None = None
+) -> AsyncGenerator[Any, None]:
+    """Read any stream of a run by name, for a stream :class:`Run` cannot name.
+
+    :meth:`Run.readable` covers the run's own streams; this is the way in when
+    the name came from :meth:`Run.list_streams` or from another SDK.
+    """
+
+    async def values() -> AsyncGenerator[Any, None]:
+        world = w.get_world()
+        frames = streams.reconnecting_frames(world, run_id, name, start_index)
+        async with contextlib.aclosing(frames):
+            index = start_index or 0
+            async for payload in frames:
+                yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
+                index += 1
+
+    return values()
 
 
 async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:

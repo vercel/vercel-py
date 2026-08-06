@@ -22,13 +22,16 @@ frame boundaries without understanding the payload format at all.
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import base64
+import contextlib
+import dataclasses
 import os
-from collections.abc import AsyncIterable, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
-from . import serde, serialization as ser
+from . import serialization as ser
 
 if TYPE_CHECKING:
     from . import world as w
@@ -117,7 +120,7 @@ def _reduce_uint8array(value: Any) -> Any:
     return memoryview(value)
 
 
-CHUNK_REDUCERS: dict[str, Any] = {**serde.REDUCERS, "Uint8Array": _reduce_uint8array}
+CHUNK_REDUCERS: dict[str, Any] = {**ser.REDUCERS, "Uint8Array": _reduce_uint8array}
 """Reducers for a stream chunk, as opposed to a run/step/hook payload."""
 
 
@@ -174,6 +177,91 @@ class FrameDecoder:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# reader
+# ═══════════════════════════════════════════════════════════════════════════
+
+MAX_RECONNECTS = 50
+"""Consecutive reconnects allowed before a read gives up.
+
+Reset by any reconnect that delivers a frame, so this bounds *consecutive*
+failures rather than the lifetime total: a long-lived stream may reconnect far
+more than this and stay healthy, as long as it keeps making progress.
+"""
+
+MAX_TOTAL_RECONNECTS = 1000
+"""Absolute backstop, independent of progress.
+
+The consecutive cap resets on forward progress, which is correct against a
+backend that honours ``start_index``. One that ignored it would re-deliver
+earlier frames, look like progress every time, and never trip that cap -- so
+this guarantees the loop terminates regardless.
+"""
+
+
+async def reconnecting_frames(
+    world: w.World, run_id: str, name: str, start_index: int | None = None
+) -> AsyncGenerator[bytes, None]:
+    """Read a stream's frames, reopening the connection when it breaks.
+
+    A live read is long-lived and the transport under it is not: the Vercel
+    world's read endpoint errors the response body when the server's max
+    duration expires, which is what tells this loop apart from the end of the
+    stream. A clean end of iteration means the stream is closed and the read is
+    done; an error means reopen at the next unread frame and carry on.
+
+    Resuming is exact because one frame is one stored chunk, so the position is
+    ``start_index`` plus the frames already handed to the caller. Bytes of a
+    frame that had not fully arrived are dropped -- the reopened connection
+    re-sends that chunk whole.
+
+    A negative *start_index* (last-N) cannot be resumed: its meaning depends on
+    where the tail was at connect time, and re-resolving it after a break would
+    silently move the window. Such a read is single-shot.
+    """
+    resumable = start_index is None or start_index >= 0
+    position = start_index or 0
+    consumed = 0
+    consecutive = 0
+    total = 0
+    max_reconnects = _env_int("WORKFLOW_FRAMED_STREAM_MAX_RECONNECTS", MAX_RECONNECTS)
+    max_total = _env_int("WORKFLOW_FRAMED_STREAM_MAX_TOTAL_RECONNECTS", MAX_TOTAL_RECONNECTS)
+
+    while True:
+        # A fresh decoder per connection: whatever partial frame the broken
+        # connection left behind is not continued, it is re-sent.
+        decoder = FrameDecoder()
+        effective = position + consumed if resumable else start_index
+        try:
+            source = world.streams_get(run_id, name, effective)
+            async with contextlib.aclosing(source):
+                async for data in source:
+                    for payload in decoder.feed(data):
+                        consumed += 1
+                        consecutive = 0
+                        yield payload
+        except Exception as error:
+            if not resumable:
+                raise
+            consecutive += 1
+            total += 1
+            if consecutive > max_reconnects:
+                raise ser.SerializationError(
+                    f"Stream {name!r} exceeded {max_reconnects} consecutive reconnection attempts"
+                ) from error
+            if total > max_total:
+                raise ser.SerializationError(
+                    f"Stream {name!r} exceeded {max_total} total reconnection attempts"
+                ) from error
+            position += consumed
+            consumed = 0
+            continue
+
+        # Iteration ended without error: the stream is closed and complete.
+        decoder.finish()
+        return
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # writer
 # ═══════════════════════════════════════════════════════════════════════════
 #
@@ -208,7 +296,97 @@ MAX_BYTES_PER_BATCH = 1024 * 1024
 """Cumulative bytes in one write request, under platform body limits."""
 
 
-class WorkflowStreamWriter:
+class WorkflowWritable(abc.ABC):
+    """One of a run's streams, as :func:`vercel.workflow.get_writable` hands it out.
+
+    Two things wear this interface. In a step it is a
+    :class:`WorkflowStreamWriter` and every method works. In a workflow body it
+    is a :class:`WorkflowStreamHandle`, which knows which stream it is but
+    refuses to write to it.
+
+    One interface rather than two so that a workflow can take a writable and
+    pass it to a step without the type changing on the way, which is also how
+    `@workflow/core` does it -- its workflow-side `getWritable()` returns
+    something with `WritableStream`'s prototype whose methods throw.
+    """
+
+    @property
+    @abc.abstractmethod
+    def run_id(self) -> str:
+        """The run that owns the stream."""
+
+    @property
+    @abc.abstractmethod
+    def name(self) -> str:
+        """The stream this writes to."""
+
+    @abc.abstractmethod
+    async def write(self, value: Any) -> None:
+        """Append *value* as one chunk."""
+
+    @abc.abstractmethod
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        """Append every item *source* yields, in order."""
+
+    @abc.abstractmethod
+    async def drain(self) -> None:
+        """Wait until every accepted chunk is durably written."""
+
+    @abc.abstractmethod
+    async def close(self) -> None:
+        """Mark the stream complete, ending its readers."""
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkflowStreamHandle(WorkflowWritable):
+    """A stream a workflow body can name but not write to.
+
+    The body re-executes on every replay and its sandbox has no network, so
+    writing from there is not on offer -- but naming the stream is, and that is
+    what a step needs. Pass the handle into a step and it arrives as a
+    :class:`WorkflowStreamWriter`.
+
+    Deterministic by construction: the name comes from the run id and the
+    namespace, so a replay produces the same handle rather than pointing a
+    later attempt at a different stream.
+    """
+
+    # Underscored because the interface declares `run_id` and `name` as
+    # properties, and a dataclass field only annotates -- it puts nothing in the
+    # class body for `abc` to see as the implementation. Constructed
+    # positionally, so the names stay out of the way.
+    _run_id: str
+    _name: str
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def _refuse(self) -> RuntimeError:
+        return RuntimeError(
+            f"cannot write to stream {self._name!r} from a workflow body: it re-runs "
+            f"on every replay and cannot reach the network. Pass this to a step "
+            f"and write to it there."
+        )
+
+    async def write(self, value: Any) -> None:
+        raise self._refuse()
+
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        raise self._refuse()
+
+    async def drain(self) -> None:
+        raise self._refuse()
+
+    async def close(self) -> None:
+        raise self._refuse()
+
+
+class WorkflowStreamWriter(WorkflowWritable):
     """A group-committing writer for one ``(run_id, name)`` stream.
 
     Not safe to use from more than one event loop; within one loop, concurrent
