@@ -701,7 +701,7 @@ def check_fragments(base: str | None = None) -> int:
     fragments = parse_fragments(set(packages_by_name))
     head = os.environ.get("WORKSPACE_POE_GIT_COMMIT")
     if base is None:
-        base = _default_base_ref()
+        base = os.environ.get("WORKSPACE_POE_GIT_BASE") or _default_base_ref()
     if base is None:
         print("Could not detect a base branch for news fragment enforcement.")
         return 1

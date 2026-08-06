@@ -1,0 +1,29 @@
+name: News Fragments
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  check-news-fragments:
+    name: Check news fragments
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Check news fragments
+        run: uv run --locked poe check-news-fragments
+        env:
+          WORKSPACE_POE_GIT_BASE: ${{ github.event.pull_request.base.sha }}
