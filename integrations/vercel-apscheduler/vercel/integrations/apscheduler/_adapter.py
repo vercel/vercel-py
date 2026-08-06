@@ -18,6 +18,7 @@ import vercel.queue.sync as vqs_sync
 
 from ._driver import (
     APSchedulerConfigurationError,
+    NamespaceFencedError,
     RedisDriver,
     StartDecision,
     WakeToken,
@@ -57,6 +58,10 @@ RAW_STORE_KEY_ATTR = "_vercel_apscheduler_raw_jobs_key"
 # Queue delivery rounds wake delays up to whole seconds and adds dispatch
 # latency, so a grace below this cannot be met and skips occurrences.
 MIN_QUEUE_MISFIRE_GRACE_SECONDS = 5
+# A reconciliation pass can lose a revision race to a concurrent owner write;
+# rerunning with fresh state converges. Bounded so a mutation storm defers to
+# the next activation instead of spinning.
+RECONCILE_PASS_LIMIT = 3
 
 # One live adapter per durable identity. Two schedulers whose stores collapse
 # to the same identity would interleave one namespace, so the second claim
@@ -816,22 +821,52 @@ class SchedulerAdapter:
         if self.driver.reconciled_deployment() == self.deployment:
             self._reconciled = True
             return
+        try:
+            for _ in range(RECONCILE_PASS_LIMIT):
+                if not self._reconcile_pass(now):
+                    continue
+                if self.driver.mark_reconciled(self.deployment, now):
+                    self._reconciled = True
+                return
+        except NamespaceFencedError:
+            # Ownership moved mid-reconciliation; the marker stays unset and
+            # the current owner reconciles instead.
+            self._logger.info(
+                'Deployment "%s" lost the scheduler while reconciling; '
+                "leaving the sync to the current owner",
+                self.deployment,
+            )
+            return
+        self._logger.warning(
+            "Reconciliation kept losing revision races to concurrent writes; "
+            "it stays unfinished and retries on the next activation"
+        )
+
+    def _reconcile_pass(self, now: datetime) -> bool:
+        """Run one full declaration sync; False when a revision race dirtied it.
+
+        A lost compare-and-set means a concurrent owner write moved a job
+        after this pass read it; the caller reruns against fresh state so the
+        sync always reflects the store it actually saw.
+        """
+        clean = True
         missing = dict(self._declared_jobs)
         with self.scheduler._jobstores_lock:
             jobs, undecodable = self.coordinator.get_all_jobs_with_revisions()
-            self._reconcile_undecodable(undecodable, missing, now)
+            clean &= self._reconcile_undecodable(undecodable, missing, now)
             for job, revision, provenance in jobs:
                 missing.pop(str(job.id), None)
                 if provenance != PROVENANCE_DECLARED:
                     continue
                 declared = self._declared_jobs.get(str(job.id))
                 if declared is None:
-                    synced = self.coordinator.cas_remove_job(job.id, revision)
-                    if synced:
+                    if self.coordinator.cas_remove_job(job.id, revision):
                         self._logger.info(
                             'Removed job "%s": this deployment no longer declares it',
                             job.id,
                         )
+                    else:
+                        clean = False
                     continue
                 if _trigger_fingerprint(declared.trigger) == _trigger_fingerprint(job.trigger):
                     next_run_time = job.next_run_time
@@ -841,28 +876,22 @@ class SchedulerAdapter:
                         now.astimezone(self.scheduler.timezone),
                     )
                 declared._modify(next_run_time=next_run_time)
-                synced = self.coordinator.cas_update_job(declared, revision)
-                if not synced:
-                    # A concurrent handler moved the revision; the next sync
-                    # pass sees the current value.
-                    self._logger.debug(
-                        'Job "%s" changed while reconciling; leaving the newer revision',
-                        job.id,
-                    )
+                if not self.coordinator.cas_update_job(declared, revision):
+                    clean = False
             for declared in missing.values():
                 # Declared before this deployment owned the namespace, so the
                 # cold-start materialization deliberately did not write it.
                 self.coordinator.add_job(declared)
-        self.driver.mark_reconciled(self.deployment, now)
-        self._reconciled = True
+        return clean
 
     def _reconcile_undecodable(
         self,
         undecodable: list[tuple[str, int, str]],
         missing: dict[str, Any],
         now: datetime,
-    ) -> None:
+    ) -> bool:
         """Repair or sideline records this deployment's code cannot load."""
+        clean = True
         for job_id, revision, provenance in undecodable:
             declared = missing.pop(job_id, None)
             if provenance != PROVENANCE_DECLARED:
@@ -875,6 +904,8 @@ class SchedulerAdapter:
                         'Removed job "%s": this deployment no longer declares it',
                         job_id,
                     )
+                else:
+                    clean = False
                 continue
             # The code still declares this job but its persisted record no
             # longer loads (typically its function moved). The declaration is
@@ -891,6 +922,9 @@ class SchedulerAdapter:
                     "definition no longer loads under this deployment",
                     job_id,
                 )
+            else:
+                clean = False
+        return clean
 
     def _rebase_before(self, activation_time: datetime) -> None:
         with self.scheduler._jobstores_lock:
@@ -990,17 +1024,28 @@ class SchedulerAdapter:
                             plan.run_times,
                         )
                     )
-                if plan.next_run_time is None:
-                    advanced = self.coordinator.cas_remove_job(
-                        plan.job.id,
-                        plan.expected_revision,
+                try:
+                    if plan.next_run_time is None:
+                        advanced = self.coordinator.cas_remove_job(
+                            plan.job.id,
+                            plan.expected_revision,
+                        )
+                    else:
+                        plan.job._modify(next_run_time=plan.next_run_time)
+                        advanced = self.coordinator.cas_update_job(
+                            plan.job,
+                            plan.expected_revision,
+                        )
+                except NamespaceFencedError:
+                    # Another deployment took the chain mid-run. Work already
+                    # executed stays executed (delivery is at least once);
+                    # remaining due jobs belong to the new owner.
+                    self._logger.info(
+                        'Deployment "%s" no longer drives this scheduler; '
+                        "leaving the remaining due jobs to the new owner",
+                        self.deployment,
                     )
-                else:
-                    plan.job._modify(next_run_time=plan.next_run_time)
-                    advanced = self.coordinator.cas_update_job(
-                        plan.job,
-                        plan.expected_revision,
-                    )
+                    break
                 if not advanced:
                     # A concurrent mutation moved the revision; its value wins
                     # and its dirty marker keeps the chain covered.

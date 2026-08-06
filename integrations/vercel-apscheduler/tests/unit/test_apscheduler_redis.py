@@ -21,7 +21,11 @@ from vercel.integrations.apscheduler import (
     install_vercel_apscheduler_integration,
 )
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
-from vercel.integrations.apscheduler._driver import RedisDriver, StartDecision
+from vercel.integrations.apscheduler._driver import (
+    NamespaceFencedError,
+    RedisDriver,
+    StartDecision,
+)
 
 UTC = timezone.utc
 REDIS_URL = environ.get("APSCHEDULER_TEST_REDIS_URL")
@@ -958,6 +962,210 @@ def test_real_redis_takeover_restores_unloadable_declared_jobs(
         assert restored.next_run_time is not None
         second_store = second._jobstores["default"]
         assert client.zscore(second_store.run_times_key, "moved") is not None
+    finally:
+        client.delete(*keys)
+
+
+def _take_over_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+    deployment: str,
+) -> tuple[BlockingScheduler, SchedulerAdapter]:
+    """Build a second scheduler over the shared scope, bound but not started."""
+    assert REDIS_URL is not None
+    _adapter_module._ACTIVE_IDENTITIES.clear()
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", deployment)
+    monkeypatch.delenv("VERCEL")
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={"default": _redis_job_store(REDIS_URL)},
+    )
+    modules[TEST_SCHEDULER_MODULE].__dict__["scheduler"] = scheduler
+    monkeypatch.setenv("VERCEL", "1")
+    adapter = get_adapter(scheduler)
+    assert adapter is not None
+    adapter._bind_runtime()
+    return scheduler, adapter
+
+
+def _bump_revision(client: Redis, keys: tuple[str, ...], job_id: str) -> None:
+    """Mimic a concurrent owner write moving a job's revision."""
+    revision = client.hincrby(keys[3], "job_revision", 1)
+    client.hset(keys[2], job_id, str(revision))
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_demoted_deployment_writes_are_fenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A takeover atomically fences the demoted deployment's late writes.
+
+    An in-flight handler on the demoted deployment may finish after the
+    takeover; its job-store commit must be refused so reconciliation can
+    never lose to it, and it must not stamp reconciliation as its own.
+    """
+    assert REDIS_URL is not None
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_fence")
+    first_scheduler, first_adapter, client, keys = _real_scheduler(
+        monkeypatch,
+        deployment="dpl_fence_one",
+    )
+    try:
+        first_scheduler.add_job(
+            durable_test_job,
+            "interval",
+            hours=1,
+            id="lingering",
+            replace_existing=True,
+        )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            first_scheduler.start()
+        [(job, revision, _provenance)], _undecodable = (
+            first_adapter.coordinator.get_all_jobs_with_revisions()
+        )
+
+        second, second_adapter = _take_over_scheduler(monkeypatch, "dpl_fence_two")
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            second.start()
+        second_driver = second_adapter.driver
+        assert second_driver.owner_deployment() == "dpl_fence_two"
+
+        # The demoted deployment's in-flight handler writes with its own
+        # bound identity; only the environment is restored for the lookup.
+        monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_fence_one")
+        first_coordinator = first_adapter.coordinator
+        with pytest.raises(NamespaceFencedError):
+            first_coordinator.cas_update_job(job, revision)
+        with pytest.raises(NamespaceFencedError):
+            first_coordinator.remove_job("lingering")
+        assert not first_adapter.driver.mark_reconciled(
+            "dpl_fence_one",
+            datetime.now(UTC),
+        )
+        assert second_driver.reconciled_deployment() == "dpl_fence_two"
+    finally:
+        client.delete(*keys)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_reconciliation_retries_revision_races(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revision race reruns the pass instead of losing the removal."""
+    assert REDIS_URL is not None
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_retry")
+    first_scheduler, _first_adapter, client, keys = _real_scheduler(
+        monkeypatch,
+        deployment="dpl_retry_one",
+    )
+    try:
+        first_scheduler.add_job(
+            durable_test_job,
+            "interval",
+            hours=1,
+            id="gone",
+            replace_existing=True,
+        )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            first_scheduler.start()
+
+        second, second_adapter = _take_over_scheduler(monkeypatch, "dpl_retry_two")
+        coordinator = second_adapter.coordinator
+        original_remove = coordinator.cas_remove_job
+        calls: list[str] = []
+
+        def racing_remove(job_id: str, expected_revision: int) -> bool:
+            calls.append(job_id)
+            if len(calls) == 1:
+                _bump_revision(client, coordinator.keys, job_id)
+            return original_remove(job_id, expected_revision)
+
+        monkeypatch.setattr(coordinator, "cas_remove_job", racing_remove)
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            second.start()
+
+        assert calls == ["gone", "gone"]
+        assert not client.hexists(coordinator.keys[0], "gone")
+        assert second_adapter.driver.reconciled_deployment() == "dpl_retry_two"
+    finally:
+        client.delete(*keys)
+
+
+@pytest.mark.skipif(
+    REDIS_URL is None,
+    reason="requires a disposable Redis server",
+)
+def test_real_redis_unconverged_reconciliation_defers_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconciliation that cannot converge stays unmarked and retries later."""
+    assert REDIS_URL is not None
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_defer")
+    first_scheduler, _first_adapter, client, keys = _real_scheduler(
+        monkeypatch,
+        deployment="dpl_defer_one",
+    )
+    try:
+        first_scheduler.add_job(
+            durable_test_job,
+            "interval",
+            hours=1,
+            id="gone",
+            replace_existing=True,
+        )
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            first_scheduler.start()
+
+        second, second_adapter = _take_over_scheduler(monkeypatch, "dpl_defer_two")
+        coordinator = second_adapter.coordinator
+        original_remove = coordinator.cas_remove_job
+
+        def always_racing_remove(job_id: str, expected_revision: int) -> bool:
+            _bump_revision(client, coordinator.keys, job_id)
+            return original_remove(job_id, expected_revision)
+
+        monkeypatch.setattr(coordinator, "cas_remove_job", always_racing_remove)
+        with patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg",
+        ):
+            second.start()
+
+        # Every pass lost its race: the job survives and the marker is not
+        # stamped, so the sync stays owed rather than silently skipped.
+        assert client.hexists(coordinator.keys[0], "gone")
+        assert second_adapter.driver.reconciled_deployment() == "dpl_defer_one"
+        assert second_adapter._reconciled is False
+
+        monkeypatch.setattr(coordinator, "cas_remove_job", original_remove)
+        second_adapter.ensure_local_started()
+
+        assert not client.hexists(coordinator.keys[0], "gone")
+        assert second_adapter.driver.reconciled_deployment() == "dpl_defer_two"
+        assert second_adapter._reconciled is True
     finally:
         client.delete(*keys)
 
