@@ -42,10 +42,17 @@ class SerializationError(RuntimeError):
     """A payload could not be encoded, or arrived in a format we cannot read."""
 
 
-def dehydrate(value: Any) -> bytes:
-    """Encode *value* as a ``devl``-prefixed devalue payload."""
+def dehydrate(value: Any, *, reducers: dict[str, Any] | None = None) -> bytes:
+    """Encode *value* as a ``devl``-prefixed devalue payload.
+
+    *reducers* replaces the default set, for a boundary whose consumer needs a
+    different shape than a payload's -- see :data:`.streams.CHUNK_REDUCERS`.
+    """
     try:
-        return DEVALUE_V1 + devalue.stringify(value, serde.REDUCERS).encode()
+        return (
+            DEVALUE_V1
+            + devalue.stringify(value, serde.REDUCERS if reducers is None else reducers).encode()
+        )
     except devalue.DevalueError as error:
         at = f" at {error.path}" if error.path else ""
         raise SerializationError(

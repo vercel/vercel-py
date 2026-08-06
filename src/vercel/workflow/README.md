@@ -99,7 +99,9 @@ workflow body take a handle and pass it into a step, here it cannot yet, so each
 step that streams calls `get_writable()` itself.
 
 Chunks are values, not just bytes: anything the payload format carries (see
-below) can be written, and a reader gets it back.
+below) can be written, and a reader gets it back. A `bytes` chunk arrives on the
+TypeScript side as a `Uint8Array`, so a consumer there can pipe the stream
+straight into a `Response`.
 
 Three things are worth knowing:
 
