@@ -12,6 +12,7 @@ from vercel._internal.workflow.runtime import (
     StepInfo,
     get_step_metadata,
     get_writable,
+    read_stream,
     start,
 )
 from vercel._internal.workflow.serde import register_serializable, serializable
@@ -41,6 +42,7 @@ __all__ = [
     "HookEvent",
     "get_step_metadata",
     "get_writable",
+    "read_stream",
     "WorkflowStreamWriter",
     "StepInfo",
     "serializable",

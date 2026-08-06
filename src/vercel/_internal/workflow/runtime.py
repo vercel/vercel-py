@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import functools
@@ -10,7 +11,7 @@ import re
 import sys
 import traceback
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
@@ -1199,6 +1200,95 @@ class Run:
 
             else:
                 await asyncio.sleep(1)
+
+    def readable(
+        self, *, namespace: str | None = None, start_index: int | None = None
+    ) -> AsyncGenerator[Any, None]:
+        """Read what the run's steps stream, as they stream it.
+
+        Yields one value per :meth:`~vercel.workflow.WorkflowStreamWriter.write`,
+        in write order, and ends when a step closes the stream. A run that never
+        closes its stream leaves this waiting until the run expires.
+
+        *start_index* skips that many chunks; a negative value reads that many
+        back from the end. Positive values resume exactly, which is what makes
+        this usable behind a reconnecting client -- hand back the index you last
+        saw and pass it in next time. A negative one cannot: it resolves against
+        wherever the tail was at connect time, so the read is single-shot and
+        will not survive a dropped connection.
+
+        A method rather than a property, because each call opens its own read:
+        iterating a property twice would quietly start a second one.
+        """
+
+        async def values() -> AsyncGenerator[Any, None]:
+            name = streams.workflow_run_stream_id(self._run_id, namespace)
+            frames = streams.reconnecting_frames(self._world, self._run_id, name, start_index)
+            async with contextlib.aclosing(frames):
+                index = start_index or 0
+                async for payload in frames:
+                    yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
+                    index += 1
+
+        return values()
+
+    def readable_bytes(
+        self, *, namespace: str | None = None, start_index: int | None = None
+    ) -> AsyncGenerator[bytes, None]:
+        """:meth:`readable`, for a stream of nothing but ``bytes``.
+
+        The shape an HTTP body wants, so a route can hand this straight to a
+        streaming response. A chunk that is not ``bytes`` is an error here
+        rather than something for the response layer to trip over.
+        """
+
+        async def data() -> AsyncGenerator[bytes, None]:
+            source = self.readable(namespace=namespace, start_index=start_index)
+            async with contextlib.aclosing(source):
+                async for value in source:
+                    if not isinstance(value, bytes | bytearray):
+                        raise ser.SerializationError(
+                            f"Stream chunk is {type(value).__name__}, not bytes; use "
+                            f"readable() for a stream of values"
+                        )
+                    yield bytes(value)
+
+        return data()
+
+    async def stream_info(self, *, namespace: str | None = None) -> w.StreamInfo:
+        """The stream's last chunk index and whether it has been closed.
+
+        ``tail_index`` is ``-1`` when nothing has been written yet, so a caller
+        deriving a start index from it has to handle that rather than treat it
+        as a position.
+        """
+        name = streams.workflow_run_stream_id(self._run_id, namespace)
+        return await self._world.streams_get_info(self._run_id, name)
+
+    async def list_streams(self) -> list[str]:
+        """Every stream this run has written to, namespaced ones included."""
+        return await self._world.streams_list(self._run_id)
+
+
+def read_stream(
+    run_id: str, name: str, *, start_index: int | None = None
+) -> AsyncGenerator[Any, None]:
+    """Read any stream of a run by name, for a stream :class:`Run` cannot name.
+
+    :meth:`Run.readable` covers the run's own streams; this is the way in when
+    the name came from :meth:`Run.list_streams` or from another SDK.
+    """
+
+    async def values() -> AsyncGenerator[Any, None]:
+        world = w.get_world()
+        frames = streams.reconnecting_frames(world, run_id, name, start_index)
+        async with contextlib.aclosing(frames):
+            index = start_index or 0
+            async for payload in frames:
+                yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
+                index += 1
+
+    return values()
 
 
 async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
