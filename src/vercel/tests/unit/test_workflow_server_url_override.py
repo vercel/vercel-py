@@ -1,13 +1,11 @@
 """Tests for the URL overrides VercelWorld reads, mirroring world-vercel's
 ``utils.ts``.
 
-Two independent knobs:
+Two independent knobs, one per hop:
 
-- the workflow-server override — the hard-coded ``WORKFLOW_SERVER_URL_OVERRIDE``
-  constant wins, then the ``VERCEL_WORKFLOW_SERVER_URL`` environment variable,
-  then the production default. Preview deployments carry the env var, so a
-  Python app has to honour it to reach the same workflow-server as its
-  TypeScript peers.
+- ``VERCEL_WORKFLOW_SERVER_URL``, the workflow-server itself. Preview
+  deployments carry it, so a Python app has to honour it to reach the same
+  workflow-server as its TypeScript peers.
 - ``WORKFLOW_VERCEL_BACKEND_URL``, which swaps the api.vercel.com proxy the
   world talks to when it has project config.
 """
@@ -19,14 +17,12 @@ import pytest
 from vercel._internal.workflow.worlds import vercel as vercel_mod
 
 BRANCH_URL = "https://workflow-server-git-branch.vercel.sh"
-PINNED_URL = "https://workflow-server-pinned.vercel.sh"
 BACKEND_URL = "https://api-vercel-git-branch.vercel.sh/v1/workflow"
 
 
 @pytest.fixture(autouse=True)
 def _clean_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Start every test from "no constant, no env var"."""
-    monkeypatch.setattr(vercel_mod, "WORKFLOW_SERVER_URL_OVERRIDE", "")
+    """Start every test from "neither variable set"."""
     monkeypatch.delenv("VERCEL_WORKFLOW_SERVER_URL", raising=False)
     monkeypatch.delenv("WORKFLOW_VERCEL_BACKEND_URL", raising=False)
 
@@ -55,15 +51,6 @@ def test_env_var_reaches_the_proxy_as_a_header(monkeypatch: pytest.MonkeyPatch) 
     # forwards to the workflow-server.
     assert world._base_url == "https://api.vercel.com/v1/workflow"
     assert world._headers["x-vercel-workflow-api-url"] == BRANCH_URL
-
-
-def test_hard_coded_constant_wins_over_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(vercel_mod, "WORKFLOW_SERVER_URL_OVERRIDE", PINNED_URL)
-    monkeypatch.setenv("VERCEL_WORKFLOW_SERVER_URL", BRANCH_URL)
-
-    world = vercel_mod.VercelWorld(token="tok")
-
-    assert world._base_url == f"{PINNED_URL}/api"
 
 
 def test_backend_url_swaps_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -17,25 +17,6 @@ from vercel.oidc.aio import get_vercel_oidc_token
 
 from .. import world as w
 
-# Hard-coded workflow-server URL override for testing.
-# Set this to test against a different workflow-server version, or leave it
-# empty and set VERCEL_WORKFLOW_SERVER_URL in the environment instead.
-# Empty and unset means production (uses default vercel-workflow.com).
-#
-# Example: 'https://workflow-server-git-branch-name.vercel.sh'
-#
-WORKFLOW_SERVER_URL_OVERRIDE = ""
-
-
-def _workflow_server_url_override() -> str:
-    """Resolve the workflow-server URL override, or "" for the default.
-
-    Mirrors world-vercel's precedence in utils.ts: the hard-coded constant
-    wins, then VERCEL_WORKFLOW_SERVER_URL.
-    """
-    return WORKFLOW_SERVER_URL_OVERRIDE or os.getenv("VERCEL_WORKFLOW_SERVER_URL", "")
-
-
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
 )  # 23 hours - leave 1h buffer before 24h retention limit
@@ -91,7 +72,11 @@ class VercelWorld(w.World):
     ) -> None:
         self._token = token
         self._queue_callbacks: list[Any] = []
-        server_url_override = _workflow_server_url_override()
+        # Points the world at a workflow-server other than production, e.g. a
+        # branch deployment. world-vercel also has an inline constant that
+        # wins over this; there is nothing here to rewrite one, so the
+        # environment is the only way in.
+        server_url_override = os.getenv("VERCEL_WORKFLOW_SERVER_URL", "")
 
         # utils.ts, getHttpUrl
         # Use proxy when we have project config (for authentication via Vercel API)
