@@ -13,7 +13,7 @@ import pydantic
 
 from vercel._internal.core.polyfills import Self
 
-from . import py_sandbox, world as w
+from . import py_sandbox, signature_codec, world as w
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -113,6 +113,7 @@ class Workflow(Generic[P, T]):
         self.qualname = func.__qualname__
         self.workflow_id = f"workflow//{self.module}//{self.qualname}"
         self._signature = inspect.signature(func)
+        self.codec = signature_codec.SignatureCodec(func, self._signature, self.qualname)
 
     def bind_arguments(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -132,6 +133,9 @@ class Step(Generic[P, T]):
         self.max_retries = max_retries
         self._signature = inspect.signature(func)
         functools.update_wrapper(self, func)
+        # After update_wrapper, which copies the wrapped function's __dict__
+        # over ours and would take a `codec` attribute with it.
+        self.codec = signature_codec.SignatureCodec(func, self._signature, func.__qualname__)
 
     def bind_arguments(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -269,6 +273,8 @@ class BaseHook:
         else:
             raise RuntimeError("cannot call resume() inside workflow")
 
+        # Hooks carry their payload themselves rather than through a signature,
+        # so they dump and validate here instead of through `signature_codec`.
         if isinstance(self, pydantic.BaseModel):
             payload = self.model_dump(**{"mode": "python", **kwargs})
         elif dataclasses.is_dataclass(self):
