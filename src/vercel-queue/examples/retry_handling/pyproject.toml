@@ -12,5 +12,5 @@ package = false
 [tool.uv.sources]
 vercel-queue = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-queue" }
 
-[tool.vercel]
-entrypoint = "api.process_job:app"
+[[tool.vercel.subscribers]]
+entrypoint = "main:process_job"

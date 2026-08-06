@@ -5,7 +5,6 @@ import dramatiq
 from vercel.integrations.dramatiq import install_vercel_dramatiq_integration
 
 install_vercel_dramatiq_integration(
-    consumer_group="api/dramatiq_worker.py",
     queue_name_prefix="dramatiq-vercel-dramatiq-example-chunks-",
 )
 
