@@ -790,6 +790,42 @@ def test_check_fragments_requires_changed_package_fragment(
     assert "Run `poe changelog`" in output
 
 
+def test_check_fragments_uses_environment_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str | None]] = []
+
+    def changed_paths(*, base: str, head: str | None) -> set[Path]:
+        seen.append((base, head))
+        return set()
+
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    monkeypatch.setattr(release, "parse_fragments", lambda _packages: [])
+    monkeypatch.setenv("WORKSPACE_POE_GIT_BASE", "stack-base")
+    monkeypatch.setenv("WORKSPACE_POE_GIT_COMMIT", "pushed-head")
+    monkeypatch.setattr(release, "_default_base_ref", lambda: pytest.fail("unexpected fallback"))
+    monkeypatch.setattr(release, "_changed_paths", changed_paths)
+
+    assert release.check_fragments() == 0
+    assert seen == [("stack-base", "pushed-head")]
+
+
+def test_check_fragments_explicit_base_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def changed_paths(*, base: str, head: str | None) -> set[Path]:
+        seen.append(base)
+        return set()
+
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    monkeypatch.setattr(release, "parse_fragments", lambda _packages: [])
+    monkeypatch.setenv("WORKSPACE_POE_GIT_BASE", "environment-base")
+    monkeypatch.setattr(release, "_changed_paths", changed_paths)
+
+    assert release.check_fragments(base="explicit-base") == 0
+    assert seen == ["explicit-base"]
+
+
 def test_check_fragments_exempts_release_prep_version_bumps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

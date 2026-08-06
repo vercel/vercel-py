@@ -207,6 +207,11 @@ Commit mode materializes `git archive` for `WORKSPACE_POE_GIT_COMMIT`, or
 hooks use this mode and set `WORKSPACE_POE_GIT_COMMIT` from Git's pre-push
 input so checks run against the commit tree being pushed.
 
+For stacked branches, the pre-push hook follows the local
+`branch.<name>.gh-merge-base` signal used by GitHub's tooling when available.
+Otherwise it falls back to `origin/main` or `origin/master`; CI uses the pull
+request's exact base commit and remains authoritative.
+
 The managed `pre-push.checks` hook invokes `uv run poe pre-push`, which runs
 news-fragment, lint, typecheck, and test checks concurrently through the
 Python/lograil runner.
