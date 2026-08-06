@@ -73,16 +73,15 @@ async def test_step_metadata_available_inside_step(tmp_path, monkeypatch) -> Non
         ),
     )
 
-    payload = w.StepInvokePayload(
-        workflowName="test-wf",
-        workflowRunId=run_id,
-        workflowStartedAt=0.0,
+    payload = w.WorkflowInvokePayload(
+        runId=run_id,
         stepId=step_id,
+        stepName=greet.name,
     )
-    await runtime.step_handler(
+    await runtime.workflow_handler(
         payload.model_dump(by_alias=True),
         attempt=1,
-        queue_name=f"__wkf_step_{greet.name}",
+        queue_name="__wkf_workflow_test-wf",
         message_id="msg_1",
         registry=registry,
     )

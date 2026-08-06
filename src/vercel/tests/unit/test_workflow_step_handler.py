@@ -1,10 +1,15 @@
-"""Tests for step_handler's start-first control flow and the too-early/terminal paths.
+"""Tests for the step path's start-first control flow and too-early/terminal paths.
 
-step_handler mirrors the upstream JS step-handler: it issues ``step_started``
-first and lets the world surface state as typed errors — ``TooEarlyError``
-(retryAfter not reached, HTTP 425) and ``EntityConflictError`` (terminal step,
-HTTP 409) — instead of pre-reading the step. A too-early step defers via a queue
-timeout; a terminal step re-enqueues the parent workflow and acks.
+Steps arrive on the workflow topic as a ``WorkflowInvokePayload`` carrying a
+``stepId``, and ``workflow_handler`` dispatches those to its step path instead
+of replaying. That path issues ``step_started`` first and lets the world surface
+state as typed errors — ``TooEarlyError`` (retryAfter not reached, HTTP 425) and
+``EntityConflictError`` (terminal step, HTTP 409) — instead of pre-reading the
+step. A too-early step defers via a queue timeout; a terminal step re-enqueues
+the parent workflow and acks.
+
+``FakeWorld.runs_get`` raises, which also pins down the dispatch order: the step
+path must be taken before the run is ever read.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
 
 
 class FakeWorld(w.World):
-    """In-memory world driving step_handler.
+    """In-memory world driving the handler's step path.
 
     ``step`` is the persisted step ``steps_get`` returns (the pre-read snapshot).
     ``step_started`` then raises ``start_error`` if set — modelling the step's
@@ -106,17 +111,19 @@ def registry() -> core.Workflows:
     return core.Workflows(as_vercel_job=False)
 
 
+WORKFLOW_QUEUE = f"__wkf_workflow_{WORKFLOW_NAME}"
+
+
 async def _invoke(registry: core.Workflows, step_name: str) -> w.QueueContinuation | None:
-    payload = w.StepInvokePayload(
-        workflowName=WORKFLOW_NAME,
-        workflowRunId=RUN_ID,
-        workflowStartedAt=0.0,
+    payload = w.WorkflowInvokePayload(
+        runId=RUN_ID,
         stepId=STEP_ID,
+        stepName=step_name,
     )
-    return await runtime.step_handler(
+    return await runtime.workflow_handler(
         payload.model_dump(by_alias=True),
         attempt=1,
-        queue_name=f"__wkf_step_{step_name}",
+        queue_name=WORKFLOW_QUEUE,
         message_id="msg_1",
         registry=registry,
     )
@@ -127,7 +134,7 @@ def _event_types(fake: FakeWorld) -> list[str]:
 
 
 def _workflow_enqueues(fake: FakeWorld) -> list[tuple[str, Any]]:
-    return [q for q in fake.queued if q[0] == f"__wkf_workflow_{WORKFLOW_NAME}"]
+    return [q for q in fake.queued if q[0] == WORKFLOW_QUEUE]
 
 
 async def test_too_early_defers_without_running(registry: core.Workflows) -> None:

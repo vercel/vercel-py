@@ -109,14 +109,12 @@ def _run_created_contexts(world: FakeWorld) -> list[dict[str, Any] | None]:
 
 
 def test_queue_names_default_to_unnamespaced_prefixes() -> None:
-    assert w.get_queue_topic_prefix("workflow") == "__wkf_workflow_"
-    assert w.get_queue_topic_prefix("step") == "__wkf_step_"
-    assert w.get_queue_name("workflow", "example") == "__wkf_workflow_example"
+    assert w.get_queue_topic_prefix() == "__wkf_workflow_"
+    assert w.get_queue_name("example") == "__wkf_workflow_example"
 
 
 def test_queue_names_accept_explicit_namespace() -> None:
-    assert w.get_queue_name("workflow", "example", "python2") == "__python2_wkf_workflow_example"
-    assert w.get_queue_name("step", "example", "python2") == "__python2_wkf_step_example"
+    assert w.get_queue_name("example", "python2") == "__python2_wkf_workflow_example"
 
 
 def test_physical_topic_keeps_the_wkf_prefix_intact() -> None:
@@ -126,7 +124,7 @@ def test_physical_topic_keeps_the_wkf_prefix_intact() -> None:
     # result outside the `__wkf_*` prefix that the builder's trigger pattern
     # and platform service resolution key on.
     assert w.get_physical_topic("__wkf_workflow_") == "__wkf_workflow_"
-    assert w.get_physical_topic("__python2_wkf_step_") == "__python2_wkf_step_"
+    assert w.get_physical_topic("__python2_wkf_workflow_") == "__python2_wkf_workflow_"
     assert (
         w.get_physical_topic(f"__wkf_workflow_{WORKFLOW_NAME}")
         == "__wkf_workflow_workflow--tests-example"
@@ -165,20 +163,14 @@ def test_registries_subscribe_to_distinct_namespaced_topics() -> None:
     core.Workflows(namespace="python1")
     core.Workflows(namespace="python2")
 
+    # One subscription per registry, not two: steps share the workflow topic.
     assert world.prefixes == [
         "__python1_wkf_workflow_",
-        "__python1_wkf_step_",
         "__python2_wkf_workflow_",
-        "__python2_wkf_step_",
     ]
 
 
-def test_step_queue_rejects_mismatched_namespace() -> None:
-    with pytest.raises(ValueError, match="expected prefix"):
-        runtime._step_name_from_queue("__wkf_step_step//tests.add", "python")
-
-
-async def test_step_handler_requeues_on_namespaced_workflow_topic() -> None:
+async def test_step_requeues_on_the_topic_it_arrived_on() -> None:
     world = FakeWorld(start_error=w.EntityConflictError("already finished"))
     w.set_world(world)
     registry = core.Workflows(namespace="python", as_vercel_job=False)
@@ -187,21 +179,23 @@ async def test_step_handler_requeues_on_namespaced_workflow_topic() -> None:
     async def add() -> None:
         pass
 
-    await runtime.step_handler(
-        w.StepInvokePayload(
-            workflowName=WORKFLOW_NAME,
-            workflowRunId=RUN_ID,
-            workflowStartedAt=0,
+    queue_name = f"__python_wkf_workflow_{WORKFLOW_NAME}"
+    await runtime.workflow_handler(
+        w.WorkflowInvokePayload(
+            runId=RUN_ID,
             stepId="step_test",
+            stepName=add.name,
         ).model_dump(by_alias=True),
         attempt=1,
-        queue_name=f"__python_wkf_step_{add.name}",
+        queue_name=queue_name,
         message_id="msg_test",
         registry=registry,
         namespace=registry.namespace,
     )
 
-    assert world.queued[0][0] == f"__python_wkf_workflow_{WORKFLOW_NAME}"
+    # The wake-up goes back to the namespaced topic the step came in on, which
+    # is how the namespace survives without being re-derived from the payload.
+    assert world.queued[0][0] == queue_name
 
 
 async def test_start_without_namespace_uses_unnamespaced_topic() -> None:
