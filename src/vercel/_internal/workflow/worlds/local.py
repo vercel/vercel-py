@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import contextlib
 import hashlib
@@ -8,7 +9,7 @@ import pathlib
 import tempfile
 import threading
 import traceback
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Any, TypeVar, cast
@@ -40,6 +41,67 @@ def is_step_terminal(status: str) -> bool:
 # Marker the TypeScript `world-local` package uses to smuggle binary payloads
 # through JSON. See its `jsonReplacer` / `jsonReviver`.
 UINT8ARRAY_TYPE_TAG = "Uint8Array"
+
+# A chunk file is its EOF flag byte followed by the payload. The flag is what
+# marks the end of a stream: `close()` appends a chunk carrying it and nothing
+# else, so a reader can tell "closed" from "nothing written yet" without a
+# separate metadata file to keep in sync.
+_EOF_MARKER = 1
+
+# How often a live reader re-lists a stream's directory. The writer may be in
+# another process -- `vercel dev` serving a run while a test tails it -- so the
+# filesystem is the only channel that always works.
+_POLL_INTERVAL_SECONDS = 0.1
+
+
+class RunStreams(w.BaseModel):
+    streams: list[str]
+
+
+def _read_chunk(path: pathlib.Path) -> tuple[bool, bytes]:
+    """A chunk file's EOF flag and payload.
+
+    A missing file reads as an empty non-EOF chunk: a live reader lists the
+    directory and then opens what it found, and a concurrent writer's atomic
+    replace can retire a name in between.
+    """
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return False, b""
+    if not raw:
+        return False, b""
+    return raw[0] == _EOF_MARKER, raw[1:]
+
+
+def _read_eof_flag(path: pathlib.Path) -> bool:
+    """Just a chunk's EOF flag, without reading its payload."""
+    try:
+        with path.open("rb") as f:
+            return f.read(1) == bytes([_EOF_MARKER])
+    except FileNotFoundError:
+        return False
+
+
+def _encode_chunks_cursor(index: int) -> str:
+    return base64.b64encode(json.dumps({"i": index}).encode()).decode("ascii")
+
+
+def _decode_chunks_cursor(cursor: str | None) -> int:
+    """The data-chunk index a cursor points at, or 0 for anything unreadable.
+
+    Matching the TS reader, which treats a corrupt cursor as "start over"
+    rather than an error -- a cursor is an opaque token a client round-trips,
+    and failing the whole read over a mangled one helps nobody.
+    """
+    if not cursor:
+        return 0
+    try:
+        decoded = json.loads(base64.b64decode(cursor))
+        index = decoded["i"]
+    except Exception:
+        return 0
+    return index if isinstance(index, int) and index >= 0 else 0
 
 
 def to_js_iso(value: datetime) -> str:
@@ -168,6 +230,24 @@ def write_json(path: pathlib.Path, data: w.BaseModel | dict, *, overwrite: bool 
         raise w.EntityConflictError(f"File already exists: {path}") from None
 
 
+class UnsafeEntityIdError(ValueError):
+    """An id that would not stay put inside the data directory."""
+
+    def __init__(self, kind: str, value: str) -> None:
+        super().__init__(f"unsafe {kind}: {value!r}")
+
+
+def assert_safe_entity_id(kind: str, value: str) -> None:
+    """Reject an id that cannot be used as a path segment.
+
+    Mirrors the TS ``assertSafeEntityId``. Stream names in particular arrive
+    from a namespace the caller chose and become a *directory* name, so this is
+    the check that keeps ``../`` out of the data directory.
+    """
+    if not value or value.startswith(".") or set(value) & {"/", "\\", "\0", "."}:
+        raise UnsafeEntityIdError(kind, value)
+
+
 def write_exclusive(path: pathlib.Path, data: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -260,6 +340,9 @@ class LocalWorld(w.World):
         # We certainly *could* do more fine-grained locking but I
         # don't think it would really help.
         self._run_locks: dict[str, threading.Lock] = {}
+        # `${run_id}:${stream_name}` already written to the run's stream
+        # registry. See `_register_stream`.
+        self._registered_streams: set[str] = set()
 
     def _run_lock(self, run_id: str) -> threading.Lock:
         # dict.setdefault is atomic, so concurrent callers for the same run_id
@@ -845,6 +928,189 @@ class LocalWorld(w.World):
             run=run,
             step=step,
         )
+
+    # ── streams ────────────────────────────────────────────────────────────
+    #
+    # One file per chunk, under a directory per stream. The directory matters:
+    # a live reader re-lists it every 100ms, and a single flat directory would
+    # make each of those listings proportional to every chunk in the whole data
+    # directory rather than to this one stream (vercel/workflow#2797).
+    #
+    # Chunk order is file name order. Names are monotonic ULIDs minted *before*
+    # the first await in each method, so ordering follows the order calls were
+    # made and not the order their writes happen to complete.
+
+    def _chunk_dir(self, name: str) -> pathlib.Path:
+        assert_safe_entity_id("streamName", name)
+        return self.data_dir / "streams" / "chunks" / name
+
+    def _run_streams_path(self, run_id: str) -> pathlib.Path:
+        assert_safe_entity_id("runId", run_id)
+        return self.data_dir / "streams" / "runs" / f"{run_id}.json"
+
+    def _chunk_files(self, name: str) -> list[pathlib.Path]:
+        """Every chunk file of a stream, in chunk order."""
+        try:
+            entries = [p for p in self._chunk_dir(name).iterdir() if p.suffix == ".bin"]
+        except FileNotFoundError:
+            return []
+        return sorted(entries, key=lambda p: p.name)
+
+    def _register_stream(self, run_id: str, name: str) -> None:
+        """Record that *run_id* owns *name*, so ``streams_list`` finds it.
+
+        Remembered per process, because this runs on every chunk: without the
+        cache a stream of ten thousand chunks would read and re-parse the
+        registry ten thousand times. Another process registering the same
+        stream is unaffected -- each registers its own on first write, and the
+        file write is idempotent in content.
+        """
+        assert_safe_entity_id("streamName", name)
+        cache_key = f"{run_id}:{name}"
+        if cache_key in self._registered_streams:
+            return
+        path = self._run_streams_path(run_id)
+        with self._run_lock(f"streams:{run_id}"):
+            existing = read_json(path, RunStreams)
+            names = existing.streams if existing else []
+            if name not in names:
+                names.append(name)
+                write_json(path, RunStreams(streams=names), overwrite=True)
+        self._registered_streams.add(cache_key)
+
+    def _append_chunk(
+        self, run_id: str, name: str, chunk_id: str, payload: bytes, *, eof: bool
+    ) -> None:
+        self._register_stream(run_id, name)
+        path = self._chunk_dir(name) / f"{chunk_id}.bin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, bytes([_EOF_MARKER if eof else 0]) + payload)
+
+    async def streams_write(self, run_id: str, name: str, chunk: bytes) -> None:
+        chunk_id = f"chnk_{self.monotonic_ulid(None)}"
+        self._append_chunk(run_id, name, chunk_id, chunk, eof=False)
+
+    async def streams_write_multi(self, run_id: str, name: str, chunks: Sequence[bytes]) -> None:
+        if not chunks:
+            return
+        chunk_ids = [f"chnk_{self.monotonic_ulid(None)}" for _ in chunks]
+        for chunk_id, chunk in zip(chunk_ids, chunks, strict=True):
+            self._append_chunk(run_id, name, chunk_id, chunk, eof=False)
+
+    async def streams_close(self, run_id: str, name: str) -> None:
+        chunk_id = f"chnk_{self.monotonic_ulid(None)}"
+        self._append_chunk(run_id, name, chunk_id, b"", eof=True)
+
+    async def streams_list(self, run_id: str) -> list[str]:
+        data = read_json(self._run_streams_path(run_id), RunStreams)
+        return data.streams if data else []
+
+    def streams_get(
+        self, run_id: str, name: str, start_index: int | None = None
+    ) -> AsyncIterator[bytes]:
+        return self._iter_stream(name, start_index)
+
+    async def _iter_stream(self, name: str, start_index: int | None) -> AsyncIterator[bytes]:
+        delivered: set[str] = set()
+        files = self._chunk_files(name)
+        start = self._resolve_start_index(files, start_index)
+
+        # Everything before the start position counts as delivered, so the poll
+        # below does not hand back what the caller asked to skip. An EOF marker
+        # in that skipped region means the stream ended before the caller's
+        # start index -- there is nothing left to wait for, and marking it
+        # delivered would leave the poll waiting for an end it had already
+        # passed. (`@workflow/world-local` marks it and hangs; a reader that
+        # overshoots a closed stream should come back empty, not never.)
+        for path in files[:start]:
+            if _read_eof_flag(path):
+                return
+            delivered.add(path.name)
+
+        for path in files[start:]:
+            delivered.add(path.name)
+            eof, payload = _read_chunk(path)
+            if eof:
+                return
+            if payload:
+                yield payload
+
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+            for path in self._chunk_files(name):
+                if path.name in delivered:
+                    continue
+                delivered.add(path.name)
+                eof, payload = _read_chunk(path)
+                if eof:
+                    return
+                if payload:
+                    yield payload
+
+    def _resolve_start_index(self, files: Sequence[pathlib.Path], start_index: int | None) -> int:
+        """Turn *start_index* into a position in *files*.
+
+        A negative index counts back from the end, over data chunks only -- the
+        trailing EOF marker is not a chunk anyone asked for.
+        """
+        if start_index is None:
+            return 0
+        if start_index >= 0:
+            return start_index
+        data_count = len(files)
+        if files and _read_eof_flag(files[-1]):
+            data_count -= 1
+        return max(0, data_count + start_index)
+
+    async def streams_get_chunks(
+        self, run_id: str, name: str, *, limit: int | None = None, cursor: str | None = None
+    ) -> w.StreamChunksPage:
+        page_size = 100 if limit is None else limit
+        start = _decode_chunks_cursor(cursor)
+
+        chunks: list[w.StreamChunk] = []
+        done = False
+        index = 0  # running count of data (non-EOF) chunks seen
+        for path in self._chunk_files(name):
+            if index < start:
+                # Before the cursor only the flag matters, so skip the payload.
+                if _read_eof_flag(path):
+                    done = True
+                    break
+                index += 1
+                continue
+            if len(chunks) >= page_size:
+                # Peek one past the page to answer has_more/done without
+                # reading another payload.
+                if _read_eof_flag(path):
+                    done = True
+                else:
+                    index += 1
+                break
+            eof, payload = _read_chunk(path)
+            if eof:
+                done = True
+                break
+            chunks.append(w.StreamChunk(index=index, data=payload))
+            index += 1
+
+        has_more = not done and index > start + len(chunks)
+        return w.StreamChunksPage(
+            data=chunks,
+            cursor=_encode_chunks_cursor(start + len(chunks)) if has_more else None,
+            hasMore=has_more,
+            done=done,
+        )
+
+    async def streams_get_info(self, run_id: str, name: str) -> w.StreamInfo:
+        data_count = 0
+        done = False
+        for path in self._chunk_files(name):
+            if _read_eof_flag(path):
+                done = True
+                break
+            data_count += 1
+        return w.StreamInfo(tailIndex=data_count - 1, done=done)
 
     async def events_list(
         self,

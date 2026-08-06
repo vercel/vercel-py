@@ -4,7 +4,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from typing import (
     Annotated,
@@ -677,6 +677,37 @@ class PaginatedResult(BaseModel, Generic[T]):
     has_more: bool = pydantic.Field(alias="hasMore")
 
 
+class StreamInfo(BaseModel):
+    """Lightweight metadata about a stream, without reading its payloads."""
+
+    tail_index: int = pydantic.Field(alias="tailIndex")
+    """Index of the last known chunk, 0-based, or ``-1`` when none was written.
+
+    Anything deriving a start index from this has to handle ``-1`` rather than
+    treating it as a position.
+    """
+
+    done: bool
+    """Whether the stream has been closed."""
+
+
+class StreamChunk(BaseModel):
+    index: int
+    data: bytes
+
+
+class StreamChunksPage(BaseModel):
+    """One page of already-written chunks -- a snapshot, not a live read."""
+
+    data: list[StreamChunk]
+    cursor: str | None = None
+    has_more: bool = pydantic.Field(default=False, alias="hasMore")
+    """Whether further pages of already-written chunks exist."""
+
+    done: bool = False
+    """Whether the stream is closed, so no more chunks will ever arrive."""
+
+
 class EventResult(BaseModel):
     event: Event | None = None
     events: list[Event] | None = None
@@ -904,6 +935,71 @@ class World(metaclass=abc.ABCMeta):
         *,
         pagination: PaginationOptions | None = None,
     ) -> PaginatedResult[Event]: ...
+
+    # ── streams ────────────────────────────────────────────────────────────
+    #
+    # A stream is an append-only, indexed log of opaque chunks scoped to a run.
+    # Unlike the entities above it lives outside the event log: chunks are not
+    # events and are not replayed, which is what lets a workflow stream output
+    # without growing its own history.
+
+    @abc.abstractmethod
+    async def streams_write(self, run_id: str, name: str, chunk: bytes) -> None:
+        """Append one chunk to a stream, creating it if needed."""
+        ...
+
+    async def streams_write_multi(self, run_id: str, name: str, chunks: Sequence[bytes]) -> None:
+        """Append several chunks in order, ideally in one round trip.
+
+        Concrete because a world that cannot batch is still correct without it:
+        chunk boundaries and indices come out the same either way, so the
+        default below only costs requests.
+        """
+        for chunk in chunks:
+            await self.streams_write(run_id, name, chunk)
+
+    @abc.abstractmethod
+    async def streams_close(self, run_id: str, name: str) -> None:
+        """Mark a stream complete, ending its readers.
+
+        Idempotent: closing a closed stream is not an error, which is what lets
+        a retried close be safe.
+        """
+        ...
+
+    @abc.abstractmethod
+    def streams_get(
+        self, run_id: str, name: str, start_index: int | None = None
+    ) -> AsyncIterator[bytes]:
+        """Read a stream live, waiting for chunks that have not arrived yet.
+
+        The iterator ends when the stream is closed, not when it runs out of
+        currently-available chunks -- for a snapshot use
+        :meth:`streams_get_chunks` instead.
+
+        *start_index* skips that many chunks from the start. A negative value
+        counts back from the current end (``-3`` starts three chunks before it),
+        clamped at 0. Callers who abandon the iterator early should close it
+        (``contextlib.aclosing``) so the underlying request or poll stops.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def streams_list(self, run_id: str) -> list[str]:
+        """The names of every stream this run has written to."""
+        ...
+
+    @abc.abstractmethod
+    async def streams_get_chunks(
+        self, run_id: str, name: str, *, limit: int | None = None, cursor: str | None = None
+    ) -> StreamChunksPage:
+        """One page of currently-available chunks, oldest first."""
+        ...
+
+    @abc.abstractmethod
+    async def streams_get_info(self, run_id: str, name: str) -> StreamInfo:
+        """A stream's tail index and closed flag, without reading payloads."""
+        ...
 
 
 the_world: World | None = None
