@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import dramatiq
+from dramatiq.results import Results
 
-from vercel.integrations.dramatiq import install_vercel_dramatiq_integration
+from vercel.integrations.dramatiq import VercelQueueBroker, VercelRuntimeCacheBackend
 
-install_vercel_dramatiq_integration(
-    queue_name_prefix="dramatiq-vercel-dramatiq-example-chunks-",
-)
+# Construct the broker explicitly: dramatiq.set_broker() always takes effect,
+# and the broker options are visible right here.
+broker = VercelQueueBroker(queue_name_prefix="dramatiq-vercel-dramatiq-example-chunks-")
+broker.add_middleware(Results(backend=VercelRuntimeCacheBackend()))
+dramatiq.set_broker(broker)
 
 
 @dramatiq.actor(store_results=True)

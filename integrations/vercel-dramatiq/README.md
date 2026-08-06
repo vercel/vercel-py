@@ -3,36 +3,48 @@
 Dramatiq broker backed by Vercel Queue Service.
 
 ```python
+# tasks.py
 import dramatiq
 
-from vercel.integrations.dramatiq import install_vercel_dramatiq_integration
+from vercel.integrations.dramatiq import VercelQueueBroker
 
-install_vercel_dramatiq_integration()
+broker = VercelQueueBroker()
+dramatiq.set_broker(broker)
 
 
 @dramatiq.actor
 def send_email(user_id: str) -> None: ...
 ```
 
-The installer sets Dramatiq's global broker to `VercelQueueBroker` when no
-broker has been configured yet. Pass `set_default_broker=False` to opt out, or
-call `dramatiq.set_broker(VercelQueueBroker(...))` directly when you need to
-construct the broker yourself.
+Constructing the broker explicitly is the recommended pattern: it always takes
+effect and the broker options are visible at the construction site. To store
+actor results in Vercel Runtime Cache, add the results middleware:
+
+```python
+from dramatiq.results import Results
+
+from vercel.integrations.dramatiq import VercelRuntimeCacheBackend
+
+broker.add_middleware(Results(backend=VercelRuntimeCacheBackend()))
+```
+
+Alternatively, `install_vercel_dramatiq_integration()` sets Dramatiq's global
+broker to a default `VercelQueueBroker` with the results middleware when no
+broker has been configured yet. Note that this is a no-op once a global broker
+exists, so broker options passed to the installer do not apply in environments
+that install the integration first (Vercel functions do).
 
 The broker uses push delivery when `VERCEL` is truthy in the environment and
 poll delivery otherwise. Pass `poll=False` or `poll=True` to
-`install_vercel_dramatiq_integration(...)` to force a mode, or pass the same
-option to `VercelQueueBroker(...)` when constructing the broker yourself.
+`VercelQueueBroker(...)` to force a mode.
 
 For Vercel push delivery, declare a module that exposes the broker as a queue
 subscriber in `pyproject.toml`:
 
 ```python
 # worker.py
-import dramatiq
-import tasks  # noqa: F401  (importing tasks declares the actors' queues)
-
-broker = dramatiq.get_broker()
+# Importing tasks declares the actors' queues on the broker.
+from tasks import broker
 
 __all__ = ["broker"]
 ```
