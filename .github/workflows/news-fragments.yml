@@ -23,6 +23,9 @@ jobs:
         with:
           enable-cache: false
 
+      - name: Bootstrap lockfile
+        run: uv lock
+
       - name: Check news fragments
         run: uv run --locked poe check-news-fragments
         env:

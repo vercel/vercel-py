@@ -9,6 +9,11 @@ workspace dependency cascades.
 Package discovery and release/build ordering come from `uv` workspace metadata,
 not from a hard-coded package list.
 
+The workspace metadata and bundle vendoring commands use the locally generated
+`uv.lock`. Run `uv sync` or `uv lock` before release work in a fresh checkout.
+The lockfile is environment- and registry-specific, is intentionally ignored by
+Git, and is never committed.
+
 Useful commands:
 
 ```sh
@@ -68,7 +73,7 @@ uv run poe release
 - updates package `version.py` files
 - prepends per-package `CHANGELOG.md` entries
 - removes consumed news fragments
-- runs `uv lock`
+- runs `uv lock` to refresh the local, ephemeral resolution
 - stages the release diff
 - opens `git commit -v` with a prepopulated `Release Packages` commit message
 - pushes the current branch

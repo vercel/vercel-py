@@ -82,6 +82,9 @@ poetry.lock
 pdm.lock
 .pdm.toml
 
+# uv
+uv.lock
+
 # Hatch
 .hatch/
 

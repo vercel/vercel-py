@@ -9,6 +9,11 @@ uv sync
 uv run poe setup
 ```
 
+`uv sync` creates the local `uv.lock` used by locked workspace commands. The
+lockfile is environment- and registry-specific, is intentionally ignored by
+Git, and must never be committed. Run `uv sync` or `uv lock` again in a fresh
+checkout before using commands that require a lockfile.
+
 `uv run poe setup` runs `uv run poe sync-githooks`, which registers repo-local
 Git hook config for scripts named `scripts/githooks/<event>.<name>.<ext>`. Each
 hook is installed as `hook.<event>-<name>` and marked as managed by this repo;

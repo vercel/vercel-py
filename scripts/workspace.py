@@ -46,6 +46,11 @@ def workspace_list(*, paths: bool = False) -> list[str]:
 
 
 def workspace_metadata(*, locked: bool = True) -> dict[str, Any]:
+    """Return workspace metadata, using the local lockfile by default.
+
+    A fresh checkout must run ``uv sync`` or ``uv lock`` before using the
+    default locked mode.
+    """
     args = ["workspace", "metadata"]
     if locked:
         args.append("--locked")
