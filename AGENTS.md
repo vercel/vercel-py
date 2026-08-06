@@ -55,6 +55,14 @@ include = "../../scripts/poe/poe.toml"
 verbosity = -1
 ```
 
+# News Fragments
+
+- Before opening a pull request or handing work back to the user, run
+  `uv run poe check-news-fragments`.
+- If the check reports missing fragments, add them with `uv run poe changelog`
+  or explicitly tell the user that the pull request requires them to pass CI.
+  Do not silently hand off package-code changes without the required fragments.
+
 # Commit Message Guidance
 
 - Keep commit messages short and specific.
