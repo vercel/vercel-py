@@ -208,7 +208,32 @@ dashboard, and `workflow inspect stream <id> --run=<run-id>`.
 Workflow inputs, step results and hook payloads travel in the devalue format
 `@workflow/core` uses, which carries `datetime`, `bytes`, `set` and repeated
 references natively. `Decimal`, `UUID`, `date`, `time`, `timedelta` and `Path`
-are registered on top of that; anything else needs a registration:
+are registered on top of that.
+
+Pydantic models and dataclasses will be automatically serialized and
+validated using Pydantic.
+
+```python
+class Order(pydantic.BaseModel):
+    sku: str
+    quantity: int
+
+
+@app.step
+async def fulfil(order: Order) -> Receipt:
+    ...
+
+
+@app.step
+async def fulfil_many(orders: list[Order] | None) -> None:
+    ...
+```
+
+A value that does not match its annotation raises
+`TypeValidationError`, which is a fatal error for a step.
+
+Classes other than models and dataclasses can have custom serializers
+written for them:
 
 ```python
 import enum

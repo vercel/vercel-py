@@ -248,7 +248,7 @@ class TestRunApi:
         world = ReplayWorld(["logged"])
         w.set_world(world)
 
-        run = runtime.Run(RUN_ID)
+        run = runtime.Run[Any](RUN_ID)
         async with contextlib.aclosing(run.readable(namespace="logs")) as chunks:
             assert [c async for c in chunks] == ["logged"]
 
@@ -285,7 +285,7 @@ class TestRunApi:
                 return [NAME]
 
         w.set_world(Meta([]))
-        run = runtime.Run(RUN_ID)
+        run = runtime.Run[Any](RUN_ID)
 
         assert await run.stream_info() == w.StreamInfo(tailIndex=4, done=True)
         assert await run.list_streams() == [NAME]

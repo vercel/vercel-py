@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
+import pydantic
 import pytest
 import respx
 
@@ -27,13 +28,18 @@ from vercel.workflow._internal import core, runtime, serialization as ser, world
 
 from ..world_stubs import NoStreams
 
+
+class Order(pydantic.BaseModel):
+    sku: str
+
+
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 RUN_ID = "wrun_test"
 STEP_ID = "step_test"
 WORKFLOW_NAME = "workflow//tests.wf"
 
 
-def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
+def _running_step(step_name: str, *, attempt: int, input: bytes | None = None) -> w.WorkflowStep:
     return w.NonFinalWorkflowStep(
         runId=RUN_ID,
         stepId=STEP_ID,
@@ -43,7 +49,7 @@ def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
         createdAt=NOW,
         updatedAt=NOW,
         startedAt=NOW,
-        input=ser.dehydrate(ser.step_arguments((), {})),
+        input=input if input is not None else ser.dehydrate(ser.step_arguments((), {})),
     )
 
 
@@ -296,6 +302,35 @@ async def test_a_fatal_failure_gives_up_on_the_first_attempt(registry: core.Work
     assert failed.event_data.error == (
         f"Step '{my_step.name}' failed: vercel.workflow._internal.errors.FatalError: card declined"
     )
+
+
+async def test_input_that_does_not_match_the_annotation_is_fatal(
+    registry: core.Workflows,
+) -> None:
+    """The recorded bytes are what did not match, and a retry replays them."""
+    ran = False
+
+    @registry.step
+    async def my_step(order: Order) -> str:
+        nonlocal ran
+        ran = True
+        return "ok"
+
+    fake = FakeWorld(
+        started_step=_running_step(
+            my_step.name,
+            attempt=1,
+            input=ser.dehydrate(ser.step_arguments((), {"order": {"nope": 1}})),
+        )
+    )
+    w.set_world(fake)
+
+    result = await _invoke(registry, my_step.name)
+
+    assert result is None
+    assert ran is False
+    assert _event_types(fake) == ["step_failed"]
+    assert "does not match" in fake.events[0].event_data.error
 
 
 async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) -> None:

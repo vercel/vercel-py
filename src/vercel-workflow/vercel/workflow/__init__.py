@@ -36,6 +36,7 @@ from .errors import (
     SerializationError,
     ThrottleError,
     TooEarlyError,
+    TypeValidationError,
     WorkflowWorldError,
 )
 from .sandbox import SandboxPolicy
@@ -73,6 +74,7 @@ __all__ = [
     "SerializationError",
     "ThrottleError",
     "TooEarlyError",
+    "TypeValidationError",
     "WorkflowWorldError",
     "sandbox",
     "SandboxPolicy",
