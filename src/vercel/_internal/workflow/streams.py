@@ -22,11 +22,16 @@ frame boundaries without understanding the payload format at all.
 
 from __future__ import annotations
 
+import asyncio
 import base64
-from collections.abc import Iterator
-from typing import Any
+import os
+from collections.abc import AsyncIterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Any
 
 from . import serialization as ser
+
+if TYPE_CHECKING:
+    from . import world as w
 
 FRAME_HEADER_SIZE = 4
 """Bytes of big-endian length prefix in front of every frame."""
@@ -38,6 +43,23 @@ A length header advertising more than this is refused rather than allocated:
 past a certain size the far more likely explanation is a misframed wire than a
 100 MB chunk.
 """
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a positive-integer knob, falling back to *default* when unusable.
+
+    Mirrors `@workflow/world`'s ``envNumber``: an unset, non-numeric or
+    out-of-range value is ignored rather than fatal, since these are
+    operational overrides and a typo should not take a deployment down.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else default
 
 
 def workflow_run_stream_id(run_id: str, namespace: str | None = None) -> str:
@@ -115,3 +137,265 @@ class FrameDecoder:
                 f"Stream ended with {len(self._buffer)} bytes of incomplete frame data; "
                 f"it was truncated mid-frame"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# writer
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Ported from `@workflow/core`'s `WorkflowServerWritableStream`, whose shape is
+# not obvious and is worth restating.
+#
+# `write()` returns once the chunk is *buffered*, not once it is durable. That
+# early acknowledgement is what makes batching work at all: the producer keeps
+# handing over chunks while a request is in flight, so they accumulate and the
+# next request carries the whole group. If `write()` waited for the server, a
+# producer writing in a loop would serialize into one request per chunk.
+#
+# Durability gets its own barrier, `drain()`, which the step handler awaits
+# before recording the step as complete -- so "the step finished" still implies
+# "its chunks are durable", and a caller who needs that guarantee mid-step can
+# ask for it.
+
+MAX_INFLIGHT_CHUNKS = 1000
+"""Chunks that may sit buffered-but-not-durable before ``write()`` blocks."""
+
+MAX_BUFFERED_BYTES = 8 * 1024 * 1024
+"""Byte-denominated counterpart of :data:`MAX_INFLIGHT_CHUNKS`.
+
+Count alone is not a bound: 1,000 small chunks are ~100 KB, 1,000 file-sized
+ones are hundreds of MB.
+"""
+
+MAX_CHUNKS_PER_BATCH = 1000
+"""Chunks in one write request, matching the server's per-batch cap."""
+
+MAX_BYTES_PER_BATCH = 1024 * 1024
+"""Cumulative bytes in one write request, under platform body limits."""
+
+
+class WorkflowStreamWriter:
+    """A group-committing writer for one ``(run_id, name)`` stream.
+
+    Not safe to use from more than one event loop; within one loop, concurrent
+    writers are fine and their chunks land in call order.
+    """
+
+    def __init__(self, world: w.World, run_id: str, name: str) -> None:
+        if not name:
+            raise ValueError(f'"name" is required, got {name!r}')
+        self._world = world
+        self._run_id = run_id
+        self._name = name
+
+        self._buffer: list[bytes] = []
+        self._buffered_bytes = 0
+        # Counted against the buffer bound as well, so the bound keeps its
+        # documented meaning -- a cap on everything read but not yet durable,
+        # not just on the queued follow-up group.
+        self._inflight_chunks = 0
+        self._inflight_bytes = 0
+        self._dispatch: asyncio.Task[None] | None = None
+        # Sticky: once a request fails, its group stays at the head of the
+        # buffer and every later call raises the original error. Chunks whose
+        # `write()` already returned surface their failure at the barrier --
+        # that is the contract of an early-acknowledging sink.
+        self._sink_error: BaseException | None = None
+        self._closed = False
+        self._condition = asyncio.Condition()
+
+        self._max_inflight_chunks = _env_int(
+            "WORKFLOW_STREAM_MAX_INFLIGHT_CHUNKS", MAX_INFLIGHT_CHUNKS
+        )
+        self._max_buffered_bytes = _env_int(
+            "WORKFLOW_STREAM_MAX_BUFFERED_BYTES", MAX_BUFFERED_BYTES
+        )
+        self._max_chunks_per_batch = _env_int(
+            "WORKFLOW_STREAM_MAX_CHUNKS_PER_BATCH", MAX_CHUNKS_PER_BATCH
+        )
+        self._max_bytes_per_batch = _env_int(
+            "WORKFLOW_STREAM_MAX_BYTES_PER_BATCH", MAX_BYTES_PER_BATCH
+        )
+
+    @property
+    def name(self) -> str:
+        """The stream this writer appends to."""
+        return self._name
+
+    @property
+    def run_id(self) -> str:
+        """The run that owns the stream."""
+        return self._run_id
+
+    async def write(self, value: Any) -> None:
+        """Append *value* as one chunk.
+
+        Returns once the chunk is buffered and ordered, which is not yet
+        durable; await :meth:`drain` or :meth:`close` for that. Blocks while
+        the buffer is full, so a fast producer cannot grow it without bound.
+        """
+        await self._enqueue(encode_value(value))
+
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        """Append every item *source* yields, in order.
+
+        The counterpart of piping a stream into this one: a step forwarding an
+        upstream async iterator (LLM tokens, an HTTP body) wants this rather
+        than a hand-rolled loop, and it keeps the group-commit buffer fed
+        without the caller thinking about batching.
+        """
+        async for value in source:
+            await self.write(value)
+
+    async def _enqueue(self, frame: bytes) -> None:
+        async with self._condition:
+            self._raise_if_unusable()
+            while self._at_capacity():
+                await self._condition.wait()
+                self._raise_if_unusable()
+            self._buffer.append(frame)
+            self._buffered_bytes += len(frame)
+            self._start_dispatch()
+
+    def _raise_if_unusable(self) -> None:
+        if self._sink_error is not None:
+            raise self._sink_error
+        if self._closed:
+            raise ser.SerializationError(f"Stream {self._name!r} is closed")
+
+    def _at_capacity(self) -> bool:
+        chunks = len(self._buffer) + self._inflight_chunks
+        octets = self._buffered_bytes + self._inflight_bytes
+        # A single chunk over the byte bound would deadlock against it, so an
+        # empty buffer always accepts one.
+        if chunks == 0:
+            return False
+        return chunks >= self._max_inflight_chunks or octets >= self._max_buffered_bytes
+
+    def _start_dispatch(self) -> None:
+        """Start the dispatch loop unless one is already running.
+
+        Exactly one runs at a time, which is what keeps groups reaching the
+        server in write order. Called with the condition held.
+        """
+        if self._dispatch is None and self._sink_error is None and self._buffer:
+            self._dispatch = asyncio.ensure_future(self._dispatch_loop())
+
+    def _take_group(self) -> tuple[list[bytes], int]:
+        """The largest leading group that fits one request.
+
+        A single chunk larger than the byte cap still goes out alone -- the
+        alternative is refusing to send it at all.
+        """
+        count = 0
+        octets = 0
+        for frame in self._buffer:
+            if count >= self._max_chunks_per_batch:
+                break
+            if count > 0 and octets + len(frame) > self._max_bytes_per_batch:
+                break
+            count += 1
+            octets += len(frame)
+        group = self._buffer[:count]
+        del self._buffer[:count]
+        self._buffered_bytes -= octets
+        return group, octets
+
+    async def _dispatch_loop(self) -> None:
+        try:
+            while True:
+                async with self._condition:
+                    if not self._buffer:
+                        self._dispatch = None
+                        # Nothing buffered and nothing in flight: the
+                        # durability barrier is satisfied.
+                        self._condition.notify_all()
+                        return
+                    group, octets = self._take_group()
+                    self._inflight_chunks = len(group)
+                    self._inflight_bytes = octets
+
+                try:
+                    await self._send(group)
+                except BaseException as error:
+                    cancelled = isinstance(error, asyncio.CancelledError)
+                    async with self._condition:
+                        # The group did not land, so it goes back at the head
+                        # either way: the buffer holds everything not known to
+                        # be durable, and dropping it here would lose chunks
+                        # whose `write()` had already returned.
+                        self._buffer[:0] = group
+                        self._buffered_bytes += octets
+                        self._inflight_chunks = 0
+                        self._inflight_bytes = 0
+                        self._dispatch = None
+                        # Cancellation is this task being torn down, not the
+                        # stream failing. Recording it as the sink error would
+                        # make a later `write()` raise `CancelledError` inside
+                        # a caller that was never cancelled.
+                        if not cancelled:
+                            self._sink_error = error
+                        self._condition.notify_all()
+                    if cancelled:
+                        raise
+                    return
+
+                async with self._condition:
+                    self._inflight_chunks = 0
+                    self._inflight_bytes = 0
+                    # This group is durable: release writers blocked on the
+                    # bound. They re-check it and may block again.
+                    self._condition.notify_all()
+        except BaseException as error:
+            # Cancellation, or a bug in the loop itself. Either way no one is
+            # driving this buffer any more, so waiters have to be released --
+            # and for anything that is not cancellation the sink is poisoned
+            # too, because `drain()` would otherwise see an idle buffer, start
+            # a fresh loop, and hit the same bug forever.
+            async with self._condition:
+                self._dispatch = None
+                if not isinstance(error, asyncio.CancelledError):
+                    self._sink_error = error
+                self._condition.notify_all()
+            raise
+
+    async def _send(self, group: Sequence[bytes]) -> None:
+        if len(group) == 1:
+            await self._world.streams_write(self._run_id, self._name, group[0])
+        else:
+            await self._world.streams_write_multi(self._run_id, self._name, group)
+
+    async def drain(self) -> None:
+        """Wait until every accepted chunk is durably written.
+
+        Raises the sink's error if any request failed -- including one whose
+        ``write()`` had already returned.
+        """
+        async with self._condition:
+            while True:
+                if self._sink_error is not None:
+                    raise self._sink_error
+                if not self._buffer and self._inflight_chunks == 0 and self._dispatch is None:
+                    return
+                self._start_dispatch()
+                await self._condition.wait()
+
+    async def close(self) -> None:
+        """Drain, then mark the stream complete so readers see the end.
+
+        Idempotent. Nothing closes a run's stream implicitly -- not the end of
+        a step, not the end of the run -- so a stream a workflow never closes
+        leaves its readers waiting until the run expires.
+        """
+        if self._closed and self._sink_error is None:
+            return
+        await self.drain()
+        await self._world.streams_close(self._run_id, self._name)
+        self._closed = True
+
+    async def __aenter__(self) -> WorkflowStreamWriter:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if exc_type is None:
+            await self.close()
