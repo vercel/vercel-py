@@ -340,7 +340,7 @@ class SchedulerAdapter:
         *,
         idle_timeout_seconds: int | None = None,
         takeover_allowed: bool = False,
-    ) -> None:
+    ) -> bool:
         """Activate on request activity without overriding an explicit pause.
 
         ``takeover_allowed`` is true only when the triggering request arrived
@@ -348,6 +348,10 @@ class SchedulerAdapter:
         currently promoted deployment. Traffic to a deployment's own URL
         proves nothing about promotion, so it may drive an owned chain but
         never adopt someone else's.
+
+        Returns whether this deployment is settled: it drives the chain (an
+        explicit pause counts), so periodic sweeps suffice. False means a
+        takeover is still owed to a future alias-routed request.
         """
         self._lifecycle_called = True
         self.ensure_local_started()
@@ -358,15 +362,16 @@ class SchedulerAdapter:
             takeover_allowed=takeover_allowed,
         )
         if not decision.owned:
-            return
+            return False
         self._reconcile_takeover(now)
         if decision.state != "running":
             self._pause_local()
-            return
+            return True
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
+        return True
 
     def pause(self) -> None:
         """Durably fence the current generation."""

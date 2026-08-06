@@ -353,7 +353,11 @@ preview activates the same way and remains active only while requests renew
 its deadline.
 
 Automatic takeover is traffic-driven: it happens on the first request the
-promoted deployment serves through an environment alias. After promoting or
+promoted deployment serves through an environment alias, regardless of what
+arrived before it. Requests through the deployment's own URL neither take
+over nor delay it: while another deployment owns the chain, the activation
+hook stays eligible on every invocation and touches Redis only for an
+alias-routed request or a lapsed sweep interval. After promoting or
 rolling back a deployment that receives no organic traffic, send one request
 through the environment's domain (or schedule a cron heartbeat) so the chain
 hands over promptly. Alias routing is judged by the request host, so do not
