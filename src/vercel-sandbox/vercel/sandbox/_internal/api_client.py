@@ -130,11 +130,8 @@ class _ApiRequestModel(_ApiModel):
         return cast(JSONObject, self.model_dump(by_alias=True, exclude_none=True))
 
 
-class _CreateSandboxRequest(_ApiRequestModel):
-    project_id: str = Field(serialization_alias="projectId")
+class _SandboxCreationOverridesRequest(_ApiRequestModel):
     name: str | None = None
-    image: str | None = None
-    source: SandboxSource | None = None
     ports: list[int] | None = None
     timeout: timedelta | None = None
     resources: SandboxResources | None = None
@@ -171,6 +168,16 @@ class _CreateSandboxRequest(_ApiRequestModel):
         if value is None or isinstance(value, NetworkPolicy):
             return value
         raise TypeError("network_policy must be a NetworkPolicy")
+
+
+class _CreateSandboxRequest(_SandboxCreationOverridesRequest):
+    project_id: str = Field(serialization_alias="projectId")
+    image: str | None = None
+    source: SandboxSource | None = None
+
+
+class _ForkSandboxRequest(_SandboxCreationOverridesRequest):
+    image: str | None = None
 
 
 class _UpdateSandboxRequest(_ApiRequestModel):
@@ -934,6 +941,46 @@ class SandboxApiClient:
         )
         data = await self._request_json(
             "POST", "v3/sandboxes", credentials=credentials, body=request.to_api_dict()
+        )
+        return _validate_response(_SandboxResponse, data).to_sandbox()
+
+    async def fork_sandbox(
+        self,
+        *,
+        source_sandbox: str,
+        project_id: str | None = None,
+        name: str | None = None,
+        ports: list[int] | None = None,
+        execution_time_limit: timedelta | None = None,
+        resources: SandboxResources | None = None,
+        image: str | None = None,
+        persistent: bool | None = None,
+        network_policy: NetworkPolicy | None = None,
+        env: Mapping[str, str] | None = None,
+        tags: Mapping[str, str] | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
+        snapshot_retention: SnapshotRetention | None = None,
+    ) -> SandboxState:
+        credentials = await self._credentials_factory()
+        request = _ForkSandboxRequest(
+            name=name,
+            ports=ports,
+            timeout=execution_time_limit,
+            resources=resources,
+            image=image,
+            persistent=persistent,
+            network_policy=network_policy,
+            env=dict(env) if env is not None else None,
+            tags=dict(tags) if tags is not None else None,
+            snapshot_expiration=snapshot_expiration,
+            keep_last_snapshots=snapshot_retention,
+        )
+        data = await self._request_json(
+            "POST",
+            format_url_path("v2/sandboxes/{source_sandbox}/fork", source_sandbox=source_sandbox),
+            credentials=credentials,
+            params={"projectId": project_id or credentials.project_id},
+            body=request.to_api_dict(),
         )
         return _validate_response(_SandboxResponse, data).to_sandbox()
 

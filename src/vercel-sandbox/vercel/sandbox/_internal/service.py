@@ -283,6 +283,41 @@ class SandboxService:
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
 
+    async def fork_sandbox(
+        self,
+        *,
+        source_sandbox: str,
+        project_id: str | None = None,
+        name: str | None = None,
+        ports: list[int] | None = None,
+        execution_time_limit: timedelta | None = None,
+        resources: SandboxResources | None = None,
+        image: str | None = None,
+        persistent: bool | None = None,
+        network_policy: NetworkPolicy | None = None,
+        env: Mapping[str, str] | None = None,
+        tags: Mapping[str, str] | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
+        snapshot_retention: SnapshotRetention | None = None,
+    ) -> SandboxState:
+        self._ensure_open()
+        sandbox = await self._api_client.fork_sandbox(
+            source_sandbox=source_sandbox,
+            project_id=project_id,
+            name=name,
+            ports=ports,
+            execution_time_limit=execution_time_limit,
+            resources=resources,
+            image=image,
+            persistent=persistent,
+            network_policy=network_policy,
+            env=env,
+            tags=tags,
+            snapshot_expiration=snapshot_expiration,
+            snapshot_retention=snapshot_retention,
+        )
+        return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
+
     async def get_sandbox(
         self,
         *,
