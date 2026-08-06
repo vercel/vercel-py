@@ -16,7 +16,11 @@ from vercel._internal.workflow.runtime import (
     start,
 )
 from vercel._internal.workflow.serde import register_serializable, serializable
-from vercel._internal.workflow.streams import WorkflowStreamWriter
+from vercel._internal.workflow.streams import (
+    WorkflowStreamHandle,
+    WorkflowStreamWriter,
+    WorkflowWritable,
+)
 
 from . import sandbox
 from .errors import (
@@ -43,7 +47,9 @@ __all__ = [
     "get_step_metadata",
     "get_writable",
     "read_stream",
+    "WorkflowWritable",
     "WorkflowStreamWriter",
+    "WorkflowStreamHandle",
     "StepInfo",
     "serializable",
     "register_serializable",

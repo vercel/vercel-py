@@ -94,9 +94,23 @@ async def analyze(*, document: str) -> str:
     return summary
 ```
 
-`get_writable()` works inside a step only. Where the TypeScript SDK lets a
-workflow body take a handle and pass it into a step, here it cannot yet, so each
-step that streams calls `get_writable()` itself.
+A workflow body can call `get_writable()` too and pass the result to its steps,
+which take it as a `WorkflowWritable` and write to it:
+
+```python
+@app.step
+async def summarize(*, document: str, out: WorkflowWritable) -> str:
+    await out.write("starting")
+    ...
+
+
+@app.workflow
+async def analyze(*, document: str) -> str:
+    out = get_writable()
+    return await summarize(document=document, out=out)
+```
+
+Only a step can write. Calling `write()` on what the workflow body holds raises.
 
 Chunks are values, not just bytes: anything the payload format carries (see
 below) can be written, and a reader gets it back. A `bytes` chunk arrives on the

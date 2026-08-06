@@ -32,9 +32,10 @@ class FakeWorld(NoStreams, w.World):
     a chunk landing and the step being recorded complete.
     """
 
-    def __init__(self, *, fail_writes: bool = False) -> None:
+    def __init__(self, *, fail_writes: bool = False, step_input: bytes | None = None) -> None:
         self.log: list[tuple[str, Any]] = []
         self.fail_writes = fail_writes
+        self.step_input = step_input or ser.dehydrate(ser.step_arguments((), {}))
 
     async def get_deployment_id(self) -> str:
         return ""
@@ -71,7 +72,7 @@ class FakeWorld(NoStreams, w.World):
                     createdAt=NOW,
                     updatedAt=NOW,
                     startedAt=NOW,
-                    input=ser.dehydrate(ser.step_arguments((), {})),
+                    input=self.step_input,
                 )
             )
         self.log.append((data.event_type, data))
@@ -178,7 +179,7 @@ async def test_two_calls_in_one_step_share_a_writer(registry) -> None:
     stream, and two buffers flushing independently interleave by whichever
     request wins -- scrambling the order the step wrote in.
     """
-    seen: list[streams.WorkflowStreamWriter] = []
+    seen: list[streams.WorkflowWritable] = []
 
     @registry.step
     async def emit() -> None:
@@ -277,19 +278,115 @@ async def test_a_failing_step_still_flushes_what_it_wrote(registry) -> None:
     assert _chunk_values(fake) == ["got this far"]
 
 
-async def test_get_writable_outside_a_step_is_refused() -> None:
-    # Including inside a workflow body: it replays, and its sandbox has no
-    # network access.
-    with pytest.raises(RuntimeError, match="can only be called inside a step"):
+async def test_get_writable_outside_a_run_is_refused() -> None:
+    # There is no stream to name without a run, so this cannot answer.
+    with pytest.raises(RuntimeError, match="inside a workflow or a step"):
         runtime.get_writable()
 
 
-async def test_a_workflow_body_cannot_stream(registry) -> None:
-    @registry.workflow
-    async def wf() -> None:
-        runtime.get_writable()
+class TestHandOff:
+    """A workflow body naming a stream and a step writing to it.
 
-    fake = FakeWorld()
-    w.set_world(fake)
-    with pytest.raises(RuntimeError, match="a workflow body cannot write to a stream"):
-        await wf.func()
+    The workflow cannot write -- it replays, and its sandbox has no network --
+    but it can say *which* stream, which is what lets one workflow fan the same
+    stream out to several steps.
+    """
+
+    async def test_a_workflow_body_gets_a_handle_it_cannot_write_to(self, registry) -> None:
+        writable: list[Any] = []
+
+        @registry.workflow
+        async def wf() -> None:
+            writable.append(runtime.get_writable())
+
+        fake = FakeWorld()
+        w.set_world(fake)
+        ctx = runtime.WorkflowOrchestratorContext(
+            [], run_id=RUN_ID, seed=RUN_ID, started_at=0, registry=registry
+        )
+        token = ctx._ctx.set(ctx)
+        try:
+            await wf.func()
+        finally:
+            ctx._ctx.reset(token)
+
+        (handle,) = writable
+        assert isinstance(handle, streams.WorkflowStreamHandle)
+        assert handle.name == STREAM
+        assert handle.run_id == RUN_ID
+        with pytest.raises(RuntimeError, match="Pass this to a step"):
+            await handle.write("nope")
+
+    async def test_the_handle_is_the_same_on_every_replay(self, registry) -> None:
+        # Derived from the run id, not minted, so a replay cannot point a later
+        # attempt at a different stream.
+        ctx = runtime.WorkflowOrchestratorContext(
+            [], run_id=RUN_ID, seed=RUN_ID, started_at=0, registry=registry
+        )
+        again = runtime.WorkflowOrchestratorContext(
+            [], run_id=RUN_ID, seed=RUN_ID, started_at=0, registry=registry
+        )
+        assert ctx.stream_handle(None) == again.stream_handle(None)
+        assert ctx.stream_handle("logs") != ctx.stream_handle(None)
+
+    async def test_a_handle_survives_the_trip_into_a_step(self, registry) -> None:
+        """The round trip that makes the feature work.
+
+        The handle is dehydrated into the step's arguments as `@workflow/core`'s
+        `WritableStream` tag and revived on the other side as a live writer, so
+        the step writes to the stream the workflow named.
+        """
+        handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
+        payload = ser.dehydrate(ser.step_arguments((), {"out": handle}))
+
+        # The tag is the one a TypeScript peer already understands.
+        assert b'"WritableStream"' in payload
+
+        fake = FakeWorld()
+        w.set_world(fake)
+        state = runtime._StepStreams(run_id=RUN_ID)
+        token = runtime._step_streams_ctx.set(state)
+        try:
+            _, kwargs = ser.step_call_arguments(ser.hydrate(payload, what="input"), what="input")
+        finally:
+            runtime._step_streams_ctx.reset(token)
+
+        revived = kwargs["out"]
+        assert isinstance(revived, streams.WorkflowStreamWriter)
+        assert (revived.run_id, revived.name) == (RUN_ID, STREAM)
+
+    async def test_a_revived_handle_is_the_step_own_writer(self, registry) -> None:
+        """Not a second writer over the same stream.
+
+        Two writers would each buffer independently and interleave by whichever
+        request wins, so a step that both received a handle and called
+        `get_writable()` would scramble its own chunk order.
+        """
+        seen: list[Any] = []
+
+        @registry.step
+        async def emit(*, out: Any) -> None:
+            seen.append(out)
+            seen.append(runtime.get_writable())
+            await out.write("via handle")
+            await seen[1].write("via get_writable")
+
+        fake = FakeWorld(
+            step_input=ser.dehydrate(
+                ser.step_arguments((), {"out": streams.WorkflowStreamHandle(RUN_ID, STREAM)})
+            )
+        )
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        assert seen[0] is seen[1], "the revived handle has to be the step's own writer"
+        assert _chunk_values(fake) == ["via handle", "via get_writable"]
+        assert _kinds(fake)[-1] == "step_completed"
+
+    async def test_a_writer_reduces_back_to_the_same_reference(self) -> None:
+        # A step forwarding its own writable onward has to produce the same
+        # descriptor the workflow would have.
+        world = FakeWorld()
+        writer = streams.WorkflowStreamWriter(world, RUN_ID, STREAM)
+        handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
+        assert ser.dehydrate(writer) == ser.dehydrate(handle)
