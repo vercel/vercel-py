@@ -75,12 +75,13 @@ jobs:
       # the native postinstalls of @swc/core, esbuild and cbor-extract, which
       # the read-only `inspect` path does not use.
       - name: Install the workflow CLI
+        # zizmor: ignore[adhoc-packages]
         run: >-
           npm install workflow@5.0.0-beta.38 --no-save --no-audit --no-fund
           --ignore-scripts --prefix "$RUNNER_TEMP/workflow-cli"
 
       - name: Sync dependencies
-        run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
+        run: uv sync --all-packages --python ${{ matrix.python-version }}
 
       - name: Lint
         run: ./scripts/lint.sh

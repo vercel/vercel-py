@@ -6,26 +6,26 @@ backend-path = ["scripts"]
 [dependency-groups]
 dev = [
     "ruff==0.15.20",
-    "pytest>=7.0.0,<10",
-    "pytest-asyncio<2",
+    "pytest>=9.1.1,<10",
+    "pytest-asyncio>=1.4.0,<2",
     "pytest-xdist<4",
-    "fastapi>=0.115.0,<1",
-    "uvicorn>=0.30.0,<1",
-    "hypothesis>=6.0.0,<7",
+    "fastapi>=0.141.1,<1",
+    "uvicorn>=0.52.1,<1",
+    "hypothesis>=6.165.0,<7",
     "respx>=0.21.0,<1",
     "uvloop<1",
     "mypy>=1.20.2,<2",
     "build<2",
     "twine<7",
     "ty==0.0.55",
-    "zizmor>=1.24.1,<2",
-    "hatchling>=1.27.0,<2",
+    "zizmor>=1.29.0,<2",
+    "hatchling>=1.31.0,<2",
     "time-machine>=2.16,<3",
     "textual>=8.0.0,<9",
     "trio>=0.33.0,<1",
     "poethepoet>=0.48.0",
-    "tox>=4",
-    "tox-uv-bare",
+    "tox>=4.58.0,<5",
+    "tox-uv-bare>=1.36.0,<2",
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
     "lograil~=0.5.0",
@@ -50,7 +50,7 @@ markers = [
 ]
 
 [tool.tox]
-requires = ["tox>=4", "tox-uv-bare"]
+requires = ["tox>=4.58.0,<5", "tox-uv-bare>=1.36.0,<2"]
 env_list = ["py310", "py311", "py312", "py313", "py314"]
 
 [tool.tox.env_run_base]
