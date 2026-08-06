@@ -65,7 +65,7 @@ Image references may be a bare repository (`my-repository`), a tagged image
 (`my-repository@sha256:<digest>`), or a fully qualified VCR reference such as
 `vcr.vercel.com/team-slug/project-slug/my-repository:latest`. The backend
 resolves the selected image, and `Sandbox.image` contains the resolved image
-metadata.
+reference.
 
 Installing this package also provides the `vercel-sandbox` and `sandbox`
 console commands. Both are aliases that delegate all arguments to `npx sandbox`;

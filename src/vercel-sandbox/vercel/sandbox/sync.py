@@ -176,10 +176,29 @@ def get_or_create_sandbox(
 
     The existing-sandbox lookup resumes by default. If its latest snapshot is
     missing, the stale named sandbox is destroyed and recreated.
+    Creation options are used only when the sandbox must be created or
+    recreated.
 
     Args:
-        image: Vercel Container Registry image reference used only when the
-            sandbox must be created.
+        name: Sandbox name to retrieve or create.
+        project_id: Project that owns the sandbox. Uses the active credentials
+            when omitted.
+        resume: Whether to resume an existing stopped sandbox during lookup.
+        include_system_routes: Whether to include platform-managed routes.
+        image: Vercel Container Registry image reference. The backend validates
+            and resolves the reference.
+        source: Git, tarball, or snapshot source used to initialize the sandbox.
+        ports: Ports to expose from the sandbox.
+        execution_time_limit: Maximum session runtime in seconds or as a
+            duration.
+        resources: Requested CPU and memory resources.
+        persistent: Whether the sandbox persists beyond its current session.
+        network_policy: Network access policy sent to the Sandbox API.
+        env: Environment variables for the sandbox.
+        tags: Metadata tags used to organize and query sandboxes.
+        snapshot_expiration: Default lifetime for snapshots created from this
+            sandbox.
+        snapshot_retention: Automatic snapshot retention policy.
 
     Returns:
         A ``(sandbox, created)`` tuple. ``created`` is true when this call
