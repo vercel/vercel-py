@@ -12,27 +12,23 @@ app = Workflows()
 
 
 @app.step
-async def charge_customer(*, customer_id: str) -> None:
+async def charge_customer(customer_id: str) -> None:
     ...
 
 
 @app.workflow
-async def renew_subscription(*, customer_id: str) -> None:
+async def renew_subscription(customer_id: str) -> None:
     await sleep("1h")
-    await charge_customer(customer_id=customer_id)
+    await charge_customer(customer_id)
 
 
 async def main() -> None:
-    run = await start(renew_subscription, customer_id="cus_123")
+    run = await start(renew_subscription, "cus_123")
 ```
 
 `app.workflow` registers async workflow functions. `app.step` registers async
 steps that can be called only from inside a workflow. `sleep()` creates a
 durable wait in a workflow run.
-
-Workflows and steps take **keyword arguments only**, so their parameters have
-to be declared keyword-only (after a bare `*`); a positional parameter is
-rejected when the function is registered.
 
 ## Queue namespaces
 
