@@ -28,7 +28,7 @@ import os
 from collections.abc import AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
-from . import serialization as ser
+from . import serde, serialization as ser
 
 if TYPE_CHECKING:
     from . import world as w
@@ -87,9 +87,43 @@ def encode_frame(payload: bytes) -> bytes:
     return len(payload).to_bytes(FRAME_HEADER_SIZE, "big") + payload
 
 
+def _reduce_uint8array(value: Any) -> Any:
+    """devalue reducer sending a chunk's ``bytes`` as a view. Falsy declines.
+
+    Only the emitted *form* differs: devalue writes a typed array as a view
+    onto its own buffer entry, ``["Uint8Array", <buffer>]``, where the payload
+    boundary writes the bare ``["ArrayBuffer", …]``. Both carry the same bytes
+    and both read back here as ``bytes``.
+
+    It matters because of what reads a stream. The pattern the TypeScript docs
+    lead with pipes a run's readable straight into a `Response`, and a body
+    stream takes `Uint8Array` chunks only -- an `ArrayBuffer` chunk raises
+    ``Received non-Uint8Array chunk``. So a step writing ``b"..."`` has to
+    frame it as a view or every consumer doing that breaks.
+
+    Chunk-local on purpose. Python has one bytes type, so whichever form the
+    encoder picks the other becomes a one-way landing; the payload boundary
+    already chose ``ArrayBuffer`` and has tests pinning it. Nothing downstream
+    of a payload cares which form a ``bytes`` *field* took, so there is no
+    reason to move that.
+    """
+    if type(value) is not bytes:
+        return False
+    # A `memoryview` rather than the `bytes` itself, and not for speed: devalue
+    # indexes by identity, so returning the same object would make the view
+    # reference its own slot instead of a buffer. A distinct object flattens to
+    # the `["ArrayBuffer", …]` entry the view is supposed to point at -- and a
+    # view over the same memory copies nothing to get one.
+    return memoryview(value)
+
+
+CHUNK_REDUCERS: dict[str, Any] = {**serde.REDUCERS, "Uint8Array": _reduce_uint8array}
+"""Reducers for a stream chunk, as opposed to a run/step/hook payload."""
+
+
 def encode_value(value: Any) -> bytes:
     """The frame a single user write becomes."""
-    return encode_frame(ser.dehydrate(value))
+    return encode_frame(ser.dehydrate(value, reducers=CHUNK_REDUCERS))
 
 
 class FrameDecoder:
