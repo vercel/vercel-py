@@ -468,28 +468,33 @@ class WorkflowOrchestratorContext:
                     sus = self.suspensions.pop(event.correlation_id)
                     assert isinstance(sus, Suspension)
                     result = ser.hydrate(data, what=f"the result of step {event.correlation_id}")
-                    sus.future.set_result(result)
+                    if not sus.future.cancelled():
+                        sus.future.set_result(result)
 
                 case w.WaitCompletedEvent():
                     wait = self.suspensions.pop(event.correlation_id)
                     assert isinstance(wait, Wait)
-                    wait.future.set_result(None)
+                    if not wait.future.cancelled():
+                        wait.future.set_result(None)
 
                 case w.StepFailedEvent(event_data=w.StepFailedEventData(error=e)):
                     sus = self.suspensions.pop(event.correlation_id)
                     assert isinstance(sus, Suspension)
-                    sus.future.set_exception(RuntimeError(e))
+                    if not sus.future.cancelled():
+                        sus.future.set_exception(RuntimeError(e))
 
                 case w.HookConflictEvent(event_data=w.HookConflictEventData(token=token)):
                     hook = self.suspensions.pop(event.correlation_id, None)
                     if hook is not None:
                         assert isinstance(hook, Hook)
                         while hook.futures:
-                            hook.futures.popleft().set_exception(
-                                RuntimeError(
-                                    f'Hook token "{token}" is already in use by another workflow'
+                            future = hook.futures.popleft()
+                            if not future.cancelled():
+                                future.set_exception(
+                                    RuntimeError(
+                                        f'Hook token "{token}" is already in use by another workflow'
+                                    )
                                 )
-                            )
 
                 case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
                     hook = self.suspensions[event.correlation_id]
