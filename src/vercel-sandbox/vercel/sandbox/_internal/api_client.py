@@ -1,4 +1,4 @@
-"""Internal Sandbox v2 API client."""
+"""Internal Sandbox API client."""
 
 import json
 import platform
@@ -133,7 +133,6 @@ class _ApiRequestModel(_ApiModel):
 class _CreateSandboxRequest(_ApiRequestModel):
     project_id: str = Field(serialization_alias="projectId")
     name: str | None = None
-    runtime: str | None = None
     image: str | None = None
     source: SandboxSource | None = None
     ports: list[int] | None = None
@@ -175,7 +174,6 @@ class _CreateSandboxRequest(_ApiRequestModel):
 
 
 class _UpdateSandboxRequest(_ApiRequestModel):
-    runtime: str | None = None
     ports: list[int] | None = None
     timeout: timedelta | None = None
     resources: SandboxResources | None = None
@@ -326,7 +324,6 @@ class _RuntimeSessionPayload(_ApiModel):
         serialization_alias="projectId",
     )
     status: SandboxStatus | None = None
-    runtime: str | None = None
     cwd: str | None = None
     region: str | None = None
     memory: int | None = None
@@ -375,7 +372,6 @@ class _SandboxPayload(_ApiModel):
         serialization_alias="currentSessionId",
     )
     image: str | None = None
-    runtime: str | None = None
     status: SandboxStatus | None = None
     persistent: bool | None = None
     current_snapshot_id: str | None = Field(
@@ -566,7 +562,6 @@ class _SandboxResponse(_ApiModel):
             if payload.project_id is None and session.project_id is not None:
                 updates["project_id"] = session.project_id
             for name in (
-                "runtime",
                 "status",
                 "cwd",
                 "region",
@@ -575,8 +570,6 @@ class _SandboxResponse(_ApiModel):
                 "execution_time_limit",
                 "network_policy",
             ):
-                if name == "runtime" and payload.image is not None:
-                    continue
                 if getattr(payload, name) is None:
                     updates[name] = getattr(session, name)
         payload = payload.model_copy(update=updates)
@@ -661,7 +654,6 @@ def _runtime_session_state(payload: _RuntimeSessionPayload) -> SandboxRuntimeSes
         sandbox_name=payload.sandbox_name,
         project_id=payload.project_id,
         status=payload.status,
-        runtime=payload.runtime,
         cwd=payload.cwd,
         region=payload.region,
         memory=payload.memory,
@@ -688,7 +680,6 @@ def _sandbox_state(
         name=payload.name,
         current_session_id=payload.current_session_id,
         image=payload.image,
-        runtime=payload.runtime,
         status=payload.status,
         persistent=payload.persistent,
         current_snapshot_id=payload.current_snapshot_id,
@@ -756,7 +747,7 @@ def _validate_response(model: type[ResponseModelT], data: JSONObject) -> Respons
         return model.model_validate(data)
     except ValidationError as exc:
         raise SandboxResponseError(
-            "Sandbox API response did not match the expected v2 shape",
+            "Sandbox API response did not match the expected shape",
             data=data,
         ) from exc
 
@@ -913,7 +904,6 @@ class SandboxApiClient:
         *,
         project_id: str | None = None,
         name: str | None = None,
-        runtime: str | None = None,
         image: str | None = None,
         source: SandboxSource | None = None,
         ports: list[int] | None = None,
@@ -930,7 +920,6 @@ class SandboxApiClient:
         request = _CreateSandboxRequest(
             project_id=project_id or credentials.project_id,
             name=name,
-            runtime=runtime,
             image=image,
             source=source,
             ports=ports,
@@ -944,7 +933,7 @@ class SandboxApiClient:
             keep_last_snapshots=snapshot_retention,
         )
         data = await self._request_json(
-            "POST", "v2/sandboxes", credentials=credentials, body=request.to_api_dict()
+            "POST", "v3/sandboxes", credentials=credentials, body=request.to_api_dict()
         )
         return _validate_response(_SandboxResponse, data).to_sandbox()
 
@@ -1027,7 +1016,6 @@ class SandboxApiClient:
         *,
         name: str,
         project_id: str | None = None,
-        runtime: str | None = None,
         ports: list[int] | None = None,
         execution_time_limit: timedelta | None = None,
         resources: SandboxResources | None = None,
@@ -1042,7 +1030,6 @@ class SandboxApiClient:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
         request = _UpdateSandboxRequest(
-            runtime=runtime,
             ports=ports,
             timeout=execution_time_limit,
             resources=resources,

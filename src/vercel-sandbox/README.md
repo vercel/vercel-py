@@ -14,6 +14,9 @@ async with session():
 
 The package can be installed independently with `pip install vercel-sandbox`.
 
+When no image is provided, the Sandbox API uses
+`vercel/sandbox/universal:latest`.
+
 The same promoted API is available synchronously:
 
 ```python
@@ -60,10 +63,9 @@ with session():
 Image references may be a bare repository (`my-repository`), a tagged image
 (`my-repository:latest`), a digest-pinned image
 (`my-repository@sha256:<digest>`), or a fully qualified VCR reference such as
-`vcr.vercel.com/team-slug/project-slug/my-repository:latest`. Use `image`
-instead of `runtime`; the two options are mutually exclusive. For an
-image-backed sandbox, `Sandbox.image` contains the returned image metadata and
-`Sandbox.runtime` remains `None`.
+`vcr.vercel.com/team-slug/project-slug/my-repository:latest`. The backend
+resolves the selected image, and `Sandbox.image` contains the resolved image
+metadata.
 
 Installing this package also provides the `vercel-sandbox` and `sandbox`
 console commands. Both are aliases that delegate all arguments to `npx sandbox`;

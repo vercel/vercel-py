@@ -709,12 +709,12 @@ async def test_filesystem_open_rejects_invalid_options(
     options: dict[str, object],
     error_type: type[Exception],
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(error_type):
             box.fs.open("data.bin", mode, **options)  # type: ignore[call-overload]
 
@@ -723,7 +723,7 @@ async def test_filesystem_open_rejects_invalid_options(
 async def test_async_filesystem_native_operations_and_write_composition(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     mkdir = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/mkdir").mock(
@@ -737,7 +737,7 @@ async def test_async_filesystem_native_operations_and_write_composition(
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         assert isinstance(box.fs, sandbox.SandboxFilesystem)
         assert box.current_session is not None
         assert isinstance(box.current_session.fs, sandbox.SandboxFilesystem)
@@ -775,7 +775,7 @@ async def test_async_filesystem_native_operations_and_write_composition(
 async def test_async_unknown_size_writer_publishes_temporary_spool(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -786,7 +786,7 @@ async def test_async_unknown_size_writer_publishes_temporary_spool(
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         async with box.fs.open("spooled.bin", "wb") as writer:
             await writer.write(b"spooled")
             await writer.write(b" data")
@@ -802,7 +802,7 @@ async def test_async_unknown_size_writer_publishes_temporary_spool(
 async def test_async_binary_writer_rejects_incomplete_declared_size(
     mock_env_clear: None, content: bytes
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -813,7 +813,7 @@ async def test_async_binary_writer_rejects_incomplete_declared_size(
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
             async with box.fs.open("data.bin", "wb", size=4) as writer:
                 await writer.write(content)
@@ -829,7 +829,7 @@ async def test_async_binary_writer_rejects_incomplete_declared_size(
 
 @respx.mock
 async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
@@ -839,7 +839,7 @@ async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(SandboxFilesystemWriteError) as exc_info:
             async with box.fs.batch(cwd=PurePosixPath("workspace")) as batch:
                 batch.write_text(PurePosixPath("a.txt"), "a")
@@ -855,7 +855,7 @@ async def test_filesystem_write_wraps_api_error(mock_env_clear: None) -> None:
 async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response("sbx_1"))
     )
     respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -884,7 +884,7 @@ async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         retained_box_fs = box.fs
         assert box.current_session is not None
         retained_session_fs = box.current_session.fs
@@ -912,7 +912,7 @@ async def test_filesystem_target_binding_tracks_sandbox_but_not_runtime_session(
 async def test_async_filesystem_batch_stages_one_request_and_skips_aborted_or_empty_batches(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
@@ -920,7 +920,7 @@ async def test_async_filesystem_batch_stages_one_request_and_skips_aborted_or_em
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         staged = box.fs.batch(cwd="workspace")
         with pytest.raises(RuntimeError):
             staged.write_text("outside.txt", "no")
@@ -951,7 +951,7 @@ async def test_async_filesystem_batch_stages_one_request_and_skips_aborted_or_em
 async def test_command_backed_filesystem_operations_parse_output_and_pass_paths_as_args(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     requested: list[dict[str, object]] = []
@@ -978,7 +978,7 @@ async def test_command_backed_filesystem_operations_parse_output_and_pass_paths_
 
     unsafe_path = "-a; printf injected"
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         assert await box.fs.exists(unsafe_path)
         assert not await box.fs.is_file("missing")
         assert await box.fs.listdir("directory") == [
@@ -998,7 +998,7 @@ async def test_command_backed_filesystem_operations_parse_output_and_pass_paths_
 
 @respx.mock
 async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     read = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read")
@@ -1019,7 +1019,7 @@ async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear:
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(SandboxPathNotFoundError) as missing:
             await box.fs.read_bytes("missing")
         assert missing.value.path == "missing"
@@ -1039,7 +1039,7 @@ async def test_filesystem_failures_use_filesystem_error_contract(mock_env_clear:
 
 @respx.mock
 def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
@@ -1053,7 +1053,7 @@ def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> 
     )
 
     with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        box = sandbox_sync.create_sandbox(name="preview")
         assert isinstance(box.fs, sandbox_sync.SyncSandboxFilesystem)
         assert box.current_session is not None
         assert isinstance(box.current_session.fs, sandbox_sync.SyncSandboxFilesystem)
@@ -1065,7 +1065,7 @@ def test_sync_filesystem_capability_uses_sync_boundary(mock_env_clear: None) -> 
 
 @respx.mock
 def test_sync_unknown_size_writer_publishes_temporary_spool(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -1076,7 +1076,7 @@ def test_sync_unknown_size_writer_publishes_temporary_spool(mock_env_clear: None
     )
 
     with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        box = sandbox_sync.create_sandbox(name="preview")
         with box.fs.open("spooled.bin", "wb") as writer:
             writer.write(b"spooled")
             writer.write(b" data")
@@ -1092,7 +1092,7 @@ def test_sync_unknown_size_writer_publishes_temporary_spool(mock_env_clear: None
 def test_sync_binary_writer_rejects_incomplete_declared_size(
     mock_env_clear: None, content: bytes
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -1103,7 +1103,7 @@ def test_sync_binary_writer_rejects_incomplete_declared_size(
     )
 
     with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(SandboxUploadSizeMismatchError) as exc_info:
             with box.fs.open("data.bin", "wb", size=4) as writer:
                 writer.write(content)
@@ -1119,7 +1119,7 @@ def test_sync_binary_writer_rejects_incomplete_declared_size(
 
 @respx.mock
 def test_sync_filesystem_batch_stages_one_request(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     writes = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/write").mock(
@@ -1127,7 +1127,7 @@ def test_sync_filesystem_batch_stages_one_request(mock_env_clear: None) -> None:
     )
 
     with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        box = sandbox_sync.create_sandbox(name="preview")
         staged = box.fs.batch(cwd="/tmp")
         with staged as batch:
             batch.write_text("message.txt", "hello")
@@ -1206,7 +1206,7 @@ async def test_text_reader_preserves_crlf_split_across_chunks(
     ]
 
     with respx.mock:
-        respx.post("https://sandbox.test/v2/sandboxes").mock(
+        respx.post("https://sandbox.test/v3/sandboxes").mock(
             return_value=httpx.Response(200, json=_sandbox_response())
         )
         respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -1217,7 +1217,7 @@ async def test_text_reader_preserves_crlf_split_across_chunks(
         )
 
         async with session(service_options=_session_options()):
-            box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+            box = await sandbox.create_sandbox(name="preview")
             async with box.fs.open("data.txt", "r", newline="") as reader:
                 assert await reader.readline() == f"{prefix}\r\n"
                 assert await reader.read() == suffix
@@ -1225,7 +1225,7 @@ async def test_text_reader_preserves_crlf_split_across_chunks(
 
 @respx.mock
 async def test_read_bytes_response_closed_after_streaming_read(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     stream = _TrackedAsyncStream([b"bytes"])
@@ -1234,7 +1234,7 @@ async def test_read_bytes_response_closed_after_streaming_read(mock_env_clear: N
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         result = await box.fs.read_bytes(PurePosixPath("data.bin"))
         assert result == b"bytes"
 
@@ -1243,7 +1243,7 @@ async def test_read_bytes_response_closed_after_streaming_read(mock_env_clear: N
 
 @respx.mock
 def test_sync_read_bytes_uses_and_closes_unread_stream(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     stream = _TrackedSyncStream([b"abc", b"", b"def"])
@@ -1252,7 +1252,7 @@ def test_sync_read_bytes_uses_and_closes_unread_stream(mock_env_clear: None) -> 
     )
 
     with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        box = sandbox_sync.create_sandbox(name="preview")
         assert box.fs.read_bytes("data.bin") == b"abcdef"
 
     assert stream.close_called
@@ -1260,7 +1260,7 @@ def test_sync_read_bytes_uses_and_closes_unread_stream(mock_env_clear: None) -> 
 
 @respx.mock
 def test_sync_read_bytes_closes_response_after_stream_failure(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     failure = RuntimeError("stream failed")
@@ -1270,7 +1270,7 @@ def test_sync_read_bytes_closes_response_after_stream_failure(mock_env_clear: No
     )
 
     with session(service_options=_session_options()):
-        box = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        box = sandbox_sync.create_sandbox(name="preview")
         with pytest.raises(RuntimeError) as exc_info:
             box.fs.read_bytes("data.bin")
         assert exc_info.value is failure
@@ -1280,7 +1280,7 @@ def test_sync_read_bytes_closes_response_after_stream_failure(mock_env_clear: No
 
 @respx.mock
 async def test_read_bytes_multiple_chunks(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
@@ -1288,14 +1288,14 @@ async def test_read_bytes_multiple_chunks(mock_env_clear: None) -> None:
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         result = await box.fs.read_bytes(PurePosixPath("data.bin"))
         assert result == b"abcdefghi"
 
 
 @respx.mock
 async def test_read_bytes_empty_file(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
@@ -1303,14 +1303,14 @@ async def test_read_bytes_empty_file(mock_env_clear: None) -> None:
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         result = await box.fs.read_bytes(PurePosixPath("empty.txt"))
         assert result == b""
 
 
 @respx.mock
 async def test_read_bytes_missing_path(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/fs/read").mock(
@@ -1320,7 +1320,7 @@ async def test_read_bytes_missing_path(mock_env_clear: None) -> None:
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
         with pytest.raises(SandboxPathNotFoundError) as exc_info:
             await box.fs.read_bytes(PurePosixPath("missing.txt"))
         assert exc_info.value.path == "missing.txt"
@@ -1330,7 +1330,7 @@ async def test_read_bytes_missing_path(mock_env_clear: None) -> None:
 
 @respx.mock
 async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     response_count = 0
@@ -1345,7 +1345,7 @@ async def test_read_bytes_and_read_text_still_work(mock_env_clear: None) -> None
     )
 
     async with session(service_options=_session_options()):
-        box = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        box = await sandbox.create_sandbox(name="preview")
 
         raw = await box.fs.read_bytes(PurePosixPath("data.bin"))
         assert raw == b"content"

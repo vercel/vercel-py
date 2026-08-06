@@ -27,7 +27,6 @@ async def _main() -> None:
     # sandbox several times before destroying it.
     box = await sandbox.create_sandbox(
         name=name,
-        runtime="python3.13",
         persistent=True,
         execution_time_limit=timedelta(minutes=2),
     )

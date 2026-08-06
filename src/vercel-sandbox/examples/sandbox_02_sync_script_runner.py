@@ -28,7 +28,6 @@ def run_script(input_text: str, script: str) -> str:
         session(),
         sandbox.create_sandbox(
             name=name,
-            runtime="python3.13",
             execution_time_limit=timedelta(minutes=1),
         ) as box,
     ):

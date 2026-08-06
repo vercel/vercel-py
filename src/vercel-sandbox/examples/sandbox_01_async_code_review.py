@@ -50,7 +50,6 @@ async def review_code(
     #
     #     box = await sandbox.create_sandbox(name="foo-box", ...)
     async with sandbox.create_sandbox(
-        runtime="python3.13",
         execution_time_limit=timedelta(minutes=1),
         # The token is injected into requests to api.github.com by the network
         # policy. It is never exposed to the sandbox process or filesystem.

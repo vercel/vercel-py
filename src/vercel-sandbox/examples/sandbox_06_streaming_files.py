@@ -35,7 +35,6 @@ async def _main() -> None:
 
         async with sandbox.create_sandbox(
             name=name,
-            runtime="python3.13",
             execution_time_limit=timedelta(minutes=2),
         ) as box:
             async with (

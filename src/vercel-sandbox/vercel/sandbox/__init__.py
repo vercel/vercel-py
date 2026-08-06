@@ -93,7 +93,6 @@ def create_sandbox(
     *,
     project_id: str | None = None,
     name: str | None = None,
-    runtime: str | None = None,
     image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
@@ -117,9 +116,8 @@ def create_sandbox(
         project_id: Project that owns the sandbox. Uses the active credentials
             when omitted.
         name: Requested sandbox name. The service generates one when omitted.
-        runtime: Runtime image or runtime identifier.
-        image: Vercel Container Registry image reference. Mutually exclusive
-            with ``runtime``; the backend validates and resolves the reference.
+        image: Vercel Container Registry image reference. The backend validates
+            and resolves the reference.
         source: Git, tarball, or snapshot source used to initialize the sandbox.
         ports: Ports to expose from the sandbox.
         execution_time_limit: Maximum session runtime in seconds or as a
@@ -146,7 +144,6 @@ def create_sandbox(
         _service(),
         project_id=project_id,
         name=name,
-        runtime=runtime,
         image=image,
         source=source,
         ports=ports,
@@ -168,7 +165,6 @@ async def get_or_create_sandbox(
     project_id: str | None = None,
     resume: bool = True,
     include_system_routes: bool | None = None,
-    runtime: str | None = None,
     image: str | None = None,
     source: SandboxSource | None = None,
     ports: list[int] | None = None,
@@ -188,7 +184,7 @@ async def get_or_create_sandbox(
 
     Args:
         image: Vercel Container Registry image reference used only when the
-            sandbox must be created. Mutually exclusive with ``runtime``.
+            sandbox must be created.
 
     Returns:
         A ``(sandbox, created)`` tuple. ``created`` is true when this call
@@ -201,7 +197,6 @@ async def get_or_create_sandbox(
         project_id=project_id,
         resume=resume,
         include_system_routes=include_system_routes,
-        runtime=runtime,
         image=image,
         source=source,
         ports=ports,

@@ -26,11 +26,6 @@ _MAX_SNAPSHOT_EXPIRATION = timedelta(days=365 * 10)
 _ZERO_DELTA = timedelta(0)
 
 
-def _validate_image_and_runtime(*, image: str | None, runtime: str | None) -> None:
-    if image is not None and runtime is not None:
-        raise ValueError("image and runtime are mutually exclusive")
-
-
 @dataclass(frozen=True, slots=True)
 class NetworkPolicyMatcher:
     """Match one request value using one comparison strategy."""
