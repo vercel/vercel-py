@@ -127,6 +127,32 @@ def _completed(cid: str, result: Any) -> w.Event:
     return w.StepCompletedEventData(result=ser.dehydrate(result)).into_event(cid)
 
 
+async def test_cancelled_step_ignores_later_completion() -> None:
+    """A launched step can be cancelled before its completion is replayed.
+
+    The completion event still needs to be consumed, but setting a result on
+    the cancelled future would raise ``InvalidStateError``.
+    """
+    step = core.Step(_greet)
+    events: list[w.Event] = [_created(step, "step_1")]
+    ctx = _context(events)
+    sus = _suspension("step_1", _ARGS)
+    ctx.suspensions["step_1"] = sus
+
+    # Replay the launch, then model the workflow task being cancelled while
+    # the step is in flight. The completion arrives in a later event batch.
+    with pytest.raises(runtime._SuspendException):
+        ctx.resume()
+    assert sus.has_created_event
+    assert sus.future.cancel()
+
+    events.append(_completed("step_1", "one"))
+    ctx.resume()
+
+    assert sus.future.cancelled()
+    assert "step_1" not in ctx.suspensions
+
+
 async def test_single_step_delivers_one_completion_per_pass() -> None:
     """Two concurrently-issued steps both have results in the log, but a single
     resume() pass resolves only the first; the rest is left for the next pass."""
