@@ -23,6 +23,7 @@ import respx
 
 from vercel._internal.core.polyfills import UTC
 from vercel._internal.workflow import core, runtime, serialization as ser, world as w
+from vercel.workflow import FatalError
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 RUN_ID = "wrun_test"
@@ -246,6 +247,53 @@ async def test_happy_path_completes_and_reenqueues(registry: core.Workflows) -> 
     assert result is None
     assert _event_types(fake) == ["step_completed"]
     assert len(_workflow_enqueues(fake)) == 1
+
+
+async def test_an_ordinary_failure_below_max_retries_asks_for_a_retry(
+    registry: core.Workflows,
+) -> None:
+    @registry.step
+    async def my_step() -> str:
+        raise RuntimeError("flaky")
+
+    fake = FakeWorld(started_step=_running_step(my_step.name, attempt=1))
+    w.set_world(fake)
+
+    result = await _invoke(registry, my_step.name)
+
+    assert result == w.QueueContinuation(delay_seconds=1.0)
+    assert _event_types(fake) == ["step_retrying"]
+    assert _workflow_enqueues(fake) == []
+
+
+async def test_a_fatal_failure_gives_up_on_the_first_attempt(registry: core.Workflows) -> None:
+    """`FatalError` skips the remaining attempts.
+
+    The same call would be replayed to reach the same place, so the handler
+    records `step_failed` and lets the workflow observe it instead.
+    """
+    attempts = 0
+
+    @registry.step
+    async def my_step() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise FatalError("card declined")
+
+    fake = FakeWorld(started_step=_running_step(my_step.name, attempt=1))
+    w.set_world(fake)
+
+    result = await _invoke(registry, my_step.name)
+
+    assert result is None
+    assert attempts == 1
+    assert _event_types(fake) == ["step_failed"]
+    assert len(_workflow_enqueues(fake)) == 1
+    (failed,) = fake.events
+    # No retry count: none were spent, and the phrasing would be misleading.
+    assert failed.event_data.error == (
+        f"Step '{my_step.name}' failed: vercel._internal.workflow.core.FatalError: card declined"
+    )
 
 
 async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) -> None:

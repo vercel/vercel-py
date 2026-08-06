@@ -25,6 +25,10 @@ T = TypeVar("T")
 DEFAULT_MAX_RETRIES = 3
 
 
+class FatalError(Exception):
+    """A step failure that will not be retried."""
+
+
 def _bind_arguments(
     signature: inspect.Signature,
     qualname: str,
