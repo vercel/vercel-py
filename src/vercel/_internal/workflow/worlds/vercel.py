@@ -17,14 +17,6 @@ from vercel.oidc.aio import get_vercel_oidc_token
 
 from .. import world as w
 
-# Hard-coded workflow-server URL override for testing.
-# Set this to test against a different workflow-server version.
-# Leave empty string for production (uses default vercel-workflow.com).
-#
-# Example: 'https://workflow-server-git-branch-name.vercel.sh'
-#
-WORKFLOW_SERVER_URL_OVERRIDE = ""
-
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
 )  # 23 hours - leave 1h buffer before 24h retention limit
@@ -80,6 +72,11 @@ class VercelWorld(w.World):
     ) -> None:
         self._token = token
         self._queue_callbacks: list[Any] = []
+        # Points the world at a workflow-server other than production, e.g. a
+        # branch deployment. world-vercel also has an inline constant that
+        # wins over this; there is nothing here to rewrite one, so the
+        # environment is the only way in.
+        server_url_override = os.getenv("VERCEL_WORKFLOW_SERVER_URL", "")
 
         # utils.ts, getHttpUrl
         # Use proxy when we have project config (for authentication via Vercel API)
@@ -88,9 +85,13 @@ class VercelWorld(w.World):
         # header if override is set)
         # When not using proxy, use the default workflow-server URL (with /api path appended)
         if self._using_proxy:
-            self._base_url = "https://api.vercel.com/v1/workflow"
+            # WORKFLOW_VERCEL_BACKEND_URL swaps the proxy itself, independently
+            # of the workflow-server override above.
+            self._base_url = (
+                os.getenv("WORKFLOW_VERCEL_BACKEND_URL") or "https://api.vercel.com/v1/workflow"
+            )
         else:
-            default_host = WORKFLOW_SERVER_URL_OVERRIDE or "https://vercel-workflow.com"
+            default_host = server_url_override or "https://vercel-workflow.com"
             self._base_url = f"{default_host}/api"
 
         # utils.ts, getUserAgent
@@ -111,8 +112,8 @@ class VercelWorld(w.World):
         # Only set workflow-api-url header when using the proxy, since the proxy
         # forwards it to the workflow-server. When not using proxy, requests go
         # directly to the workflow-server so this header has no effect.
-        if WORKFLOW_SERVER_URL_OVERRIDE and self._using_proxy:
-            self._headers["x-vercel-workflow-api-url"] = WORKFLOW_SERVER_URL_OVERRIDE
+        if server_url_override and self._using_proxy:
+            self._headers["x-vercel-workflow-api-url"] = server_url_override
 
         self._queue_clients: dict[object, vqs.QueueClient] = {}
 
