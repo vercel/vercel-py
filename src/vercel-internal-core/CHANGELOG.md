@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 - 2026-08-05
+
+### Internal
+
+- Key session service options by logical service so synchronous and asynchronous variants share configuration safely. (#242)
+
 ## 0.1.1 - 2026-07-31
 
 ### Bug Fixes

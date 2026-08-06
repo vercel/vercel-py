@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 - 2026-08-05
+
+### Breaking Changes
+
+- Require synchronous credential factories when configuring `vercel.sandbox.sync`; use asynchronous factories only with the async Sandbox API. (#242)
+
+### Internal
+
+- Run Sandbox examples through the package-owned workspace Poe task. (#234)
+
 ## 0.3.0 - 2026-07-31
 
 ### Features

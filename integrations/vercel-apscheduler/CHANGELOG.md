@@ -1,0 +1,8 @@
+# Changelog
+
+## 0.1.0 - 2026-08-05
+
+### Features
+
+- Add the durable Redis driver for running APScheduler schedules through delayed Vercel Queue messages. (#242)
+- Add Redis-backed APScheduler subscribers for Vercel Queues. The integration patches `scheduler.start()`, `scheduler.pause()`, and `scheduler.resume()` with durable, deployment-scoped lifecycle transitions and atomic single-chain fencing. Paused occurrences are skipped on resume, and interrupted successor publication is repaired on retry. Production schedules activate on the first request, and opted-in previews stop after a durable idle timeout. Jobs that do not choose a `misfire_grace_time` run their occurrences whenever the wake arrives: the stock one-second grace assumes in-process wakeup precision that queue delivery cannot meet. A takeover atomically fences the demoted deployment's job-store writes, and reconciliation retries revision races, marking completion only once it converges. Automatic takeover reacts to the first request that arrives through an environment alias, regardless of what arrived before it. (#238)
