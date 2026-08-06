@@ -44,10 +44,42 @@ class SerializationError(RuntimeError):
     """A payload could not be encoded, or arrived in a format we cannot read."""
 
 
+def _reduce_writable_stream(value: Any) -> Any:
+    """devalue reducer for a run's stream. Falsy declines the value.
+
+    Rides `@workflow/core`'s own ``WritableStream`` tag rather than the
+    ``Instance`` rail :mod:`.serde` uses for new types, because a stream is not
+    a new type: the TypeScript SDK already defines this tag and revives it into
+    a real `WritableStream` against the same ``(runId, name)``. A Python
+    workflow can therefore hand one of its streams to a JavaScript peer.
+    """
+    from . import streams
+
+    if isinstance(value, streams.WorkflowStreamHandle | streams.WorkflowStreamWriter):
+        return {"name": value.name, "runId": value.run_id}
+    return False
+
+
+def _revive_writable_stream(value: Any) -> Any:
+    """devalue reviver for the ``WritableStream`` tag."""
+    from . import runtime
+
+    if not isinstance(value, dict) or not isinstance(value.get("name"), str):
+        raise ValueError(f"malformed WritableStream payload: {value!r}")
+    run_id = value.get("runId")
+    return runtime.open_writable(run_id if isinstance(run_id, str) else None, value["name"])
+
+
+# `serde` owns the custom-type rail; streams sit alongside it on a tag
+# `@workflow/core` composes itself.
+REDUCERS: dict[str, Any] = {**serde.REDUCERS, "WritableStream": _reduce_writable_stream}
+REVIVERS: dict[str, Any] = {**serde.REVIVERS, "WritableStream": _revive_writable_stream}
+
+
 def dehydrate(value: Any) -> bytes:
     """Encode *value* as a ``devl``-prefixed devalue payload."""
     try:
-        return DEVALUE_V1 + devalue.stringify(value, serde.REDUCERS).encode()
+        return DEVALUE_V1 + devalue.stringify(value, REDUCERS).encode()
     except devalue.DevalueError as error:
         at = f" at {error.path}" if error.path else ""
         raise SerializationError(
@@ -94,7 +126,7 @@ def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
     prefix, payload = data[:FORMAT_PREFIX_LENGTH], data[FORMAT_PREFIX_LENGTH:]
     if prefix == DEVALUE_V1:
         try:
-            return devalue.parse(payload.decode(), serde.REVIVERS)
+            return devalue.parse(payload.decode(), REVIVERS)
         except (devalue.DevalueError, ValueError, TypeError) as error:
             raise SerializationError(f"Cannot deserialize {what}: {error}") from error
     if prefix == ENCRYPTED:

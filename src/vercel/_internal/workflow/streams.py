@@ -22,8 +22,10 @@ frame boundaries without understanding the payload format at all.
 
 from __future__ import annotations
 
+import abc
 import base64
 import contextlib
+import dataclasses
 import os
 from collections.abc import AsyncGenerator, AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
@@ -262,7 +264,99 @@ MAX_BYTES_PER_BATCH = 1024 * 1024
 """Cumulative bytes in one write request, under platform body limits."""
 
 
-class WorkflowStreamWriter:
+class WorkflowWritable(abc.ABC):
+    """One of a run's streams, as :func:`vercel.workflow.get_writable` hands it out.
+
+    Two things wear this interface. In a step it is a
+    :class:`WorkflowStreamWriter` and every method works. In a workflow body it
+    is a :class:`WorkflowStreamHandle`, which knows which stream it is but
+    refuses to write to it.
+
+    One interface rather than two so that a workflow can take a writable and
+    pass it to a step without the type changing on the way, which is also how
+    `@workflow/core` does it -- its workflow-side `getWritable()` returns
+    something with `WritableStream`'s prototype whose methods throw.
+    """
+
+    @property
+    @abc.abstractmethod
+    def run_id(self) -> str:
+        """The run that owns the stream."""
+
+    @property
+    @abc.abstractmethod
+    def name(self) -> str:
+        """The stream this writes to."""
+
+    @abc.abstractmethod
+    async def write(self, value: Any) -> None:
+        """Append *value* as one chunk."""
+
+    @abc.abstractmethod
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        """Append every item *source* yields, in order."""
+
+    @abc.abstractmethod
+    async def drain(self) -> None:
+        """Wait until every accepted chunk is durably written."""
+
+    @abc.abstractmethod
+    async def close(self) -> None:
+        """Mark the stream complete, ending its readers."""
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkflowStreamHandle(WorkflowWritable):
+    """A stream that can be named here but only written to from a step.
+
+    A workflow body re-executes on every replay and its sandbox has no network,
+    so writing from there is not on offer -- but naming the stream is, and that
+    is what a step needs. Pass the handle into a step and it arrives as a
+    :class:`WorkflowStreamWriter`. Hydrating a payload outside a step yields a
+    handle for the same reason: a writer sends from a task the step handler
+    owns, and there is no such owner out there.
+
+    Deterministic by construction: the name comes from the run id and the
+    namespace, so a replay produces the same handle rather than pointing a
+    later attempt at a different stream.
+    """
+
+    # Underscored because the interface declares `run_id` and `name` as
+    # properties, and a dataclass field only annotates -- it puts nothing in the
+    # class body for `abc` to see as the implementation. Constructed
+    # positionally, so the names stay out of the way.
+    _run_id: str
+    _name: str
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def _refuse(self) -> RuntimeError:
+        return RuntimeError(
+            f"cannot write to stream {self._name!r} from here: a workflow body re-runs "
+            f"on every replay and cannot reach the network, and outside a run there is "
+            f"nothing to carry the sends. Pass this to a step and write to it there."
+        )
+
+    async def write(self, value: Any) -> None:
+        raise self._refuse()
+
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        raise self._refuse()
+
+    async def drain(self) -> None:
+        raise self._refuse()
+
+    async def close(self) -> None:
+        raise self._refuse()
+
+
+class WorkflowStreamWriter(WorkflowWritable):
     """A stream that workflow steps can write to.
 
     Sending happens in a task of *task_group*, not in ``write()``, which is

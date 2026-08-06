@@ -151,7 +151,9 @@ class _StepStreams:
     """
 
     run_id: str
-    writers: dict[str, streams.WorkflowStreamWriter] = dataclasses.field(default_factory=dict)
+    writers: dict[tuple[str, str], streams.WorkflowStreamWriter] = dataclasses.field(
+        default_factory=dict
+    )
     _task_group: anyio.abc.TaskGroup | None = None
 
     @contextlib.asynccontextmanager
@@ -162,6 +164,10 @@ class _StepStreams:
         need a group whose lifetime covers every write *and* the flush that
         follows. Leaving the block waits for them, so nothing is still in
         flight once it returns.
+
+        It has to open before the step's input is hydrated, not just around the
+        body: a stream the workflow passed in becomes a writer while the input
+        is being read, and a writer with no group behind it cannot send.
 
         If the block raises, the chunks the step did manage to stream are
         flushed first: those are as real as any other, and a reader tailing the
@@ -195,28 +201,40 @@ class _StepStreams:
     def writer(
         self, namespace: str | None, *, reentrant_ctx_on_err: bool = True
     ) -> streams.WorkflowStreamWriter:
-        """The writer for this run's *namespace* stream, created on first use.
+        """The writer for this run's *namespace* stream."""
+        return self.writer_for(
+            self.run_id,
+            streams.workflow_run_stream_id(self.run_id, namespace),
+            reentrant_ctx_on_err=reentrant_ctx_on_err,
+        )
+
+    def writer_for(
+        self, run_id: str, name: str, *, reentrant_ctx_on_err: bool = True
+    ) -> streams.WorkflowStreamWriter:
+        """The writer for one stream, created on first use.
 
         One writer per stream per step, deliberately. Handing out a fresh writer
         each call would give each its own buffer over the same stream, and two
         buffers flushing independently interleave their chunks by whichever
         request happens to win -- so `get_writable()` twice in a loop would
         scramble the order the caller wrote in. Sharing one serial sink makes
-        that pattern correct instead of subtly wrong.
+        that pattern correct instead of subtly wrong, and it is why a handle the
+        workflow passed in resolves to the same writer the step would have got
+        by asking for the stream itself.
         """
         if self._task_group is None:
             raise RuntimeError("stream writers are only available while a step is running")
-        name = streams.workflow_run_stream_id(self.run_id, namespace)
-        writer = self.writers.get(name)
+        key = (run_id, name)
+        writer = self.writers.get(key)
         if writer is None:
             writer = streams.WorkflowStreamWriter(
                 world=w.get_world(),
-                run_id=self.run_id,
+                run_id=run_id,
                 name=name,
                 task_group=self._task_group,
                 reentrant_ctx_on_err=reentrant_ctx_on_err,
             )
-            self.writers[name] = writer
+            self.writers[key] = writer
         return writer
 
     async def drain(self) -> None:
@@ -256,23 +274,23 @@ def get_writable(
     *,
     namespace: str | None = None,
     reentrant_ctx_on_err: bool = True,
-) -> streams.WorkflowStreamWriter:
-    """The run's writable stream, for streaming output as the step runs.
+) -> streams.WorkflowWritable:
+    """The run's writable stream, for streaming output while the run works.
 
-    Chunks become readable immediately -- through ``run.readable`` on the
-    TypeScript side, the dashboard, or ``workflow inspect stream`` -- without
-    waiting for the step or the run to finish. This SDK has no reader of its own
-    yet; :meth:`vercel._internal.workflow.world.World.streams_get` is the
-    unstable way in.
+    Chunks are readable straight away, through :meth:`Run.readable`, the
+    TypeScript SDK, the dashboard or ``workflow inspect stream`` -- no waiting
+    for the step or the run to finish.
+
+    In a step this is a :class:`~.streams.WorkflowStreamWriter`, ready to write.
+    In a workflow body it is a :class:`~.streams.WorkflowStreamHandle`, which
+    names the stream but cannot write to it: that body re-executes on every
+    replay and its sandbox has no network. Pass the handle to a step and it
+    arrives as the writer -- the same one the step would get by asking for the
+    stream itself, so ordering holds however the step obtained it.
 
     Pass *namespace* to write to a second, independent stream on the same run.
 
-    Must be called from within a step body; raises ``RuntimeError`` otherwise.
-    A workflow body cannot stream: unlike the TypeScript SDK it cannot even take
-    a handle to pass into a step, which is why a streaming step calls this
-    itself.
-
-    Nothing closes the stream implicitly. Call :meth:`close` on the writer when
+    Nothing closes the stream implicitly. Call ``close()`` on the writer when
     the run has nothing more to say, or readers will wait until the run expires.
 
     When used as an asynchronous context in ``async with`` statements, the stream
@@ -282,11 +300,41 @@ def get_writable(
     try:
         state = _step_streams_ctx.get()
     except LookupError:
+        pass
+    else:
+        return state.writer(namespace, reentrant_ctx_on_err=reentrant_ctx_on_err)
+
+    try:
+        ctx = WorkflowOrchestratorContext.current()
+    except LookupError:
         raise RuntimeError(
-            "get_writable() can only be called inside a step; a workflow body "
-            "cannot write to a stream directly"
+            "get_writable() can only be called inside a workflow or a step"
         ) from None
-    return state.writer(namespace, reentrant_ctx_on_err=reentrant_ctx_on_err)
+    return ctx.stream_handle(namespace)
+
+
+def open_writable(run_id: str | None, name: str) -> streams.WorkflowWritable:
+    """Turn a serialized stream reference back into something writable.
+
+    The reviving half of the ``WritableStream`` tag, so a handle a workflow put
+    in a step's arguments arrives as something the step can write to. Inside a
+    step it is a writer registered with that step, which is what gets it
+    drained before the step is recorded complete.
+
+    Outside one -- a client hydrating a payload that happens to carry a stream
+    -- it stays a handle. A writer sends from a task in the step handler's
+    group, and there is no such group here, so there would be nothing to own
+    the sends or to guarantee they finished.
+    """
+    try:
+        state = _step_streams_ctx.get()
+    except LookupError:
+        if run_id is None:
+            raise ser.SerializationError(
+                f"stream {name!r} arrived without a run id and there is no step to take it from"
+            ) from None
+        return streams.WorkflowStreamHandle(run_id, name)
+    return state.writer_for(run_id or state.run_id, name)
 
 
 if sys.version_info >= (3, 11):
@@ -372,11 +420,13 @@ class WorkflowOrchestratorContext:
         self,
         events: list[w.Event],
         *,
+        run_id: str,
         seed: str,
         started_at: int,
         registry: core.Workflows,
         run_key: bytes | None = None,
     ):
+        self.run_id = run_id
         self.events = events
         # The key is per-run, so it is resolved once and reused for every
         # payload in the replay.
@@ -459,6 +509,16 @@ class WorkflowOrchestratorContext:
 
     def random(self) -> random.Random:
         return self._user_random
+
+    def stream_handle(self, namespace: str | None) -> streams.WorkflowStreamHandle:
+        """A reference to one of this run's streams, for a step to write to.
+
+        Deterministic, so a replay of the body produces the same handle rather
+        than pointing a later attempt at a different stream.
+        """
+        return streams.WorkflowStreamHandle(
+            self.run_id, streams.workflow_run_stream_id(self.run_id, namespace)
+        )
 
     def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
         hook = Hook(
@@ -793,6 +853,7 @@ async def workflow_handler(
 
     context = WorkflowOrchestratorContext(
         events,
+        run_id=run_id,
         seed=run_id,
         started_at=workflow_started_at,
         registry=registry,
@@ -1019,44 +1080,47 @@ async def _execute_step(
     # managed to write before it raised.
     step_streams = _StepStreams(run_id=req.run_id)
 
+    # Installed around the whole invocation, not just the body: a stream the
+    # workflow passed in is revived while the input is hydrated, and it has to
+    # register with this step or nothing would ever drain it.
+    streams_token = _step_streams_ctx.set(step_streams)
+
     try:
-        if not step_run.started_at:
-            raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
-
-        # Deserialize step input
-        if not step_run.input:
-            raise RuntimeError(f"Step '{req.step_id}' has no input")
-        what = f"the input of step {req.step_id}"
-        # No deployment id: the queue message routed this step to the deployment
-        # that owns the run, so the key resolves against the current one.
-        run_key = await world.run_key(req.run_id) if ser.is_encrypted(step_run.input) else None
-        args, kwargs = ser.step_call_arguments(
-            ser.hydrate(step_run.input, what=what, key=run_key), what=what
-        )
-
-        logger.debug(
-            "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
-            req.run_id,
-            step.name,
-            req.step_id,
-            current_attempt,
-        )
-        token = _step_ctx.set(
-            StepInfo(
-                run_id=req.run_id,
-                step_id=req.step_id,
-                step_name=step.name,
-                attempt=current_attempt,
-            )
-        )
-        streams_token = _step_streams_ctx.set(step_streams)
         async with step_streams.dispatching():
+            if not step_run.started_at:
+                raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
+
+            # Deserialize step input
+            if not step_run.input:
+                raise RuntimeError(f"Step '{req.step_id}' has no input")
+            what = f"the input of step {req.step_id}"
+            # No deployment id: the queue message routed this step to the deployment
+            # that owns the run, so the key resolves against the current one.
+            run_key = await world.run_key(req.run_id) if ser.is_encrypted(step_run.input) else None
+            args, kwargs = ser.step_call_arguments(
+                ser.hydrate(step_run.input, what=what, key=run_key), what=what
+            )
+
+            logger.debug(
+                "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
+                req.run_id,
+                step.name,
+                req.step_id,
+                current_attempt,
+            )
+            token = _step_ctx.set(
+                StepInfo(
+                    run_id=req.run_id,
+                    step_id=req.step_id,
+                    step_name=step.name,
+                    attempt=current_attempt,
+                )
+            )
             # Execute the step function
             try:
                 result = await step.func(*args, **kwargs)
             finally:
                 _step_ctx.reset(token)
-                _step_streams_ctx.reset(streams_token)
 
             # A stream write returns as soon as it is buffered, so the chunks
             # this step wrote are not durable yet. Force them out before
@@ -1151,6 +1215,9 @@ async def _execute_step(
 
             # Return timeout to keep message visible for retry
             return w.QueueContinuation(delay_seconds=1.0)
+
+    finally:
+        _step_streams_ctx.reset(streams_token)
 
     # Re-invoke the workflow to continue execution
     await world.queue(

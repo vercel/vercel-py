@@ -29,6 +29,7 @@ def _context(
 ) -> runtime.WorkflowOrchestratorContext:
     ctx = runtime.WorkflowOrchestratorContext(
         events,
+        run_id=seed,
         seed=seed,
         started_at=0,
         registry=core.Workflows(as_vercel_job=False),
