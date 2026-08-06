@@ -22,7 +22,6 @@ from vercel.sandbox import (
 load_dotenv()
 
 DEFAULT_REPO = "https://github.com/vercel/sandbox-example-next.git"
-DEFAULT_CWD = "/vercel/sandbox"
 DEFAULT_INSTALL = "npm install --loglevel info"
 DEFAULT_IMAGE = "vercel/sandbox/universal:latest"
 MARKER_PATH = ".vercel-py-dev-server/install.json"
@@ -37,7 +36,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--install", default=DEFAULT_INSTALL)
     parser.add_argument("--entrypoint")
     parser.add_argument("--name")
-    parser.add_argument("--cwd", default=DEFAULT_CWD)
+    parser.add_argument(
+        "--cwd",
+        help="working directory (defaults to the image working directory)",
+    )
     parser.add_argument("--reinstall", action="store_true")
     parser.add_argument("--destroy", action="store_true")
     return parser.parse_args()
@@ -242,7 +244,7 @@ async def _main() -> None:
     install: str = args.install
     entrypoint: str | None = args.entrypoint
     name: str | None = args.name
-    cwd: str = args.cwd
+    cwd_override: str | None = args.cwd
     reinstall: bool = args.reinstall
     destroy: bool = args.destroy
 
@@ -261,6 +263,10 @@ async def _main() -> None:
     )
 
     try:
+        cwd = cwd_override if cwd_override is not None else box.cwd
+        if cwd is None:
+            raise RuntimeError("sandbox did not report a working directory; pass --cwd")
+
         await install_dependencies(
             box,
             repo=repo,
