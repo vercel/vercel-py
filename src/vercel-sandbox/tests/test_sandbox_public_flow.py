@@ -451,6 +451,101 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
 
 
 @respx.mock
+async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
+    mock_env_clear: None,
+) -> None:
+    pending = _sandbox_response(name="forked", session_id="sbx_fork", status="pending")
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(200, json=pending)
+    )
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/forked").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(name="forked", session_id="sbx_fork")
+        )
+    )
+    stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_fork/stop").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "session": _sandbox_response(
+                    name="forked",
+                    session_id="sbx_fork",
+                    status="stopped",
+                    session_status="stopped",
+                )["session"]
+            },
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        async with sandbox.fork_sandbox(
+            source_sandbox="source",
+            project_id="prj_other",
+            name="forked",
+            ports=[],
+            execution_time_limit=12.5,
+            resources=SandboxResources(vcpus=2, memory=4096),
+            image="team/project/image:v1",
+            persistent=False,
+            network_policy=NetworkPolicy.deny_all(),
+            env={},
+            tags={},
+            snapshot_expiration=0,
+            snapshot_retention=SnapshotRetention(
+                count=2,
+                expiration=timedelta(days=1),
+                delete_evicted=False,
+            ),
+            destroy=False,
+        ) as forked:
+            assert forked.name == "forked"
+
+    request = fork_route.calls.last.request
+    assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_other"}
+    assert json.loads(request.content) == {
+        "name": "forked",
+        "ports": [],
+        "timeout": 12500,
+        "resources": {"vcpus": 2, "memory": 4096},
+        "image": "team/project/image:v1",
+        "persistent": False,
+        "networkPolicy": {"mode": "deny-all"},
+        "env": {},
+        "tags": {},
+        "snapshotExpiration": 0,
+        "keepLastSnapshots": {
+            "count": 2,
+            "expiration": 86400000,
+            "deleteEvicted": False,
+        },
+    }
+    assert dict(get_route.calls.last.request.url.params) == {
+        "teamId": "team_123",
+        "projectId": "prj_other",
+        "resume": "false",
+    }
+    assert stop_route.called
+
+
+@respx.mock
+def test_sync_fork_sandbox_uses_inherited_defaults(mock_env_clear: None) -> None:
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(name="forked", session_id="sbx_fork")
+        )
+    )
+
+    with session(service_options=_session_options()):
+        forked = sandbox_sync.fork_sandbox(source_sandbox="source")
+
+    assert isinstance(forked, sandbox_sync.SyncSandbox)
+    assert forked.name == "forked"
+    request = fork_route.calls.last.request
+    assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_123"}
+    assert json.loads(request.content) == {}
+
+
+@respx.mock
 async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
     create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(

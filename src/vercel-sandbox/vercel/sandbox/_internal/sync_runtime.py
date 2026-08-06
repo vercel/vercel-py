@@ -1536,6 +1536,51 @@ def create_sandbox(
         raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
 
 
+def fork_sandbox(
+    service: SandboxService,
+    *,
+    source_sandbox: str,
+    project_id: str | None = None,
+    name: str | None = None,
+    ports: list[int] | None = None,
+    execution_time_limit: DurationInput = None,
+    resources: SandboxResources | None = None,
+    image: str | None = None,
+    persistent: bool | None = None,
+    network_policy: NetworkPolicy | None = None,
+    env: Mapping[str, str] | None = None,
+    tags: Mapping[str, str] | None = None,
+    snapshot_expiration: SnapshotExpirationInput = None,
+    snapshot_retention: SnapshotRetention | None = None,
+    destroy: bool = True,
+) -> _ManagedSyncSandbox:
+    try:
+        state = iter_coroutine(
+            service.fork_sandbox(
+                source_sandbox=source_sandbox,
+                project_id=project_id,
+                name=name,
+                ports=ports,
+                execution_time_limit=parse_duration_seconds(execution_time_limit),
+                resources=resources,
+                image=image,
+                persistent=persistent,
+                network_policy=network_policy,
+                env=env,
+                tags=tags,
+                snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
+                snapshot_retention=snapshot_retention,
+            )
+        )
+        return _ManagedSyncSandbox(
+            payload=state,
+            service=service,
+            destroy_on_exit=destroy,
+        )
+    except _SandboxTerminalState as error:
+        raise _terminal_error(error, SyncSandbox(payload=error.sandbox, service=service)) from error
+
+
 def get_sandbox(
     service: SandboxService,
     *,

@@ -72,6 +72,48 @@ console commands. Both are aliases that delegate all arguments to `npx sandbox`;
 they require Node.js with npm and `npx` installed. Node.js is not required when
 using the Python API directly.
 
+## Creating, forking, and restoring
+
+Create a sandbox from a runtime, Git repository, tarball, or snapshot with
+`create_sandbox(...)`. A snapshot source restores that snapshot's filesystem
+into a new sandbox:
+
+```python
+from vercel import sandbox
+from vercel.sandbox import SnapshotSource
+
+restored = await sandbox.create_sandbox(
+    name="restored-workspace",
+    source=SnapshotSource(snapshot_id="snap_123"),
+)
+```
+
+Use `fork_sandbox(...)` when the source is an existing named sandbox. The
+server restores the fork from the source's current snapshot, or from its
+runtime or image when no snapshot exists. It also copies the source's ports,
+execution time limit, resources, image, persistence, network policy,
+environment variables, tags, snapshot expiration, and snapshot retention.
+Only pass values that should override the inherited configuration:
+
+```python
+forked = await sandbox.fork_sandbox(
+    source_sandbox="production-agent",
+    name="debug-agent",
+    resources=sandbox.SandboxResources(vcpus=4, memory=8192),
+    tags={"purpose": "debug"},
+)
+```
+
+Both creation and fork operations can be used as async context managers for
+automatic stop and destroy. The synchronous mirror uses the same arguments:
+
+```python
+from vercel.sandbox import sync as sandbox
+
+with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
+    result = forked.run_process("python", ["script.py"], capture_output=True)
+```
+
 ## Session lifecycles
 
 Sandbox-level process and filesystem operations resume a stopped sandbox

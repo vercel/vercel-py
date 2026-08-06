@@ -11,6 +11,7 @@ from vercel.sandbox._internal.async_filesystem_handle import (
 )
 from vercel.sandbox._internal.async_runtime import (
     CreateSandboxOperation,
+    ForkSandboxOperation,
     Process,
     ResumeSandboxOperation,
     Sandbox,
@@ -20,6 +21,7 @@ from vercel.sandbox._internal.async_runtime import (
     SandboxSessionOperation,
     Snapshot,
     create_sandbox_operation as _create_sandbox_operation,
+    fork_sandbox_operation as _fork_sandbox_operation,
     get_or_create_sandbox as _get_or_create_sandbox,
     get_sandbox as _get_sandbox,
     get_snapshot as _get_snapshot,
@@ -149,6 +151,77 @@ def create_sandbox(
         ports=ports,
         execution_time_limit=execution_time_limit,
         resources=resources,
+        persistent=persistent,
+        network_policy=network_policy,
+        env=env,
+        tags=tags,
+        snapshot_expiration=snapshot_expiration,
+        snapshot_retention=snapshot_retention,
+        destroy=destroy,
+    )
+
+
+def fork_sandbox(
+    *,
+    source_sandbox: str,
+    project_id: str | None = None,
+    name: str | None = None,
+    ports: list[int] | None = None,
+    execution_time_limit: DurationInput = None,
+    resources: SandboxResources | None = None,
+    image: str | None = None,
+    persistent: bool | None = None,
+    network_policy: NetworkPolicy | None = None,
+    env: Mapping[str, str] | None = None,
+    tags: Mapping[str, str] | None = None,
+    snapshot_expiration: SnapshotExpirationInput = None,
+    snapshot_retention: SnapshotRetention | None = None,
+    destroy: bool = True,
+) -> ForkSandboxOperation:
+    """Prepare an asynchronous sandbox fork operation.
+
+    The server initializes the fork from the source sandbox's current snapshot,
+    or from its runtime or image when it has no snapshot. Configuration is
+    inherited from the source; values supplied here replace the corresponding
+    inherited values.
+
+    Awaiting the returned operation performs no automatic cleanup. Using it as
+    an async context manager stops the fork on exit and destroys it by default.
+
+    Args:
+        source_sandbox: Name of the sandbox to fork.
+        project_id: Project that owns both the source and fork. Uses the active
+            credentials when omitted.
+        name: Requested name for the fork. The service generates one when
+            omitted.
+        ports: Ports to expose instead of the source sandbox's ports.
+        execution_time_limit: Maximum session runtime override.
+        resources: CPU and memory resource override.
+        image: Vercel Container Registry image override.
+        persistent: Persistence override.
+        network_policy: Network access policy override.
+        env: Environment variable override.
+        tags: Metadata tag override.
+        snapshot_expiration: Default snapshot lifetime override.
+        snapshot_retention: Automatic snapshot retention override.
+        destroy: Whether context-manager exit destroys the fork after stopping
+            it. Awaiting the operation never triggers cleanup.
+
+    Returns:
+        A single-use awaitable and async context manager for the fork.
+
+    Raises:
+        SandboxTerminalStateError: If the fork reaches a terminal failure state.
+    """
+    return _fork_sandbox_operation(
+        _service(),
+        source_sandbox=source_sandbox,
+        project_id=project_id,
+        name=name,
+        ports=ports,
+        execution_time_limit=execution_time_limit,
+        resources=resources,
+        image=image,
         persistent=persistent,
         network_policy=network_policy,
         env=env,
@@ -403,6 +476,7 @@ __all__ = [
     "SandboxTextWriter",
     "Sandbox",
     "CreateSandboxOperation",
+    "ForkSandboxOperation",
     "SandboxApiError",
     "SandboxCleanupError",
     "ProcessStatus",
@@ -454,6 +528,7 @@ __all__ = [
     "TarballSource",
     "TextReader",
     "create_sandbox",
+    "fork_sandbox",
     "get_or_create_sandbox",
     "get_sandbox",
     "get_snapshot",

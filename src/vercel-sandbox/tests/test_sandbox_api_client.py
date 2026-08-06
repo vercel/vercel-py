@@ -6,6 +6,7 @@ from httpx._types import HeaderTypes, QueryParamTypes
 
 from vercel._internal.core.http import (
     BaseTransport,
+    JSONBody,
     ReadResponsePolicy,
     RequestBody,
     StreamingRequest,
@@ -62,6 +63,40 @@ class JsonTransport(BaseTransport):
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         return httpx.Response(200, json=self.data, request=httpx.Request(method, path))
+
+
+class RecordingJsonTransport(JsonTransport):
+    def __init__(self, data: object) -> None:
+        super().__init__(data)
+        self.request: tuple[str, str, str | None, QueryParamTypes | None, RequestBody] | None = None
+
+    async def send(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
+        body: RequestBody = None,
+        headers: HeaderTypes | None = None,
+        timeout: timedelta | None = None,
+        follow_redirects: bool | None = None,
+        stream: bool = False,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
+    ) -> httpx.Response:
+        self.request = (method, path, token, params, body)
+        return await super().send(
+            method,
+            path,
+            token=token,
+            params=params,
+            body=body,
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+            stream=stream,
+            read_response=read_response,
+        )
 
 
 class _CompletedResponse(StreamingResponse):
@@ -144,6 +179,55 @@ def test_format_url_path_quotes_placeholder_values() -> None:
         name="name/with spaces",
         command_id="cmd?x=1",
     ) == ("v2/sandboxes/name%2Fwith%20spaces/cmd%3Fx%3D1")
+
+
+async def test_fork_sandbox_encodes_source_query_and_overrides() -> None:
+    transport = RecordingJsonTransport(
+        {
+            "sandbox": {
+                "name": "forked",
+                "currentSessionId": "sbx_fork",
+                "status": "running",
+            },
+            "session": {
+                "id": "sbx_fork",
+                "sourceSandboxName": "forked",
+                "projectId": "prj_other",
+                "status": "running",
+            },
+        }
+    )
+    client = _sandbox_client(transport)
+
+    result = await client.fork_sandbox(
+        source_sandbox="source/with spaces",
+        project_id="prj_other",
+        name="forked",
+        ports=[],
+        execution_time_limit=timedelta(seconds=12.5),
+        image="team/project/image:v1",
+        persistent=False,
+        env={},
+        tags={},
+    )
+
+    assert result.name == "forked"
+    assert transport.request is not None
+    method, path, token, params, body = transport.request
+    assert method == "POST"
+    assert path == "https://sandbox.test/v2/sandboxes/source%2Fwith%20spaces/fork"
+    assert token == "token"
+    assert params == {"teamId": "team_123", "projectId": "prj_other"}
+    assert isinstance(body, JSONBody)
+    assert body.data == {
+        "name": "forked",
+        "ports": [],
+        "timeout": 12500,
+        "image": "team/project/image:v1",
+        "persistent": False,
+        "env": {},
+        "tags": {},
+    }
 
 
 async def test_stop_runtime_session_retains_sparse_sandbox_metadata() -> None:
