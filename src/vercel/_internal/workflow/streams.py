@@ -23,8 +23,9 @@ frame boundaries without understanding the payload format at all.
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
-from collections.abc import AsyncIterable, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -140,6 +141,91 @@ class FrameDecoder:
                 f"Stream ended with {len(self._buffer)} bytes of incomplete frame data; "
                 f"it was truncated mid-frame"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# reader
+# ═══════════════════════════════════════════════════════════════════════════
+
+MAX_RECONNECTS = 50
+"""Consecutive reconnects allowed before a read gives up.
+
+Reset by any reconnect that delivers a frame, so this bounds *consecutive*
+failures rather than the lifetime total: a long-lived stream may reconnect far
+more than this and stay healthy, as long as it keeps making progress.
+"""
+
+MAX_TOTAL_RECONNECTS = 1000
+"""Absolute backstop, independent of progress.
+
+The consecutive cap resets on forward progress, which is correct against a
+backend that honours ``start_index``. One that ignored it would re-deliver
+earlier frames, look like progress every time, and never trip that cap -- so
+this guarantees the loop terminates regardless.
+"""
+
+
+async def reconnecting_frames(
+    world: w.World, run_id: str, name: str, start_index: int | None = None
+) -> AsyncGenerator[bytes, None]:
+    """Read a stream's frames, reopening the connection when it breaks.
+
+    A live read is long-lived and the transport under it is not: the Vercel
+    world's read endpoint errors the response body when the server's max
+    duration expires, which is what tells this loop apart from the end of the
+    stream. A clean end of iteration means the stream is closed and the read is
+    done; an error means reopen at the next unread frame and carry on.
+
+    Resuming is exact because one frame is one stored chunk, so the position is
+    ``start_index`` plus the frames already handed to the caller. Bytes of a
+    frame that had not fully arrived are dropped -- the reopened connection
+    re-sends that chunk whole.
+
+    A negative *start_index* (last-N) cannot be resumed: its meaning depends on
+    where the tail was at connect time, and re-resolving it after a break would
+    silently move the window. Such a read is single-shot.
+    """
+    resumable = start_index is None or start_index >= 0
+    position = start_index or 0
+    consumed = 0
+    consecutive = 0
+    total = 0
+    max_reconnects = _env_int("WORKFLOW_FRAMED_STREAM_MAX_RECONNECTS", MAX_RECONNECTS)
+    max_total = _env_int("WORKFLOW_FRAMED_STREAM_MAX_TOTAL_RECONNECTS", MAX_TOTAL_RECONNECTS)
+
+    while True:
+        # A fresh decoder per connection: whatever partial frame the broken
+        # connection left behind is not continued, it is re-sent.
+        decoder = FrameDecoder()
+        effective = position + consumed if resumable else start_index
+        try:
+            source = world.streams_get(run_id, name, effective)
+            async with contextlib.aclosing(source):
+                async for data in source:
+                    for payload in decoder.feed(data):
+                        consumed += 1
+                        consecutive = 0
+                        yield payload
+        except Exception as error:
+            if not resumable:
+                raise
+            consecutive += 1
+            total += 1
+            if consecutive > max_reconnects:
+                raise ser.SerializationError(
+                    f"Stream {name!r} exceeded {max_reconnects} consecutive reconnection attempts"
+                ) from error
+            if total > max_total:
+                raise ser.SerializationError(
+                    f"Stream {name!r} exceeded {max_total} total reconnection attempts"
+                ) from error
+            position += consumed
+            consumed = 0
+            continue
+
+        # Iteration ended without error: the stream is closed and complete.
+        decoder.finish()
+        return
 
 
 # ═══════════════════════════════════════════════════════════════════════════

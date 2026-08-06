@@ -6,7 +6,7 @@ import os
 import platform
 import traceback
 import urllib.parse
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from typing import Any, TypeVar, overload
 
 import cbor2
@@ -793,12 +793,12 @@ class VercelWorld(w.World):
 
     def streams_get(
         self, run_id: str, name: str, start_index: int | None = None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         return self._iter_stream(run_id, name, start_index)
 
     async def _iter_stream(
         self, run_id: str, name: str, start_index: int | None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         # The live read is v3, not v2, and that is load-bearing: on its
         # max-duration timeout (or a mid-stream drop) v3 *errors* the response
         # body where v2 closes it cleanly. Only the error tells a resuming
