@@ -1,10 +1,15 @@
-"""Tests for the workflow-server URL override on VercelWorld.
+"""Tests for the URL overrides VercelWorld reads, mirroring world-vercel's
+``utils.ts``.
 
-The override mirrors world-vercel's ``utils.ts`` precedence: the hard-coded
-``WORKFLOW_SERVER_URL_OVERRIDE`` constant wins, then the
-``VERCEL_WORKFLOW_SERVER_URL`` environment variable, then the production
-default. Preview deployments carry the env var, so a Python app has to honour
-it to reach the same workflow-server as its TypeScript peers.
+Two independent knobs:
+
+- the workflow-server override — the hard-coded ``WORKFLOW_SERVER_URL_OVERRIDE``
+  constant wins, then the ``VERCEL_WORKFLOW_SERVER_URL`` environment variable,
+  then the production default. Preview deployments carry the env var, so a
+  Python app has to honour it to reach the same workflow-server as its
+  TypeScript peers.
+- ``WORKFLOW_VERCEL_BACKEND_URL``, which swaps the api.vercel.com proxy the
+  world talks to when it has project config.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from vercel._internal.workflow.worlds import vercel as vercel_mod
 
 BRANCH_URL = "https://workflow-server-git-branch.vercel.sh"
 PINNED_URL = "https://workflow-server-pinned.vercel.sh"
+BACKEND_URL = "https://api-vercel-git-branch.vercel.sh/v1/workflow"
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +28,7 @@ def _clean_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start every test from "no constant, no env var"."""
     monkeypatch.setattr(vercel_mod, "WORKFLOW_SERVER_URL_OVERRIDE", "")
     monkeypatch.delenv("VERCEL_WORKFLOW_SERVER_URL", raising=False)
+    monkeypatch.delenv("WORKFLOW_VERCEL_BACKEND_URL", raising=False)
 
 
 def test_defaults_to_production_without_an_override() -> None:
@@ -57,6 +64,36 @@ def test_hard_coded_constant_wins_over_the_env_var(monkeypatch: pytest.MonkeyPat
     world = vercel_mod.VercelWorld(token="tok")
 
     assert world._base_url == f"{PINNED_URL}/api"
+
+
+def test_backend_url_swaps_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORKFLOW_VERCEL_BACKEND_URL", BACKEND_URL)
+
+    world = vercel_mod.VercelWorld(token="tok", project_id="prj_1", team_id="team_1")
+
+    assert world._base_url == BACKEND_URL
+    assert world._queue_client().base_url == f"{BACKEND_URL}/queues-proxy"
+
+
+def test_backend_url_is_ignored_without_project_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No project config means no proxy, so there is nothing to swap."""
+    monkeypatch.setenv("WORKFLOW_VERCEL_BACKEND_URL", BACKEND_URL)
+
+    world = vercel_mod.VercelWorld(token="tok")
+
+    assert world._base_url == "https://vercel-workflow.com/api"
+
+
+def test_the_two_overrides_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proxy moves, and the workflow-server it should route to still
+    travels in the header."""
+    monkeypatch.setenv("WORKFLOW_VERCEL_BACKEND_URL", BACKEND_URL)
+    monkeypatch.setenv("VERCEL_WORKFLOW_SERVER_URL", BRANCH_URL)
+
+    world = vercel_mod.VercelWorld(token="tok", project_id="prj_1", team_id="team_1")
+
+    assert world._base_url == BACKEND_URL
+    assert world._headers["x-vercel-workflow-api-url"] == BRANCH_URL
 
 
 def test_override_is_read_per_world_not_at_import(monkeypatch: pytest.MonkeyPatch) -> None:

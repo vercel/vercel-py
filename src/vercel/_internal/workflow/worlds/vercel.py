@@ -100,7 +100,11 @@ class VercelWorld(w.World):
         # header if override is set)
         # When not using proxy, use the default workflow-server URL (with /api path appended)
         if self._using_proxy:
-            self._base_url = "https://api.vercel.com/v1/workflow"
+            # WORKFLOW_VERCEL_BACKEND_URL swaps the proxy itself, independently
+            # of the workflow-server override above.
+            self._base_url = (
+                os.getenv("WORKFLOW_VERCEL_BACKEND_URL") or "https://api.vercel.com/v1/workflow"
+            )
         else:
             default_host = server_url_override or "https://vercel-workflow.com"
             self._base_url = f"{default_host}/api"
