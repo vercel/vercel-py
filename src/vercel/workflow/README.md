@@ -61,6 +61,70 @@ async def wait_for_approval() -> bool:
 
 `BaseHook` supports dataclasses and Pydantic models for external resume events.
 
+## Streaming
+
+Every run has a stream a step can write to while it runs, so a client sees
+progress without waiting for the run to finish:
+
+```python
+from vercel.workflow import Workflows, get_writable
+
+app = Workflows()
+
+
+@app.step
+async def summarize(*, document: str) -> str:
+    writable = get_writable()
+    summary = []
+    async for token in llm.stream(document):
+        await writable.write(token)
+        summary.append(token)
+    return "".join(summary)
+
+
+@app.step
+async def done() -> None:
+    await get_writable().close()
+
+
+@app.workflow
+async def analyze(*, document: str) -> str:
+    summary = await summarize(document=document)
+    await done()
+    return summary
+```
+
+`get_writable()` works inside a step only. Where the TypeScript SDK lets a
+workflow body take a handle and pass it into a step, here it cannot yet, so each
+step that streams calls `get_writable()` itself.
+
+Chunks are values, not just bytes: anything the payload format carries (see
+below) can be written, and a reader gets it back.
+
+Three things are worth knowing:
+
+- **Nothing closes a stream for you.** Not the end of a step, not the end of the
+  run — the stream spans steps, and a closed stream cannot be reopened. A reader
+  of a stream nobody closes waits until the run expires, so close it from the
+  last step that has something to say.
+- **A step is not complete until its chunks are.** `write()` returns once the
+  chunk is buffered, and the step handler flushes before recording the step, so
+  "the step finished" implies "everything it streamed is readable". Call
+  `await writable.drain()` if you need that guarantee earlier.
+- **Retries re-stream.** A step that fails halfway has already written what it
+  wrote, and the retry writes it again. Keep chunks idempotent, or stream from a
+  step you are willing to see repeated.
+
+`await writable.write_from(source)` forwards an async iterable in one call, and
+`get_writable(namespace="logs")` gives the run a second, independent stream.
+
+There is no public reader yet. A stream is consumed today by the TypeScript SDK
+(`run.readable`), the dashboard, or `workflow inspect stream <id> --run=<run-id>`.
+Python can read one through the world (`streams_get()` yields transport bytes,
+`FrameDecoder` turns them into payloads), but those live under
+`vercel._internal` and have no auto-reconnect, so a long read will not survive
+the server's stream timeout.
+
 ## Serializing your own types
 
 Workflow inputs, step results and hook payloads travel in the devalue format
