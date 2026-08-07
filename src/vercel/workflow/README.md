@@ -32,8 +32,8 @@ durable wait in a workflow run.
 
 ## Queue namespaces
 
-Pass a namespace to a workflow registry to isolate its workflow and step
-messages on dedicated queue topics:
+Pass a namespace to a workflow registry to isolate its messages on a dedicated
+queue topic:
 
 ```python
 workflows = Workflows(namespace="billing")

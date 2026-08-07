@@ -530,7 +530,11 @@ async def workflow_handler(
     namespace: str | None = None,
 ) -> w.QueueContinuation | None:
     world = w.get_world()
-    run_id = w.WorkflowInvokePayload.model_validate(message).run_id
+    req = w.WorkflowInvokePayload.model_validate(message)
+    if req.step_id is not None:
+        return await _execute_step(req, queue_name=queue_name, registry=registry)
+
+    run_id = req.run_id
     workflow_run = await world.runs_get(run_id)
     if workflow_run.status == "pending":
         try:
@@ -674,12 +678,11 @@ async def workflow_handler(
                     # Instead we use an idempotency_key to pervent
                     # duplicate queueing.
                     await world.queue(
-                        w.get_queue_name("step", s.step.name, namespace),
-                        w.StepInvokePayload(
-                            workflowName=workflow_run.workflow_name,
-                            workflowRunId=run_id,
-                            workflowStartedAt=workflow_started_at,
+                        w.get_queue_name(workflow_run.workflow_name, namespace),
+                        w.WorkflowInvokePayload(
+                            runId=run_id,
                             stepId=s.correlation_id,
+                            stepName=s.step.name,
                             requestedAt=datetime.now(UTC),
                         ),
                         idempotency_key=s.correlation_id,
@@ -759,34 +762,26 @@ async def workflow_handler(
     return w.QueueContinuation(delay_seconds=delay, idempotency_key=key)
 
 
-def _step_name_from_queue(queue_name: str, namespace: str | None = None) -> str:
-    """The step name encoded in a step queue topic."""
-    prefix = w.get_queue_topic_prefix("step", namespace)
-    if not queue_name.startswith(prefix):
-        raise ValueError(f'Invalid step queue name "{queue_name}": expected prefix "{prefix}"')
-    return queue_name.removeprefix(prefix)
-
-
-async def step_handler(
-    message: Any,
+async def _execute_step(
+    req: w.WorkflowInvokePayload,
     *,
-    attempt: int,
     queue_name: str,
-    message_id: str,
     registry: core.Workflows,
-    namespace: str | None = None,
 ) -> w.QueueContinuation | None:
     world = w.get_world()
-    req = w.StepInvokePayload.model_validate(message)
 
-    step = registry._get_step(_step_name_from_queue(queue_name, namespace))
+    if req.step_id is None:
+        raise ValueError(f"Step invocation for run '{req.run_id}' is missing 'stepId'")
+    if req.step_name is None:
+        raise ValueError(f"Step invocation for '{req.step_id}' is missing 'stepName'")
+    step = registry._get_step(req.step_name)
 
     # step_started validates state (terminal -> EntityConflictError, retryAfter
     # not reached -> TooEarlyError), increments the attempt, and returns the
     # updated step entity, so no step pre-read is needed.
     try:
         start_result = await world.events_create(
-            req.workflow_run_id,
+            req.run_id,
             w.StepStartedEvent(correlationId=req.step_id),
         )
     except w.TooEarlyError as e:
@@ -794,7 +789,7 @@ async def step_handler(
         timeout_seconds = max(1, e.retry_after or 1)
         logger.debug(
             "[Workflows] '%s' - step '%s' retryAfter not reached, deferring %ds",
-            req.workflow_run_id,
+            req.run_id,
             step.name,
             timeout_seconds,
         )
@@ -806,9 +801,9 @@ async def step_handler(
         # but whose handler died before re-invoking the workflow.
         logger.debug("Tried starting step %r, but it has already finished", req.step_id)
         await world.queue(
-            w.get_queue_name("workflow", req.workflow_name, namespace),
+            queue_name,
             w.WorkflowInvokePayload(
-                runId=req.workflow_run_id,
+                runId=req.run_id,
                 requestedAt=datetime.now(UTC),
             ),
         )
@@ -828,11 +823,11 @@ async def step_handler(
             f"Step '{step.name}' exceeded max retries "
             f"({retry_count} {'retry' if retry_count == 1 else 'retries'})"
         )
-        logger.error("[Workflows] '%s' - %s", req.workflow_run_id, error_message)
+        logger.error("[Workflows] '%s' - %s", req.run_id, error_message)
 
         # Fail the step via event
         await world.events_create(
-            req.workflow_run_id,
+            req.run_id,
             w.StepFailedEventData(
                 error=error_message, stack=step_run.error.stack if step_run.error else None
             ).into_event(req.step_id),
@@ -840,9 +835,9 @@ async def step_handler(
 
         # Re-invoke the workflow to handle the failed step
         await world.queue(
-            w.get_queue_name("workflow", req.workflow_name, namespace),
+            queue_name,
             w.WorkflowInvokePayload(
-                runId=req.workflow_run_id,
+                runId=req.run_id,
                 requestedAt=datetime.now(UTC),
             ),
         )
@@ -860,14 +855,14 @@ async def step_handler(
 
         logger.debug(
             "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
-            req.workflow_run_id,
+            req.run_id,
             step.name,
             req.step_id,
             current_attempt,
         )
         token = _step_ctx.set(
             StepInfo(
-                run_id=req.workflow_run_id,
+                run_id=req.run_id,
                 step_id=req.step_id,
                 step_name=step.name,
                 attempt=current_attempt,
@@ -884,7 +879,7 @@ async def step_handler(
 
         # Complete the step via event
         await world.events_create(
-            req.workflow_run_id,
+            req.run_id,
             w.StepCompletedEventData(result=output).into_event(req.step_id),
         )
 
@@ -908,7 +903,7 @@ async def step_handler(
                 "[Workflows] '%s' - Encountered Error "
                 "while executing step '%s' (attempt %d, "
                 "%d %s): %s\n\n  Max retries reached\n  Bubbling error to parent workflow",
-                req.workflow_run_id,
+                req.run_id,
                 step.name,
                 step_run.attempt,
                 retry_count,
@@ -919,7 +914,7 @@ async def step_handler(
             # Fail the step via event
             error_stack = traceback.format_exc()
             await world.events_create(
-                req.workflow_run_id,
+                req.run_id,
                 w.StepFailedEventData(error=error_message, stack=error_stack).into_event(
                     req.step_id
                 ),
@@ -930,7 +925,7 @@ async def step_handler(
                 "[Workflows] '%s' - Encountered Error "
                 "while executing step '%s' (attempt %d): "
                 "%s\n\n  This step has failed but will be retried",
-                req.workflow_run_id,
+                req.run_id,
                 step.name,
                 current_attempt,
                 e,
@@ -939,7 +934,7 @@ async def step_handler(
             # Set step to pending for retry
             error_stack = traceback.format_exc()
             await world.events_create(
-                req.workflow_run_id,
+                req.run_id,
                 w.StepRetryingEventData(error=error_text, stack=error_stack).into_event(
                     req.step_id
                 ),
@@ -950,9 +945,9 @@ async def step_handler(
 
     # Re-invoke the workflow to continue execution
     await world.queue(
-        w.get_queue_name("workflow", req.workflow_name, namespace),
+        queue_name,
         w.WorkflowInvokePayload(
-            runId=req.workflow_run_id,
+            runId=req.run_id,
             requestedAt=datetime.now(UTC),
         ),
     )
@@ -962,16 +957,8 @@ async def step_handler(
 def workflow_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     namespace = registry.namespace
     return w.get_world().create_queue_handler(
-        w.get_queue_topic_prefix("workflow", namespace),
+        w.get_queue_topic_prefix(namespace),
         functools.partial(workflow_handler, registry=registry, namespace=namespace),
-    )
-
-
-def step_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
-    namespace = registry.namespace
-    return w.get_world().create_queue_handler(
-        w.get_queue_topic_prefix("step", namespace),
-        functools.partial(step_handler, registry=registry, namespace=namespace),
     )
 
 
@@ -1116,7 +1103,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
 
     run_id = result.run.run_id
     await world.queue(
-        w.get_queue_name("workflow", wf.workflow_id, namespace),
+        w.get_queue_name(wf.workflow_id, namespace),
         w.WorkflowInvokePayload(runId=run_id),
         deployment_id=deployment_id,
     )
@@ -1138,7 +1125,7 @@ async def resume_hook(token_or_hook: str | w.Hook, payload: Any) -> w.Hook:
     if namespace is not None and not isinstance(namespace, str):
         raise RuntimeError("Workflow run has an invalid queue namespace")
     await world.queue(
-        w.get_queue_name("workflow", run.workflow_name, namespace),
+        w.get_queue_name(run.workflow_name, namespace),
         w.WorkflowInvokePayload(runId=hook.run_id),
     )
     return hook

@@ -1,18 +1,15 @@
 """Regression test for step-retry dispatch in the queue-handler wrapper.
 
-When a step fails below ``max_retries``, ``step_handler`` returns a retry timeout
-(``return 1.0``). The wrapper registered by ``World.create_queue_handler``
-(``async_handler``) is responsible for rescheduling the step after that delay.
+When a step fails below ``max_retries``, the handler's step path returns a retry
+timeout. The wrapper registered by ``World.create_queue_handler``
+(``async_handler``) is responsible for rescheduling it after that delay.
 
-``async_handler`` must re-enqueue the retry preserving the message's payload type.
-Previously it re-enqueued *every* timeout return as a ``WorkflowInvokePayload``,
-which raised ``ValidationError`` for a ``StepInvokePayload`` → the handler 500'd and
-the step only retried via un-acked redelivery (wrong cadence, no backoff). The fix
-validates against the ``QueuePayload`` union, so a step retry re-enqueues a
-``StepInvokePayload`` on its own queue with the delay.
-
-This drives the real ``async_handler`` closure with a step payload and a handler
-that asks to retry.
+Steps and orchestration share one topic, so what distinguishes a step message is
+the ``stepId`` on its ``WorkflowInvokePayload``. ``async_handler`` re-enqueues the
+continuation by round-tripping the raw payload through ``QueuePayload``, which
+means a dropped ``stepId`` would silently turn the retry into a plain replay: the
+step would never run again, and the run would stall until redelivery. These tests
+drive the real ``async_handler`` closure and assert what survives that round trip.
 """
 
 from __future__ import annotations
@@ -47,35 +44,34 @@ async def test_step_retry_timeout_reschedules_step(isolated_subscriptions: None)
     async def handler(
         message: object, *, queue_name: str, attempt: int, message_id: str
     ) -> w.QueueContinuation:
-        # Stand in for step_handler deciding to retry: a non-None continuation.
+        # Stand in for the step path deciding to retry: a non-None continuation.
         del message, queue_name, attempt, message_id
         return w.QueueContinuation(delay_seconds=1.0)
 
     # Registers async_handler into the global subscription registry as a side effect.
-    world.create_queue_handler("__wkf_step_", handler)
+    world.create_queue_handler("__wkf_workflow_", handler)
     subscriptions = list(get_subscriptions())
     assert len(subscriptions) == 1
-    assert subscriptions[0].topic == "__wkf_step_*"
+    assert subscriptions[0].topic == "__wkf_workflow_*"
     assert subscriptions[0].consumer_group == "default"
     async_handler = subscriptions[0].func
     assert async_handler is not None
 
-    step_payload = w.StepInvokePayload(
-        workflowName="wf",
-        workflowRunId="wrun_1",
-        workflowStartedAt=0.0,
+    step_payload = w.WorkflowInvokePayload(
+        runId="wrun_1",
         stepId="step_1",
+        stepName="step//tests.add",
     ).model_dump()
     body = {
         "payload": step_payload,
-        "queueName": "__wkf_step_wf",
+        "queueName": "__wkf_workflow_wf",
         "deploymentId": "<local>",
     }
     metadata = MessageMetadata(
         message_id="m1",
         delivery_count=1,
         created_at=CREATED_AT,
-        topic="__wkf_step_wf",
+        topic="__wkf_workflow_wf",
         consumer_group=SanitizedName("tests"),
     )
 
@@ -83,11 +79,12 @@ async def test_step_retry_timeout_reschedules_step(isolated_subscriptions: None)
 
     assert world.queued, "step retry was not re-enqueued"
     qn, msg, delay, _idem = world.queued[-1]
-    assert qn == "__wkf_step_wf"
-    step_id = getattr(msg, "step_id", None) or (
-        msg.get("stepId") if isinstance(msg, dict) else None
-    )
-    assert step_id == "step_1"
+    assert qn == "__wkf_workflow_wf"
+    assert isinstance(msg, w.WorkflowInvokePayload)
+    # Without both of these the redelivery replays the run instead of retrying
+    # the step, since that is the only thing telling the two message kinds apart.
+    assert msg.step_id == "step_1"
+    assert msg.step_name == "step//tests.add"
     assert delay == 1.0
 
 

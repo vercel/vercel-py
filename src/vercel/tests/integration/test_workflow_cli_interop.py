@@ -246,17 +246,16 @@ async def py_run(tmp_path, monkeypatch) -> tuple[Path, str]:
     """Execute the workflow for real and return its data dir and run id.
 
     Nothing is faked. `LocalWorld` runs an embedded queue service in-process,
-    and `workflow_entrypoint` / `step_entrypoint` subscribe the real handlers
-    to it -- which is what `Workflows()` does for itself outside a test, and
-    what a developer gets from `vercel dev`. Doing it here rather than at
-    import is what lets the run land in this test's `tmp_path`: those
-    entrypoints bind whichever world is installed when they are called.
+    and `workflow_entrypoint` subscribes the real combined handler to it --
+    which is what `Workflows()` does for itself outside a test, and what a
+    developer gets from `vercel dev`. Doing it here rather than at import is
+    what lets the run land in this test's `tmp_path`: the entrypoint binds
+    whichever world is installed when it is called.
     """
     monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
     world = local_mod.LocalWorld()
     w.set_world(world)
     runtime.workflow_entrypoint(registry)
-    runtime.step_entrypoint(registry)
 
     try:
         run = await runtime.start(checkout, 21)

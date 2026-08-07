@@ -29,7 +29,6 @@ from vercel._internal.core.polyfills import Self
 from vercel.queue import SanitizedName
 
 T = TypeVar("T")
-QueueKind: TypeAlias = Literal["workflow", "step"]
 QueuePrefix: TypeAlias = str
 # OpenTelemetry trace context for distributed tracing
 TraceCarrier: TypeAlias = dict[str, str]
@@ -46,23 +45,20 @@ def validate_queue_namespace(namespace: str | None) -> None:
         )
 
 
-def get_queue_topic_prefix(kind: QueueKind, namespace: str | None = None) -> QueuePrefix:
-    """Build the workflow or step queue prefix for an optional namespace."""
-    if kind not in ("workflow", "step"):
-        raise ValueError(f"Invalid queue kind: {kind}")
+def get_queue_topic_prefix(namespace: str | None = None) -> QueuePrefix:
+    """Build the workflow queue prefix for an optional namespace."""
     validate_queue_namespace(namespace)
     if namespace is not None:
-        return f"__{namespace}_wkf_{kind}_"
-    return f"__wkf_{kind}_"
+        return f"__{namespace}_wkf_workflow_"
+    return "__wkf_workflow_"
 
 
 def get_queue_name(
-    kind: QueueKind,
     identifier: str,
     namespace: str | None = None,
 ) -> str:
     """Build a queue name for an optional namespace."""
-    return f"{get_queue_topic_prefix(kind, namespace)}{identifier}"
+    return f"{get_queue_topic_prefix(namespace)}{identifier}"
 
 
 # The consumer group our subscribers register under. The Python builder
@@ -114,30 +110,24 @@ class BaseModel(pydantic.BaseModel):
 
 
 class WorkflowInvokePayload(BaseModel):
-    """Payload for invoking a workflow."""
+    """Payload for invoking a workflow.
+
+    Step invocations ride this same payload on the workflow topic: a message
+    carrying ``stepId`` asks the receiver to execute that step before the run
+    is replayed, rather than to replay straight away.
+    """
 
     run_id: str = pydantic.Field(alias="runId")
-    trace_carrier: TraceCarrier | None = pydantic.Field(
-        default=None, alias="traceCarrier", exclude_if=lambda e: e is None
+    # Step ID for step execution on the combined handler. When present, the
+    # receiver executes that step instead of replaying the run.
+    step_id: str | None = pydantic.Field(
+        default=None, alias="stepId", exclude_if=lambda e: e is None
     )
-    requested_at: datetime | None = pydantic.Field(
-        default=None, alias="requestedAt", exclude_if=lambda e: e is None
+    # Step name, sent alongside stepId because the merged topic no longer
+    # encodes it: the queue name identifies the workflow, not the step.
+    step_name: str | None = pydantic.Field(
+        default=None, alias="stepName", exclude_if=lambda e: e is None
     )
-
-    @pydantic.field_serializer("requested_at", mode="plain")
-    def ser_requested_at(self, value: Any) -> Any:
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return value
-
-
-class StepInvokePayload(BaseModel):
-    """Payload for invoking a step within a workflow."""
-
-    workflow_name: str = pydantic.Field(alias="workflowName")
-    workflow_run_id: str = pydantic.Field(alias="workflowRunId")
-    workflow_started_at: float = pydantic.Field(alias="workflowStartedAt")
-    step_id: str = pydantic.Field(alias="stepId")
     trace_carrier: TraceCarrier | None = pydantic.Field(
         default=None, alias="traceCarrier", exclude_if=lambda e: e is None
     )
@@ -155,14 +145,14 @@ class StepInvokePayload(BaseModel):
 class HealthCheckPayload(BaseModel):
     """
     Health check payload - used to verify that the queue pipeline
-    can deliver messages to workflow/step endpoints.
+    can deliver messages to the combined workflow endpoint.
     """
 
     health_check: Literal[True] = pydantic.Field(default=True, alias="__healthCheck")
     correlation_id: str = pydantic.Field(alias="correlationId")
 
 
-QueuePayload: TypeAlias = WorkflowInvokePayload | StepInvokePayload | HealthCheckPayload
+QueuePayload: TypeAlias = WorkflowInvokePayload | HealthCheckPayload
 QueuePayloadAdaptor: pydantic.TypeAdapter[QueuePayload] = pydantic.TypeAdapter(QueuePayload)
 
 

@@ -285,7 +285,6 @@ class Workflows:
             from . import runtime
 
             runtime.workflow_entrypoint(self)
-            runtime.step_entrypoint(self)
 
     @property
     def namespace(self) -> str | None:
