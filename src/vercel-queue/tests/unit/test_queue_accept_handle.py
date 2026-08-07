@@ -1132,6 +1132,107 @@ def test_sync_accept_and_handle_infers_text_buffer_transport(
     assert eqs.state.by_id[delivery.message_id].acknowledged
 
 
+class _HalfJsonTransport:
+    """Stands in for a non-JSON codec: same object, different bytes.
+
+    Nothing about the payload or the subscriber signature can imply it, so a
+    delivery only decodes when the transport was named explicitly.
+    """
+
+    content_type = "application/x-half-json"
+
+    def serialize(self, value: Any) -> bytes:
+        return b"half:" + json.dumps(value).encode()
+
+    async def deserialize(
+        self,
+        payload: AsyncIterator[bytes],
+        *,
+        content_type: str,
+    ) -> Any:
+        del content_type
+        body = b"".join([chunk async for chunk in payload])
+        return json.loads(body.removeprefix(b"half:"))
+
+
+def test_sync_accept_and_handle_uses_the_given_transport(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+) -> None:
+    """An untyped subscriber infers JSON, which cannot read these bytes."""
+    calls: list[object] = []
+
+    @callback_subscribe(topic="emails")
+    def handle(payload: object) -> None:
+        calls.append(payload)
+
+    delivery = sync_delivery(eqs, {"ok": True}, transport=_HalfJsonTransport())
+    assert delivery.body == b'half:{"ok": true}'
+
+    assert isinstance(delivery.client, SyncQueueClient)
+    delivery.client.accept_and_handle(
+        delivery.body,
+        delivery.headers,
+        transport=_HalfJsonTransport(),
+        lease_duration=30,
+    )
+
+    assert calls == [{"ok": True}]
+    assert eqs.state.by_id[delivery.message_id].acknowledged
+
+
+@pytest.mark.anyio
+async def test_async_accept_and_handle_uses_the_given_transport(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+) -> None:
+    calls: list[object] = []
+
+    @callback_subscribe(topic="emails")
+    async def handle(payload: object) -> None:
+        calls.append(payload)
+
+    delivery = await async_delivery(eqs, {"ok": True}, transport=_HalfJsonTransport())
+
+    assert isinstance(delivery.client, QueueClient)
+    await delivery.client.accept_and_handle(
+        delivery.body,
+        delivery.headers,
+        transport=_HalfJsonTransport(),
+        lease_duration=30,
+    )
+
+    assert calls == [{"ok": True}]
+
+
+def test_accept_and_handle_transport_wins_over_a_typed_subscriber(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+) -> None:
+    """The codec is replaced; the annotation still validates the result."""
+
+    class Payload(BaseModel):
+        count: int
+
+    calls: list[Payload] = []
+
+    @callback_subscribe(topic="emails")
+    def handle(payload: Payload) -> None:
+        calls.append(payload)
+
+    delivery = sync_delivery(eqs, {"count": 3}, transport=_HalfJsonTransport())
+
+    assert isinstance(delivery.client, SyncQueueClient)
+    delivery.client.accept_and_handle(
+        delivery.body,
+        delivery.headers,
+        transport=_HalfJsonTransport(),
+        lease_duration=30,
+    )
+
+    assert calls == [Payload(count=3)]
+
+
 def test_accept_and_handle_infers_json_transport_for_union_with_buffer_types(
     eqs: EmbeddedQueueDevServer,
     isolated_subscriptions: None,

@@ -14,6 +14,7 @@ from .types import (
     MessageID,
     RawHeaders,
     Topic,
+    Transport,
 )
 
 T = TypeVar("T")
@@ -47,6 +48,7 @@ def accept_and_handle(
     raw_body: PushDeliveryBody,
     headers: RawHeaders,
     *,
+    transport: Transport[Any] | None = None,
     lease_duration: Duration | None = None,
 ) -> None: ...
 
@@ -56,6 +58,7 @@ def accept_and_handle(
     raw_body: HttpResponse,
     headers: None = None,
     *,
+    transport: Transport[Any] | None = None,
     lease_duration: Duration | None = None,
 ) -> None: ...
 
@@ -64,6 +67,7 @@ def accept_and_handle(
     raw_body: PushDeliveryBody | HttpResponse,
     headers: RawHeaders | None = None,
     *,
+    transport: Transport[Any] | None = None,
     lease_duration: Duration | None = None,
 ) -> None:
     """Accept a push callback and dispatch sync subscribers."""
@@ -71,6 +75,7 @@ def accept_and_handle(
     client._accept_and_handle(  # noqa: SLF001
         raw_body,
         headers,
+        transport=transport,
         lease_duration=lease_duration,
     )
 

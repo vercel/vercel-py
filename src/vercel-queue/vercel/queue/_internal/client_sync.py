@@ -141,6 +141,7 @@ class QueueClient(BaseQueueClient):
         raw_body: PushDeliveryBody,
         headers: RawHeaders,
         *,
+        transport: Transport[Any] | None = None,
         lease_duration: Duration | None = None,
     ) -> None: ...
 
@@ -150,6 +151,7 @@ class QueueClient(BaseQueueClient):
         raw_body: HttpResponse,
         headers: None = None,
         *,
+        transport: Transport[Any] | None = None,
         lease_duration: Duration | None = None,
     ) -> None: ...
 
@@ -158,12 +160,18 @@ class QueueClient(BaseQueueClient):
         raw_body: PushDeliveryBody | HttpResponse,
         headers: RawHeaders | None = None,
         *,
+        transport: Transport[Any] | None = None,
         lease_duration: Duration | None = None,
     ) -> None:
-        """Accept a push callback and dispatch matching subscribers."""
+        """Accept a push callback and dispatch matching subscribers.
+
+        ``transport`` overrides the codec inferred from the matching
+        subscriber's signature.
+        """
         self._accept_and_handle(
             raw_body,
             headers,
+            transport=transport,
             lease_duration=lease_duration,
         )
 
