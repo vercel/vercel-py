@@ -171,6 +171,24 @@ def test_send_explicit_transport_overrides_inference(
     assert request.body == b"custom:raw"
 
 
+def test_send_rejects_a_subscription_pattern(eqs: EmbeddedQueueDevServer) -> None:
+    client = _sync_client(token="token", base_url=eqs.base_url, deployment=ALL_DEPLOYMENTS)
+
+    with pytest.raises(ValueError, match="is a subscription pattern"):
+        client.send(Topic[dict[str, str]]("emails*"), {"subject": "hi"})
+
+    assert not eqs.state.requests
+
+
+def test_poll_rejects_a_subscription_pattern(eqs: EmbeddedQueueDevServer) -> None:
+    client = _sync_client(token="token", base_url=eqs.base_url, deployment=ALL_DEPLOYMENTS)
+
+    with pytest.raises(ValueError, match="is a subscription pattern"):
+        next(iter(client.poll(Topic[dict[str, str]]("emails*"), "tests")))
+
+    assert not eqs.state.requests
+
+
 def test_base_url_path_prefix_is_preserved_for_queue_api(
     eqs: EmbeddedQueueDevServer,
 ) -> None:

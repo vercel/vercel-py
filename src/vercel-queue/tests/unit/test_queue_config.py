@@ -17,6 +17,7 @@ from vercel.queue import (
     DeploymentResolutionError,
     QueueClient,
     RawJsonTransport,
+    SanitizedName,
     Topic,
     sync as queue_sync,
 )
@@ -231,6 +232,26 @@ def test_queue_client_timeout_rejects_invalid_duration() -> None:
 def test_topic_rejects_invalid_name() -> None:
     with pytest.raises(ValueError, match="Invalid queue topic"):
         Topic("emails.v1")
+
+
+def test_topic_accepts_a_subscription_pattern() -> None:
+    prefix = Topic[bytes]("emails*")
+    assert prefix.is_pattern
+    assert prefix.name == "emails*"
+    # Not a SanitizedName: that type means "safe in a request path".
+    assert not isinstance(prefix.name, SanitizedName)
+
+    assert Topic[bytes]("*").is_pattern
+
+    concrete = Topic[bytes]("emails")
+    assert not concrete.is_pattern
+    assert isinstance(concrete.name, SanitizedName)
+
+
+@pytest.mark.parametrize("name", ["a*b", "*emails", "bad.topic*"])
+def test_topic_rejects_a_malformed_pattern(name: str) -> None:
+    with pytest.raises(ValueError, match="Invalid queue topic"):
+        Topic[bytes](name)
 
 
 def test_name_helpers_are_public() -> None:

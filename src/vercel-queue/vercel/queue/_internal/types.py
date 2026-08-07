@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .constants import DEFAULT_RETRY_AFTER_SECONDS
-from .names import SanitizedName, validate_name, validate_topic_name
+from .names import (
+    SanitizedName,
+    validate_name,
+    validate_subscription_pattern,
+    validate_topic_name,
+)
 
 T = TypeVar("T")
 _TYPE_VAR_TYPE = type(T)
@@ -68,11 +73,22 @@ class Topic(Generic[T]):
     Topics identify the stream that messages are sent to and received from.
     """
 
-    name: SanitizedName
-    """Topic name to send to or receive from."""
+    name: SanitizedName | str
+    """Topic name to send to or receive from, or the pattern to subscribe with.
+
+    A pattern is a plain ``str``: ``SanitizedName`` means "safe to put in a
+    request path", which a pattern is not.
+    """
 
     transport: Transport[Any] | None = None
-    """Optional transport used when sending to or polling this topic."""
+    """Optional transport used when sending to, polling, or subscribing to this topic."""
+
+    is_pattern: bool = False
+    """Whether ``name`` is a subscription pattern rather than one topic.
+
+    A pattern (``"*"``, or a prefix ending in ``*``) can only be subscribed to.
+    Publishing and polling reject it.
+    """
 
     __topic_origin__: ClassVar[type[Topic[Any]] | None] = None
     __topic_payload_type__: ClassVar[Any] = None
@@ -110,8 +126,13 @@ class Topic(Generic[T]):
         *,
         transport: Transport[Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "name", SanitizedName(validate_topic_name(name)))
+        is_pattern = isinstance(name, str) and name.endswith("*")
+        if is_pattern:
+            object.__setattr__(self, "name", validate_subscription_pattern(str(name)))
+        else:
+            object.__setattr__(self, "name", SanitizedName(validate_topic_name(name)))
         object.__setattr__(self, "transport", transport)
+        object.__setattr__(self, "is_pattern", is_pattern)
 
     def __repr__(self) -> str:
         return f"Topic(name={self.name!r})"
