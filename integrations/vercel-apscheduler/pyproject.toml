@@ -62,6 +62,9 @@ extend = "../ruff.toml"
     "S403",  # job persistence mirrors the Redis store's pickle format.
     "SLF001",  # store/coordinator coupling mirrors _jobstore.py's design.
 ]
+"vercel/integrations/apscheduler/_backends/cache/_driver.py" = [
+    "PLR0904",  # the Driver protocol dictates the full public surface.
+]
 "vercel/integrations/apscheduler/_backends/__init__.py" = [
     "PLC0415",  # only the selected backend imports, so its transitive deps load once.
     "SLF001",  # autodetection reads the scheduler's private job-store registry.

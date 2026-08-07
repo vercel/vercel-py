@@ -178,9 +178,7 @@ class CacheDriver:
                 doc["idle_expires_at"] = iso(now + timedelta(seconds=idle_timeout_seconds))
                 self._write(doc, now)
             elif (
-                doc.pop("idle_expires_at", None) is not None
-                or self._token(doc) is None
-                or repaired
+                doc.pop("idle_expires_at", None) is not None or self._token(doc) is None or repaired
             ):
                 # A dormant chain (no current wake) has no wakes refreshing
                 # its TTL; the activation hook's touch is what keeps it alive.
@@ -232,7 +230,7 @@ class CacheDriver:
         any claim exists).
         """
         status = doc.get("start_status")
-        if status not in ("published", "processing"):
+        if status not in {"published", "processing"}:
             return False
         anchor = from_iso(doc.get("start_claimed_at")) or from_iso(doc.get("activation_time"))
         if anchor is None:
