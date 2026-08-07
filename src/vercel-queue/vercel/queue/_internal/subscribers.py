@@ -107,6 +107,7 @@ class InvocationPlan:
     payload_adapter: PayloadAdapter | None
     mode: InvocationMode
     transport_kind: TransportKind
+    transport: Transport[Any] | None = None
 
     def prepare_payload(self, payload: Any) -> Any:
         if self.payload_adapter is None:
@@ -118,6 +119,33 @@ class InvocationPlan:
             if exc.__class__.__name__ == "ValidationError":
                 raise PayloadValidationError(str(exc)) from exc
             raise
+
+
+class _TransportOrKind:
+    def __init__(self, plan: InvocationPlan) -> None:
+        self.transport_kind = plan.transport_kind
+        self.transport = plan.transport
+
+    def __hash__(self) -> int:
+        return hash(self.transport_kind) if self.transport is None else id(self.transport)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _TransportOrKind):
+            return NotImplemented
+        if self.transport is None and other.transport is None:
+            return self.transport_kind == other.transport_kind
+        # Two instances of the same class can decode differently
+        return self.transport is other.transport
+
+    def __repr__(self) -> str:
+        if self.transport is None:
+            return self.transport_kind
+        return repr(self.transport)
+
+    def get_transport(self) -> Transport[Any]:
+        if self.transport is None:
+            return _transport_for_kind(self.transport_kind)
+        return self.transport
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -407,6 +435,7 @@ def _build_invocation_plan(
     func: _Subscriber,
     *,
     topic_payload_annotation: Any = inspect.Signature.empty,
+    transport: Transport[Any] | None = None,
 ) -> InvocationPlan:
     signature = inspect.signature(func)
     input_params: list[inspect.Parameter] = []
@@ -449,6 +478,7 @@ def _build_invocation_plan(
         ),
         mode=mode,
         transport_kind=_transport_kind(payload_annotation),
+        transport=transport,
     )
 
 
@@ -593,13 +623,13 @@ def infer_subscriber_transport(metadata: MessageMetadata) -> Transport[Any]:
     if not matching:
         raise _no_matching_subscriptions_error(metadata.topic)
 
-    kinds = {matched.subscription.invocation.transport_kind for matched in matching}
-    if len(kinds) != 1:
+    tks = {_TransportOrKind(matched.subscription.invocation) for matched in matching}
+    if len(tks) != 1:
         raise SubscriptionError(
             "matching queue subscribers require incompatible payload transports: "
-            + ", ".join(sorted(kinds))
+            + ", ".join(sorted(map(repr, tks)))
         )
-    return _transport_for_kind(kinds.pop())
+    return tks.pop().get_transport()
 
 
 async def _maybe_await_result(result: Any) -> Any:
@@ -703,6 +733,7 @@ def _register_subscription(
     *,
     consumer_group: str | SanitizedName | None = None,
     topic: str | SanitizedName | Topic[Any],
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -726,6 +757,7 @@ def _register_subscription(
         invocation=_build_invocation_plan(
             cast("_Subscriber", func),
             topic_payload_annotation=topic_payload_annotation,
+            transport=transport,
         ),
         topic=topic_name,
         retry_after_seconds=_optional_bounded_duration(
@@ -786,6 +818,7 @@ def subscribe(
     *,
     topic: str,
     consumer_group: str | SanitizedName | None = None,
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -798,6 +831,7 @@ def subscribe(
     *,
     topic: SanitizedName,
     consumer_group: str | SanitizedName | None = None,
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -810,6 +844,7 @@ def subscribe(
     *,
     topic: Topic[T],
     consumer_group: str | SanitizedName | None = None,
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -824,6 +859,7 @@ def subscribe(
     *,
     topic: str,
     consumer_group: str | SanitizedName | None = None,
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -838,6 +874,7 @@ def subscribe(
     *,
     topic: SanitizedName,
     consumer_group: str | SanitizedName | None = None,
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -852,6 +889,7 @@ def subscribe(
     *,
     topic: Topic[T],
     consumer_group: str | SanitizedName | None = None,
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -865,6 +903,7 @@ def subscribe(
     *,
     topic: str | SanitizedName | Topic[Any],
     consumer_group: str | SanitizedName | None = None,
+    transport: Transport[Any] | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
@@ -879,6 +918,9 @@ def subscribe(
             topic.
         consumer_group: Local/in-process consumer group override. When omitted,
             the SDK derives one from the function's fully-qualified Python name.
+        transport: Wire codec for deliveries dispatched to this subscriber.
+            Defaults to the codec inferred from the subscriber's payload
+            annotation.
         retry_after: Optional base retry delay for generated queue trigger
             configuration.
         initial_delay: Optional deploy-time delay before generated queue
@@ -902,6 +944,7 @@ def subscribe(
             f,
             consumer_group=consumer_group,
             topic=topic,
+            transport=transport,
             retry_after=retry_after,
             initial_delay=initial_delay,
             max_concurrency=max_concurrency,

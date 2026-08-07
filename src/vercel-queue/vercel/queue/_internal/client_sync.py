@@ -165,8 +165,8 @@ class QueueClient(BaseQueueClient):
     ) -> None:
         """Accept a push callback and dispatch matching subscribers.
 
-        ``transport`` overrides the codec inferred from the matching
-        subscriber's signature.
+        ``transport`` overrides the subscription's transport and the codec
+        inferred from the subscriber signature.
         """
         self._accept_and_handle(
             raw_body,
