@@ -5,7 +5,7 @@ from collections.abc import AsyncIterable
 from vercel.queue import asgi_app, subscribe
 
 
-@subscribe(topic="files", consumer_group=f"api/{__name__}.py")
+@subscribe(topic="files")
 async def archive_file(payload: AsyncIterable[bytes]) -> None:
     size = 0
     async for chunk in payload:

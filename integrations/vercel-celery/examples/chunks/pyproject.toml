@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "celery>=5.3,<6",
+    "fastapi",
     "vercel-cache>=0.7.0",
     "vercel-celery>=0.7.0",
     "vercel-queue>=0.7.0",
@@ -11,3 +12,9 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+# Compiles worker.py into a queue-triggered function. With no "topics"
+# filter, the subscriber consumes every subscription introspected from the
+# Celery app's queues.
+[[tool.vercel.subscribers]]
+entrypoint = "worker:celery_app"

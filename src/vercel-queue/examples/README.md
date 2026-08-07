@@ -57,9 +57,10 @@ uv run --project src/vercel-queue --extra trio python src/vercel-queue/examples/
 
 Each deployable app contains:
 
-- `api/<handler>.py`: a queue push callback using `@subscribe` and `asgi_app()`.
-- `pyproject.toml`: the app dependencies.
-- `vercel.json`: the queue trigger configuration for the callback function.
+- `main.py`: the queue handlers, registered with `@subscribe`.
+- `pyproject.toml`: the app dependencies and a `[[tool.vercel.subscribers]]`
+  entry that compiles the handlers into a queue-triggered function at build
+  time. No `vercel.json` trigger configuration is needed.
 
 Run each send command from the corresponding deployed example directory:
 

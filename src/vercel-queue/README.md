@@ -46,34 +46,28 @@ from vercel.queue import send
 message_id = await send("my-topic", {"message": "Hello world"})
 ```
 
-**3. Handle incoming messages with an API route function:**
+**3. Handle incoming messages in a subscriber module:**
 
 ```python
-# api/queue.py
-from vercel.queue import asgi_app, subscribe
+# worker.py
+from vercel.queue import subscribe
 
 
-@subscribe(topic="my-topic", consumer_group="api/queue.py")
+@subscribe(topic="my-topic")
 async def process_message(message):
     print("Processing:", message)
-
-
-# An ASGI app instance that converts incoming message callbacks
-# sent by Vercel Queues and routes them to handlers.
-app = asgi_app()
 ```
 
-**4. Configure `vercel.json`:**
+**4. Declare the subscriber in `pyproject.toml`:**
 
-```json
-{
-    "functions": {
-        "api/queue.py": {
-            "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "my-topic" }]
-        }
-    }
-}
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "worker:process_message"
 ```
+
+The Vercel build introspects the entrypoint module's registered
+subscriptions and compiles it into a queue-triggered function. No
+`vercel.json` trigger configuration is needed.
 
 **5. Deploy:**
 
@@ -142,42 +136,46 @@ and running polling loops on other infrastructure.
 
 ### Auto-scaled push-mode on Vercel
 
-The recommended way of deploying queue subscribers is to deploy them as Vercel Functions
-
-**Vercel Function (plain `/api` directory):**
+The recommended way of deploying queue subscribers is to declare them in
+`pyproject.toml` with `[[tool.vercel.subscribers]]`. Each entry points at a
+module that registers subscriptions with `@subscribe`:
 
 ```python
-# api/handle_orders.py
-from vercel.queue import asgi_app, subscribe
+# worker.py
+from vercel.queue import subscribe
 
 
-@subscribe(topic="orders", consumer_group="api/handle_orders.py")
+@subscribe(topic="orders", retry_after=60)
 async def handle_order(message):
     print("Processing:", message)
-
-
-# An ASGI app instance that converts incoming message callbacks
-# sent by Vercel Queues and routes them to handlers.
-app = asgi_app()
 ```
 
-**vercel.json**:
+**pyproject.toml**:
 
-```json
-{
-    "functions": {
-        "api/queue/orders.py": {
-            "experimentalTriggers": [
-                {
-                    "type": "queue/v2beta",
-                    "topic": "orders",
-                    "retryAfterSeconds": 60,
-                    "initialDelaySeconds": 0
-                }
-            ]
-        }
-    }
-}
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "worker:handle_order"
+```
+
+At build time, Vercel imports the entrypoint module, introspects every
+subscription it registers, and compiles the subscriber into its own
+queue-triggered function. Delivery tuning lives on the `@subscribe`
+decorator (`retry_after`, `initial_delay`, `max_concurrency`,
+`max_attempts`, `consumer_group`), so no `vercel.json` configuration is
+needed.
+
+A subscriber consumes every subscription registered by its entrypoint
+module. Add an optional `topics` filter to split subscriptions across
+several subscriber functions:
+
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "worker:handle_order"
+topics = ["orders"]
+
+[[tool.vercel.subscribers]]
+entrypoint = "worker:handle_refund"
+topics = ["refunds"]
 ```
 
 ### Automatic Polling Loop
@@ -264,7 +262,7 @@ polling, because it can distribute messages across regions unpredictably.
 ## Retry and Backoff
 
 When a topic handler raises, the message is not acknowledged and becomes available for redelivery
-after the `retryAfterSeconds` interval configured in `vercel.json`. Retries continue until the
+after the `retry_after` interval configured on the subscriber. Retries continue until the
 handler succeeds or the message expires.
 
 For finer control over retry timing, raise `RetryAfter` from a subscriber:
