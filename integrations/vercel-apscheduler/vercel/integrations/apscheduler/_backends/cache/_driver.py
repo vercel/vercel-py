@@ -257,6 +257,30 @@ class CacheDriver:
         self._write(doc, now)
         return changed
 
+    def apply_remote_pause(self, generation: int, issued_at: datetime, now: datetime) -> bool:
+        """Apply a queue-borne pause unless it is provably stale.
+
+        Control messages race starts and wakes on the topic and may be
+        redelivered after a resume minted a newer generation; pausing
+        whatever is current would let a stale pause overturn the resume. The
+        pause is dropped only when both indicators agree it is stale: the
+        issuer fenced an older generation than the local one *and* issued
+        before the local generation activated. Neither alone can decide —
+        the issuer reads the generation from its own evictable document and
+        may under-read it, and the timestamps come from different clocks.
+        """
+        issued_at = as_utc(issued_at, name="issued_at")
+        doc = self._read()
+        activation_time = from_iso(doc.get("activation_time"))
+        if (
+            generation < int(doc.get("generation") or 0)
+            and activation_time is not None
+            and issued_at < activation_time
+        ):
+            return False
+        self.pause(now)
+        return True
+
     def mark_start_published(self, generation: int, now: datetime) -> None:
         doc = self._read()
         if int(doc.get("generation") or 0) == generation and doc.get("start_status") == "pending":

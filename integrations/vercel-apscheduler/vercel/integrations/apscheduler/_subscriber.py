@@ -180,17 +180,29 @@ def _process_lifecycle(
 ) -> None:
     """Apply a queue-borne lifecycle flag to the local driver document.
 
-    Only the cache backend publishes these; pausing an already-paused chain
-    is a no-op, so redelivery needs no dedup.
+    Only the cache backend publishes these. They carry no idempotency key,
+    so a delivery may arrive late or twice — including after a resume minted
+    a newer generation; the driver drops a pause that is provably stale for
+    the currently activated generation.
     """
     if not _targets_adapter(adapter, payload.scheduler_id, message, "lifecycle"):
         return
     if payload.action == "pause":
-        adapter.driver.pause(datetime.now(UTC))
-        LOGGER.info(
-            'Applied queue-borne pause to scheduler "%s"',
-            payload.scheduler_id,
+        applied = adapter.driver.apply_remote_pause(
+            payload.generation,
+            payload.issued_at,
+            datetime.now(UTC),
         )
+        if applied:
+            LOGGER.info(
+                'Applied queue-borne pause to scheduler "%s"',
+                payload.scheduler_id,
+            )
+        else:
+            LOGGER.info(
+                'Dropped a stale queue-borne pause for scheduler "%s"',
+                payload.scheduler_id,
+            )
 
 
 def _targets_adapter(

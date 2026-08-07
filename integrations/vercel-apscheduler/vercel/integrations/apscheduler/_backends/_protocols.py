@@ -49,6 +49,20 @@ class Driver(Protocol):
 
     def pause(self, now: datetime) -> bool: ...
 
+    def apply_remote_pause(
+        self,
+        generation: int,
+        issued_at: datetime,
+        now: datetime,
+    ) -> bool:
+        """Apply a queue-borne pause unless it is provably stale.
+
+        False iff the pause was dropped because a newer generation was
+        activated after it was issued (only the cache backend ever receives
+        these; see ``_control``).
+        """
+        ...
+
     def mark_start_published(self, generation: int, now: datetime) -> None: ...
 
     def claim_start(

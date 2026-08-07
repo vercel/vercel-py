@@ -653,6 +653,14 @@ class RedisDriver:
         )
         return bool(int(result))
 
+    def apply_remote_pause(self, generation: int, issued_at: datetime, now: datetime) -> bool:
+        # Lifecycle control messages are only ever published in cache mode;
+        # the redis document is the single authority, so no staleness gate
+        # is needed if one were somehow delivered.
+        del generation, issued_at
+        self.pause(now)
+        return True
+
     def mark_start_published(self, generation: int, now: datetime) -> None:
         self._eval(
             _MARK_START_PUBLISHED_SCRIPT,

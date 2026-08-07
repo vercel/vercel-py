@@ -223,6 +223,26 @@ def test_cache_driver_resume_generation_revives_paused_document() -> None:
     assert driver.snapshot().state == "running"
 
 
+def test_cache_driver_remote_pause_drops_stale_but_honors_evicted_issuer() -> None:
+    driver = cache_driver()
+    t0 = datetime.now(UTC)
+
+    driver.start(t0)  # generation 1
+    driver.pause(t0)
+    resumed = driver.start(t0 + timedelta(seconds=10))
+    assert resumed.generation == 2
+
+    # The queue redelivers the generation-1 pause after the resume: both
+    # indicators date it before the current activation, so it is dropped.
+    assert not driver.apply_remote_pause(1, t0, t0 + timedelta(seconds=20))
+    assert driver.snapshot().state == "running"
+
+    # A pause from an issuer whose own document was evicted under-reads the
+    # generation as 0, but its fresh issue time proves it is not stale.
+    assert driver.apply_remote_pause(0, t0 + timedelta(seconds=30), t0 + timedelta(seconds=30))
+    assert driver.snapshot().state == "paused"
+
+
 def test_cache_driver_idle_deadline_demotes_at_claim() -> None:
     driver = cache_driver()
     now = datetime.now(UTC)
@@ -505,6 +525,7 @@ def test_cache_pause_publishes_control_message_and_subscriber_applies_it() -> No
     send.assert_called_once()
     control = LifecyclePayload.from_payload(send.call_args.args[1])
     assert control.action == "pause"
+    assert control.generation == 1
     assert send.call_args.args[0] == adapter.identity.start_topic
 
     # Simulate the queue-serving process: wipe the local document (its memory
@@ -521,6 +542,37 @@ def test_cache_pause_publishes_control_message_and_subscriber_applies_it() -> No
         )
     )
     assert adapter.driver.snapshot().state == "paused"
+
+    # A resume elsewhere arrives as a start message minting generation 2; a
+    # late redelivery of the generation-1 pause must not settle the chain
+    # back to paused.
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_wake_after_resume",
+    ):
+        start_subscription.func(
+            message(
+                StartPayload(
+                    scheduler_id=adapter.identity.scheduler_id,
+                    generation=2,
+                ).to_payload(),
+                message_id="start-2",
+                topic=start_subscription.topic,
+                consumer_group=start_subscription.consumer_group,
+            )
+        )
+    assert adapter.driver.snapshot().state == "running"
+    assert adapter.driver.snapshot().generation == 2
+
+    start_subscription.func(
+        message(
+            control.to_payload(),
+            message_id="ctl-1-dup",
+            topic=start_subscription.topic,
+            consumer_group=start_subscription.consumer_group,
+        )
+    )
+    assert adapter.driver.snapshot().state == "running"
 
 
 def test_cache_eviction_self_heals_from_the_next_wake() -> None:

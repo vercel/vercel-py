@@ -391,6 +391,7 @@ class SchedulerAdapter:
             scheduler_id=self.identity.scheduler_id,
             action=action,
             issued_at=now,
+            generation=self.driver.snapshot().generation,
         ).to_payload()
         try:
             vqs_sync.send(
