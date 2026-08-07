@@ -1,10 +1,11 @@
 import datetime
+import json
 import math
 import os
 import platform
 import traceback
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, TypeVar
 
 import cbor2
@@ -32,6 +33,44 @@ def _cbor_tag_hook(tag: cbor2.CBORTag, shareable: bool = False) -> Any:
 
 def _cbor_filter_undefined(value: Mapping[Any, Any], shareable: bool = False) -> dict[str, Any]:
     return {k: None if v is cbor2.undefined else v for k, v in value.items()}
+
+
+class _QueueTransport:
+    """CBOR queue transport with a JSON fallback on receive.
+
+    Mirrors `DualTransport` in `@workflow/world-vercel`: workflow queue
+    messages are sent as CBOR (the transport every producer at
+    ``specVersion >= 3`` uses) and decoded CBOR-first, so messages from a
+    JSON-only producer still arrive.
+    """
+
+    content_type = "application/cbor"
+
+    def serialize(self, value: Any) -> bytes:
+        return cbor2.dumps(value)
+
+    async def deserialize(
+        self,
+        payload: AsyncIterator[bytes],
+        *,
+        content_type: str,
+    ) -> Any:
+        chunks = bytearray()
+        async for chunk in payload:
+            chunks.extend(chunk)
+        body = bytes(chunks)
+        if "json" in content_type:
+            return json.loads(body)
+        try:
+            return cbor2.loads(body, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined)
+        except cbor2.CBORDecodeError:
+            # A producer that predates the CBOR transport, or one that sent
+            # JSON without labelling it.
+            return json.loads(body)
+
+
+# One instance: it is stateless, and both directions must agree.
+_QUEUE_TRANSPORT = _QueueTransport()
 
 
 # Events whose result the runtime reads back resolved (run/step entity fields);
@@ -255,7 +294,9 @@ class VercelWorld(w.World):
         client = self._queue_client(deployment=deployment_id)
         try:
             message_id = await client.send(
-                w.get_physical_topic(queue_name),
+                # The topic carries the codec, so the send is CBOR whichever
+                # client happens to make it.
+                vqs.Topic(w.get_physical_topic(queue_name), transport=_QUEUE_TRANSPORT),
                 payload,
                 idempotency_key=idempotency_key,
                 delay=delay,
@@ -309,7 +350,9 @@ class VercelWorld(w.World):
 
         topic_prefix = w.get_physical_topic(queue_name_prefix)
         vqs.subscribe(
-            topic=f"{topic_prefix}*",
+            # The pattern carries the codec, so a push delivery is decoded as
+            # CBOR whichever client happens to accept it.
+            topic=vqs.TopicPattern[Any](f"{topic_prefix}*", transport=_QUEUE_TRANSPORT),
             consumer_group=w.QUEUE_CONSUMER_GROUP,
         )(async_handler)
         self._queue_callbacks.append(async_handler)
