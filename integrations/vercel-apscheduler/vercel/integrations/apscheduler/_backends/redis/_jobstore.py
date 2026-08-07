@@ -17,22 +17,22 @@ from apscheduler.util import (  # type: ignore[import-untyped]
     datetime_to_utc_timestamp,
 )
 
-from ._driver import NamespaceFencedError
-from ._imports import RedisJobStore
+from ..._imports import RedisJobStore
+from ..._types import (
+    PROVENANCE_DECLARED,
+    PROVENANCE_RUNTIME,
+    NamespaceFencedError,
+)
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
 if TYPE_CHECKING:
-    from ._adapter import SchedulerAdapter
+    from ..._adapter import SchedulerAdapter
     from ._driver import RedisDriver
 
 UTC = timezone.utc
-# Code owns "declared" jobs across deployments; the store owns "runtime" jobs.
-# Takeover reconciliation reads this on promote.
-PROVENANCE_DECLARED = "declared"
-PROVENANCE_RUNTIME = "runtime"
 
-__all__ = ["PROVENANCE_DECLARED", "PROVENANCE_RUNTIME", "RedisJobCoordinator"]
+__all__ = ["RedisJobCoordinator"]
 
 
 # Shared head of the job write scripts: refuse the whole write when another

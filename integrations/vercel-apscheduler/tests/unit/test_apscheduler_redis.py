@@ -21,11 +21,8 @@ from vercel.integrations.apscheduler import (
     install_vercel_apscheduler_integration,
 )
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
-from vercel.integrations.apscheduler._driver import (
-    NamespaceFencedError,
-    RedisDriver,
-    StartDecision,
-)
+from vercel.integrations.apscheduler._backends.redis import RedisDriver
+from vercel.integrations.apscheduler._types import NamespaceFencedError, StartDecision
 
 UTC = timezone.utc
 REDIS_URL = environ.get("APSCHEDULER_TEST_REDIS_URL")
@@ -667,7 +664,8 @@ def _real_scheduler(
     adapter = get_adapter(scheduler)
     assert adapter is not None
     adapter._bind_runtime()
-    keys = adapter.coordinator.keys
+    coordinator: Any = adapter.coordinator
+    keys = coordinator.keys
     store.redis.delete(*keys)
     return scheduler, adapter, store.redis, keys
 
@@ -1042,7 +1040,7 @@ def test_real_redis_demoted_deployment_writes_are_fenced(
         # The demoted deployment's in-flight handler writes with its own
         # bound identity; only the environment is restored for the lookup.
         monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_fence_one")
-        first_coordinator = first_adapter.coordinator
+        first_coordinator: Any = first_adapter.coordinator
         with pytest.raises(NamespaceFencedError):
             first_coordinator.cas_update_job(job, revision)
         with pytest.raises(NamespaceFencedError):
@@ -1086,7 +1084,7 @@ def test_real_redis_reconciliation_retries_revision_races(
             first_scheduler.start()
 
         second, second_adapter = _take_over_scheduler(monkeypatch, "dpl_retry_two")
-        coordinator = second_adapter.coordinator
+        coordinator: Any = second_adapter.coordinator
         original_remove = coordinator.cas_remove_job
         calls: list[str] = []
 
@@ -1140,7 +1138,7 @@ def test_real_redis_unconverged_reconciliation_defers_and_retries(
             first_scheduler.start()
 
         second, second_adapter = _take_over_scheduler(monkeypatch, "dpl_defer_two")
-        coordinator = second_adapter.coordinator
+        coordinator: Any = second_adapter.coordinator
         original_remove = coordinator.cas_remove_job
 
         def always_racing_remove(job_id: str, expected_revision: int) -> bool:

@@ -16,13 +16,8 @@ from weakref import WeakValueDictionary
 import vercel.queue as vqs
 import vercel.queue.sync as vqs_sync
 
-from ._driver import (
-    APSchedulerConfigurationError,
-    NamespaceFencedError,
-    RedisDriver,
-    StartDecision,
-    WakeToken,
-)
+from ._backends import Backend, Driver, JobCoordinator, resolve_backend
+from ._control import LifecyclePayload
 from ._executor import VercelInlineExecutor
 from ._imports import (
     EVENT_JOB_MAX_INSTANCES,
@@ -34,9 +29,7 @@ from ._imports import (
     IntervalTrigger,
     JobSubmissionEvent,
     MaxInstancesReachedError,
-    RedisJobStore,
 )
-from ._jobstore import PROVENANCE_DECLARED, RedisJobCoordinator
 from ._options import (
     VercelAPSchedulerOptions,
     _SchedulerIdentity,
@@ -47,6 +40,13 @@ from ._options import (
 )
 from ._payload import StartPayload, WakeupPayload
 from ._time import as_utc, canonical_scheduled_logical_time, earliest
+from ._types import (
+    PROVENANCE_DECLARED,
+    APSchedulerConfigurationError,
+    NamespaceFencedError,
+    StartDecision,
+    WakeToken,
+)
 
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 UTC = timezone.utc
@@ -54,7 +54,6 @@ ADAPTER_ATTR = "_vercel_apscheduler_adapter"
 DEPLOYMENT_ENV = "VERCEL_DEPLOYMENT_ID"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 WAKEUP_KEY_PREFIX = "aps"
-RAW_STORE_KEY_ATTR = "_vercel_apscheduler_raw_jobs_key"
 # Queue delivery rounds wake delays up to whole seconds and adds dispatch
 # latency, so a grace below this cannot be met and skips occurrences.
 MIN_QUEUE_MISFIRE_GRACE_SECONDS = 5
@@ -185,8 +184,9 @@ class SchedulerAdapter:
         self._registration_deferred = False
         self._declared_jobs: dict[str, Any] = {}
         self._reconciled = False
-        self._driver: RedisDriver | None = None
-        self._coordinator: RedisJobCoordinator | None = None
+        self._driver: Driver | None = None
+        self._coordinator: JobCoordinator | None = None
+        self._backend: Backend | None = None
         self._job_definitions: dict[str, _JobDefinition] = {}
         self._current_add_explicit = False
         self._runtime_mutation_depth = 0
@@ -216,23 +216,14 @@ class SchedulerAdapter:
                 return _SchedulerIdentity.from_scheduler_id(self.options.scheduler_id)
             except ValueError as exc:
                 raise APSchedulerConfigurationError(str(exc)) from exc
-        store = self.scheduler._jobstores.get("default")
-        if not isinstance(store, RedisJobStore):
-            raise APSchedulerConfigurationError(
-                "vercel-apscheduler requires a configured default RedisJobStore"
-            )
-        raw_key = store.__dict__.setdefault(RAW_STORE_KEY_ATTR, store.jobs_key)
-        try:
-            return _SchedulerIdentity.from_store_key(raw_key)
-        except ValueError as exc:
-            raise APSchedulerConfigurationError(str(exc)) from exc
+        return cast("_SchedulerIdentity", self.backend.derive_identity(self.scheduler))
 
     def _claim_identity(self, identity: _SchedulerIdentity) -> _SchedulerIdentity:
         existing = _ACTIVE_IDENTITIES.get(identity.scheduler_id)
         if existing is not None and existing is not self:
             raise APSchedulerConfigurationError(
                 f'two schedulers derive the durable identity "{identity.scheduler_id}"; '
-                "give each scheduler's RedisJobStore a distinct jobs_key"
+                "give each scheduler a distinct durable identity"
             )
         _ACTIVE_IDENTITIES[identity.scheduler_id] = self
         return identity
@@ -253,14 +244,14 @@ class SchedulerAdapter:
         return cast("str", self._scope)
 
     @property
-    def driver(self) -> RedisDriver:
+    def driver(self) -> Driver:
         self._bind_runtime()
-        return cast("RedisDriver", self._driver)
+        return cast("Driver", self._driver)
 
     @property
-    def coordinator(self) -> RedisJobCoordinator:
+    def coordinator(self) -> JobCoordinator:
         self._bind_runtime()
-        return cast("RedisJobCoordinator", self._coordinator)
+        return cast("JobCoordinator", self._coordinator)
 
     def _owns_namespace(self) -> bool:
         """Whether this deployment currently drives the shared chain.
@@ -276,11 +267,15 @@ class SchedulerAdapter:
 
     @property
     def _scope_outlives_deployments(self) -> bool:
-        """Whether this namespace is shared by successive deployments.
+        """Whether the namespace can outlive this code's view of it.
 
-        True for named environments; previews and development get a fresh
-        namespace per deployment, so takeover reconciliation never applies.
+        True for named environments (shared by successive deployments). Also
+        always true for the cache backend: its documents are evictable in
+        every scope, so reconciliation-from-code is the durability story
+        regardless of scoping.
         """
+        if self.backend.name == "cache":
+            return True
         return self._scope != self._deployment
 
     @property
@@ -323,6 +318,7 @@ class SchedulerAdapter:
         now = datetime.now(UTC)
         if paused:
             self.driver.pause(now)
+            self._publish_lifecycle_control("pause", now)
             self._pause_local()
             return
         decision = self.driver.start(
@@ -377,8 +373,39 @@ class SchedulerAdapter:
         """Durably fence the current generation."""
         self._lifecycle_called = True
         self.ensure_local_started()
-        self.driver.pause(datetime.now(UTC))
+        now = datetime.now(UTC)
+        self.driver.pause(now)
+        self._publish_lifecycle_control("pause", now)
         self._pause_local()
+
+    def _publish_lifecycle_control(self, action: str, now: datetime) -> None:
+        """Carry a lifecycle flag over the queue where the cache cannot.
+
+        Cache-backend documents are per-process under ``vercel dev`` and
+        per-region in deployments, so the flag also rides the start topic to
+        whichever process serves the chain. Redis needs no counterpart.
+        """
+        if self.backend.name != "cache":
+            return
+        payload = LifecyclePayload(
+            scheduler_id=self.identity.scheduler_id,
+            action=action,
+            issued_at=now,
+            generation=self.driver.snapshot().generation,
+        ).to_payload()
+        try:
+            vqs_sync.send(
+                self.identity.start_topic,
+                payload,
+                deployment=self.deployment,
+                retention=self.options.retention_seconds,
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to publish the %s control message; the flag is "
+                "recorded in the cache document only",
+                action,
+            )
 
     def resume(self) -> None:
         """Resume by creating one new durable generation."""
@@ -463,7 +490,7 @@ class SchedulerAdapter:
         )
 
     def publish_pending_wakeup(self) -> PublishedWakeup | None:
-        """Repair a wake reserved in Redis before a failed Queue send."""
+        """Repair a wake reserved durably before a failed Queue send."""
         if not self._owns_namespace():
             return None
         snapshot = self.driver.snapshot()
@@ -631,10 +658,10 @@ class SchedulerAdapter:
         replace_existing: bool,
     ) -> bool:
         jobstore = self.scheduler._lookup_jobstore(jobstore_alias)
-        if not isinstance(jobstore, RedisJobStore):
+        if not self.backend.supports_store(jobstore):
             raise APSchedulerConfigurationError(
-                "vercel-apscheduler v1 supports RedisJobStore only; "
-                f'job store "{jobstore_alias}" is {type(jobstore).__name__}'
+                f"the {self.backend.name} backend does not support job store "
+                f'"{jobstore_alias}" ({type(jobstore).__name__})'
             )
         definition = self._job_definitions.get(str(job.id))
         explicit_id = (
@@ -679,7 +706,8 @@ class SchedulerAdapter:
             return True
         if not replace_existing:
             raise APSchedulerConfigurationError(
-                f'job "{job.id}" already exists in Redis; declare it with replace_existing=True'
+                f'job "{job.id}" already exists in the durable store; '
+                "declare it with replace_existing=True"
             )
         if self.is_runtime_mutation or self.is_wake_mutation:
             return True
@@ -734,60 +762,26 @@ class SchedulerAdapter:
                 "one scheduler object cannot be shared across Vercel deployments"
             )
         self._deployment = deployment
-        stores = self._validate_durable_configuration()
+        backend = self.backend
+        self._validate_durable_configuration()
         try:
             scope = resolve_state_scope(deployment)
         except ValueError as exc:
             raise APSchedulerConfigurationError(str(exc)) from exc
         self._scope = scope
-        tag = f"{{{scope}:{self.identity.scheduler_id}}}"
-        for alias, store in stores.items():
-            namespace = getattr(store, "_vercel_apscheduler_namespace", None)
-            expected_namespace = (scope, self.identity.scheduler_id)
-            if namespace is not None and namespace != expected_namespace:
-                raise APSchedulerConfigurationError(
-                    f'job store "{alias}" is already bound to another scheduler'
-                )
-            if namespace is None:
-                if any(character in store.jobs_key + store.run_times_key for character in "{}"):
-                    raise APSchedulerConfigurationError(
-                        "custom Redis job-store keys cannot contain Redis hash tags"
-                    )
-                store.jobs_key = f"{store.jobs_key}:{tag}:jobs"
-                store.run_times_key = f"{store.run_times_key}:{tag}:run_times"
-                store.__dict__["_vercel_apscheduler_namespace"] = expected_namespace
-        if self._driver is None:
-            self._driver = RedisDriver(
-                stores["default"].redis,
-                scope=scope,
-                scheduler_id=self.identity.scheduler_id,
-                deployment=deployment,
-            )
-        if self._coordinator is None:
-            self._coordinator = RedisJobCoordinator(
-                stores["default"],
-                self._driver,
-                self,
-            )
-            self._coordinator.install()
+        if self._driver is None or self._coordinator is None:
+            bound = backend.bind(self, scope=scope, deployment=deployment)
+            self._driver = bound.driver
+            self._coordinator = bound.coordinator
 
-    def _validate_durable_configuration(self) -> dict[str, RedisJobStore]:
-        stores = self.scheduler._jobstores
-        if "default" not in stores:
-            raise APSchedulerConfigurationError(
-                "vercel-apscheduler requires a configured default RedisJobStore"
-            )
-        if set(stores) != {"default"}:
-            aliases = ", ".join(sorted(stores))
-            raise APSchedulerConfigurationError(
-                "vercel-apscheduler v1 supports exactly one job store named "
-                f'"default"; configured: {aliases}'
-            )
-        if not isinstance(stores["default"], RedisJobStore):
-            raise APSchedulerConfigurationError(
-                "vercel-apscheduler requires a configured default RedisJobStore"
-            )
-        return cast("dict[str, RedisJobStore]", stores)
+    @property
+    def backend(self) -> Backend:
+        if self._backend is None:
+            self._backend = resolve_backend(self.scheduler)
+        return self._backend
+
+    def _validate_durable_configuration(self) -> dict[str, Any]:
+        return self.backend.validate_configuration(self.scheduler)
 
     def _inject_inline_executor(self) -> None:
         existing = self.scheduler._executors.get("default")
@@ -819,13 +813,17 @@ class SchedulerAdapter:
         declaration. ``runtime`` jobs belong to the store and are never
         touched; an unloadable one is quarantined.
         """
-        if self._reconciled or not self._scope_outlives_deployments:
+        if not self._scope_outlives_deployments:
             return
         if not self._owns_namespace():
             return
+        # The durable marker is the authority; the in-process flag is only a
+        # cache of it. Consulting the marker first means a rollback onto a
+        # warm instance re-reconciles, and an evicted cache document heals.
         if self.driver.reconciled_deployment() == self.deployment:
             self._reconciled = True
             return
+        self._reconciled = False
         try:
             for _ in range(RECONCILE_PASS_LIMIT):
                 if not self._reconcile_pass(now):
@@ -1170,8 +1168,10 @@ def _register_queues_when_ready(
     """
     if not (is_vercel_runtime() and (_PATCH_STATE.register_queues or is_queue_serving_runtime())):
         return
-    store = scheduler._jobstores.get("default")
-    if adapter.options.scheduler_id is None and not isinstance(store, RedisJobStore):
+    if adapter.options.scheduler_id is None and not adapter.backend.identity_ready(scheduler):
+        # The backend cannot derive a durable identity yet (e.g. Redis needs
+        # the store's jobs_key, which may only arrive through a later
+        # add_jobstore()); registration re-runs when it can.
         adapter._registration_deferred = True
         return
     from ._subscriber import register_scheduler

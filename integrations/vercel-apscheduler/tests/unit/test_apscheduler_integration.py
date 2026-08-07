@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 from apscheduler.jobstores.base import ConflictingIdError, JobLookupError
+from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_PAUSED, STATE_RUNNING
@@ -25,21 +26,19 @@ from vercel.integrations.apscheduler import (
     is_scheduler_subscriber,
 )
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
-from vercel.integrations.apscheduler._driver import (
+from vercel.integrations.apscheduler._backends.redis import RedisJobCoordinator
+from vercel.integrations.apscheduler._options import VercelAPSchedulerOptions
+from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
+from vercel.integrations.apscheduler._subscriber import register_scheduler
+from vercel.integrations.apscheduler._types import (
+    PROVENANCE_DECLARED,
+    PROVENANCE_RUNTIME,
     ClaimResult,
     DriverSnapshot,
     FinishResult,
     StartDecision,
     WakeToken,
 )
-from vercel.integrations.apscheduler._jobstore import (
-    PROVENANCE_DECLARED,
-    PROVENANCE_RUNTIME,
-    RedisJobCoordinator,
-)
-from vercel.integrations.apscheduler._options import VercelAPSchedulerOptions
-from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
-from vercel.integrations.apscheduler._subscriber import register_scheduler
 from vercel.queue import (
     Message,
     MessageMetadata,
@@ -565,13 +564,13 @@ def scheduler_with_driver(
     adapter = get_adapter(scheduler)
     assert adapter is not None
     with patch(
-        "vercel.integrations.apscheduler._adapter.RedisJobCoordinator",
+        "vercel.integrations.apscheduler._backends.redis.RedisJobCoordinator",
         InMemoryJobCoordinator,
     ):
         adapter._bind_runtime()
     driver = FakeDriver()
     adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-    adapter.coordinator.driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    adapter.coordinator.driver = driver
     return scheduler, adapter, driver
 
 
@@ -594,7 +593,22 @@ def message(
     )
 
 
-def test_memory_job_store_is_rejected() -> None:
+def test_memory_job_store_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={"default": MemoryJobStore()},
+    )
+    bind_test_scheduler(scheduler)
+
+    with pytest.raises(
+        APSchedulerConfigurationError,
+        match="not suitable for the cache backend",
+    ):
+        scheduler.start()
+
+
+def test_redis_backend_requires_a_redis_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VERCEL_APSCHEDULER_BACKEND", "redis")
     scheduler = BlockingScheduler(timezone=UTC)
     bind_test_scheduler(scheduler)
 
@@ -855,12 +869,12 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
     second_adapter = get_adapter(second)
     assert second_adapter is not None
     with patch(
-        "vercel.integrations.apscheduler._adapter.RedisJobCoordinator",
+        "vercel.integrations.apscheduler._backends.redis.RedisJobCoordinator",
         InMemoryJobCoordinator,
     ):
         second_adapter._bind_runtime()
     second_adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-    second_adapter.coordinator.driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    second_adapter.coordinator.driver = driver
     # The new deployment holds its own driver handle on the shared hash.
     driver.deployment = "dpl_two"
     with patch(
@@ -942,12 +956,12 @@ def test_stale_deployment_touches_are_inert(
     stale_adapter = get_adapter(stale)
     assert stale_adapter is not None
     with patch(
-        "vercel.integrations.apscheduler._adapter.RedisJobCoordinator",
+        "vercel.integrations.apscheduler._backends.redis.RedisJobCoordinator",
         InMemoryJobCoordinator,
     ):
         stale_adapter._bind_runtime()
     stale_adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-    stale_adapter.coordinator.driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
+    stale_adapter.coordinator.driver = driver
     driver.deployment = "dpl_stale"
     driver.owner_deployment_value = "dpl_test"  # the promoted deployment
 
@@ -978,7 +992,7 @@ def test_two_schedulers_sharing_a_store_key_collide_loudly() -> None:
         assert second_adapter is not None
         _ = second_adapter.identity
 
-    with pytest.raises(APSchedulerConfigurationError, match="distinct jobs_key"):
+    with pytest.raises(APSchedulerConfigurationError, match="distinct durable identity"):
         build_second_scheduler_and_use_its_identity()
 
 

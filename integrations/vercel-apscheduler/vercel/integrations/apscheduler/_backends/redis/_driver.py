@@ -2,114 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import re
 import threading
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from ._time import as_utc
+from ..._time import as_utc
+from ..._types import (
+    WAKE_REPAIR_GRACE_SECONDS,
+    ClaimResult,
+    ClaimState,
+    DriverSnapshot,
+    FinishResult,
+    FinishState,
+    LifecycleState,
+    StartDecision,
+    WakeToken,
+)
 
 UTC = timezone.utc
 DRIVER_LEASE_SECONDS = 15 * 60
 DRIVER_RENEW_INTERVAL_SECONDS = 60
-# Long enough that a merely slow delivery or an in-progress retry cycle is
-# never declared dead, short enough that a stranded chain heals within one
-# activation sweep.
-WAKE_REPAIR_GRACE_SECONDS = 10 * 60
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 # Scopes are either a deployment id or "<project>:<environment>".
 _SCOPE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
-ClaimState = Literal["claimed", "busy", "stale"]
-FinishState = Literal["advanced", "fenced", "lost"]
-LifecycleState = Literal["running", "paused", "inactive"]
-
-__all__ = [
-    "APSchedulerConfigurationError",
-    "ClaimResult",
-    "DriverSnapshot",
-    "FinishResult",
-    "NamespaceFencedError",
-    "RedisDriver",
-    "StartDecision",
-    "WakeToken",
-]
-
-
-class APSchedulerConfigurationError(RuntimeError):
-    """Raised when a scheduler cannot satisfy the Vercel runtime contract."""
-
-
-class NamespaceFencedError(APSchedulerConfigurationError):
-    """Raised when a write is refused because another deployment owns the chain."""
-
-
-@dataclass(frozen=True, slots=True)
-class WakeToken:
-    """The one wake message currently allowed to advance a scheduler."""
-
-    generation: int
-    sequence: int
-    logical_time: datetime
-    status: str = "pending"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "logical_time",
-            as_utc(self.logical_time, name="logical_time"),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class StartDecision:
-    """Atomic result of starting or resuming a scheduler."""
-
-    generation: int
-    changed: bool
-    start_status: str
-    current_wake: WakeToken | None
-    state: LifecycleState = "running"
-    # False when another deployment owns the chain and the caller was not
-    # allowed to take it; every action besides serving must then be skipped.
-    owned: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class ClaimResult:
-    """Result of trying to own a start or wake delivery."""
-
-    state: ClaimState
-    activation_time: datetime | None = None
-
-    def __post_init__(self) -> None:
-        if self.activation_time is not None:
-            object.__setattr__(
-                self,
-                "activation_time",
-                as_utc(self.activation_time, name="activation_time"),
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class FinishResult:
-    """Atomic outcome of completing a claimed start or wake."""
-
-    state: FinishState
-    wake: WakeToken | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DriverSnapshot:
-    """Current durable driver state."""
-
-    state: LifecycleState
-    generation: int
-    start_status: str | None
-    current_wake: WakeToken | None
+__all__ = ["RedisDriver"]
 
 
 def _idle_demotion_block(*, now_ts: str, updated_at: str, clear_owner: bool, result: str) -> str:
@@ -732,6 +652,14 @@ class RedisDriver:
             as_utc(now, name="now").isoformat(),
         )
         return bool(int(result))
+
+    def apply_remote_pause(self, generation: int, issued_at: datetime, now: datetime) -> bool:
+        # Lifecycle control messages are only ever published in cache mode;
+        # the redis document is the single authority, so no staleness gate
+        # is needed if one were somehow delivered.
+        del generation, issued_at
+        self.pause(now)
+        return True
 
     def mark_start_published(self, generation: int, now: datetime) -> None:
         self._eval(

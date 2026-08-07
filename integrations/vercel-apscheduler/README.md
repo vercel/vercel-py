@@ -224,6 +224,26 @@ pause semantics, so use a durable Redis service rather than an ephemeral
 cache. Redis failures fail closed: lifecycle calls raise and Queue deliveries
 retry without running unfenced work.
 
+## Backends
+
+Configuring a `RedisJobStore` selects the Redis backend above. Without one,
+the integration runs on the Vercel Runtime Cache instead (explicitly:
+`VERCEL_APSCHEDULER_BACKEND=redis|cache`). The two differ in what they can
+guarantee:
+
+| Property | Redis | Runtime Cache |
+| --- | --- | --- |
+| One wake chain, no forks | atomic Lua claims | queue idempotency keys |
+| Job execution | at-least-once | at-least-once, wider duplicate window |
+| Code-declared jobs | durable in Redis | rebuilt from code after eviction |
+| Runtime `add_job()` | durable, revision-checked | best-effort, lost on eviction |
+| `pause()` | durable, fails closed | best-effort flag plus a queue-borne control message |
+
+Under `vercel dev` the cache client falls back to per-process memory, which
+makes the cache backend the zero-infrastructure development mode: the
+queue-serving process drives the schedule, and chain progress travels in the
+messages themselves rather than shared state.
+
 ## v1 restrictions
 
 - APScheduler 3.x only.

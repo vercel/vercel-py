@@ -9,6 +9,7 @@ from uuid import uuid4
 import vercel.queue as vqs
 
 from ._adapter import SchedulerAdapter, adopt_scheduler
+from ._control import LifecyclePayload
 from ._imports import BaseScheduler
 from ._options import VercelAPSchedulerOptions
 from ._payload import StartPayload, WakeupPayload
@@ -70,12 +71,17 @@ def _process_start(
 ) -> None:
     try:
         payload = StartPayload.from_payload(message.payload)
-    except ValueError as exc:
-        LOGGER.warning(
-            "Ignoring invalid APScheduler start message %s: %s",
-            message.metadata.message_id,
-            exc,
-        )
+    except ValueError as start_error:
+        try:
+            control = LifecyclePayload.from_payload(message.payload)
+        except ValueError:
+            LOGGER.warning(
+                "Ignoring invalid APScheduler start message %s: %s",
+                message.metadata.message_id,
+                start_error,
+            )
+            return
+        _process_lifecycle(adapter, control, message)
         return
     if not _targets_adapter(adapter, payload.scheduler_id, message, "start"):
         return
@@ -93,7 +99,7 @@ def _process_start(
         return
     activation_time = claim.activation_time
     if activation_time is None:
-        raise RuntimeError("Redis start claim omitted its activation time")
+        raise RuntimeError("durable start claim omitted its activation time")
 
     try:
         with adapter.driver.renewing(owner):
@@ -165,6 +171,38 @@ def _process_wakeup(
                 adapter.publish_wakeup(finish.wake)
     finally:
         adapter.driver.release(owner)
+
+
+def _process_lifecycle(
+    adapter: SchedulerAdapter,
+    payload: LifecyclePayload,
+    message: vqs.Message[dict[str, Any]],
+) -> None:
+    """Apply a queue-borne lifecycle flag to the local driver document.
+
+    Only the cache backend publishes these. They carry no idempotency key,
+    so a delivery may arrive late or twice — including after a resume minted
+    a newer generation; the driver drops a pause that is provably stale for
+    the currently activated generation.
+    """
+    if not _targets_adapter(adapter, payload.scheduler_id, message, "lifecycle"):
+        return
+    if payload.action == "pause":
+        applied = adapter.driver.apply_remote_pause(
+            payload.generation,
+            payload.issued_at,
+            datetime.now(UTC),
+        )
+        if applied:
+            LOGGER.info(
+                'Applied queue-borne pause to scheduler "%s"',
+                payload.scheduler_id,
+            )
+        else:
+            LOGGER.info(
+                'Dropped a stale queue-borne pause for scheduler "%s"',
+                payload.scheduler_id,
+            )
 
 
 def _targets_adapter(

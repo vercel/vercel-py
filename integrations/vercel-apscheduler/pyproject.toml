@@ -13,10 +13,12 @@ license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
     "APScheduler>=3.10.4,<4",
     "redis>=5,<7",
+    "vercel-cache>=0.7.1",
     "vercel-queue>=0.6.0",
 ]
 
 [tool.uv.sources]
+vercel-cache = { workspace = true }
 vercel-queue = { workspace = true }
 
 [tool.ruff]
@@ -47,9 +49,25 @@ extend = "../ruff.toml"
 "vercel/integrations/apscheduler/_automatic.py" = [
     "PLC0415",  # runtime-only imports avoid a hard runtime dependency and an adapter cycle.
 ]
-"vercel/integrations/apscheduler/_jobstore.py" = [
+"vercel/integrations/apscheduler/_backends/redis/_jobstore.py" = [
     "S403",  # APScheduler's RedisJobStore persistence format is pickle-based.
     "SLF001",  # coordinated reads must reuse APScheduler's reconstitution hook.
+]
+"vercel/integrations/apscheduler/_backends/redis/__init__.py" = [
+    "SLF001",  # binds to the scheduler's private job-store registry, as the adapter does.
+]
+"vercel/integrations/apscheduler/_backends/cache/*.py" = [
+    "S301",  # job persistence mirrors the Redis store's pickle format.
+    "S311",  # jitter for write retries is not cryptographic.
+    "S403",  # job persistence mirrors the Redis store's pickle format.
+    "SLF001",  # store/coordinator coupling mirrors _jobstore.py's design.
+]
+"vercel/integrations/apscheduler/_backends/cache/_driver.py" = [
+    "PLR0904",  # the Driver protocol dictates the full public surface.
+]
+"vercel/integrations/apscheduler/_backends/__init__.py" = [
+    "PLC0415",  # only the selected backend imports, so its transitive deps load once.
+    "SLF001",  # autodetection reads the scheduler's private job-store registry.
 ]
 "vercel/integrations/apscheduler/_executor.py" = [
     "BLE001",  # mirrors APScheduler BaseExecutor error handling.
