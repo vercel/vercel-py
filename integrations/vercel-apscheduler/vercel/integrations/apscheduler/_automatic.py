@@ -12,6 +12,7 @@ from time import monotonic
 
 from ._imports import BaseScheduler
 from ._options import (
+    SUBSCRIBERS_ENV,
     is_discovery_runtime,
     is_queue_serving_runtime,
     is_vercel_runtime,
@@ -22,7 +23,6 @@ from ._types import APSchedulerConfigurationError
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
 PREVIEW_IDLE_TIMEOUT_ENV = "VERCEL_APSCHEDULER_PREVIEW_IDLE_TIMEOUT_SECONDS"
-SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 ACTIVATION_HOOK_NAME = "vercel-apscheduler:auto-activate"
 MAX_PREVIEW_RENEW_INTERVAL_SECONDS = 5 * 60
 # Activation is idempotent; the periodic re-run renews preview deadlines and
@@ -144,14 +144,16 @@ def _automatic_environment() -> bool:
     Named environments (production and custom environments) share one durable
     chain that must start and take over without a manual call, so they always
     activate. Previews activate only when idling is configured, so a preview
-    chain cannot outlive its usefulness. The resolution must match
+    chain cannot outlive its usefulness. Development (``vercel dev``) follows
+    the production rule: the first request activates, and the local processes
+    only live while requests can reach them anyway. The resolution must match
     ``resolve_state_scope``: a custom environment reports
     ``VERCEL_ENV=preview`` but is a named environment.
     """
     if not is_vercel_runtime() or not environ.get(SUBSCRIBERS_ENV):
         return False
     environment = resolve_environment().casefold()
-    if environment in {"", "development"}:
+    if not environment:
         return False
     if environment == "preview":
         return PREVIEW_IDLE_TIMEOUT_ENV in environ

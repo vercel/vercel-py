@@ -26,12 +26,18 @@ from vercel.integrations.apscheduler import (
     install_vercel_apscheduler_integration,
 )
 from vercel.integrations.apscheduler._adapter import get_adapter
-from vercel.integrations.apscheduler._backends.cache import CacheDriver, CacheJobStore
+from vercel.integrations.apscheduler._backends.cache import (
+    CacheBackend,
+    CacheDriver,
+    CacheJobStore,
+)
 from vercel.integrations.apscheduler._control import LifecyclePayload
+from vercel.integrations.apscheduler._options import development_deployment_id
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
 from vercel.integrations.apscheduler._subscriber import register_scheduler
 from vercel.integrations.apscheduler._types import (
     PROVENANCE_DECLARED,
+    APSchedulerConfigurationError,
     NamespaceFencedError,
     WakeToken,
 )
@@ -821,3 +827,100 @@ def test_cache_processing_claim_is_busy_until_the_grace_lapses() -> None:
     # Past the grace the owner is presumed crashed and the claim is retaken.
     late = now + timedelta(minutes=16)
     assert driver.claim_wake(token, "owner-4", late).state == "claimed"
+
+
+def test_cache_identity_resolves_from_declared_subscriber_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A publishing process has no VERCEL_PYTHON_SUBSCRIBER_ID; the identity
+    # must come from the builder's declared mapping so its start and wake
+    # publishes land on the topics the sidecar actually serves.
+    monkeypatch.setenv(
+        "VERCEL_APSCHEDULER_SUBSCRIBERS",
+        f'[{{"id":"jobs_scheduler","entrypoint":"{CACHE_SCHEDULER_MODULE}:scheduler"}}]',
+    )
+    scheduler = BlockingScheduler()
+    monkeypatch.setattr(modules[CACHE_SCHEDULER_MODULE], "scheduler", scheduler, raising=False)
+
+    adapter = get_adapter(scheduler)
+    assert adapter is not None
+    assert adapter.identity.scheduler_id == "jobs_scheduler"
+    assert adapter.identity.start_topic == "__aps_jobs_scheduler_start"
+
+
+def test_cache_identity_prefers_the_builder_assigned_subscriber_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "sidecar_identity")
+    monkeypatch.setenv(
+        "VERCEL_APSCHEDULER_SUBSCRIBERS",
+        f'[{{"id":"jobs_scheduler","entrypoint":"{CACHE_SCHEDULER_MODULE}:scheduler"}}]',
+    )
+    scheduler = BlockingScheduler()
+    monkeypatch.setattr(modules[CACHE_SCHEDULER_MODULE], "scheduler", scheduler, raising=False)
+
+    adapter = get_adapter(scheduler)
+    assert adapter is not None
+    assert adapter.identity.scheduler_id == "sidecar_identity"
+
+
+def test_cache_identity_ready_waits_for_the_declared_module_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "VERCEL_APSCHEDULER_SUBSCRIBERS",
+        f'[{{"id":"jobs_scheduler","entrypoint":"{CACHE_SCHEDULER_MODULE}:scheduler"}}]',
+    )
+    backend = CacheBackend()
+    scheduler = BlockingScheduler()
+
+    # While the declaring module is importing, the variable is unbound and
+    # registration must defer rather than cache the "default" fallback.
+    assert backend.identity_ready(scheduler) is False
+
+    monkeypatch.setattr(modules[CACHE_SCHEDULER_MODULE], "scheduler", scheduler, raising=False)
+    assert backend.identity_ready(scheduler) is True
+    assert backend.derive_identity(scheduler).scheduler_id == "jobs_scheduler"
+
+
+def test_development_derives_a_stable_deployment_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `vercel dev` sets no VERCEL_DEPLOYMENT_ID (SDKs read its presence as
+    # "deployed"); development derives a stable synthetic id instead, so the
+    # web process and the sidecar share one state scope.
+    monkeypatch.delenv("VERCEL_DEPLOYMENT_ID", raising=False)
+    monkeypatch.setenv("VERCEL_ENV", "development")
+
+    scheduler = BlockingScheduler()
+    adapter = get_adapter(scheduler)
+    assert adapter is not None
+
+    assert adapter.deployment == development_deployment_id()
+    assert adapter.deployment.startswith("dpl_dev_")
+    assert adapter.scope == adapter.deployment
+
+
+def test_missing_deployment_id_still_fails_when_deployed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERCEL_DEPLOYMENT_ID", raising=False)
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+
+    scheduler = BlockingScheduler()
+    adapter = get_adapter(scheduler)
+    assert adapter is not None
+
+    with pytest.raises(APSchedulerConfigurationError, match="VERCEL_DEPLOYMENT_ID"):
+        _ = adapter.deployment
+
+
+def test_cache_identity_defaults_without_a_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERCEL_APSCHEDULER_SUBSCRIBERS", raising=False)
+    backend = CacheBackend()
+    scheduler = BlockingScheduler()
+
+    assert backend.identity_ready(scheduler) is True
+    assert backend.derive_identity(scheduler).scheduler_id == "default"

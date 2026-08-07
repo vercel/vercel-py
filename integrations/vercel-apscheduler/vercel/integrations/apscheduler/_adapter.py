@@ -33,9 +33,11 @@ from ._imports import (
 from ._options import (
     VercelAPSchedulerOptions,
     _SchedulerIdentity,
+    development_deployment_id,
     is_discovery_runtime,
     is_queue_serving_runtime,
     is_vercel_runtime,
+    resolve_environment,
     resolve_state_scope,
 )
 from ._payload import StartPayload, WakeupPayload
@@ -52,7 +54,6 @@ LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 UTC = timezone.utc
 ADAPTER_ATTR = "_vercel_apscheduler_adapter"
 DEPLOYMENT_ENV = "VERCEL_DEPLOYMENT_ID"
-SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 WAKEUP_KEY_PREFIX = "aps"
 # Queue delivery rounds wake delays up to whole seconds and adds dispatch
 # latency, so a grace below this cannot be met and skips occurrences.
@@ -753,6 +754,11 @@ class SchedulerAdapter:
 
     def _bind_runtime(self) -> None:
         deployment = environ.get(DEPLOYMENT_ENV)
+        if not deployment and resolve_environment().casefold() == "development":
+            # `vercel dev` does not set a deployment id (SDKs read its mere
+            # presence as "deployed"); development derives a stable synthetic
+            # one instead.
+            deployment = development_deployment_id()
         if not deployment:
             raise APSchedulerConfigurationError(
                 f"{DEPLOYMENT_ENV} is required to run an APScheduler subscriber"
