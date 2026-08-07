@@ -21,6 +21,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "typing_extensions>=4.0.0",
     "vercel-headers>=0.6.0",
+    "vercel-internal-core>=0.1.0,<0.2.0",
     "vercel-oidc>=0.6.0",
 ]
 
@@ -32,6 +33,7 @@ trio = ["anyio[trio]>=4.0.0"]
 [tool.uv.sources]
 vercel-oidc = { workspace = true }
 vercel-headers = { workspace = true }
+vercel-internal-core = { workspace = true }
 
 [tool.hatch.version]
 path = "vercel/queue/version.py"
@@ -63,6 +65,10 @@ exclude = [
 extend = "../../pyproject.toml"
 cache-dir = "../../.ruff_cache"
 preview = true
+# `vercel` is a PEP 420 namespace package split across workspace members, so
+# `vercel._internal.core` is this package's own shared internals rather than
+# another project's privates. import-private-name needs telling.
+namespace-packages = ["vercel"]
 
 [tool.ruff.lint]
 extend-select = [

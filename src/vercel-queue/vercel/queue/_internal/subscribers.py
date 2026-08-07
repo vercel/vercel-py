@@ -12,6 +12,15 @@ from importlib import import_module
 from itertools import count
 from types import MappingProxyType
 
+from vercel._internal.core.typeutils import (
+    ResolvedAnnotation,
+    TypeAnnotationResolutionError,
+    args,
+    origin_is,
+    resolve_annotation_with_namespace_from_call_stack,
+    strip_annotated,
+)
+
 from .errors import (
     DuplicateSubscriptionError,
     PayloadValidationError,
@@ -43,14 +52,6 @@ from .types import (
     Topic,
     Transport,
     duration_to_seconds,
-)
-from .typeutils import (
-    ResolvedAnnotation,
-    TypeAnnotationResolutionError,
-    args,
-    origin_is,
-    resolve_annotation_with_namespace_from_call_stack,
-    strip_annotated,
 )
 
 _Subscriber: TypeAlias = Callable[..., Any | Awaitable[Any]]

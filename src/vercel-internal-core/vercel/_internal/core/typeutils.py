@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import inspect
+import types
+from dataclasses import dataclass
+from types import FrameType
 from typing import (
     Annotated,
     Any,
@@ -13,11 +17,6 @@ from typing import (
     get_origin,
     get_type_hints,
 )
-
-import inspect
-import types
-from dataclasses import dataclass
-from types import FrameType
 
 _T = TypeVar("_T")
 _TYPE_VAR_TYPE = type(_T)

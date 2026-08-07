@@ -7,6 +7,17 @@ import json
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable
 from importlib import import_module
 
+from vercel._internal.core.typeutils import (
+    annotation_needs_resolution,
+    args,
+    is_classvar,
+    is_final,
+    is_type_var,
+    is_union_type,
+    origin_is,
+    strip_annotated,
+)
+
 from .constants import CONTENT_TYPE_JSON, CONTENT_TYPE_OCTET_STREAM, CONTENT_TYPE_TEXT
 from .errors import SubscriptionError
 from .streams import (
@@ -19,16 +30,6 @@ from .types import (
     RequestContent,
     Topic,
     Transport,
-)
-from .typeutils import (
-    annotation_needs_resolution,
-    args,
-    is_classvar,
-    is_final,
-    is_type_var,
-    is_union_type,
-    origin_is,
-    strip_annotated,
 )
 
 T = TypeVar("T")
