@@ -84,14 +84,17 @@ def parse_fragments(packages: set[str]) -> list[Fragment]:
     fragments: list[Fragment] = []
     if not CHANGES.exists():
         return fragments
+    ignored = _git_ignored_untracked_paths(CHANGES)
     for package_dir in sorted(path for path in CHANGES.iterdir() if path.is_dir()):
+        if package_dir in ignored:
+            continue
         package = package_dir.name
         if package not in packages:
             raise SystemExit(f"unknown package changes directory: {package_dir.relative_to(ROOT)}")
         for fragment_path in sorted(package_dir.iterdir()):
             if not fragment_path.is_file():
                 continue
-            if fragment_path.name in IGNORED_FRAGMENT_FILES:
+            if fragment_path.name in IGNORED_FRAGMENT_FILES or fragment_path in ignored:
                 continue
             match = FRAGMENT_FILE_RE.fullmatch(fragment_path.name)
             if match is None:
@@ -527,15 +530,39 @@ def _is_valid_news_fragment_path(path: Path) -> bool:
     return FRAGMENT_FILE_RE.fullmatch(parts[2]) is not None
 
 
-def _git_name_paths(args: list[str]) -> set[Path]:
-    return {ROOT / line for line in _git_lines(args) if line}
+def _git_ignored_untracked_paths(directory: Path) -> set[Path]:
+    """Return untracked paths under *directory* excluded by Git ignore rules."""
+    try:
+        return _git_name_paths(
+            [
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+                "--",
+                str(directory),
+            ],
+            zero_terminated=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        # No git, or not a work tree. Nothing is known to be ignored, which
+        # leaves the name check below exactly as strict as it was.
+        return set()
 
 
-def _git_lines(args: list[str]) -> list[str]:
+def _git_name_paths(args: list[str], *, zero_terminated: bool = False) -> set[Path]:
+    return {ROOT / line for line in _git_lines(args, zero_terminated=zero_terminated) if line}
+
+
+def _git_lines(args: list[str], *, zero_terminated: bool = False) -> list[str]:
     # quotepath=off keeps non-ASCII path names literal instead of C-quoted.
     output = subprocess.check_output(
         ["git", "-c", "core.quotepath=off", *args], cwd=ROOT, text=True
     )
+    if zero_terminated:
+        return [line for line in output.split("\0") if line]
     return [line for line in output.splitlines() if line]
 
 

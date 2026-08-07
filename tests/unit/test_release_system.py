@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -398,6 +399,51 @@ def test_parse_fragments_ignores_keep_files(
     fragments = release.parse_fragments({"lib"})
 
     assert [fragment.path.name for fragment in fragments] == ["123.bugfix.md"]
+
+
+def test_parse_fragments_skips_git_ignored_untracked_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("*~\nscratch/\n", encoding="utf-8")
+
+    changes = tmp_path / "changes"
+    fragment_dir = changes / "lib"
+    fragment_dir.mkdir(parents=True)
+    (fragment_dir / "123.feature.md").write_text("Add library feature.\n", encoding="utf-8")
+    (fragment_dir / "123.feature.md~").write_text("half-written draft\n", encoding="utf-8")
+    scratch_dir = changes / "scratch"
+    scratch_dir.mkdir()
+    (scratch_dir / "notes").write_text("release notes draft\n", encoding="utf-8")
+
+    monkeypatch.setattr(release, "ROOT", tmp_path)
+    monkeypatch.setattr(release, "CHANGES", changes)
+
+    fragments = release.parse_fragments({"lib"})
+
+    assert [fragment.path.name for fragment in fragments] == ["123.feature.md"]
+
+
+def test_parse_fragments_still_refuses_a_tracked_file_matching_an_ignore_rule(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("*.typo.md\n", encoding="utf-8")
+
+    changes = tmp_path / "changes"
+    fragment_dir = changes / "lib"
+    fragment_dir.mkdir(parents=True)
+    fragment = fragment_dir / "123.typo.md"
+    fragment.write_text("Wrong kind.\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "-f", str(fragment.relative_to(tmp_path))], cwd=tmp_path, check=True
+    )
+
+    monkeypatch.setattr(release, "ROOT", tmp_path)
+    monkeypatch.setattr(release, "CHANGES", changes)
+
+    with pytest.raises(SystemExit, match="invalid news fragment name"):
+        release.parse_fragments({"lib"})
 
 
 def test_render_changelog_entry_appends_pr_number(tmp_path: Path) -> None:
