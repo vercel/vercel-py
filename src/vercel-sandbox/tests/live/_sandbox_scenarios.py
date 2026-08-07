@@ -226,7 +226,6 @@ class AsyncDriver(_ScenarioDriver):
     async def ephemeral_sandbox(self, name: str) -> AsyncIterator[Any]:
         async with sandbox.create_sandbox(
             name=name,
-            runtime="python3.13",
             execution_time_limit=timedelta(minutes=2),
         ) as box:
             yield box
@@ -234,7 +233,6 @@ class AsyncDriver(_ScenarioDriver):
     async def create_persistent(self, name: str, tags: dict[str, str]) -> Any:
         return await sandbox.create_sandbox(
             name=name,
-            runtime="python3.13",
             persistent=True,
             ports=[3000],
             execution_time_limit=timedelta(minutes=2),
@@ -244,7 +242,6 @@ class AsyncDriver(_ScenarioDriver):
     async def create_with_network_policy(self, name: str, network_policy: NetworkPolicy) -> Any:
         return await sandbox.create_sandbox(
             name=name,
-            runtime="python3.13",
             execution_time_limit=timedelta(minutes=2),
             network_policy=network_policy,
         )
@@ -264,7 +261,6 @@ class AsyncDriver(_ScenarioDriver):
     async def restore(self, name: str, snapshot_id: str) -> Any:
         return await sandbox.create_sandbox(
             name=name,
-            runtime="python3.13",
             source=SnapshotSource(snapshot_id=snapshot_id),
         )
 
@@ -424,7 +420,6 @@ class SyncDriver(_ScenarioDriver):
     async def ephemeral_sandbox(self, name: str) -> AsyncIterator[Any]:
         with sandbox_sync.create_sandbox(
             name=name,
-            runtime="python3.13",
             execution_time_limit=timedelta(minutes=2),
         ) as box:
             yield box
@@ -432,7 +427,6 @@ class SyncDriver(_ScenarioDriver):
     async def create_persistent(self, name: str, tags: dict[str, str]) -> Any:
         return sandbox_sync.create_sandbox(
             name=name,
-            runtime="python3.13",
             persistent=True,
             ports=[3000],
             execution_time_limit=timedelta(minutes=2),
@@ -442,7 +436,6 @@ class SyncDriver(_ScenarioDriver):
     async def create_with_network_policy(self, name: str, network_policy: NetworkPolicy) -> Any:
         return sandbox_sync.create_sandbox(
             name=name,
-            runtime="python3.13",
             execution_time_limit=timedelta(minutes=2),
             network_policy=network_policy,
         )
@@ -462,7 +455,6 @@ class SyncDriver(_ScenarioDriver):
     async def restore(self, name: str, snapshot_id: str) -> Any:
         return sandbox_sync.create_sandbox(
             name=name,
-            runtime="python3.13",
             source=sandbox_sync.SnapshotSource(snapshot_id=snapshot_id),
         )
 

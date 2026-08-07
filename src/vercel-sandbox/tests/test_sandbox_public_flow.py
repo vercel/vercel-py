@@ -72,9 +72,9 @@ def _sandbox_response(
         "sandbox": {
             "name": name,
             "currentSessionId": session_id,
+            "image": "vercel/sandbox/universal:latest",
             "status": status,
             "persistent": True,
-            "runtime": "python3.13",
             "timeout": 300000,
             "snapshotExpiration": 0,
             "keepLastSnapshots": {
@@ -90,7 +90,6 @@ def _sandbox_response(
             "sourceSandboxName": name,
             "projectId": project_id,
             "status": session_status or status,
-            "runtime": "python3.13",
             "cwd": "/vercel/sandbox",
             "memory": 2048,
             "vcpus": 1,
@@ -106,6 +105,24 @@ def _sandbox_response(
             }
         ],
     }
+
+
+def _image_sandbox_response(
+    *,
+    image: str = "my-repository@sha256:resolved",
+    name: str = "preview",
+    session_id: str = "sbx_123",
+    project_id: str = "prj_123",
+) -> dict[str, Any]:
+    response = _sandbox_response(
+        name=name,
+        session_id=session_id,
+        project_id=project_id,
+    )
+    sandbox_payload = response["sandbox"]
+    assert isinstance(sandbox_payload, dict)
+    sandbox_payload["image"] = image
+    return response
 
 
 def _command_response(
@@ -290,7 +307,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path == "/v2/sandboxes"
+        assert request.url.path == "/v3/sandboxes"
         assert dict(request.url.params) == {"teamId": "team_123"}
         assert request.headers["authorization"] == "Bearer token"
         assert request.headers["user-agent"].startswith("vercel-sandbox/")
@@ -298,7 +315,6 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         assert json.loads(request.content) == {
             "projectId": "prj_other",
             "name": "preview",
-            "runtime": "python3.13",
             "source": {
                 "type": "git",
                 "url": "https://github.com/vercel/vercel-py",
@@ -320,7 +336,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         payload["tags"] = {"env": "test"}
         return httpx.Response(200, json=response)
 
-    route = respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=handler)
+    route = respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=handler)
     update_responses = iter(
         [
             {
@@ -361,7 +377,6 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         handle = await sandbox.create_sandbox(
             project_id="prj_other",
             name="preview",
-            runtime="python3.13",
             source=GitSource(
                 url="https://github.com/vercel/vercel-py",
                 revision="main",
@@ -376,6 +391,10 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             ),
             tags={"env": "test"},
         )
+        assert handle.image == "vercel/sandbox/universal:latest"
+        assert not hasattr(handle, "runtime")
+        assert handle.current_session is not None
+        assert not hasattr(handle.current_session, "runtime")
 
         with pytest.raises(AttributeError):
             handle.status = SandboxStatus.STOPPED  # type: ignore[misc]
@@ -433,7 +452,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
 
 @respx.mock
 async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -493,7 +512,6 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
     async with session(service_options=_session_options()):
         handle = await sandbox.create_sandbox(
             name="preview",
-            runtime="python3.13",
             network_policy=NetworkPolicy.allow_all(),
         )
         assert handle.network_policy == NetworkPolicy.allow_all()
@@ -563,7 +581,7 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
 
 @respx.mock
 def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
-    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+    route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -583,7 +601,6 @@ def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
     with session(service_options=_session_options()):
         handle = sandbox_sync.create_sandbox(
             name="preview",
-            runtime="python3.13",
             network_policy=_authored_network_policy(),
         )
 
@@ -703,7 +720,7 @@ async def test_network_policy_structural_validation(mock_env_clear: None) -> Non
     update_route = respx.post(
         "https://sandbox.test/v2/sandboxes/sessions/sbx_123/network-policy"
     ).mock(return_value=httpx.Response(200, json={"session": _sandbox_response()["session"]}))
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
@@ -764,30 +781,83 @@ async def test_public_create_sandbox_serializes_source_variants(
     source: SandboxSource,
     expected: dict[str, str],
 ) -> None:
-    route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+    route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
     async with session(service_options=_session_options()):
-        await sandbox.create_sandbox(name="preview", runtime="python3.13", source=source)
+        await sandbox.create_sandbox(name="preview", source=source)
 
     assert json.loads(route.calls.last.request.content)["source"] == expected
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    "image",
+    [
+        "my-repository",
+        "my-repository:latest",
+        "my-repository@sha256:request-digest",
+        "vcr.vercel.com/team-slug/project-slug/my-repository:latest",
+    ],
+)
+async def test_public_create_sandbox_serializes_image_without_runtime(
+    mock_env_clear: None,
+    image: str,
+) -> None:
+    route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_image_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        handle = await sandbox.create_sandbox(name="preview", image=image)
+
+    assert json.loads(route.calls.last.request.content) == {
+        "projectId": "prj_123",
+        "name": "preview",
+        "image": image,
+    }
+    assert handle.image == "my-repository@sha256:resolved"
+    assert not hasattr(handle, "runtime")
+    assert handle.current_session is not None
+    assert not hasattr(handle.current_session, "runtime")
+
+
+@respx.mock
+def test_sync_create_sandbox_serializes_image_without_runtime(mock_env_clear: None) -> None:
+    image = "my-repository:latest"
+    route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_image_sandbox_response())
+    )
+
+    with session(service_options=_session_options()):
+        handle = sandbox_sync.create_sandbox(name="preview", image=image)
+
+    assert json.loads(route.calls.last.request.content) == {
+        "projectId": "prj_123",
+        "name": "preview",
+        "image": image,
+    }
+    assert handle.image == "my-repository@sha256:resolved"
+    assert not hasattr(handle, "runtime")
+    assert handle.current_session is not None
+    assert not hasattr(handle.current_session, "runtime")
+
+
+@respx.mock
 async def test_public_create_rejects_malformed_success_response(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(return_value=httpx.Response(200, json={}))
+    respx.post("https://sandbox.test/v3/sandboxes").mock(return_value=httpx.Response(200, json={}))
 
     async with session(service_options=_session_options()):
         with pytest.raises(SandboxResponseError):
-            await sandbox.create_sandbox(name="preview", runtime="python3.13")
+            await sandbox.create_sandbox(name="preview")
 
 
 @respx.mock
 async def test_public_snapshot_expiration_validation_happens_before_requests(
     mock_env_clear: None,
 ) -> None:
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -819,7 +889,7 @@ async def test_public_snapshot_expiration_validation_happens_before_requests(
 
 @respx.mock
 async def test_public_create_rejects_terminal_initial_state(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
             200,
             json=_sandbox_response(status="stopped", session_status="stopped"),
@@ -828,7 +898,7 @@ async def test_public_create_rejects_terminal_initial_state(mock_env_clear: None
 
     async with session(service_options=_session_options()):
         with pytest.raises(SandboxTerminalStateError) as exc_info:
-            await sandbox.create_sandbox(name="preview", runtime="python3.13")
+            await sandbox.create_sandbox(name="preview")
 
     assert exc_info.value.status is SandboxStatus.STOPPED
     assert isinstance(exc_info.value.sandbox, sandbox.Sandbox)
@@ -837,7 +907,7 @@ async def test_public_create_rejects_terminal_initial_state(mock_env_clear: None
 
 @respx.mock
 def test_sync_create_terminal_error_contains_sync_handle(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
             200,
             json=_sandbox_response(status="stopped", session_status="stopped"),
@@ -846,7 +916,7 @@ def test_sync_create_terminal_error_contains_sync_handle(mock_env_clear: None) -
 
     with session(service_options=_session_options()):
         with pytest.raises(SandboxTerminalStateError) as exc_info:
-            sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+            sandbox_sync.create_sandbox(name="preview")
 
     assert exc_info.value.status is SandboxStatus.STOPPED
     assert isinstance(exc_info.value.sandbox, sandbox_sync.SyncSandbox)
@@ -1035,7 +1105,7 @@ def test_sync_command_kill_after_encodes_seconds_and_omits_none(mock_env_clear: 
 
 @respx.mock
 async def test_session_closure_during_create_polling_is_rejected(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
             200,
             json=_sandbox_response(status="pending", session_status="pending"),
@@ -1045,7 +1115,7 @@ async def test_session_closure_during_create_polling_is_rejected(mock_env_clear:
     async with session(service_options=_session_options()):
         active_session = get_active_session()
         operation = asyncio.create_task(
-            get_sandbox_service(active_session).create_sandbox(name="preview", runtime="python3.13")
+            get_sandbox_service(active_session).create_sandbox(name="preview")
         )
         await asyncio.sleep(0)
         await active_session.aclose()
@@ -1234,7 +1304,7 @@ async def test_public_api_error_propagates_status_code_code_and_data(mock_env_cl
 
 @respx.mock
 async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None:
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     resume_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -1255,7 +1325,7 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
     )
 
     async with session(service_options=_session_options()):
-        operation = sandbox.create_sandbox(name="preview", runtime="python3.13")
+        operation = sandbox.create_sandbox(name="preview")
         created = await operation
         assert created.current_session is not None
         with pytest.raises(RuntimeError, match="can only be used once"):
@@ -1273,7 +1343,7 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
     assert not destroy_route.called
 
     async with session():
-        captured = sandbox.create_sandbox(name="preview", runtime="python3.13")
+        captured = sandbox.create_sandbox(name="preview")
         captured_resume = sandbox.resume_sandbox(name="preview")
 
     with pytest.raises(VercelSessionClosedError):
@@ -1282,7 +1352,7 @@ async def test_create_sandbox_operation_invariants(mock_env_clear: None) -> None
         await captured_resume
 
     with pytest.warns(RuntimeWarning, match="never awaited or entered"):
-        unconsumed = sandbox.create_sandbox(name="preview", runtime="python3.13")
+        unconsumed = sandbox.create_sandbox(name="preview")
         del unconsumed
         gc.collect()
     with pytest.warns(RuntimeWarning, match="never awaited or entered"):
@@ -1313,7 +1383,6 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
         assert body == {
             "projectId": "prj_other",
             "name": "missing",
-            "runtime": "python3.13",
             "persistent": True,
             "tags": {"purpose": "test"},
         }
@@ -1322,17 +1391,17 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
             json=_sandbox_response(name="missing", session_id="sbx_missing"),
         )
 
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=create_handler)
 
     async with session(service_options=_session_options()):
         existing, existing_created = await sandbox.get_or_create_sandbox(
             name="existing",
             project_id="prj_other",
+            image="existing-repository:latest",
         )
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
             project_id="prj_other",
-            runtime="python3.13",
             persistent=True,
             tags={"purpose": "test"},
         )
@@ -1344,6 +1413,56 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
     assert existing_get.calls.last.request.url.params["resume"] == "true"
     assert missing_get.calls.last.request.url.params["resume"] == "true"
     assert create_route.call_count == 1
+
+
+@respx.mock
+async def test_async_get_or_create_forwards_image_only_when_creating(
+    mock_env_clear: None,
+) -> None:
+    existing_get = respx.get("https://sandbox.test/v2/sandboxes/existing-image").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_image_sandbox_response(name="existing-image", session_id="sbx_existing"),
+                "resumed": True,
+            },
+        )
+    )
+    missing_get = respx.get("https://sandbox.test/v2/sandboxes/missing-image").mock(
+        return_value=httpx.Response(
+            404,
+            json={"error": {"code": "not_found", "message": "not found"}},
+        )
+    )
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(
+            200,
+            json=_image_sandbox_response(name="missing-image", session_id="sbx_missing"),
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        existing, existing_created = await sandbox.get_or_create_sandbox(
+            name="existing-image",
+            image="ignored-repository:latest",
+        )
+        created, created_flag = await sandbox.get_or_create_sandbox(
+            name="missing-image",
+            image="requested-repository:latest",
+        )
+
+    assert existing_created is False
+    assert existing.image == "my-repository@sha256:resolved"
+    assert created_flag is True
+    assert created.image == "my-repository@sha256:resolved"
+    assert existing_get.called
+    assert missing_get.called
+    assert create_route.call_count == 1
+    assert json.loads(create_route.calls.last.request.content) == {
+        "projectId": "prj_123",
+        "name": "missing-image",
+        "image": "requested-repository:latest",
+    }
 
 
 @respx.mock
@@ -1390,18 +1509,29 @@ async def test_async_get_or_create_recreates_stale_snapshot(mock_env_clear: None
             json={"error": {"code": "not_found", "message": "already deleted"}},
         )
     )
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "projectId": "prj_123",
+            "name": "stale",
+            "image": "stale-repository:latest",
+        }
+        return httpx.Response(
             200,
-            json=_sandbox_response(name="stale", session_id="sbx_recreated"),
+            json=_image_sandbox_response(name="stale", session_id="sbx_recreated"),
         )
-    )
+
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=create_handler)
 
     async with session(service_options=_session_options()):
-        recreated, created = await sandbox.get_or_create_sandbox(name="stale")
+        recreated, created = await sandbox.get_or_create_sandbox(
+            name="stale", image="stale-repository:latest"
+        )
 
     assert recreated.name == "stale"
     assert created is True
+    assert recreated.image == "my-repository@sha256:resolved"
+    assert not hasattr(recreated, "runtime")
     assert get_route.calls.last.request.url.params["resume"] == "true"
     assert delete_route.call_count == 1
     assert create_route.call_count == 1
@@ -1415,7 +1545,7 @@ async def test_async_get_or_create_propagates_other_get_errors(mock_env_clear: N
             json={"error": {"code": "forbidden", "message": "nope"}},
         )
     )
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(500)
     )
 
@@ -1448,16 +1578,27 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
 
     respx.get("https://sandbox.test/v2/sandboxes/existing").mock(side_effect=get_handler)
     respx.get("https://sandbox.test/v2/sandboxes/missing").mock(side_effect=get_handler)
-    create_route = respx.post("https://sandbox.test/v2/sandboxes").mock(
-        return_value=httpx.Response(
+
+    def create_handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {
+            "projectId": "prj_123",
+            "name": "missing",
+            "image": "missing-repository:latest",
+        }
+        return httpx.Response(
             200,
-            json=_sandbox_response(name="missing", session_id="sbx_missing"),
+            json=_image_sandbox_response(name="missing", session_id="sbx_missing"),
         )
-    )
+
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=create_handler)
 
     with session(service_options=_session_options()):
-        existing, existing_created = sandbox_sync.get_or_create_sandbox(name="existing")
-        created, was_created = sandbox_sync.get_or_create_sandbox(name="missing")
+        existing, existing_created = sandbox_sync.get_or_create_sandbox(
+            name="existing", image="existing-repository:latest"
+        )
+        created, was_created = sandbox_sync.get_or_create_sandbox(
+            name="missing", image="missing-repository:latest"
+        )
 
     assert existing.name == "existing"
     assert existing_created is False
@@ -1465,6 +1606,7 @@ def test_sync_get_or_create_defaults_to_resume_and_returns_created_flag(
     assert was_created is True
     assert not hasattr(existing, "__enter__")
     assert not hasattr(created, "__enter__")
+    assert created.image == "my-repository@sha256:resolved"
     assert [request.url.params["resume"] for request in requests] == ["true", "true"]
     assert create_route.call_count == 1
 
@@ -1529,7 +1671,7 @@ def test_sync_get_is_plain_handle_and_create_resume_are_managed(
         return httpx.Response(200, json=_sandbox_response())
 
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=get_handler)
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
@@ -1548,12 +1690,16 @@ def test_sync_get_is_plain_handle_and_create_resume_are_managed(
 
     with session(service_options=_session_options()):
         fetched = sandbox_sync.get_sandbox(name="preview")
-        created = sandbox_sync.create_sandbox(name="preview", runtime="python3.13")
+        created = sandbox_sync.create_sandbox(name="preview")
         resumed = sandbox_sync.resume_sandbox(name="preview")
 
     assert not hasattr(fetched, "__enter__")
     assert hasattr(created, "__enter__")
     assert hasattr(resumed, "__enter__")
+    assert created.image == "vercel/sandbox/universal:latest"
+    assert not hasattr(created, "runtime")
+    assert created.current_session is not None
+    assert not hasattr(created.current_session, "runtime")
     assert [request.url.params["resume"] for request in requests] == ["false", "true"]
     assert not stop_route.called
     assert not destroy_route.called
@@ -1561,7 +1707,7 @@ def test_sync_get_is_plain_handle_and_create_resume_are_managed(
 
 @respx.mock
 async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -1579,7 +1725,7 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
 
     async with session(service_options=_session_options()):
         service = get_sandbox_service(get_active_session())
-        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        handle = await sandbox.create_sandbox(name="preview")
         resumed = await sandbox.resume_sandbox(name="preview")
         assert resumed.current_session is not None
         runtime_session = resumed.current_session
@@ -1612,7 +1758,7 @@ async def test_async_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None
         name = body["name"]
         return httpx.Response(200, json=_sandbox_response(name=name, session_id=f"sbx_{name}"))
 
-    respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
+    respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=create_handler)
     respx.get("https://sandbox.test/v2/sandboxes/resumed").mock(
         return_value=httpx.Response(
             200, json=_sandbox_response(name="resumed", session_id="sbx_resumed")
@@ -1661,11 +1807,9 @@ async def test_async_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None
     )
 
     async with session(service_options=_session_options()):
-        async with sandbox.create_sandbox(name="default", runtime="python3.13") as default:
+        async with sandbox.create_sandbox(name="default") as default:
             pass
-        async with sandbox.create_sandbox(
-            name="retained", runtime="python3.13", destroy=False
-        ) as retained:
+        async with sandbox.create_sandbox(name="retained", destroy=False) as retained:
             pass
         async with sandbox.resume_sandbox(name="resumed") as resumed:
             pass
@@ -1696,7 +1840,7 @@ def test_sync_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None:
         name = body["name"]
         return httpx.Response(200, json=_sandbox_response(name=name, session_id=f"sbx_{name}"))
 
-    respx.post("https://sandbox.test/v2/sandboxes").mock(side_effect=create_handler)
+    respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=create_handler)
     respx.get("https://sandbox.test/v2/sandboxes/resumed").mock(
         return_value=httpx.Response(
             200, json=_sandbox_response(name="resumed", session_id="sbx_resumed")
@@ -1745,11 +1889,9 @@ def test_sync_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None:
     )
 
     with session(service_options=_session_options()):
-        with sandbox_sync.create_sandbox(name="default", runtime="python3.13") as default:
+        with sandbox_sync.create_sandbox(name="default") as default:
             pass
-        with sandbox_sync.create_sandbox(
-            name="retained", runtime="python3.13", destroy=False
-        ) as retained:
+        with sandbox_sync.create_sandbox(name="retained", destroy=False) as retained:
             pass
         with sandbox_sync.resume_sandbox(name="resumed") as resumed:
             pass
@@ -1773,7 +1915,7 @@ def test_sync_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None:
 
 @respx.mock
 async def test_async_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
@@ -1793,7 +1935,7 @@ async def test_async_context_cleanup_wraps_api_failure(mock_env_clear: None) -> 
 
     async with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
-            async with sandbox.create_sandbox(name="preview", runtime="python3.13"):
+            async with sandbox.create_sandbox(name="preview"):
                 pass
 
     assert exc_info.value.resource_type == "sandbox"
@@ -1804,7 +1946,7 @@ async def test_async_context_cleanup_wraps_api_failure(mock_env_clear: None) -> 
 
 @respx.mock
 def test_sync_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
@@ -1824,7 +1966,7 @@ def test_sync_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
 
     with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
-            with sandbox_sync.create_sandbox(name="preview", runtime="python3.13"):
+            with sandbox_sync.create_sandbox(name="preview"):
                 pass
 
     assert exc_info.value.resource_type == "sandbox"
@@ -1837,7 +1979,7 @@ def test_sync_context_cleanup_wraps_api_failure(mock_env_clear: None) -> None:
 async def test_create_cleanup_attempts_destroy_after_stop_failure(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
@@ -1854,7 +1996,7 @@ async def test_create_cleanup_attempts_destroy_after_stop_failure(
 
     async with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
-            async with sandbox.create_sandbox(name="preview", runtime="python3.13"):
+            async with sandbox.create_sandbox(name="preview"):
                 pass
 
     assert destroy_route.called
@@ -1866,7 +2008,7 @@ async def test_create_cleanup_attempts_destroy_after_stop_failure(
 def test_sync_create_cleanup_attempts_destroy_after_stop_failure(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_123/stop").mock(
@@ -1883,7 +2025,7 @@ def test_sync_create_cleanup_attempts_destroy_after_stop_failure(
 
     with session(service_options=_session_options()):
         with pytest.raises(SandboxCleanupError) as exc_info:
-            with sandbox_sync.create_sandbox(name="preview", runtime="python3.13"):
+            with sandbox_sync.create_sandbox(name="preview"):
                 pass
 
     assert destroy_route.called
@@ -2205,7 +2347,7 @@ async def test_async_sandbox_recovery_preserves_route_projection(
 
 async def _run_async_unrecovered_operation(handle: sandbox.Sandbox, operation: str) -> object:
     if operation == "update":
-        return await handle.update(runtime="node22")
+        return await handle.update(ports=[3001])
     if operation == "stop":
         return await handle.stop()
     if operation == "destroy":
@@ -2334,7 +2476,7 @@ async def test_async_transition_poll_failure_propagates_without_resuming(
 
 def _run_sync_unrecovered_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
     if operation == "update":
-        return handle.update(runtime="node22")
+        return handle.update(ports=[3001])
     if operation == "stop":
         return handle.stop()
     if operation == "destroy":
@@ -2348,7 +2490,7 @@ def _run_sync_unrecovered_operation(handle: sandbox_sync.SyncSandbox, operation:
 
 @respx.mock
 async def test_mutating_handles_reject_mismatched_response_identity(mock_env_clear: None) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
     respx.patch("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -2371,9 +2513,9 @@ async def test_mutating_handles_reject_mismatched_response_identity(mock_env_cle
     )
 
     async with session(service_options=_session_options()):
-        handle = await sandbox.create_sandbox(name="preview", runtime="python3.13")
+        handle = await sandbox.create_sandbox(name="preview")
         with pytest.raises(SandboxResponseError):
-            await handle.update(runtime="node22")
+            await handle.update(ports=[3001])
 
         command = await handle.create_process("python", ["--version"])
         with pytest.raises(SandboxResponseError):
@@ -3284,7 +3426,7 @@ def test_sync_managed_resume_sandbox_stops_adopted_replacement(
 async def test_managed_create_sandbox_stops_replacement_before_destroy(
     mock_env_clear: None,
 ) -> None:
-    respx.post("https://sandbox.test/v2/sandboxes").mock(
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
     )
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
@@ -3315,7 +3457,7 @@ async def test_managed_create_sandbox_stops_replacement_before_destroy(
     )
 
     async with session(service_options=_session_options()):
-        async with sandbox.create_sandbox(name="preview", runtime="python3.13") as box:
+        async with sandbox.create_sandbox(name="preview") as box:
             assert await box.query_processes() == []
 
     assert old_stop.call_count == 0

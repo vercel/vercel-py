@@ -327,10 +327,6 @@ class RuntimeSessionHandleBase:
         return self._payload.status
 
     @property
-    def runtime(self) -> str | None:
-        return self._payload.runtime
-
-    @property
     def cwd(self) -> str | None:
         return self._payload.cwd
 
@@ -439,8 +435,8 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         return self._payload.current_session_id
 
     @property
-    def runtime(self) -> str | None:
-        return self._payload.runtime
+    def image(self) -> str | None:
+        return self._payload.image
 
     @property
     def status(self) -> SandboxStatus | None:

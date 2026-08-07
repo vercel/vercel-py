@@ -25,14 +25,13 @@ async def _main() -> None:
     restored = None
     snapshot = None
 
-    async with sandbox.create_sandbox(name=base_name, runtime="python3.13") as base:
+    async with sandbox.create_sandbox(name=base_name) as base:
         try:
             await base.fs.write_text("state/message.txt", "restored from snapshot\n")
             snapshot = await base.snapshot()
 
             restored = await sandbox.create_sandbox(
                 name=restored_name,
-                runtime="python3.13",
                 source=SnapshotSource(snapshot_id=snapshot.id),
             )
             content = await restored.fs.read_text("state/message.txt")

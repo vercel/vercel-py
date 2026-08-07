@@ -22,8 +22,8 @@ from vercel.sandbox import (
 load_dotenv()
 
 DEFAULT_REPO = "https://github.com/vercel/sandbox-example-next.git"
-DEFAULT_CWD = "/vercel/sandbox"
 DEFAULT_INSTALL = "npm install --loglevel info"
+DEFAULT_IMAGE = "vercel/sandbox/universal:latest"
 MARKER_PATH = ".vercel-py-dev-server/install.json"
 
 
@@ -31,23 +31,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--ref")
-    parser.add_argument("--runtime", default="node22")
+    parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--port", type=int, default=3000)
     parser.add_argument("--install", default=DEFAULT_INSTALL)
     parser.add_argument("--entrypoint")
     parser.add_argument("--name")
-    parser.add_argument("--cwd", default=DEFAULT_CWD)
+    parser.add_argument(
+        "--cwd",
+        help="working directory (defaults to the image working directory)",
+    )
     parser.add_argument("--reinstall", action="store_true")
     parser.add_argument("--destroy", action="store_true")
     return parser.parse_args()
 
 
-def sandbox_name(*, repo: str, ref: str | None, runtime: str, port: int) -> str:
+def sandbox_name(*, repo: str, ref: str | None, image: str, port: int) -> str:
     key = json.dumps(
         {
             "repo": repo,
             "ref": ref,
-            "runtime": runtime,
+            "image": image,
             "port": port,
         },
         sort_keys=True,
@@ -61,7 +64,7 @@ async def get_or_create_sandbox(
     name: str,
     repo: str,
     ref: str | None,
-    runtime: str,
+    image: str,
     port: int,
 ) -> Sandbox:
     try:
@@ -75,7 +78,7 @@ async def get_or_create_sandbox(
     source = GitSource(url=repo, revision=ref)
     box = await sandbox.create_sandbox(
         name=name,
-        runtime=runtime,
+        image=image,
         source=source,
         ports=[port],
         persistent=True,
@@ -83,7 +86,7 @@ async def get_or_create_sandbox(
         tags={
             "example": "dev-server",
             "sdk": "vercel-py",
-            "runtime": runtime,
+            "image": image,
         },
     )
     print(f"created sandbox {box.name}")
@@ -95,7 +98,7 @@ async def should_install(
     *,
     repo: str,
     ref: str | None,
-    runtime: str,
+    image: str,
     install: str,
     cwd: str,
     reinstall: bool,
@@ -106,7 +109,7 @@ async def should_install(
     expected = marker_payload(
         repo=repo,
         ref=ref,
-        runtime=runtime,
+        image=image,
         install=install,
         cwd=cwd,
     )
@@ -124,14 +127,14 @@ def marker_payload(
     *,
     repo: str,
     ref: str | None,
-    runtime: str,
+    image: str,
     install: str,
     cwd: str,
 ) -> dict[str, object]:
     return {
         "repo": repo,
         "ref": ref,
-        "runtime": runtime,
+        "image": image,
         "install": install,
         "cwd": cwd,
     }
@@ -146,7 +149,7 @@ async def install_dependencies(
     *,
     repo: str,
     ref: str | None,
-    runtime: str,
+    image: str,
     install: str,
     cwd: str,
     reinstall: bool,
@@ -155,7 +158,7 @@ async def install_dependencies(
         box,
         repo=repo,
         ref=ref,
-        runtime=runtime,
+        image=image,
         install=install,
         cwd=cwd,
         reinstall=reinstall,
@@ -172,7 +175,7 @@ async def install_dependencies(
             marker_payload(
                 repo=repo,
                 ref=ref,
-                runtime=runtime,
+                image=image,
                 install=install,
                 cwd=cwd,
             ),
@@ -236,35 +239,39 @@ async def _main() -> None:
     args = parse_args()
     repo: str = args.repo
     ref: str | None = args.ref
-    runtime: str = args.runtime
+    image: str = args.image
     port: int = args.port
     install: str = args.install
     entrypoint: str | None = args.entrypoint
     name: str | None = args.name
-    cwd: str = args.cwd
+    cwd_override: str | None = args.cwd
     reinstall: bool = args.reinstall
     destroy: bool = args.destroy
 
     sandbox_id = name or sandbox_name(
         repo=repo,
         ref=ref,
-        runtime=runtime,
+        image=image,
         port=port,
     )
     box = await get_or_create_sandbox(
         name=sandbox_id,
         repo=repo,
         ref=ref,
-        runtime=runtime,
+        image=image,
         port=port,
     )
 
     try:
+        cwd = cwd_override if cwd_override is not None else box.cwd
+        if cwd is None:
+            raise RuntimeError("sandbox did not report a working directory; pass --cwd")
+
         await install_dependencies(
             box,
             repo=repo,
             ref=ref,
-            runtime=runtime,
+            image=image,
             install=install,
             cwd=cwd,
             reinstall=reinstall,

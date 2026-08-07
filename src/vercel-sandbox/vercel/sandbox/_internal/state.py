@@ -39,7 +39,6 @@ class SandboxRuntimeSessionState:
     sandbox_name: str | None = None
     project_id: str | None = None
     status: SandboxStatus | None = None
-    runtime: str | None = None
     cwd: str | None = None
     region: str | None = None
     memory: int | None = None
@@ -64,7 +63,7 @@ class SnapshotRetentionState:
 class SandboxState:
     name: str
     current_session_id: str
-    runtime: str | None = None
+    image: str | None = None
     status: SandboxStatus | None = None
     persistent: bool | None = None
     current_snapshot_id: str | None = None

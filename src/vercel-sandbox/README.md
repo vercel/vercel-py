@@ -14,6 +14,9 @@ async with session():
 
 The package can be installed independently with `pip install vercel-sandbox`.
 
+When no image is provided, the Sandbox API uses
+`vercel/sandbox/universal:latest`.
+
 The same promoted API is available synchronously:
 
 ```python
@@ -25,6 +28,44 @@ with session():
         process = instance.run_process("echo", ["hello"], capture_output=True)
         print(process.stdout)
 ```
+
+## Custom images
+
+Create a sandbox from a Vercel Container Registry (VCR) image with the
+`image` keyword. The image reference is sent to the Sandbox API unchanged;
+the backend validates access, resolves the image, and waits for it to be
+ready.
+
+```python
+from vercel import sandbox
+from vercel.api import session
+
+async with session():
+    async with sandbox.create_sandbox(image="my-repository:latest") as instance:
+        result = await instance.run_process("my-command", capture_output=True)
+        print(result.stdout)
+        print(instance.image)  # The resolved digest-pinned image reference
+```
+
+The same option is available synchronously:
+
+```python
+from vercel.api import session
+from vercel.sandbox import sync as sandbox
+
+with session():
+    with sandbox.create_sandbox(image="my-repository:latest") as instance:
+        result = instance.run_process("my-command", capture_output=True)
+        print(result.stdout)
+        print(instance.image)  # The resolved digest-pinned image reference
+```
+
+Image references may be a bare repository (`my-repository`), a tagged image
+(`my-repository:latest`), a digest-pinned image
+(`my-repository@sha256:<digest>`), or a fully qualified VCR reference such as
+`vcr.vercel.com/team-slug/project-slug/my-repository:latest`. The backend
+resolves the selected image, and `Sandbox.image` contains the resolved image
+reference.
 
 Installing this package also provides the `vercel-sandbox` and `sandbox`
 console commands. Both are aliases that delegate all arguments to `npx sandbox`;
