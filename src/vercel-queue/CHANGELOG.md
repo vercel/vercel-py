@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3 - 2026-08-07
+
+### Internal
+
+- Take `typeutils` from `vercel._internal.core` rather than carrying a private copy. Adds a dependency on `vercel-internal-core`. (#261)
+
 ## 0.7.2 - 2026-07-31
 
 ### Bug Fixes
