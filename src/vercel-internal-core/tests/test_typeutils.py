@@ -1,26 +1,9 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, ClassVar, Final, ForwardRef, TypeVar, Union
-
-import importlib.util
-import sys
 from collections.abc import Iterable
-from pathlib import Path
+from typing import Annotated, ClassVar, Final, ForwardRef, TypeVar, Union
 
-
-def _load_typeutils() -> Any:
-    root = Path(__file__).parents[2]
-    path = root / "vercel" / "queue" / "_internal" / "typeutils.py"
-    spec = importlib.util.spec_from_file_location("queue_typeutils_for_tests", path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-typeutils = _load_typeutils()
+from vercel._internal.core import typeutils
 
 
 def test_generic_alias_detection() -> None:
@@ -76,12 +59,3 @@ def test_resolve_annotation_handles_forward_refs_inside_generics() -> None:
         )
         == dict[str, list[Payload]]
     )
-
-
-if __name__ == "__main__":
-    test_generic_alias_detection()
-    test_annotated_detection_and_stripping()
-    test_special_form_detection()
-    test_union_detection_supports_typing_and_pep604()
-    test_origin_and_args_helpers()
-    test_resolve_annotation_handles_forward_refs_inside_generics()
