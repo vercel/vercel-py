@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import logging
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timedelta, timezone
 
@@ -25,6 +26,8 @@ from ..._types import (
 from ._doc import DOC_TTL_SECONDS, from_iso, iso
 
 UTC = timezone.utc
+
+LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
 # A processing claim younger than this is treated as live (busy); past it,
 # the owner is presumed crashed and the claim is retaken (redis lease parity).
@@ -170,10 +173,15 @@ class CacheDriver:
                 state="paused",
             )
         if state == "running" and not foreign:
+            repaired = self._repair_overdue_start(doc, now)
             if idle_timeout_seconds is not None:
                 doc["idle_expires_at"] = iso(now + timedelta(seconds=idle_timeout_seconds))
                 self._write(doc, now)
-            elif doc.pop("idle_expires_at", None) is not None or self._token(doc) is None:
+            elif (
+                doc.pop("idle_expires_at", None) is not None
+                or self._token(doc) is None
+                or repaired
+            ):
                 # A dormant chain (no current wake) has no wakes refreshing
                 # its TTL; the activation hook's touch is what keeps it alive.
                 self._write(doc, now)
@@ -189,6 +197,7 @@ class CacheDriver:
             generation=generation,
             owner_deployment=self.deployment,
             start_status="pending",
+            start_claimed_at=None,
             activation_time=iso(now),
             current=None,
             last_sequence=0,
@@ -205,6 +214,39 @@ class CacheDriver:
             start_status="pending",
             current_wake=None,
         )
+
+    def _repair_overdue_start(self, doc: dict[str, Any], now: datetime) -> bool:
+        """Demote a presumed-lost start publication back to ``pending``.
+
+        A ``published`` start whose message died (a rollback strands it in a
+        queue with no forward alias; alias or retention expiry drops it) has
+        no wake token yet, so the overdue-wake repair cannot see it. The
+        recurring activation touch is the only signal left on such a chain,
+        so it doubles as the repairer: past the grace the status drops back
+        to ``pending`` and the regular publish path resends the start under
+        its unchanged idempotency key (a still-live original makes the
+        resend a dedup no-op). A stranded ``processing`` claim gets the same
+        treatment — its liveness cannot be judged by ``updated_at``, which
+        every activation touch refreshes, so the grace runs from the claim's
+        own ``start_claimed_at`` (the generation's ``activation_time`` before
+        any claim exists).
+        """
+        status = doc.get("start_status")
+        if status not in ("published", "processing"):
+            return False
+        anchor = from_iso(doc.get("start_claimed_at")) or from_iso(doc.get("activation_time"))
+        if anchor is None:
+            return False
+        if now < anchor + timedelta(seconds=WAKE_REPAIR_GRACE_SECONDS):
+            return False
+        doc["start_status"] = "pending"
+        LOGGER.warning(
+            'Republishing the start of generation %s for scheduler "%s": its '
+            "queue message is overdue and presumed lost",
+            doc.get("generation"),
+            self.scheduler_id,
+        )
+        return True
 
     def pause(self, now: datetime) -> bool:
         now = as_utc(now, name="now")
@@ -248,6 +290,7 @@ class CacheDriver:
                 return ClaimResult(state="busy")
             activation_time = from_iso(doc.get("activation_time")) or now
             doc["start_status"] = "processing"
+            doc["start_claimed_at"] = iso(now)
             self._write(doc, now)
             return ClaimResult(state="claimed", activation_time=activation_time)
         doc.update(
@@ -255,6 +298,7 @@ class CacheDriver:
             generation=generation,
             owner_deployment=self.deployment,
             start_status="processing",
+            start_claimed_at=iso(now),
             activation_time=iso(now),
             current=None,
             last_sequence=0,
@@ -281,6 +325,7 @@ class CacheDriver:
         ):
             return FinishResult(state="fenced")
         doc["start_status"] = "active"
+        doc["start_claimed_at"] = None
         wake: WakeToken | None = None
         if next_time is not None:
             wake = WakeToken(generation=generation, sequence=1, logical_time=next_time)

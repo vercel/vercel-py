@@ -269,6 +269,50 @@ def test_cache_driver_repair_overdue_wake() -> None:
     assert repaired.status == "pending"
 
 
+def test_cache_driver_repairs_overdue_published_start() -> None:
+    driver = cache_driver()
+    now = datetime.now(UTC)
+
+    decision = driver.start(now)
+    driver.mark_start_published(decision.generation, now)
+
+    # Within the grace the message is presumed in flight or merely delayed.
+    touched = driver.auto_activate(now + timedelta(minutes=5))
+    assert touched.start_status == "published"
+
+    # Past it the activation touch demotes the start so the regular publish
+    # path resends it under the same generation.
+    repaired = driver.auto_activate(now + timedelta(minutes=11))
+    assert not repaired.changed
+    assert repaired.generation == decision.generation
+    assert repaired.start_status == "pending"
+
+
+def test_cache_driver_repairs_stranded_processing_start() -> None:
+    driver = cache_driver()
+    now = datetime.now(UTC)
+
+    decision = driver.start(now)
+    driver.mark_start_published(decision.generation, now)
+    assert driver.claim_start(decision.generation, "owner-1", now).state == "claimed"
+
+    # Steady traffic keeps rewriting the document, so updated_at never ages
+    # out; the grace must run from the claim's own timestamp instead.
+    touched = driver.auto_activate(now + timedelta(minutes=5))
+    assert touched.start_status == "processing"
+
+    repaired = driver.auto_activate(now + timedelta(minutes=11))
+    assert repaired.start_status == "pending"
+
+    # The republished start is claimable again, and the fresh claim is not
+    # instantly demoted by the very next touch.
+    driver.mark_start_published(decision.generation, now + timedelta(minutes=11))
+    reclaim = driver.claim_start(decision.generation, "owner-2", now + timedelta(minutes=12))
+    assert reclaim.state == "claimed"
+    after = driver.auto_activate(now + timedelta(minutes=13))
+    assert after.start_status == "processing"
+
+
 def test_cache_driver_foreign_owner_is_fenced_without_takeover() -> None:
     ours = cache_driver("dpl_a")
     theirs = cache_driver("dpl_b")
