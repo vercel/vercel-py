@@ -246,6 +246,7 @@ class _BenchmarkPushClient(QueueClient):
         raw_body: Any,
         headers: Any = None,
         *,
+        transport: Any | None = None,
         lease_duration: Any | None = None,
     ) -> None:
         started = time.perf_counter()
@@ -253,6 +254,7 @@ class _BenchmarkPushClient(QueueClient):
             await super().accept_and_handle(
                 raw_body,
                 headers,
+                transport=transport,
                 lease_duration=lease_duration,
             )
         except Exception:

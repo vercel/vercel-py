@@ -741,6 +741,7 @@ class QueueClient(BaseQueueClient):
         raw_body: AsyncPushDeliveryBody,
         headers: RawHeaders,
         *,
+        transport: Transport[Any] | None = None,
         lease_duration: Duration | None = None,
     ) -> None: ...
 
@@ -750,6 +751,7 @@ class QueueClient(BaseQueueClient):
         raw_body: AsyncHttpMessage,
         headers: None = None,
         *,
+        transport: Transport[Any] | None = None,
         lease_duration: Duration | None = None,
     ) -> None: ...
 
@@ -758,6 +760,7 @@ class QueueClient(BaseQueueClient):
         raw_body: AsyncPushDeliveryInput,
         headers: RawHeaders | None = None,
         *,
+        transport: Transport[Any] | None = None,
         lease_duration: Duration | None = None,
     ) -> None:
         """Accept a push callback and dispatch matching subscribers.
@@ -765,6 +768,8 @@ class QueueClient(BaseQueueClient):
         Args:
             raw_body: Callback body bytes, byte iterable, or response object.
             headers: Callback request headers, unless ``raw_body`` is a response.
+            transport: Wire codec for this delivery. Overrides the codec
+                inferred from the matching subscriber's signature.
             lease_duration: Processing timeout used while handlers run.
 
         Raises:
@@ -775,6 +780,7 @@ class QueueClient(BaseQueueClient):
         await self._accept_and_handle(
             raw_body,
             headers,
+            transport=transport,
             lease_duration=lease_duration,
         )
 

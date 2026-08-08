@@ -35,6 +35,7 @@ StrContainer = _types.StrContainer
 TextBufferTransport = _transports.TextBufferTransport
 TextStreamTransport = _transports.TextStreamTransport
 Topic = _types.Topic
+Transport = _types.Transport
 TypedJsonTransport = _transports.TypedJsonTransport
 __version__ = _version.__version__
 asgi_app = _asgi.asgi_app
@@ -93,6 +94,7 @@ __all__ = (
     "ThrottledError",
     "TokenResolutionError",
     "Topic",
+    "Transport",
     "TypedJsonTransport",
     "UnauthorizedError",
     "UnhandledMessageError",

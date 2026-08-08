@@ -297,4 +297,5 @@ __all__: tuple[str, ...] = (
     "RetryAfter",
     "StrContainer",
     "Topic",
+    "Transport",
 )
