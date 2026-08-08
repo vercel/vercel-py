@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 dependencies = [
+    "anyio>=4,<5",
     "APScheduler>=3.10.4,<4",
     "redis>=5,<7",
     "vercel-cache>=0.7.1",
