@@ -2522,6 +2522,7 @@ requires-dist = [
 name = "vercel-apscheduler"
 source = { editable = "integrations/vercel-apscheduler" }
 dependencies = [
+    { name = "anyio" },
     { name = "apscheduler" },
     { name = "redis" },
     { name = "vercel-cache" },
@@ -2530,6 +2531,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4,<5" },
     { name = "apscheduler", specifier = ">=3.10.4,<4" },
     { name = "redis", specifier = ">=5,<7" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
