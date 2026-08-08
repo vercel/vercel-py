@@ -19,7 +19,7 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, loop, nanoid, serialization as ser, ulid, world as w
+from . import core, errors, loop, nanoid, serialization as ser, ulid, world as w
 from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
@@ -884,32 +884,40 @@ async def _execute_step(
         )
 
     except Exception as e:
-        # TODO: Check if this is a fatal error (would need FatalError class)
-        # For now, treat all errors as potentially retryable
-
         # step.attempt was incremented by step_started
         current_attempt = step_run.attempt
         error_text = "".join(traceback.format_exception_only(type(e), e)).strip()
 
-        # Check if max retries reached
-        if current_attempt >= step.max_retries + 1:
-            # Max retries reached
-            retry_count = step_run.attempt - 1
-            error_message = (
-                f"Step '{step.name}' failed after {step.max_retries} "
-                f"{'retry' if step.max_retries == 1 else 'retries'}: {error_text}"
-            )
-            logger.exception(
-                "[Workflows] '%s' - Encountered Error "
-                "while executing step '%s' (attempt %d, "
-                "%d %s): %s\n\n  Max retries reached\n  Bubbling error to parent workflow",
-                req.run_id,
-                step.name,
-                step_run.attempt,
-                retry_count,
-                "retry" if retry_count == 1 else "retries",
-                e,
-            )
+        fatal = isinstance(e, errors.FatalError)
+        if fatal or current_attempt >= step.max_retries + 1:
+            if fatal:
+                error_message = f"Step '{step.name}' failed: {error_text}"
+                logger.exception(
+                    "[Workflows] '%s' - Encountered Error "
+                    "while executing step '%s' (attempt %d): %s"
+                    "\n\n  Error is fatal\n  Bubbling error to parent workflow",
+                    req.run_id,
+                    step.name,
+                    step_run.attempt,
+                    e,
+                )
+            else:
+                retry_count = step_run.attempt - 1
+                error_message = (
+                    f"Step '{step.name}' failed after {step.max_retries} "
+                    f"{'retry' if step.max_retries == 1 else 'retries'}: {error_text}"
+                )
+                logger.exception(
+                    "[Workflows] '%s' - Encountered Error "
+                    "while executing step '%s' (attempt %d, "
+                    "%d %s): %s\n\n  Max retries reached\n  Bubbling error to parent workflow",
+                    req.run_id,
+                    step.name,
+                    step_run.attempt,
+                    retry_count,
+                    "retry" if retry_count == 1 else "retries",
+                    e,
+                )
 
             # Fail the step via event
             error_stack = traceback.format_exc()

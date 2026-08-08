@@ -13,6 +13,7 @@ from vercel._internal.workflow.serde import register_serializable, serializable
 from . import sandbox
 from .errors import (
     EntityConflictError,
+    FatalError,
     HookNotFoundError,
     RunExpiredError,
     SerializationError,
@@ -37,6 +38,7 @@ __all__ = [
     "serializable",
     "register_serializable",
     "EntityConflictError",
+    "FatalError",
     "HookNotFoundError",
     "RunExpiredError",
     "SerializationError",

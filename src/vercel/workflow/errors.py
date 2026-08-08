@@ -1,3 +1,4 @@
+from vercel._internal.workflow.errors import FatalError
 from vercel._internal.workflow.serialization import SerializationError
 from vercel._internal.workflow.world import (
     EntityConflictError,
@@ -10,6 +11,7 @@ from vercel._internal.workflow.world import (
 
 __all__ = [
     "EntityConflictError",
+    "FatalError",
     "HookNotFoundError",
     "RunExpiredError",
     "SerializationError",
