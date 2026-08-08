@@ -768,8 +768,8 @@ class QueueClient(BaseQueueClient):
         Args:
             raw_body: Callback body bytes, byte iterable, or response object.
             headers: Callback request headers, unless ``raw_body`` is a response.
-            transport: Wire codec for this delivery. Overrides the codec
-                inferred from the matching subscriber's signature.
+            transport: Wire codec for this delivery. Overrides the subscription's
+                transport and the codec inferred from the subscriber signature.
             lease_duration: Processing timeout used while handlers run.
 
         Raises:
