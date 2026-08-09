@@ -120,6 +120,9 @@ Three things are worth knowing:
 `await writable.write_from(source)` forwards an async iterable in one call, and
 `get_writable(namespace="logs")` gives the run a second, independent stream.
 
+`async with get_writable() as writable:` closes the stream on the way out — on
+the clean path only, so a step that raises leaves the stream open for its retry.
+
 There is no public reader yet. A stream is consumed today by the TypeScript SDK
 (`run.readable`), the dashboard, or `workflow inspect stream <id> --run=<run-id>`.
 Python can read one through the world (`streams_get()` yields transport bytes,

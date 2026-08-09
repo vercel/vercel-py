@@ -727,13 +727,13 @@ class StreamChunk(BaseModel):
     data: bytes
 
 
-class StreamChunksPage(BaseModel):
+class StreamChunksPage(PaginatedResult[StreamChunk]):
     """One page of already-written chunks -- a snapshot, not a live read."""
 
-    data: list[StreamChunk]
+    # Both are optional here, unlike the base: a page that ends the stream
+    # carries neither, and the endpoint omits them rather than sending nulls.
     cursor: str | None = None
     has_more: bool = pydantic.Field(default=False, alias="hasMore")
-    """Whether further pages of already-written chunks exist."""
 
     done: bool = False
     """Whether the stream is closed, so no more chunks will ever arrive."""

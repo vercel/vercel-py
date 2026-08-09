@@ -82,7 +82,7 @@ class RecordingWorld(NoStreams, w.World):
 
 
 def _writer(world: w.World) -> streams.WorkflowStreamWriter:
-    return streams.WorkflowStreamWriter(world, RUN_ID, NAME)
+    return streams.WorkflowStreamWriter(world=world, run_id=RUN_ID, name=NAME)
 
 
 def _values(batches: list[list[bytes]]) -> list[Any]:
@@ -368,4 +368,4 @@ async def test_context_manager_closes_on_success_only() -> None:
 
 async def test_an_empty_stream_name_is_refused() -> None:
     with pytest.raises(ValueError, match='"name" is required'):
-        streams.WorkflowStreamWriter(RecordingWorld(), RUN_ID, "")
+        streams.WorkflowStreamWriter(world=RecordingWorld(), run_id=RUN_ID, name="")

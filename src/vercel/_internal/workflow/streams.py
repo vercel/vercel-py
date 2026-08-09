@@ -88,12 +88,12 @@ def encode_frame(payload: bytes) -> bytes:
 
 
 def _reduce_uint8array(value: Any) -> Any:
-    """devalue reducer sending a chunk's ``bytes`` as a view. Falsy declines.
+    """devalue reducer framing a chunk's ``bytes`` as a ``Uint8Array``.
 
-    Only the emitted *form* differs: devalue writes a typed array as a view
-    onto its own buffer entry, ``["Uint8Array", <buffer>]``, where the payload
-    boundary writes the bare ``["ArrayBuffer", …]``. Both carry the same bytes
-    and both read back here as ``bytes``.
+    devalue writes a typed array as a view onto a separate buffer entry,
+    ``["Uint8Array", <buffer>]``, where the stringifier's own ``bytes`` branch
+    writes the bare ``["ArrayBuffer", …]``. Both carry the same bytes and both
+    read back here as ``bytes``; only the tag differs.
 
     It matters because of what reads a stream. The pattern the TypeScript docs
     lead with pipes a run's readable straight into a `Response`, and a body
@@ -101,12 +101,14 @@ def _reduce_uint8array(value: Any) -> Any:
     ``Received non-Uint8Array chunk``. So a step writing ``b"..."`` has to
     frame it as a view or every consumer doing that breaks.
 
-    Chunk-local on purpose. Python has one bytes type, so whichever form the
-    encoder picks the other becomes a one-way landing; the payload boundary
-    already chose ``ArrayBuffer`` and has tests pinning it. Nothing downstream
-    of a payload cares which form a ``bytes`` *field* took, so there is no
-    reason to move that.
+    Chunk-local for now. Teaching the stringifier that ``bytes`` means
+    ``Uint8Array`` (and ``bytearray`` means ``ArrayBuffer``) is the better fix
+    and would delete this, but it changes the payload wire format and what a JS
+    ``ArrayBuffer`` field lands as, so it wants its own change.
     """
+    # Exact type on purpose: `bytearray` and `memoryview` must fall through to
+    # the stringifier's `ArrayBuffer` branch, or this would re-enter on the
+    # view it returns below and recurse.
     if type(value) is not bytes:
         return False
     # A `memoryview` rather than the `bytes` itself, and not for speed: devalue
@@ -177,8 +179,7 @@ class FrameDecoder:
 # writer
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Ported from `@workflow/core`'s `WorkflowServerWritableStream`, whose shape is
-# not obvious and is worth restating.
+# Ported from `@workflow/core`'s `WorkflowServerWritableStream`.
 #
 # `write()` returns once the chunk is *buffered*, not once it is durable. That
 # early acknowledgement is what makes batching work at all: the producer keeps
@@ -209,13 +210,20 @@ MAX_BYTES_PER_BATCH = 1024 * 1024
 
 
 class WorkflowStreamWriter:
-    """A group-committing writer for one ``(run_id, name)`` stream.
+    """A stream that workflow steps can write to.
 
     Not safe to use from more than one event loop; within one loop, concurrent
     writers are fine and their chunks land in call order.
     """
 
-    def __init__(self, world: w.World, run_id: str, name: str) -> None:
+    def __init__(
+        self,
+        *,
+        world: w.World,
+        run_id: str,
+        name: str,
+        reentrant_ctx_on_err: bool = True,
+    ) -> None:
         if not name:
             raise ValueError(f'"name" is required, got {name!r}')
         self._world = world
@@ -236,6 +244,11 @@ class WorkflowStreamWriter:
         # that is the contract of an early-acknowledging sink.
         self._sink_error: BaseException | None = None
         self._closed = False
+        # Every critical section under this condition is await-free -- the only
+        # `await` taken while holding it is `wait()`, which releases it. The
+        # cancellation handler in `_dispatch_loop` depends on that: re-acquiring
+        # there must not suspend, or a second cancel could land mid-restore and
+        # drop the in-flight group.
         self._condition = asyncio.Condition()
 
         self._max_inflight_chunks = _env_int(
@@ -250,6 +263,8 @@ class WorkflowStreamWriter:
         self._max_bytes_per_batch = _env_int(
             "WORKFLOW_STREAM_MAX_BYTES_PER_BATCH", MAX_BYTES_PER_BATCH
         )
+
+        self._reentrant_ctx_on_err = reentrant_ctx_on_err
 
     @property
     def name(self) -> str:
@@ -273,10 +288,8 @@ class WorkflowStreamWriter:
     async def write_from(self, source: AsyncIterable[Any]) -> None:
         """Append every item *source* yields, in order.
 
-        The counterpart of piping a stream into this one: a step forwarding an
-        upstream async iterator (LLM tokens, an HTTP body) wants this rather
-        than a hand-rolled loop, and it keeps the group-commit buffer fed
-        without the caller thinking about batching.
+        This is simply a shortcut for a manual loop + :meth:`write` for
+        forwarding an upstream async iterator (e.g. LLM tokens, HTTP body).
         """
         async for value in source:
             await self.write(value)
@@ -335,6 +348,13 @@ class WorkflowStreamWriter:
         self._buffered_bytes -= octets
         return group, octets
 
+    def _put_back_group(self, group: Sequence[bytes], octets: int) -> None:
+        self._buffer[:0] = group
+        self._buffered_bytes += octets
+        self._inflight_chunks = 0
+        self._inflight_bytes = 0
+        self._dispatch = None
+
     async def _dispatch_loop(self) -> None:
         try:
             while True:
@@ -351,27 +371,16 @@ class WorkflowStreamWriter:
 
                 try:
                     await self._send(group)
-                except BaseException as error:
-                    cancelled = isinstance(error, asyncio.CancelledError)
+                except asyncio.CancelledError:
                     async with self._condition:
-                        # The group did not land, so it goes back at the head
-                        # either way: the buffer holds everything not known to
-                        # be durable, and dropping it here would lose chunks
-                        # whose `write()` had already returned.
-                        self._buffer[:0] = group
-                        self._buffered_bytes += octets
-                        self._inflight_chunks = 0
-                        self._inflight_bytes = 0
-                        self._dispatch = None
-                        # Cancellation is this task being torn down, not the
-                        # stream failing. Recording it as the sink error would
-                        # make a later `write()` raise `CancelledError` inside
-                        # a caller that was never cancelled.
-                        if not cancelled:
-                            self._sink_error = error
+                        self._put_back_group(group, octets)
                         self._condition.notify_all()
-                    if cancelled:
-                        raise
+                    raise
+                except BaseException as error:
+                    async with self._condition:
+                        self._put_back_group(group, octets)
+                        self._sink_error = error
+                        self._condition.notify_all()
                     return
 
                 async with self._condition:
@@ -431,5 +440,5 @@ class WorkflowStreamWriter:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if exc_type is None:
+        if exc_type is None or not self._reentrant_ctx_on_err:
             await self.close()

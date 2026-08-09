@@ -152,7 +152,9 @@ class _StepStreams:
     run_id: str
     writers: dict[str, streams.WorkflowStreamWriter] = dataclasses.field(default_factory=dict)
 
-    def writer(self, namespace: str | None) -> streams.WorkflowStreamWriter:
+    def writer(
+        self, namespace: str | None, *, reentrant_ctx_on_err: bool = True
+    ) -> streams.WorkflowStreamWriter:
         """The writer for this run's *namespace* stream, created on first use.
 
         One writer per stream per step, deliberately. Handing out a fresh writer
@@ -165,7 +167,12 @@ class _StepStreams:
         name = streams.workflow_run_stream_id(self.run_id, namespace)
         writer = self.writers.get(name)
         if writer is None:
-            writer = streams.WorkflowStreamWriter(w.get_world(), self.run_id, name)
+            writer = streams.WorkflowStreamWriter(
+                world=w.get_world(),
+                run_id=self.run_id,
+                name=name,
+                reentrant_ctx_on_err=reentrant_ctx_on_err,
+            )
             self.writers[name] = writer
         return writer
 
@@ -202,7 +209,11 @@ def get_step_metadata() -> StepInfo:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
 
 
-def get_writable(*, namespace: str | None = None) -> streams.WorkflowStreamWriter:
+def get_writable(
+    *,
+    namespace: str | None = None,
+    reentrant_ctx_on_err: bool = True,
+) -> streams.WorkflowStreamWriter:
     """The run's writable stream, for streaming output as the step runs.
 
     Chunks become readable immediately -- through ``run.readable`` on the
@@ -220,6 +231,10 @@ def get_writable(*, namespace: str | None = None) -> streams.WorkflowStreamWrite
 
     Nothing closes the stream implicitly. Call :meth:`close` on the writer when
     the run has nothing more to say, or readers will wait until the run expires.
+
+    When used as an asynchronous context in ``async with`` statements, the stream
+    will be closed on a clean exit by default. Exceptions will not close the
+    stream on exit of the context, unless ``reentrant_ctx_on_err`` is ``False``.
     """
     try:
         state = _step_streams_ctx.get()
@@ -228,7 +243,7 @@ def get_writable(*, namespace: str | None = None) -> streams.WorkflowStreamWrite
             "get_writable() can only be called inside a step; a workflow body "
             "cannot write to a stream directly"
         ) from None
-    return state.writer(namespace)
+    return state.writer(namespace, reentrant_ctx_on_err=reentrant_ctx_on_err)
 
 
 if sys.version_info >= (3, 11):
@@ -1029,6 +1044,9 @@ async def _execute_step(
         # progress that led up to the failure. Best-effort by construction --
         # the step is already failing, and a drain error here would replace the
         # cause with a symptom.
+        #
+        # `@workflow/core` does not do this: its `ops` flush lives only on the
+        # success path, so a throwing step's buffered chunks are never awaited.
         await step_streams.drain_quietly()
 
         # step.attempt was incremented by step_started
