@@ -53,7 +53,8 @@ from vercel._internal.devalue.constants import (
 )
 from vercel._internal.devalue.parse import _BYTES_PER_ELEMENT
 
-# Every tag devalue uses for an array view; all of them land as plain bytes.
+# Every tag devalue uses for an array view; all of them land as plain bytes,
+# which is faithful only for `Uint8Array`.
 _TYPED_ARRAY_TAGS = frozenset(_BYTES_PER_ELEMENT)
 
 # Pins the npm fallback used when VERCEL_DEVALUE_JS is not set. It has no
@@ -347,9 +348,15 @@ ROUND_TRIP_CASES: list[Case] = [
     Case("regex_js_only_flags", "/a+/gu", JsRegExp("a+", "gu")),
     Case("regex_named_group", r"/(?<y>\d{4})/", JsRegExp(r"(?<y>\d{4})", "")),
     Case("regex_unicode_property", r"/\p{Letter}/u", JsRegExp(r"\p{Letter}", "u")),
-    Case("bytes", "new Uint8Array([0,1,255]).buffer", b"\x00\x01\xff"),
-    Case("bytes_empty", "new Uint8Array([]).buffer", b""),
-    Case("bytearray", "new Uint8Array([1,2]).buffer", bytearray(b"\x01\x02"), expected=b"\x01\x02"),
+    Case("bytes", "new Uint8Array([0,1,255])", b"\x00\x01\xff"),
+    Case("bytes_empty", "new Uint8Array([])", b""),
+    Case("bytearray", "new Uint8Array([1,2]).buffer", bytearray(b"\x01\x02")),
+    Case(
+        "memoryview",
+        "new Uint8Array([1,2]).buffer",
+        memoryview(b"\x01\x02"),
+        expected=bytearray(b"\x01\x02"),
+    ),
     # ── integers across the JS safe boundary ───────────────────────────────
     Case("safe_int_max", "9007199254740991", 2**53 - 1),
     Case("safe_int_min", "-9007199254740991", -(2**53) + 1),
@@ -422,7 +429,7 @@ JS_ORIGIN_CASES: list[Case] = [
     ),
     Case("js_uint8array", "new Uint8Array([1,2,3])", expected=b"\x01\x02\x03"),
     Case("js_uint16array", "new Uint16Array([1,2])", expected=b"\x01\x00\x02\x00"),
-    Case("js_arraybuffer", "new Uint8Array([9,8]).buffer", expected=b"\x09\x08"),
+    Case("js_arraybuffer", "new Uint8Array([9,8]).buffer", expected=bytearray(b"\x09\x08")),
     # Boxed primitives are unboxed.
     Case("js_boxed_number", "Object(42)", expected=42),
     Case("js_boxed_string", 'Object("woo!!!")', expected="woo!!!"),
@@ -686,7 +693,8 @@ _KNOWN_LOSSY: dict[str, str] = {
     '["Date",""': "an invalid Date becomes None",
     '["DataView"': "DataView becomes bytes",
     '["Temporal.': "Temporal values become str",
-    **{f'["{tag}"': f"{tag} becomes bytes" for tag in _TYPED_ARRAY_TAGS},
+    # `Uint8Array` is absent: `bytes` is exactly it, so it round-trips.
+    **{f'["{tag}"': f"{tag} becomes bytes" for tag in _TYPED_ARRAY_TAGS - {"Uint8Array"}},
 }
 
 # Needs revivers we deliberately do not supply, or a Python container that

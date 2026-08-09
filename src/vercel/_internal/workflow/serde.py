@@ -297,7 +297,7 @@ REVIVERS: dict[str, Callable[[Any], Any]] = {"Instance": revive_instance}
 #
 # Standard-library types that devalue rejects outright and that turn up in
 # ordinary payloads. Types it already carries are left alone -- `datetime` is
-# a `Date`, `bytes` an `ArrayBuffer`, `set` a `Set` -- as are the ones it
+# a `Date`, `bytes` a `Uint8Array`, `set` a `Set` -- as are the ones it
 # narrows rather than rejects (`tuple` to a list, `frozenset` to a set,
 # `OrderedDict` to an object): those already cross the wire, and wrapping them
 # would take a plain JavaScript array or Set away from a JavaScript reader for

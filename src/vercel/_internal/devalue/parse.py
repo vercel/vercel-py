@@ -220,7 +220,8 @@ def unflatten(parsed: Any, revivers: dict[str, Callable] | None = None) -> Any:
             b64 = value[1]
             if not isinstance(b64, str):
                 raise ValueError("Invalid ArrayBuffer encoding")
-            hydrated[index] = base64.b64decode(b64)
+            # A bare buffer, `bytearray`; a view over one is `bytes` below.
+            hydrated[index] = bytearray(base64.b64decode(b64))
 
         elif type_name in _TYPED_ARRAY_TYPES:
             ref_idx = value[1]
@@ -230,16 +231,18 @@ def unflatten(parsed: Any, revivers: dict[str, Callable] | None = None) -> Any:
             if not (isinstance(ref_val, list) and len(ref_val) > 0 and ref_val[0] == "ArrayBuffer"):
                 raise ValueError("Invalid data")
             buf = hydrate(value[1])
+            # Always a copy, so that writing through the `bytearray` the buffer
+            # parsed to cannot reach a view over it.
             if len(value) > 2:
                 byte_offset = value[2]
                 elem_count = value[3]
                 if type_name == "DataView":
-                    hydrated[index] = buf[byte_offset : byte_offset + elem_count]
+                    hydrated[index] = bytes(buf[byte_offset : byte_offset + elem_count])
                 else:
                     bpe = _BYTES_PER_ELEMENT.get(type_name, 1)
-                    hydrated[index] = buf[byte_offset : byte_offset + elem_count * bpe]
+                    hydrated[index] = bytes(buf[byte_offset : byte_offset + elem_count * bpe])
             else:
-                hydrated[index] = buf
+                hydrated[index] = bytes(buf)
 
         elif type_name == "URL":
             hydrated[index] = value[1]

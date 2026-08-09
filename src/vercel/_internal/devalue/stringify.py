@@ -35,7 +35,8 @@ def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
 
     Supports: ``None``, ``bool``, ``int``, ``float`` (including NaN / ±Inf /
     −0), ``str``, ``list``, ``tuple``, ``dict`` (string keys only), ``set``,
-    ``frozenset``, ``datetime``, ``re.Pattern``, ``bytes``, ``bytearray``,
+    ``frozenset``, ``datetime``, ``re.Pattern``, ``bytes`` (as a
+    ``Uint8Array``), ``bytearray`` and ``memoryview`` (as an ``ArrayBuffer``),
     and the ``Undefined`` sentinel.
 
     Cyclic and repeated references are handled automatically.  Integers
@@ -209,11 +210,26 @@ def stringify(value: Any, reducers: dict[str, Callable] | None = None) -> str:
                 stringified[index] = f'["RegExp",{stringify_string(source)}]'
             return index
 
-        # --- bytes / bytearray → ArrayBuffer ---
-        if isinstance(thing, (bytes, bytearray, memoryview)):
-            raw = bytes(thing)
-            b64 = base64.b64encode(raw).decode("ascii")
+        # --- bytearray / memoryview → ArrayBuffer ---
+        if isinstance(thing, (bytearray, memoryview)):
+            b64 = base64.b64encode(bytes(thing)).decode("ascii")
             stringified[index] = f'["ArrayBuffer","{b64}"]'
+            return index
+
+        # --- bytes → Uint8Array over its own ArrayBuffer ---
+        # `bytes` gets the view rather than the bare buffer because that is what
+        # the far side wants: a `Uint8Array` can be piped straight into a
+        # `Response`, an `ArrayBuffer` cannot.
+        if isinstance(thing, bytes):
+            b64 = base64.b64encode(thing).decode("ascii")
+            # Allocated here rather than through `flatten`, which would need a
+            # temporary object to key on and would offer it to the reducers.
+            buffer_index = p
+            p += 1
+            stringified[buffer_index] = f'["ArrayBuffer","{b64}"]'
+            # No offset or length: upstream emits those only for a view narrower
+            # than its buffer, and this one never is.
+            stringified[index] = f'["Uint8Array",{buffer_index}]'
             return index
 
         raise DevalueError("Cannot stringify arbitrary non-POJOs", keys, thing, value)
