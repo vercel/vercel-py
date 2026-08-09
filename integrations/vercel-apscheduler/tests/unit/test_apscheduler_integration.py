@@ -5,18 +5,23 @@ from typing import Any, cast
 import logging
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from itertools import starmap
+from operator import itemgetter
 from sys import modules
 from threading import Lock
 from types import ModuleType
 from unittest.mock import patch
 
 import pytest
-from apscheduler.jobstores.base import ConflictingIdError, JobLookupError
+from apscheduler.job import Job
+from apscheduler.jobstores.base import BaseJobStore, ConflictingIdError, JobLookupError
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_PAUSED, STATE_RUNNING
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from vercel.integrations.apscheduler import (
     APSchedulerConfigurationError,
@@ -26,6 +31,7 @@ from vercel.integrations.apscheduler import (
     is_scheduler_subscriber,
 )
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
+from vercel.integrations.apscheduler._backends.cache import CacheJobStore
 from vercel.integrations.apscheduler._backends.redis import RedisJobCoordinator
 from vercel.integrations.apscheduler._options import VercelAPSchedulerOptions
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
@@ -110,6 +116,73 @@ class InMemoryRedisJobStore(RedisJobStore):
 
     def shutdown(self) -> None:
         return
+
+
+class InMemorySourceJobStore(BaseJobStore):
+    """A source store: external rows become one-shot date jobs
+    and ``remove_job`` doubles as the dispatch step."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: dict[str, datetime] = {}
+        self.dispatched: list[str] = []
+        self.updated: list[str] = []
+        self.fail_reads = False
+        self.executor_alias = "default"
+        self.trigger_factory: Any = lambda run_date: DateTrigger(run_date, UTC)
+
+    def lookup_job(self, job_id: str) -> Any | None:
+        return None
+
+    def get_due_jobs(self, now: datetime) -> list[Any]:
+        self._check_reads()
+        return [
+            self._materialize(row_id, run_date)
+            for row_id, run_date in sorted(self.rows.items(), key=itemgetter(1))
+            if run_date <= now
+        ]
+
+    def get_next_run_time(self) -> datetime | None:
+        self._check_reads()
+        return min(self.rows.values(), default=None)
+
+    def get_all_jobs(self) -> list[Any]:
+        self._check_reads()
+        rows: list[tuple[str, datetime]] = sorted(self.rows.items(), key=itemgetter(1))
+        return list(starmap(self._materialize, rows))
+
+    def add_job(self, job: Any) -> None:
+        raise RuntimeError("This job store does not support managing jobs directly.")
+
+    def update_job(self, job: Any) -> None:
+        self.rows[job.id] = job.next_run_time
+        self.updated.append(job.id)
+
+    def remove_job(self, job_id: str) -> None:
+        del self.rows[job_id]
+        self.dispatched.append(job_id)
+
+    def remove_all_jobs(self) -> None:
+        raise RuntimeError("This job store does not support managing jobs directly.")
+
+    def _check_reads(self) -> None:
+        if self.fail_reads:
+            raise ConnectionError("source database unavailable")
+
+    def _materialize(self, row_id: str, run_date: datetime) -> Any:
+        job_kwargs = {
+            **(self._scheduler._job_defaults if self._scheduler else {}),
+            "trigger": self.trigger_factory(run_date),
+            "executor": self.executor_alias,
+            "func": lambda: None,
+            "args": (),
+            "kwargs": {},
+            "id": row_id,
+            "name": None,
+            "next_run_time": run_date,
+            "misfire_grace_time": None,
+        }
+        return Job(self._scheduler, **job_kwargs)
 
 
 class FakeDriver:
@@ -363,6 +436,9 @@ class FakeDriver:
             )
             return FinishResult("advanced", self.current)
 
+    def rearm_wake(self, candidate: datetime, now: datetime) -> None:
+        self.rearm(candidate, now)
+
     def rearm(self, logical_time: datetime, now: datetime) -> WakeToken | None:
         del now
         with self.lock:
@@ -572,6 +648,18 @@ def scheduler_with_driver(
     adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     adapter.coordinator.driver = driver
     return scheduler, adapter, driver
+
+
+def scheduler_with_source_store() -> tuple[
+    BlockingScheduler,
+    SchedulerAdapter,
+    FakeDriver,
+    InMemorySourceJobStore,
+]:
+    scheduler, adapter, driver = scheduler_with_driver()
+    source = InMemorySourceJobStore()
+    scheduler.add_jobstore(source, "subscription")
+    return scheduler, adapter, driver, source
 
 
 def message(
@@ -1291,7 +1379,7 @@ def test_runtime_mutation_requires_lifecycle_activation() -> None:
     assert adapter.scheduler.state == 0
 
 
-def test_multiple_job_stores_are_rejected() -> None:
+def test_second_durable_store_is_rejected() -> None:
     scheduler = BlockingScheduler(
         timezone=UTC,
         jobstores={
@@ -1303,9 +1391,343 @@ def test_multiple_job_stores_are_rejected() -> None:
 
     with pytest.raises(
         APSchedulerConfigurationError,
-        match="exactly one job store",
+        match='durable store must be the one named "default"',
     ):
         scheduler.start()
+
+
+def test_source_store_rows_dispatch_on_wakeup() -> None:
+    _scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    source.rows["sub-1"] = now - timedelta(seconds=5)
+
+    result = adapter.process_wakeup(now)
+
+    assert source.dispatched == ["sub-1"]
+    assert "sub-1" in result.due_job_ids
+    assert source.rows == {}
+    # Nothing left in any store: the poll cap keeps the chain alive.
+    assert result.next_wakeup_time is not None
+    assert result.next_wakeup_time >= now + timedelta(seconds=29)
+    assert result.next_wakeup_time <= datetime.now(UTC) + timedelta(seconds=30)
+
+
+def test_source_store_poll_cap_bounds_an_idle_chain() -> None:
+    _scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    source.rows["sub-far"] = now + timedelta(days=30)
+
+    result = adapter.process_wakeup(now)
+
+    assert source.dispatched == []
+    assert result.next_wakeup_time is not None
+    assert result.next_wakeup_time <= datetime.now(UTC) + timedelta(seconds=30)
+
+
+def test_source_store_near_due_time_is_trusted_below_the_poll_cap() -> None:
+    _scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    due = now + timedelta(seconds=10)
+    source.rows["sub-soon"] = due
+
+    result = adapter.process_wakeup(now)
+
+    assert result.next_wakeup_time == due
+
+
+def test_recurring_source_job_advances_through_update_job() -> None:
+    _scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    source.trigger_factory = lambda run_date: IntervalTrigger(
+        minutes=5,
+        start_date=run_date,
+        timezone=UTC,
+    )
+    due = now - timedelta(seconds=5)
+    source.rows["recurring"] = due
+
+    adapter.process_wakeup(now)
+
+    assert source.dispatched == []
+    assert source.updated == ["recurring"]
+    assert source.rows["recurring"] == due + timedelta(minutes=5)
+
+
+def test_source_store_read_errors_bound_the_retry() -> None:
+    scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    source.rows["sub-1"] = now - timedelta(seconds=5)
+    source.fail_reads = True
+
+    result = adapter.process_wakeup(now)
+
+    assert source.dispatched == []
+    assert result.next_wakeup_time is not None
+    # Bounded on both sides: no immediate hot retry, no unbounded stall.
+    assert result.next_wakeup_time >= now + timedelta(seconds=scheduler.jobstore_retry_interval - 1)
+    assert result.next_wakeup_time <= datetime.now(UTC) + timedelta(
+        seconds=scheduler.jobstore_retry_interval
+    )
+
+
+def test_source_dispatch_failure_retries_and_preserves_the_row() -> None:
+    scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    due = now - timedelta(seconds=5)
+    source.rows["sub-1"] = due
+
+    def failing_remove(job_id: str) -> None:
+        raise ConnectionError("source database unavailable")
+
+    source.remove_job = failing_remove  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+
+    result = adapter.process_wakeup(now)
+
+    # The failed advance leaves the row for the bounded retry; the row's
+    # overdue time must not pull the successor into an immediate hot loop.
+    assert source.rows == {"sub-1": due}
+    assert result.next_wakeup_time is not None
+    assert result.next_wakeup_time >= now + timedelta(seconds=scheduler.jobstore_retry_interval - 1)
+    assert result.next_wakeup_time <= datetime.now(UTC) + timedelta(
+        seconds=scheduler.jobstore_retry_interval
+    )
+
+
+def test_source_executor_mismatch_is_floored_not_hot_spun() -> None:
+    scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    source.executor_alias = "missing"
+    source.rows["sub-1"] = now - timedelta(seconds=5)
+
+    result = adapter.process_wakeup(now)
+
+    # The job is skipped, stays due, and cannot drive an immediate wake.
+    assert source.dispatched == []
+    assert source.rows
+    assert result.next_wakeup_time is not None
+    assert result.next_wakeup_time >= now + timedelta(seconds=scheduler.jobstore_retry_interval - 1)
+
+
+def test_malformed_source_job_is_stepped_over() -> None:
+    scheduler, adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    broken_date = now - timedelta(seconds=10)
+
+    class BrokenTrigger(DateTrigger):
+        def get_next_fire_time(self, previous_fire_time: Any, now: Any) -> Any:
+            raise RuntimeError("malformed job")
+
+    def factory(run_date: datetime) -> Any:
+        trigger_type = BrokenTrigger if run_date == broken_date else DateTrigger
+        return trigger_type(run_date, UTC)
+
+    source.trigger_factory = factory
+    source.rows["sub-broken"] = broken_date
+    source.rows["sub-good"] = now - timedelta(seconds=5)
+
+    result = adapter.process_wakeup(now)
+
+    # The broken job is skipped without stalling the wake or the good job.
+    assert source.dispatched == ["sub-good"]
+    assert result.next_wakeup_time is not None
+    assert result.next_wakeup_time >= now + timedelta(seconds=scheduler.jobstore_retry_interval - 1)
+
+
+def test_mutations_do_not_fall_through_to_source_stores() -> None:
+    scheduler, _adapter, _driver, source = scheduler_with_source_store()
+    now = datetime.now(UTC)
+    due = now + timedelta(hours=1)
+    source.rows["sub-1"] = due
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg",
+    ):
+        scheduler.start()
+
+        # jobstore=None is pinned to the default store instead of falling
+        # through to the source store's dispatch-on-remove.
+        with pytest.raises(JobLookupError):
+            scheduler.remove_job("sub-1")
+
+        with pytest.raises(
+            APSchedulerConfigurationError,
+            match='may only target the durable "default"',
+        ):
+            scheduler.remove_job("sub-1", jobstore="subscription")
+
+        with pytest.raises(
+            APSchedulerConfigurationError,
+            match='may only target the durable "default"',
+        ):
+            scheduler.pause_job("sub-1", "subscription")
+
+        scheduler.remove_all_jobs()
+
+    assert source.dispatched == []
+    assert source.updated == []
+    assert source.rows == {"sub-1": due}
+
+
+def test_paused_interval_does_not_skip_source_rows() -> None:
+    scheduler, adapter, _driver, source = scheduler_with_source_store()
+    del scheduler
+    now = datetime.now(UTC)
+    source.rows["sub-overdue"] = now - timedelta(hours=1)
+
+    adapter.activate_generation(now)
+    result = adapter.process_wakeup(now)
+
+    assert source.dispatched == ["sub-overdue"]
+    assert "sub-overdue" in result.due_job_ids
+
+
+def test_adding_a_source_store_rearms_an_active_chain() -> None:
+    scheduler, _adapter, driver = scheduler_with_driver()
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+    start_subscription.func(
+        message(
+            start_payload,
+            message_id="start",
+            topic=start_subscription.topic,
+            consumer_group=start_subscription.consumer_group,
+        )
+    )
+    assert driver.current is None
+
+    before = datetime.now(UTC)
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_wake",
+    ):
+        scheduler.add_jobstore(InMemorySourceJobStore(), "subscription")
+
+    armed = driver.current
+    assert armed is not None
+    assert armed.status == "published"
+    assert armed.logical_time <= before + timedelta(seconds=31)
+
+
+def test_start_rearms_source_poll_on_unchanged_generation() -> None:
+    scheduler, _adapter, driver, _source = scheduler_with_source_store()
+    register_scheduler(scheduler)
+    # A prior session's generation is active and dormant.
+    driver.start(datetime.now(UTC))
+    driver.start_status = "active"
+
+    before = datetime.now(UTC)
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_wake",
+    ):
+        scheduler.start()
+
+    armed = driver.current
+    assert armed is not None
+    assert armed.status == "published"
+    assert armed.logical_time <= before + timedelta(seconds=31)
+
+
+def test_redis_backend_rejects_a_cache_store_under_a_source_alias() -> None:
+    scheduler = BlockingScheduler(
+        timezone=UTC,
+        jobstores={
+            "default": InMemoryRedisJobStore(),
+            "secondary": CacheJobStore(),
+        },
+    )
+    bind_test_scheduler(scheduler)
+
+    with pytest.raises(
+        APSchedulerConfigurationError,
+        match='durable store must be the one named "default"',
+    ):
+        scheduler.start()
+
+
+def test_add_job_into_a_source_store_is_rejected() -> None:
+    scheduler, adapter, _driver, _source = scheduler_with_source_store()
+    scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        minutes=5,
+        id="stray",
+        jobstore="subscription",
+    )
+
+    with pytest.raises(APSchedulerConfigurationError, match="source store"):
+        adapter.ensure_local_started()
+
+
+def test_start_with_only_a_source_store_arms_the_poll_wake() -> None:
+    scheduler, _adapter, driver, _source = scheduler_with_source_store()
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+
+    before = datetime.now(UTC)
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_wake",
+    ):
+        start_subscription.func(
+            message(
+                start_payload,
+                message_id="start",
+                topic=start_subscription.topic,
+                consumer_group=start_subscription.consumer_group,
+            )
+        )
+
+    # No dormancy with a source store: the poll cap arms the first wake.
+    assert driver.current is not None
+    assert driver.current.status == "published"
+    assert driver.current.logical_time <= before + timedelta(seconds=31)
+
+
+def test_wake_delivery_dispatches_source_rows_and_rearms_the_poll() -> None:
+    scheduler, _adapter, driver, source = scheduler_with_source_store()
+    register_scheduler(scheduler)
+    wake_subscription = get_subscriptions()[1]
+    driver.start(datetime.now(UTC))
+    driver.start_status = "active"
+    logical = datetime.now(UTC)
+    token = WakeToken(1, 1, logical, status="published")
+    driver.current = token
+    source.rows["sub-1"] = logical - timedelta(seconds=5)
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_wake",
+    ):
+        wake_subscription.func(
+            message(
+                WakeupPayload.from_token(TEST_SCHEDULER_ID, token).to_payload(),
+                message_id="wake",
+                topic=wake_subscription.topic,
+                consumer_group=wake_subscription.consumer_group,
+            )
+        )
+
+    assert source.dispatched == ["sub-1"]
+    successor = driver.current
+    assert successor is not None
+    assert successor.sequence == 2
+    assert successor.logical_time <= datetime.now(UTC) + timedelta(seconds=30)
 
 
 def test_pause_resume_fences_old_start_messages() -> None:

@@ -30,6 +30,7 @@ from typing import Any
 from dataclasses import dataclass
 from os import environ
 
+from ..._imports import RedisJobStore
 from ..._options import (
     SUBSCRIBER_ID_ENV,
     SUBSCRIBERS_ENV,
@@ -55,13 +56,6 @@ class CacheBackend:
 
     def validate_configuration(self, scheduler: Any) -> dict[str, Any]:
         stores = dict(scheduler._jobstores)
-        extra = set(stores) - {"default"}
-        if extra:
-            aliases = ", ".join(sorted(extra))
-            raise APSchedulerConfigurationError(
-                "vercel-apscheduler v1 supports exactly one job store named "
-                f'"default"; configured: {aliases}'
-            )
         default = stores.get("default")
         if default is not None and not isinstance(default, CacheJobStore):
             raise APSchedulerConfigurationError(
@@ -70,6 +64,14 @@ class CacheBackend:
                 "explicit default store, or select the matching backend via "
                 "VERCEL_APSCHEDULER_BACKEND"
             )
+        for alias, store in stores.items():
+            if alias != "default" and isinstance(store, (CacheJobStore, RedisJobStore)):
+                raise APSchedulerConfigurationError(
+                    f'job store "{alias}" is a {type(store).__name__}, but the '
+                    'durable store must be the one named "default"; '
+                    "non-default stores are source stores owned by their "
+                    "external system"
+                )
         return stores
 
     def supports_store(self, store: Any) -> bool:
