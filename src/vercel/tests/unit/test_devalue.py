@@ -123,10 +123,14 @@ class TestStringifyBasics:
         assert parsed == {1, 2, 3}
 
     def test_bytes(self):
-        assert stringify(b"\x01\x02\x03") == '[["ArrayBuffer","AQID"]]'
+        # Byte-identical to `devalue.stringify(new Uint8Array([1, 2, 3]))`.
+        assert stringify(b"\x01\x02\x03") == '[["Uint8Array",1],["ArrayBuffer","AQID"]]'
 
     def test_bytearray(self):
         assert stringify(bytearray(b"\x01\x02\x03")) == '[["ArrayBuffer","AQID"]]'
+
+    def test_memoryview(self):
+        assert stringify(memoryview(b"\x01\x02\x03")) == '[["ArrayBuffer","AQID"]]'
 
     def test_tuple_as_array(self):
         assert stringify(("a", "b")) == '[[1,2],"a","b"]'
@@ -256,9 +260,10 @@ class TestStringifyRepetition:
         assert result == '[[1,1],["Date","2001-09-09T01:46:40.000Z"]]'
 
     def test_bytes_repetition(self):
+        # One view and one buffer, however many times the value appears.
         buf = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09"
         result = stringify([buf, buf])
-        assert result == '[[1,1],["ArrayBuffer","AAECAwQFBgcICQ=="]]'
+        assert result == '[[1,1],["Uint8Array",2],["ArrayBuffer","AAECAwQFBgcICQ=="]]'
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -470,10 +475,17 @@ class TestParseBasics:
     def test_arraybuffer(self):
         result = parse('[["ArrayBuffer","AQID"]]')
         assert result == b"\x01\x02\x03"
+        assert type(result) is bytearray
 
     def test_typed_array(self):
         result = parse('[["Uint8Array",1],["ArrayBuffer","AQID"]]')
         assert result == b"\x01\x02\x03"
+        assert type(result) is bytes
+
+    def test_typed_array_does_not_alias_its_buffer(self):
+        view, buffer = parse('[[1,2],["Uint8Array",2],["ArrayBuffer","AQID"]]')
+        buffer[0] = 0xFF
+        assert view == b"\x01\x02\x03"
 
     def test_url_as_string(self):
         result = parse('[["URL","https://example.com/path"]]')
@@ -826,7 +838,15 @@ class TestRoundTrip:
 
     def test_bytes(self):
         data = b"\x00\x01\x02\xff"
-        assert parse(stringify(data)) == data
+        result = parse(stringify(data))
+        assert result == data
+        assert type(result) is bytes
+
+    def test_bytearray(self):
+        data = bytearray(b"\x00\x01\x02\xff")
+        result = parse(stringify(data))
+        assert result == data
+        assert type(result) is bytearray
 
     def test_nested(self):
         val = {
