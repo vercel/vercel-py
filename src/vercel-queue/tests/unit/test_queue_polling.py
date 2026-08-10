@@ -862,7 +862,7 @@ def test_poll_rejects_specialized_topic_forward_ref(
     eqs: EmbeddedQueueDevServer,
 ) -> None:
     client = eqs.get_sync_client()
-    topic = Topic.__class_getitem__(ForwardRef("Payload"))("forward-ref")
+    topic: Topic[Any] = Topic.__class_getitem__(ForwardRef("Payload"))("forward-ref")
     client.send(topic.name, {"count": 3})
 
     with pytest.raises(SubscriptionError, match="unsupported queue subscriber payload annotation"):

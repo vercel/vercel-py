@@ -27,8 +27,10 @@ from .streams import (
     SyncTextStreamPayload,
 )
 from .types import (
+    BaseTopic,
     RequestContent,
     Topic,
+    TopicPattern,
     Transport,
 )
 
@@ -304,14 +306,24 @@ def receive_transport_for_annotation(annotation: Any) -> Transport[Any]:
     return transport_for_kind(kind)
 
 
+def topic_payload_annotation(topic: object) -> Any:
+    """Return the payload type ``topic`` was specialized with, if any.
+
+    A bare name, an unspecialized topic, and a user subclass all report "no
+    annotation": none of them carries a payload type we put there.
+    """
+    origin = getattr(type(topic), "__topic_origin__", None)
+    if origin is not Topic and origin is not TopicPattern:
+        return inspect.Signature.empty
+    return getattr(type(topic), "__topic_payload_type__", inspect.Signature.empty)
+
+
 def receive_transport_for_topic(topic: object) -> Transport[Any]:
-    if not isinstance(topic, Topic):
+    if not isinstance(topic, BaseTopic):
         return RawJsonTransport[Any]()
     if topic.transport is not None:
         return topic.transport
-    if getattr(type(topic), "__topic_origin__", None) is not Topic:
-        return RawJsonTransport[Any]()
-    return receive_transport_for_annotation(type(topic).__topic_payload_type__)
+    return receive_transport_for_annotation(topic_payload_annotation(topic))
 
 
 def send_transport_for_topic(topic: object) -> Transport[Any] | None:
@@ -360,5 +372,6 @@ __all__ = (
     "receive_transport_for_topic",
     "reject_invalid_payload_annotation",
     "send_transport_for_topic",
+    "topic_payload_annotation",
     "transport_for_kind",
 )

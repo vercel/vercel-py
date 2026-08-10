@@ -24,7 +24,10 @@ from vercel.queue import (
     RetryAfter,
     TextBufferTransport,
     TextStreamTransport,
+    Topic,
+    TopicPattern,
     UnhandledMessageError,
+    get_subscriptions,
     subscribe,
 )
 from vercel.queue._internal import lease as queue_lease
@@ -1130,6 +1133,84 @@ def test_sync_accept_and_handle_infers_text_buffer_transport(
 
     assert calls == ["raw"]
     assert eqs.state.by_id[delivery.message_id].acknowledged
+
+
+class _HalfJsonTransport:
+    """A codec no payload annotation can imply: only a Topic can name it."""
+
+    content_type = "application/x-half-json"
+
+    def serialize(self, value: Any) -> bytes:
+        return b"half:" + json.dumps(value).encode()
+
+    async def deserialize(
+        self,
+        payload: AsyncIterator[bytes],
+        *,
+        content_type: str,
+    ) -> Any:
+        del content_type
+        body = b"".join([chunk async for chunk in payload])
+        return json.loads(body.removeprefix(b"half:"))
+
+
+@pytest.mark.parametrize(
+    ("topic_type", "subscribed"),
+    [(Topic[Any], "emails"), (TopicPattern[Any], "emails*")],
+)
+def test_topic_transport_decodes_a_push_delivery(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+    topic_type: type[Topic[Any] | TopicPattern[Any]],
+    subscribed: str,
+) -> None:
+    """Both a concrete topic and a pattern; an untyped subscriber infers JSON."""
+    calls: list[object] = []
+
+    @callback_subscribe(topic=topic_type(subscribed, transport=_HalfJsonTransport()))
+    def handle(payload: object) -> None:
+        calls.append(payload)
+
+    delivery = sync_delivery(eqs, {"ok": True}, transport=_HalfJsonTransport())
+    assert delivery.body == b'half:{"ok": true}'
+
+    # A client that was told nothing, as a generated asgi_app() entrypoint builds it.
+    receiver = SyncQueueClient(token="token", base_url=eqs.base_url, deployment=ALL_DEPLOYMENTS)
+    receiver.accept_and_handle(delivery.body, delivery.headers, lease_duration=30)
+
+    assert calls == [{"ok": True}]
+    assert eqs.state.by_id[delivery.message_id].acknowledged
+
+
+def test_topic_transport_replaces_the_codec_but_not_payload_validation(
+    eqs: EmbeddedQueueDevServer,
+    isolated_subscriptions: None,
+) -> None:
+    class Payload(BaseModel):
+        count: int
+
+    calls: list[Payload] = []
+
+    @callback_subscribe(topic=TopicPattern[Any]("emails*", transport=_HalfJsonTransport()))
+    def handle(payload: Payload) -> None:
+        calls.append(payload)
+
+    delivery = sync_delivery(eqs, {"count": 3}, transport=_HalfJsonTransport())
+
+    assert isinstance(delivery.client, SyncQueueClient)
+    delivery.client.accept_and_handle(delivery.body, delivery.headers, lease_duration=30)
+
+    assert calls == [Payload(count=3)]
+
+
+def test_subscribing_to_a_pattern_topic_registers_the_pattern(
+    isolated_subscriptions: None,
+) -> None:
+    @callback_subscribe(topic=TopicPattern[Any]("emails*"))
+    def handle(payload: object) -> None:
+        del payload
+
+    assert [sub.topic for sub in get_subscriptions()] == ["emails*"]
 
 
 def test_accept_and_handle_infers_json_transport_for_union_with_buffer_types(

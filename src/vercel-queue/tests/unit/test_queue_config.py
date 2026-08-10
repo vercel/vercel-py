@@ -17,7 +17,9 @@ from vercel.queue import (
     DeploymentResolutionError,
     QueueClient,
     RawJsonTransport,
+    SanitizedName,
     Topic,
+    TopicPattern,
     sync as queue_sync,
 )
 from vercel.queue._internal.config import resolve_base_url, resolve_deployment
@@ -231,6 +233,37 @@ def test_queue_client_timeout_rejects_invalid_duration() -> None:
 def test_topic_rejects_invalid_name() -> None:
     with pytest.raises(ValueError, match="Invalid queue topic"):
         Topic("emails.v1")
+
+
+def test_topic_pattern_accepts_a_subscription_pattern() -> None:
+    prefix = TopicPattern[bytes]("emails*")
+    assert prefix.name == "emails*"
+    # Not a SanitizedName: that type means "safe in a request path".
+    assert not isinstance(prefix.name, SanitizedName)
+
+    assert TopicPattern[bytes]("*").name == "*"
+
+    concrete = Topic[bytes]("emails")
+    assert isinstance(concrete.name, SanitizedName)
+
+
+def test_topic_rejects_a_subscription_pattern() -> None:
+    with pytest.raises(ValueError, match="Invalid queue topic"):
+        Topic[bytes]("emails*")
+
+
+def test_topic_and_topic_pattern_are_distinct_types() -> None:
+    assert not issubclass(TopicPattern, Topic)
+    assert not issubclass(Topic, TopicPattern)
+    # Specializations of the two do not share a cache either.
+    assert not issubclass(TopicPattern[bytes], Topic)
+    assert not issubclass(Topic[bytes], TopicPattern)
+
+
+@pytest.mark.parametrize("name", ["a*b", "*emails", "bad.topic*"])
+def test_topic_pattern_rejects_a_malformed_pattern(name: str) -> None:
+    with pytest.raises(ValueError, match="Invalid queue topic"):
+        TopicPattern[bytes](name)
 
 
 def test_name_helpers_are_public() -> None:

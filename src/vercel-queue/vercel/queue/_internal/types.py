@@ -12,8 +12,15 @@ from collections.abc import (
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from vercel._internal.core.polyfills import Self
+
 from .constants import DEFAULT_RETRY_AFTER_SECONDS
-from .names import SanitizedName, validate_name, validate_topic_name
+from .names import (
+    SanitizedName,
+    validate_name,
+    validate_subscription_pattern,
+    validate_topic_name,
+)
 
 T = TypeVar("T")
 _TYPE_VAR_TYPE = type(T)
@@ -62,47 +69,62 @@ def duration_to_float_seconds(duration: Duration) -> float:
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
-class Topic(Generic[T]):
-    """A named Vercel Queues topic.
+class BaseTopic(Generic[T]):
+    """Shared behaviour of :class:`Topic` and :class:`TopicPattern`.
 
-    Topics identify the stream that messages are sent to and received from.
+    Use ``Topic`` to name one topic and ``TopicPattern`` to match several; the
+    two are separate types so that a pattern cannot reach an operation that
+    needs a single, concrete topic.
     """
 
-    name: SanitizedName
-    """Topic name to send to or receive from."""
+    name: SanitizedName | str
+    """The topic name, or the pattern that selects topic names.
+
+    A pattern is a plain ``str``: ``SanitizedName`` means "safe to put in a
+    request path", which a pattern is not.
+    """
 
     transport: Transport[Any] | None = None
-    """Optional transport used when sending to or polling this topic."""
+    """Optional transport used when sending to, polling, or subscribing to this topic."""
 
-    __topic_origin__: ClassVar[type[Topic[Any]] | None] = None
+    __topic_origin__: ClassVar[type[BaseTopic[Any]] | None] = None
     __topic_payload_type__: ClassVar[Any] = None
-    _specializations: ClassVar[dict[Any, type[Topic[Any]]]] = {}
+    _specializations: ClassVar[dict[Any, type[BaseTopic[Any]]]] = {}
 
-    def __class_getitem__(cls, params: Any) -> type[Topic[Any]]:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # `Topic` and `TopicPattern` each need their own cache, or the first
+        # `Topic[bytes]` would be handed back for `TopicPattern[bytes]`. A
+        # specialization (the only thing carrying `__topic_origin__` in its
+        # own namespace) keeps sharing the cache of the class it came from.
+        if "__topic_origin__" not in cls.__dict__:
+            cls._specializations = {}
+
+    def __class_getitem__(cls, params: Any) -> type[Self]:
         if isinstance(params, tuple):
             if len(params) != 1:
-                raise TypeError("Topic expects exactly one type argument")
+                raise TypeError(f"{cls.__name__} expects exactly one type argument")
             params = params[0]
         if isinstance(params, _TYPE_VAR_TYPE):
-            return cast("type[Topic[Any]]", cls)
+            return cls
 
         try:
-            return cls._specializations[params]
+            return cast("type[Self]", cls._specializations[params])
         except KeyError:
             pass
 
         payload_repr = _topic_payload_type_repr(params)
         specialization = type(
-            f"Topic[{payload_repr}]",
+            f"{cls.__name__}[{payload_repr}]",
             (cls,),
             {
                 "__module__": cls.__module__,
-                "__topic_origin__": Topic,
+                "__topic_origin__": cls,
                 "__topic_payload_type__": params,
             },
         )
         cls._specializations[params] = specialization
-        return cast("type[Topic[Any]]", specialization)
+        return cast("type[Self]", specialization)
 
     def __init__(
         self,
@@ -110,19 +132,57 @@ class Topic(Generic[T]):
         *,
         transport: Transport[Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "name", SanitizedName(validate_topic_name(name)))
+        object.__setattr__(self, "name", self._validated_name(name))
         object.__setattr__(self, "transport", transport)
 
+    @staticmethod
+    def _validated_name(name: str | SanitizedName) -> SanitizedName | str:
+        raise NotImplementedError
+
     def __repr__(self) -> str:
-        return f"Topic(name={self.name!r})"
+        # Report the class the user named, not the synthesized specialization.
+        cls = type(self)
+        return f"{(cls.__topic_origin__ or cls).__name__}(name={self.name!r})"
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Topic):
+        # A pattern always ends in `*`, which a topic name can never contain,
+        # so comparing names is enough to keep the two kinds apart.
+        if not isinstance(other, BaseTopic):
             return NotImplemented
         return self.name == other.name
 
     def __hash__(self) -> int:
         return hash(self.name)
+
+
+class Topic(BaseTopic[T]):
+    """A named Vercel Queues topic.
+
+    Topics identify the stream that messages are sent to and received from.
+    """
+
+    name: SanitizedName
+    """Topic name to send to, poll, or subscribe to."""
+
+    @staticmethod
+    def _validated_name(name: str | SanitizedName) -> SanitizedName | str:
+        return SanitizedName(validate_topic_name(name))
+
+
+class TopicPattern(BaseTopic[T]):
+    """A pattern selecting every Vercel Queues topic it matches.
+
+    ``"*"`` matches every topic and a prefix ending in ``*`` matches by
+    prefix. A pattern can only be subscribed to: sending and polling name one
+    topic, so they take a :class:`Topic`.
+    """
+
+    name: str
+    """The pattern this subscription matches topics with."""
+
+    @staticmethod
+    def _validated_name(name: str | SanitizedName) -> SanitizedName | str:
+        return validate_subscription_pattern(str(name))
 
 
 def _topic_payload_type_repr(payload_type: object) -> str:
@@ -297,4 +357,5 @@ __all__: tuple[str, ...] = (
     "RetryAfter",
     "StrContainer",
     "Topic",
+    "TopicPattern",
 )

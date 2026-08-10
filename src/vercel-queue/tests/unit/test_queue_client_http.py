@@ -23,6 +23,7 @@ from vercel.queue import (
     MessageNotFoundError,
     QueueClient,
     Topic,
+    TopicPattern,
 )
 from vercel.queue._internal.client import USER_AGENT
 from vercel.queue._internal.constants import (
@@ -169,6 +170,28 @@ def test_send_explicit_transport_overrides_inference(
     request = eqs.state.requests[-1]
     assert request.headers["Content-Type"] == "application/x-custom"
     assert request.body == b"custom:raw"
+
+
+def test_send_rejects_a_subscription_pattern(eqs: EmbeddedQueueDevServer) -> None:
+    client = _sync_client(token="token", base_url=eqs.base_url, deployment=ALL_DEPLOYMENTS)
+    # `send` takes a `Topic`, so a pattern is a type error too; check the
+    # runtime rejection for callers who are not type checked.
+    pattern = cast("Topic[dict[str, str]]", TopicPattern[dict[str, str]]("emails*"))
+
+    with pytest.raises(ValueError, match="Invalid queue topic"):
+        client.send(pattern, {"subject": "hi"})
+
+    assert not eqs.state.requests
+
+
+def test_poll_rejects_a_subscription_pattern(eqs: EmbeddedQueueDevServer) -> None:
+    client = _sync_client(token="token", base_url=eqs.base_url, deployment=ALL_DEPLOYMENTS)
+    pattern = cast("Topic[dict[str, str]]", TopicPattern[dict[str, str]]("emails*"))
+
+    with pytest.raises(ValueError, match="Invalid queue topic"):
+        next(iter(client.poll(pattern, "tests")))
+
+    assert not eqs.state.requests
 
 
 def test_base_url_path_prefix_is_preserved_for_queue_api(

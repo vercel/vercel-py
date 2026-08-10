@@ -40,9 +40,11 @@ from .transports import (
     is_untyped_payload_annotation,
     payload_transport_kind,
     reject_invalid_payload_annotation,
+    topic_payload_annotation,
     transport_for_kind,
 )
 from .types import (
+    BaseTopic,
     Duration,
     Message,
     MessageMetadata,
@@ -50,12 +52,15 @@ from .types import (
     RetryAfter,
     StrContainer,
     Topic,
+    TopicPattern,
     Transport,
     duration_to_seconds,
 )
 
 _Subscriber: TypeAlias = Callable[..., Any | Awaitable[Any]]
 _SubscriberRef: TypeAlias = weakref.ReferenceType[_Subscriber]
+_SubscriptionTopic: TypeAlias = "str | SanitizedName | Topic[Any] | TopicPattern[Any]"
+"""Anything ``subscribe()`` accepts: one topic, or a pattern matching several."""
 P = ParamSpec("P")
 R = TypeVar("R")
 R_co = TypeVar("R_co", covariant=True)
@@ -107,6 +112,7 @@ class InvocationPlan:
     payload_adapter: PayloadAdapter | None
     mode: InvocationMode
     transport_kind: TransportKind
+    transport: Transport[Any] | None = None
 
     def prepare_payload(self, payload: Any) -> Any:
         if self.payload_adapter is None:
@@ -118,6 +124,33 @@ class InvocationPlan:
             if exc.__class__.__name__ == "ValidationError":
                 raise PayloadValidationError(str(exc)) from exc
             raise
+
+
+class _TransportOrKind:
+    def __init__(self, plan: InvocationPlan) -> None:
+        self.transport_kind = plan.transport_kind
+        self.transport = plan.transport
+
+    def __hash__(self) -> int:
+        return hash(self.transport_kind) if self.transport is None else id(self.transport)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _TransportOrKind):
+            return NotImplemented
+        if self.transport is None and other.transport is None:
+            return self.transport_kind == other.transport_kind
+        # Two instances of the same class can decode differently
+        return self.transport is other.transport
+
+    def __repr__(self) -> str:
+        if self.transport is None:
+            return self.transport_kind
+        return repr(self.transport)
+
+    def get_transport(self) -> Transport[Any]:
+        if self.transport is None:
+            return _transport_for_kind(self.transport_kind)
+        return self.transport
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -314,23 +347,17 @@ def _message_payload_annotation(annotation: Any) -> Any:
     return message_args[0]
 
 
-def _topic_payload_annotation(topic: str | SanitizedName | Topic[Any]) -> Any:
-    if not isinstance(topic, Topic):
-        return inspect.Signature.empty
-    if getattr(type(topic), "__topic_origin__", None) is not Topic:
-        return inspect.Signature.empty
-    return type(topic).__topic_payload_type__
-
-
-def _normalize_subscription_topic(topic: str | SanitizedName | Topic[Any]) -> str:
+def _normalize_subscription_topic(topic: _SubscriptionTopic) -> str:
     if isinstance(topic, SanitizedName):
         return str(topic)
     if isinstance(topic, str):
         validate_subscription_pattern(topic)
         return topic
+    if isinstance(topic, TopicPattern):
+        return str(topic.name)
     if isinstance(topic, Topic):
         return validate_topic_name(topic)
-    raise TypeError("topic must be a string or Topic")
+    raise TypeError("topic must be a string, Topic, or TopicPattern")
 
 
 def _resolve_invocation_payload_annotation(
@@ -407,6 +434,7 @@ def _build_invocation_plan(
     func: _Subscriber,
     *,
     topic_payload_annotation: Any = inspect.Signature.empty,
+    transport: Transport[Any] | None = None,
 ) -> InvocationPlan:
     signature = inspect.signature(func)
     input_params: list[inspect.Parameter] = []
@@ -449,6 +477,7 @@ def _build_invocation_plan(
         ),
         mode=mode,
         transport_kind=_transport_kind(payload_annotation),
+        transport=transport,
     )
 
 
@@ -593,13 +622,13 @@ def infer_subscriber_transport(metadata: MessageMetadata) -> Transport[Any]:
     if not matching:
         raise _no_matching_subscriptions_error(metadata.topic)
 
-    kinds = {matched.subscription.invocation.transport_kind for matched in matching}
-    if len(kinds) != 1:
+    tks = {_TransportOrKind(matched.subscription.invocation) for matched in matching}
+    if len(tks) != 1:
         raise SubscriptionError(
             "matching queue subscribers require incompatible payload transports: "
-            + ", ".join(sorted(kinds))
+            + ", ".join(sorted(map(repr, tks)))
         )
-    return _transport_for_kind(kinds.pop())
+    return tks.pop().get_transport()
 
 
 async def _maybe_await_result(result: Any) -> Any:
@@ -702,14 +731,14 @@ def _register_subscription(
     func: Callable[P, R],
     *,
     consumer_group: str | SanitizedName | None = None,
-    topic: str | SanitizedName | Topic[Any],
+    topic: _SubscriptionTopic,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
     max_concurrency: int | None = None,
     max_attempts: int | None = None,
 ) -> QueueSubscriber[P, R]:
     topic_name = _normalize_subscription_topic(topic)
-    topic_payload_annotation = _topic_payload_annotation(topic)
+    payload_annotation = topic_payload_annotation(topic)
 
     resolved_consumer_group = (
         _default_consumer_group(func)
@@ -725,7 +754,10 @@ def _register_subscription(
         consumer_group=resolved_consumer_group,
         invocation=_build_invocation_plan(
             cast("_Subscriber", func),
-            topic_payload_annotation=topic_payload_annotation,
+            topic_payload_annotation=payload_annotation,
+            # This is not receive_transport_for_topic() because we are doing
+            # more than that in _build_invocation_plan()
+            transport=topic.transport if isinstance(topic, BaseTopic) else None,
         ),
         topic=topic_name,
         retry_after_seconds=_optional_bounded_duration(
@@ -769,7 +801,12 @@ def subscribe(
 
 
 @overload
-def subscribe(func: Callable[[T], R], /, *, topic: Topic[T]) -> QueueSubscriber[[T], R]: ...
+def subscribe(
+    func: Callable[[T], R],
+    /,
+    *,
+    topic: Topic[T] | TopicPattern[T],
+) -> QueueSubscriber[[T], R]: ...
 
 
 @overload
@@ -777,7 +814,7 @@ def subscribe(
     func: Callable[[Message[T]], R],
     /,
     *,
-    topic: Topic[T],
+    topic: Topic[T] | TopicPattern[T],
 ) -> QueueSubscriber[[Message[T]], R]: ...
 
 
@@ -808,7 +845,7 @@ def subscribe(
 @overload
 def subscribe(
     *,
-    topic: Topic[T],
+    topic: Topic[T] | TopicPattern[T],
     consumer_group: str | SanitizedName | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
@@ -850,7 +887,7 @@ def subscribe(
     func: None,
     /,
     *,
-    topic: Topic[T],
+    topic: Topic[T] | TopicPattern[T],
     consumer_group: str | SanitizedName | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
@@ -863,7 +900,7 @@ def subscribe(
     func: _Subscriber | None = None,
     /,
     *,
-    topic: str | SanitizedName | Topic[Any],
+    topic: _SubscriptionTopic,
     consumer_group: str | SanitizedName | None = None,
     retry_after: Duration | None = None,
     initial_delay: Duration | None = None,
