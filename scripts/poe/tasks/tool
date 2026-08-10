@@ -16,6 +16,17 @@ workspace_poe_parallel_enabled() {
   esac
 }
 
+workspace_poe_pytest_forced() {
+  case "${FORCE_PYTEST:-}" in
+    1|true|yes)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 workspace_poe_mypy_cache_package() {
   if [[ -n "${WORKSPACE_POE_PACKAGE:-}" ]]; then
     printf '%s\n' "$WORKSPACE_POE_PACKAGE"
@@ -52,7 +63,23 @@ workspace_poe_drop_duplicate_extra_args() {
 
 case "$task_name" in
   pytest)
-    command=(pytest)
+    if [[ "${WORKSPACE_POE_TEST_RUNNER:-}" == ggt ]]; then
+      command=(ggt)
+      test_runner=ggt
+    elif [[ "${WORKSPACE_POE_TEST_RUNNER:-}" == pytest ]]; then
+      command=(pytest)
+      test_runner=pytest
+    elif ! workspace_poe_pytest_forced && command -v ggt >/dev/null 2>&1; then
+      command=(ggt)
+      test_runner=ggt
+    else
+      command=(pytest)
+      test_runner=pytest
+    fi
+    if [[ "$test_runner" == ggt ]] &&
+      [[ "${WORKSPACE_POE_LOGRAIL_PROGRESS:-}" == 1 ]]; then
+      command+=(--output-format json)
+    fi
     ;;
   ruff-check)
     command=(ruff check)
@@ -194,7 +221,7 @@ if [[ "$task_name" == mypy ]]; then
   fi
 fi
 if [[ "$task_name" == pytest ]]; then
-  has_numprocesses=0
+  has_workers=0
   has_verbosity=0
   option_value=0
   if ((${#scope_args[@]})); then
@@ -204,12 +231,12 @@ if [[ "$task_name" == pytest ]]; then
         continue
       fi
       case "$arg" in
-        -n|--numprocesses)
-          has_numprocesses=1
+        -n|--numprocesses|-j|--jobs)
+          has_workers=1
           option_value=1
           ;;
-        -n*|--numprocesses=*)
-          has_numprocesses=1
+        -n*|--numprocesses=*|-j*|--jobs=*)
+          has_workers=1
           ;;
         -q|--quiet|-v|--verbose)
           has_verbosity=1
@@ -227,12 +254,12 @@ if [[ "$task_name" == pytest ]]; then
         continue
       fi
       case "$arg" in
-        -n|--numprocesses)
-          has_numprocesses=1
+        -n|--numprocesses|-j|--jobs)
+          has_workers=1
           option_value=1
           ;;
-        -n*|--numprocesses=*)
-          has_numprocesses=1
+        -n*|--numprocesses=*|-j*|--jobs=*)
+          has_workers=1
           ;;
         -q|--quiet|-v|--verbose)
           has_verbosity=1
@@ -243,18 +270,20 @@ if [[ "$task_name" == pytest ]]; then
       esac
     done
   fi
-  if ((has_verbosity == 0)) && [[ "${WORKSPACE_POE_LOGRAIL_PROGRESS:-}" == 1 ]]; then
+  if ((has_verbosity == 0)) &&
+    [[ "${WORKSPACE_POE_LOGRAIL_PROGRESS:-}" == 1 ]] &&
+    [[ "$test_runner" == pytest ]]; then
     if ((${#scope_args[@]})); then
       scope_args=(-v "${scope_args[@]}")
     else
       scope_args=(-v)
     fi
   fi
-  if ((has_numprocesses == 0)) && workspace_poe_parallel_enabled; then
-    if ((${#scope_args[@]})); then
+  if ((has_workers == 0)); then
+    if [[ "$test_runner" == pytest ]] && workspace_poe_parallel_enabled; then
       scope_args=(-n auto "${scope_args[@]}")
-    else
-      scope_args=(-n auto)
+    elif [[ "$test_runner" == ggt ]] && ! workspace_poe_parallel_enabled; then
+      scope_args=(-j 1 "${scope_args[@]}")
     fi
   fi
 fi

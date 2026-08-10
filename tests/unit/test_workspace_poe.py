@@ -104,7 +104,12 @@ def test_scope_command_lograil_name_includes_task_and_package() -> None:
     assert command.subject == "root"
 
 
-def test_example_scope_command_maps_root_to_internal_task() -> None:
+def test_example_scope_command_maps_root_to_internal_task(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workspace_poe.shutil,
+        "which",
+        lambda *args, **kwargs: "/venv/bin/ggt",
+    )
     runner = object.__new__(workspace_poe.WorkspaceRunner)
     runner.root = Path.cwd()
     runner.project_root = None
@@ -119,12 +124,18 @@ def test_example_scope_command_maps_root_to_internal_task() -> None:
 
     assert "test-examples-root" in command.argv
     assert command.argv[-2:] == ("-k", "sessions_and_resume")
-    assert command.parser == "pytest"
+    assert command.parser == "generic"
     assert command.env["WORKSPACE_POE_LOGRAIL_PROGRESS"] == "1"
+    assert command.env[workspace_poe.TEST_RUNNER_ENV] == "ggt"
     assert command.env["WORKSPACE_POE_SCOPE_TASK"] == "test-examples"
 
 
-def test_example_scope_command_preserves_package_passthrough() -> None:
+def test_example_scope_command_preserves_package_passthrough(monkeypatch) -> None:
+    monkeypatch.setattr(
+        workspace_poe.shutil,
+        "which",
+        lambda *args, **kwargs: "/venv/bin/ggt",
+    )
     runner = object.__new__(workspace_poe.WorkspaceRunner)
     runner.root = Path.cwd()
     runner.project_root = None
@@ -138,7 +149,21 @@ def test_example_scope_command_preserves_package_passthrough() -> None:
     )
 
     assert command.argv[-3:] == ("test-examples", "-k", "sessions_and_resume")
+    assert command.parser == "generic"
+
+
+def test_test_scope_uses_pytest_parser_for_pytest_fallback(monkeypatch) -> None:
+    monkeypatch.delenv("FORCE_PYTEST", raising=False)
+    monkeypatch.setattr(workspace_poe.shutil, "which", lambda *args, **kwargs: None)
+    runner = object.__new__(workspace_poe.WorkspaceRunner)
+    runner.root = Path.cwd()
+    runner.project_root = None
+    scope = workspace_poe.Scope("root", Path.cwd())
+
+    command = runner.scope_command("test", scope, (), "test-root")
+
     assert command.parser == "pytest"
+    assert command.env[workspace_poe.TEST_RUNNER_ENV] == "pytest"
 
 
 def test_tool_command_lograil_name_includes_tool_and_package(monkeypatch) -> None:
@@ -181,6 +206,40 @@ def test_single_whole_workspace_scope_still_uses_lograil(monkeypatch) -> None:
     assert [command.label for command in commands] == ["test/vercel-queue"]
     assert [command.display_label for command in commands] == ["vercel-queue"]
     assert [command.subject for command in commands] == ["vercel-queue"]
+
+
+def test_run_group_requests_progress_layout_for_tests(monkeypatch) -> None:
+    import lograil
+
+    command = workspace_poe.CommandSpec(
+        label="test/vercel-connect",
+        argv=("poe", "test"),
+        cwd=Path.cwd(),
+        env={},
+        category="test",
+        parser="generic",
+    )
+    captured = []
+
+    monkeypatch.setattr(lograil, "configure_logging", lambda: None)
+
+    def fake_run_process_group(specs):
+        captured.extend(specs)
+        return SimpleNamespace(success=True, processes=())
+
+    monkeypatch.setattr(lograil, "run_process_group", fake_run_process_group)
+
+    assert workspace_poe.run_group([command]) == 0
+    assert captured[0].layout == "progress"
+    entry = {
+        "lograil.progress.process": "ggt",
+        "lograil.progress.subject": "run",
+        "lograil.progress.description": "tests/test_api.py::test_get",
+    }
+    mapped = captured[0].remaps[-1](entry)
+    assert "lograil.progress.process" not in mapped
+    assert "lograil.progress.subject" not in mapped
+    assert mapped["lograil.progress.description"] == "tests/test_api.py::test_get"
 
 
 def test_run_sequential_can_stop_after_first_failure(monkeypatch) -> None:

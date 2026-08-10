@@ -28,14 +28,15 @@ dev = [
     "tox-uv-bare",
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
-    "lograil~=0.5.0",
+    "lograil~=0.7.0",
+    "ggt>=1.5.2; python_version >= '3.11'",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = false
 exclude-newer = "2 days"
-exclude-newer-package = { lograil = "2026-07-22T00:00:00Z" }
+exclude-newer-package = { ggt = "2026-08-10T00:00:00Z", lograil = "2026-08-10T21:20:07.442Z" }
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]

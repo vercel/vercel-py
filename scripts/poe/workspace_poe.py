@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ ROOT_TASKS = {
     "test-examples": "test-examples-root",
 }
 PYTEST_TASKS = {"test", "test-examples"}
+TEST_RUNNER_ENV = "WORKSPACE_POE_TEST_RUNNER"
 
 
 @dataclass(frozen=True)
@@ -227,8 +229,11 @@ class WorkspaceRunner:
         env = self.base_env()
         env["WORKSPACE_POE_PACKAGE"] = scope.package
         env["WORKSPACE_POE_SCOPE_TASK"] = task
+        test_runner = None
         if task in PYTEST_TASKS:
             env["WORKSPACE_POE_LOGRAIL_PROGRESS"] = "1"
+            test_runner = select_test_runner(env)
+            env[TEST_RUNNER_ENV] = test_runner
         if scope.paths:
             env["WORKSPACE_POE_SCOPE_ARGS"] = shlex.join(scope.paths)
         argv = self.uv_run_args(
@@ -243,7 +248,9 @@ class WorkspaceRunner:
             display_label=scope.package,
             category=task,
             subject=scope.package,
-            parser="pytest" if task in PYTEST_TASKS else None,
+            parser=(
+                "generic" if test_runner == "ggt" else "pytest" if test_runner == "pytest" else None
+            ),
             quiet=task in {"lint", "typecheck"} and not verbose_output,
         )
 
@@ -389,11 +396,11 @@ def run_root_task(task: str, argv: Sequence[str]) -> int:
     if task == "test-root":
         extra_args = list(argv) or poe_extra_args()
         scope_args = shlex.split(os.environ.get("WORKSPACE_POE_SCOPE_ARGS", ""))
-        args = ["--ignore=tests/test_examples.py"]
+        args = []
         if scope_args:
             args.extend(scope_args)
-        elif not extra_args:
-            args.append("tests")
+        else:
+            args.append("tests/unit")
         args.extend(extra_args)
         return run_command(
             env_command(
@@ -459,22 +466,29 @@ def run_group(
             "lograil is required; run `uv sync` after adding ../lograil as an editable dependency"
         ) from exc
     configure_logging()
-    specs = [
-        ProcessSpec(
-            command.argv,
-            cwd=str(command.cwd),
-            env=command.env,
-            name=command.label,
-            process=command.display_label if compact_labels else None,
-            category=command.category or category,
-            subject=command.subject if compact_labels else command.label,
-            stream="combined",
-            parser=command.parser,
-            remaps=(*DEFAULT_REMAPS, _quiet_entry) if command.suppress_output else None,
-            kind="pytest" if command.parser == "pytest" else None,
+    specs = []
+    for command in commands:
+        remaps = list(DEFAULT_REMAPS)
+        if command.category in PYTEST_TASKS and command.parser == "generic":
+            remaps.append(_preserve_test_scope_identity)
+        if command.suppress_output:
+            remaps.append(_quiet_entry)
+        specs.append(
+            ProcessSpec(
+                command.argv,
+                cwd=str(command.cwd),
+                env=command.env,
+                name=command.label,
+                process=command.display_label if compact_labels else None,
+                category=command.category or category,
+                subject=command.subject if compact_labels else command.label,
+                stream="combined",
+                parser=command.parser,
+                remaps=tuple(remaps),
+                kind="pytest" if command.parser == "pytest" else None,
+                layout=("progress" if command.category in PYTEST_TASKS else "auto"),
+            )
         )
-        for command in commands
-    ]
     result = run_process_group(specs)
     if not result.success:
         print_failure_summary(result.processes)
@@ -535,6 +549,13 @@ def _quiet_entry(entry: dict[str, Any]) -> dict[str, Any]:
     entry["message"] = ""
     entry.pop("lograil.status.detail", None)
     entry["lograil.status_only"] = True
+    return entry
+
+
+def _preserve_test_scope_identity(entry: dict[str, Any]) -> dict[str, Any]:
+    """Keep the package label while accepting native ggt progress detail."""
+    entry.pop("lograil.progress.process", None)
+    entry.pop("lograil.progress.subject", None)
     return entry
 
 
@@ -655,6 +676,15 @@ def ordered_scopes(scopes: Sequence[Scope]) -> tuple[Scope, ...]:
 
 def parallel_enabled() -> bool:
     return os.environ.get("WORKSPACE_POE_PARALLEL", "").lower() not in PARALLEL_FALSE
+
+
+def select_test_runner(env: dict[str, str]) -> str:
+    """Select the runner before configuring its lograil parser."""
+    if env.get("FORCE_PYTEST", "").lower() in {"1", "true", "yes"}:
+        return "pytest"
+    if shutil.which("ggt", path=env.get("PATH")) is not None:
+        return "ggt"
+    return "pytest"
 
 
 def color_supported() -> bool:
