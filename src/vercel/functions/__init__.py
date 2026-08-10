@@ -1,6 +1,7 @@
 from ..cache import AsyncRuntimeCache, RuntimeCache, get_cache
 from ..env import Env, get_env
 from ..headers import Geo, geolocation, get_headers, ip_address, set_headers
+from .metric import metric
 from .wait_until import wait_until
 
 __all__ = [
@@ -14,5 +15,6 @@ __all__ = [
     "get_cache",
     "RuntimeCache",
     "AsyncRuntimeCache",
+    "metric",
     "wait_until",
 ]

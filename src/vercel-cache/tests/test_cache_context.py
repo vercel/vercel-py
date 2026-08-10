@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 
 import pytest
 
@@ -11,12 +11,14 @@ from vercel.headers import set_headers as set_shared_headers
 @pytest.fixture
 def isolated_context() -> Generator[None, None, None]:
     ctx._cv_wait_until.set(None)
+    ctx._cv_metric.set(None)
     ctx._cv_cache.set(None)
     ctx._cv_async_cache.set(None)
     ctx._cv_purge.set(None)
     set_shared_headers(None)
     yield
     ctx._cv_wait_until.set(None)
+    ctx._cv_metric.set(None)
     ctx._cv_cache.set(None)
     ctx._cv_async_cache.set(None)
     ctx._cv_purge.set(None)
@@ -27,6 +29,17 @@ class FakeCacheObject: ...
 
 
 class TestSetContextSetsValues:
+    def test_metric_callback_is_assigned(self, isolated_context: None) -> None:
+        def metric(
+            name: str,
+            value: int | float,
+            tags: Mapping[str, str] | None,
+        ) -> None:
+            return
+
+        ctx.set_context(metric=metric)
+        assert ctx.get_context().metric is metric
+
     def test_cache_is_assigned(self, isolated_context: None) -> None:
         instance = FakeCacheObject()
         ctx.set_context(cache=instance)
