@@ -25,6 +25,7 @@ from vercel.queue import (
     TextBufferTransport,
     TextStreamTransport,
     Topic,
+    TopicPattern,
     UnhandledMessageError,
     get_subscriptions,
     subscribe,
@@ -1153,16 +1154,20 @@ class _HalfJsonTransport:
         return json.loads(body.removeprefix(b"half:"))
 
 
-@pytest.mark.parametrize("subscribed", ["emails", "emails*"])
+@pytest.mark.parametrize(
+    ("topic_type", "subscribed"),
+    [(Topic[Any], "emails"), (TopicPattern[Any], "emails*")],
+)
 def test_topic_transport_decodes_a_push_delivery(
     eqs: EmbeddedQueueDevServer,
     isolated_subscriptions: None,
+    topic_type: type[Topic[Any] | TopicPattern[Any]],
     subscribed: str,
 ) -> None:
     """Both a concrete topic and a pattern; an untyped subscriber infers JSON."""
     calls: list[object] = []
 
-    @callback_subscribe(topic=Topic[Any](subscribed, transport=_HalfJsonTransport()))
+    @callback_subscribe(topic=topic_type(subscribed, transport=_HalfJsonTransport()))
     def handle(payload: object) -> None:
         calls.append(payload)
 
@@ -1186,7 +1191,7 @@ def test_topic_transport_replaces_the_codec_but_not_payload_validation(
 
     calls: list[Payload] = []
 
-    @callback_subscribe(topic=Topic[Any]("emails*", transport=_HalfJsonTransport()))
+    @callback_subscribe(topic=TopicPattern[Any]("emails*", transport=_HalfJsonTransport()))
     def handle(payload: Payload) -> None:
         calls.append(payload)
 
@@ -1201,7 +1206,7 @@ def test_topic_transport_replaces_the_codec_but_not_payload_validation(
 def test_subscribing_to_a_pattern_topic_registers_the_pattern(
     isolated_subscriptions: None,
 ) -> None:
-    @callback_subscribe(topic=Topic[Any]("emails*"))
+    @callback_subscribe(topic=TopicPattern[Any]("emails*"))
     def handle(payload: object) -> None:
         del payload
 

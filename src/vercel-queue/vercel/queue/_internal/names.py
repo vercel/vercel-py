@@ -67,12 +67,6 @@ def validate_name(name: object, *, field: str = "name") -> str:
 
 
 def validate_topic_name(topic: object) -> str:
-    #  Duck-typed to keep names.py free of a cycle back to types.py.
-    if getattr(topic, "is_pattern", False):
-        raise ValueError(
-            f"{topic!r} is a subscription pattern; only a concrete topic can be "
-            "published to or polled"
-        )
     return validate_name(topic, field="topic")
 
 

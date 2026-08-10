@@ -1,2 +1,3 @@
-`Topic` now accepts a subscription pattern, and a transport attached to one is
-used to decode that subscription's deliveries.
+Add `TopicPattern` for subscribing to several topics at once, and use a
+transport attached to a `Topic` or `TopicPattern` to decode that
+subscription's deliveries.
