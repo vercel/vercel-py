@@ -3,7 +3,8 @@
 A stream write returns as soon as it is buffered, so the guarantee that makes
 streaming usable is placed here rather than in the writer: by the time a step is
 recorded complete, everything it streamed is durable. These tests drive the real
-`step_handler` to pin that, plus the caching that keeps chunk order sane.
+step path of `workflow_handler` to pin that, plus the caching that keeps chunk
+order sane.
 """
 
 from __future__ import annotations
@@ -102,16 +103,15 @@ def registry() -> core.Workflows:
 
 
 async def _invoke(registry: core.Workflows, step_name: str) -> w.QueueContinuation | None:
-    payload = w.StepInvokePayload(
-        workflowName=WORKFLOW_NAME,
-        workflowRunId=RUN_ID,
-        workflowStartedAt=0.0,
+    payload = w.WorkflowInvokePayload(
+        runId=RUN_ID,
         stepId=STEP_ID,
+        stepName=step_name,
     )
-    return await runtime.step_handler(
+    return await runtime.workflow_handler(
         payload.model_dump(by_alias=True),
         attempt=1,
-        queue_name=f"__wkf_step_{step_name}",
+        queue_name=f"__wkf_workflow_{WORKFLOW_NAME}",
         message_id="msg_1",
         registry=registry,
     )

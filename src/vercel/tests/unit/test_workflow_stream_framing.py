@@ -113,27 +113,20 @@ class TestStreamId:
 
 
 class TestBytesChunks:
-    """A `bytes` chunk goes out as a `Uint8Array`, unlike a `bytes` payload.
+    """A `bytes` chunk goes out as a `Uint8Array`.
 
-    Not a cosmetic difference. The TypeScript pattern for consuming a run's
-    stream pipes it straight into a `Response`, and a body stream takes
-    `Uint8Array` chunks only -- an `ArrayBuffer` raises `Received non-Uint8Array
-    chunk`. Nothing downstream of a *payload* cares, and the payload boundary
-    has its own pinned answer, so the two differ on purpose.
+    The TypeScript pattern for consuming a run's stream pipes it straight into a
+    `Response`, and a body stream takes `Uint8Array` chunks only -- an
+    `ArrayBuffer` raises `Received non-Uint8Array chunk`.
     """
 
     def _wire(self, frame: bytes) -> str:
         return frame[streams.FRAME_HEADER_SIZE + len(ser.DEVALUE_V1) :].decode()
 
     def test_a_chunk_is_a_view_onto_its_own_buffer(self) -> None:
-        # Byte for byte what `devalue.stringify(new Uint8Array([104, 105]))`
-        # emits in JS: the view references a separate buffer entry.
         assert (
             self._wire(streams.encode_value(b"hi")) == '[["Uint8Array",1],["ArrayBuffer","aGk="]]'
         )
-
-    def test_a_payload_still_writes_the_bare_buffer(self) -> None:
-        assert ser.dehydrate(b"hi")[len(ser.DEVALUE_V1) :].decode() == '[["ArrayBuffer","aGk="]]'
 
     def test_bytes_nested_in_a_chunk_are_views_too(self) -> None:
         # `run.readable` hands whole chunks to a consumer, so a `bytes` field
@@ -153,12 +146,6 @@ class TestBytesChunks:
         assert ser.hydrate(payload, what="chunk") == b""
 
     def test_a_repeated_buffer_is_still_written_once(self) -> None:
-        # devalue dedupes by identity, and the reducer must not defeat that.
         shared = b"xy"
         wire = self._wire(streams.encode_value([shared, shared]))
         assert wire.count("ArrayBuffer") == 1
-
-    def test_bytearray_is_left_on_the_buffer_form(self) -> None:
-        # Only `bytes` is what a producer streams; widening the reducer would
-        # start rewriting types the payload boundary deliberately leaves alone.
-        assert "Uint8Array" not in self._wire(streams.encode_value(bytearray(b"hi")))

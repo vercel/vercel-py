@@ -28,7 +28,7 @@ import os
 from collections.abc import AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
-from . import serde, serialization as ser
+from . import serialization as ser
 
 if TYPE_CHECKING:
     from . import world as w
@@ -87,45 +87,9 @@ def encode_frame(payload: bytes) -> bytes:
     return len(payload).to_bytes(FRAME_HEADER_SIZE, "big") + payload
 
 
-def _reduce_uint8array(value: Any) -> Any:
-    """devalue reducer framing a chunk's ``bytes`` as a ``Uint8Array``.
-
-    devalue writes a typed array as a view onto a separate buffer entry,
-    ``["Uint8Array", <buffer>]``, where the stringifier's own ``bytes`` branch
-    writes the bare ``["ArrayBuffer", …]``. Both carry the same bytes and both
-    read back here as ``bytes``; only the tag differs.
-
-    It matters because of what reads a stream. The pattern the TypeScript docs
-    lead with pipes a run's readable straight into a `Response`, and a body
-    stream takes `Uint8Array` chunks only -- an `ArrayBuffer` chunk raises
-    ``Received non-Uint8Array chunk``. So a step writing ``b"..."`` has to
-    frame it as a view or every consumer doing that breaks.
-
-    Chunk-local for now. Teaching the stringifier that ``bytes`` means
-    ``Uint8Array`` (and ``bytearray`` means ``ArrayBuffer``) is the better fix
-    and would delete this, but it changes the payload wire format and what a JS
-    ``ArrayBuffer`` field lands as, so it wants its own change.
-    """
-    # Exact type on purpose: `bytearray` and `memoryview` must fall through to
-    # the stringifier's `ArrayBuffer` branch, or this would re-enter on the
-    # view it returns below and recurse.
-    if type(value) is not bytes:
-        return False
-    # A `memoryview` rather than the `bytes` itself, and not for speed: devalue
-    # indexes by identity, so returning the same object would make the view
-    # reference its own slot instead of a buffer. A distinct object flattens to
-    # the `["ArrayBuffer", …]` entry the view is supposed to point at -- and a
-    # view over the same memory copies nothing to get one.
-    return memoryview(value)
-
-
-CHUNK_REDUCERS: dict[str, Any] = {**serde.REDUCERS, "Uint8Array": _reduce_uint8array}
-"""Reducers for a stream chunk, as opposed to a run/step/hook payload."""
-
-
 def encode_value(value: Any) -> bytes:
     """The frame a single user write becomes."""
-    return encode_frame(ser.dehydrate(value, reducers=CHUNK_REDUCERS))
+    return encode_frame(ser.dehydrate(value))
 
 
 class FrameDecoder:

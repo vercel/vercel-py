@@ -974,7 +974,7 @@ async def _execute_step(
 
     # Bound before the try so the failure path can flush whatever the step
     # managed to write before it raised.
-    step_streams = _StepStreams(run_id=req.workflow_run_id)
+    step_streams = _StepStreams(run_id=req.run_id)
 
     try:
         if not step_run.started_at:
