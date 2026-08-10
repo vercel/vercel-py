@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 import pytest
+import time_machine
 from pydantic import BaseModel
 
 from vercel.headers import get_headers, set_headers
@@ -1461,22 +1462,27 @@ def test_accept_and_handle_raised_handoff_leaves_delivery_open(
     eqs: EmbeddedQueueDevServer,
     isolated_subscriptions: None,
 ) -> None:
-    delivery = sync_delivery(eqs, {"ok": True})
+    # The embedded broker uses a manual clock. Keep the renewal worker's wall
+    # clock aligned so it does not mistake the synthetic lease for an overdue
+    # real-time deadline and race Handoff with an immediate renewal.
+    with time_machine.travel(eqs.state.now, tick=False):
+        delivery = sync_delivery(eqs, {"ok": True})
 
-    @callback_subscribe(topic="emails")
-    def handle(payload: object) -> None:
-        raise Handoff
+        @callback_subscribe(topic="emails")
+        def handle(payload: object) -> None:
+            raise Handoff
 
-    assert isinstance(delivery.client, SyncQueueClient)
-    delivery.client.accept_and_handle(
-        delivery.body,
-        delivery.headers,
-        lease_duration=30,
-    )
+        assert isinstance(delivery.client, SyncQueueClient)
+        delivery.client.accept_and_handle(
+            delivery.body,
+            delivery.headers,
+            lease_duration=30,
+        )
 
     stored = eqs.state.by_id[delivery.message_id]
     assert stored.lease_deadline_by_consumer["tests"] == (eqs.state.now + timedelta(seconds=300))
     assert not stored.acknowledged
+    assert not any(request.method == "PATCH" for request in eqs.state.requests)
 
 
 @pytest.mark.parametrize("directive", [Handoff(), RetryAfter(45)])
