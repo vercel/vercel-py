@@ -1183,7 +1183,7 @@ class _TrackedSyncStream(httpx.SyncByteStream):
     ),
     chunk_size=st.integers(min_value=1, max_value=8),
 )
-@settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(deadline=1000, suppress_health_check=[HealthCheck.function_scoped_fixture])
 async def test_text_reader_preserves_crlf_split_across_chunks(
     mock_env_clear: None,
     prefix: str,

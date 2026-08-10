@@ -1,6 +1,6 @@
 """Shared helpers for Sandbox tests."""
 
-import asyncio
+import sniffio
 
 from vercel._internal.core.options import ServiceOptions
 from vercel.sandbox import SandboxCredentials, SandboxServiceOptions, sync as sandbox_sync
@@ -19,8 +19,8 @@ def sandbox_service_options(
 
     if sync is None:
         try:
-            asyncio.get_running_loop()
-        except RuntimeError:
+            sniffio.current_async_library()
+        except sniffio.AsyncLibraryNotFoundError:
             sync = True
         else:
             sync = False
