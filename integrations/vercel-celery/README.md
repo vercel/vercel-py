@@ -34,6 +34,25 @@ poll delivery otherwise. Set `broker_url = "vercel-push://"` to force push
 delivery, or `broker_url = "vercel-poll://"` for forced polling workers, local
 workers, and background workers.
 
+To deploy a Celery worker on Vercel, declare a module that exposes the Celery
+app as a queue subscriber in `pyproject.toml`:
+
+```python
+# worker.py
+from tasks import app
+
+__all__ = ["app"]
+```
+
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "worker:app"
+```
+
+The Vercel build introspects the app's queues and compiles the subscriber into
+a queue-triggered function; no `vercel.json` trigger configuration is needed.
+With no `topics` filter, the subscriber consumes every queue the app declares.
+
 Pass `register_queues=False` to skip automatic Vercel Queue trigger
 registration. When using that mode, manually register each Celery app whose
 queues should receive Vercel Queue push deliveries:

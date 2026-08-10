@@ -707,7 +707,9 @@ def test_concurrent_cold_verifications_fetch_jwks_once(
 
 def test_missing_crypto_backend_reports_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     """PyJWT without `cryptography` must name the remedy, not raise AttributeError."""
-    import jwt
+    # The published-wheel test environment installs the package without the
+    # `verify` extra, so PyJWT may legitimately be absent there.
+    jwt = pytest.importorskip("jwt")
 
     from vercel.oidc import verify as verify_module
 

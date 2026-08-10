@@ -8,10 +8,10 @@ vc link
 vc deploy
 ```
 
-Queue the chunks by requesting the sender function on the deployed app:
+Queue the chunks by requesting the sender endpoint on the deployed app:
 
 ```bash
-vc curl /api/send_chunks
+vc curl /enqueue
 ```
 
 Check the worker logs:
@@ -28,9 +28,17 @@ queued chunk group <group-id>
 99 + 99 = 198
 ```
 
-The `vercel.json` file declares `api/celery_worker.py` as a queue-triggered
-function for the app-prefixed default Celery topic. The HTTP sender in
-`api/send_chunks.py` uses Celery canvas chunks:
+`pyproject.toml` declares `worker.py` as a queue subscriber:
+
+```toml
+[[tool.vercel.subscribers]]
+entrypoint = "worker:celery_app"
+```
+
+The Vercel build introspects the Celery app's queues and compiles the
+subscriber into a queue-triggered function; no `vercel.json` trigger
+configuration is needed. The FastAPI sender in `main.py` uses Celery canvas
+chunks:
 
 ```python
 add.chunks(zip(range(100), range(100), strict=False), 10).apply_async()

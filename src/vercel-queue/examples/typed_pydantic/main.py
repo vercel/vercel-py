@@ -10,7 +10,7 @@ class Order(BaseModel):
     total_cents: int
 
 
-@subscribe(topic="typed-orders", consumer_group=f"api/{__name__}.py")
+@subscribe(topic="typed-orders")
 async def handle_order(order: Order) -> None:
     print("Billing order", order.order_id, order.total_cents)
 

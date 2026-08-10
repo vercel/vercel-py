@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from vercel.queue import asgi_app, subscribe
 
 
-@subscribe(topic="logs", consumer_group=f"api/{__name__}.py")
+@subscribe(topic="logs")
 def index_logs(payload: Iterable[str]) -> None:
     print("".join(payload), end="")
 
