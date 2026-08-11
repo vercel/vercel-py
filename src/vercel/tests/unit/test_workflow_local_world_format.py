@@ -18,6 +18,9 @@ import base64
 import json
 from datetime import datetime, timedelta, timezone
 
+import pydantic
+import pytest
+
 from vercel._internal.workflow import serialization as ser, world as w
 from vercel._internal.workflow.worlds import local as local_mod
 
@@ -221,9 +224,10 @@ async def test_hook_token_claim_matches_the_ts_sidecar(tmp_path, monkeypatch) ->
 async def test_reads_a_log_written_at_a_newer_spec_version(tmp_path, monkeypatch) -> None:
     # The shape of a `vercel/workflow` e2e run against a Python app: the log is
     # opened by the TypeScript driver, whose `start()` writes `run_created` at
-    # its own SPEC_VERSION_CURRENT -- 5 today -- and the Python app under test
-    # replays it. Nothing here decodes by version (the payload prefix says the
-    # format), and the row inherits the version of the event.
+    # the version its World declares -- 6 on the Vercel adapter -- and the
+    # Python app under test replays it. Nothing here decodes by version (the
+    # payload prefix says the format), and the row inherits the version of the
+    # event.
     world = _world(tmp_path, monkeypatch)
     result = await world.events_create(
         None,
@@ -233,15 +237,20 @@ async def test_reads_a_log_written_at_a_newer_spec_version(tmp_path, monkeypatch
                 workflowName="workflow//./src/wf//main",
                 input=ser.dehydrate([]),
             ),
-            specVersion=5,
+            specVersion=6,
         ),
     )
     assert result.run is not None
     run_id = result.run.run_id
-    assert result.run.spec_version == 5
-    assert json.loads((world.data_dir / "runs" / f"{run_id}.json").read_text())["specVersion"] == 5
-    assert [event.spec_version for event in (await world.events_list(run_id)).data] == [5]
+    assert result.run.spec_version == 6
+    assert json.loads((world.data_dir / "runs" / f"{run_id}.json").read_text())["specVersion"] == 6
+    assert [event.spec_version for event in (await world.events_list(run_id)).data] == [6]
 
     # Our own writes into the run leave its version alone.
     await world.events_create(run_id, w.RunStartedEvent())
-    assert (await world.runs_get(run_id)).spec_version == 5
+    assert (await world.runs_get(run_id)).spec_version == 6
+
+
+def test_rejects_a_spec_version_above_the_supported_ceiling() -> None:
+    with pytest.raises(pydantic.ValidationError, match="less than or equal to 6"):
+        w.RunStartedEvent(specVersion=w.SPEC_VERSION_MAX_SUPPORTED + 1)

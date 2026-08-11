@@ -101,8 +101,12 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 #   3  CBOR queue transport
 #   4  native attributes (`attr_set`)
 #   5  payloads may be zstd- or gzip-compressed
+#   6  slot-numbered event ids
 #
+# `CURRENT` is what we stamp on rows we create; `MAX_SUPPORTED` is the highest
+# version we accept when reading, mirroring the same split in TS.
 SPEC_VERSION_CURRENT: Literal[2] = 2
+SPEC_VERSION_MAX_SUPPORTED = 6
 
 
 class BaseModel(pydantic.BaseModel):
@@ -310,8 +314,11 @@ class BaseEvent(BaseModel):
     correlation_id: str | None = pydantic.Field(
         default=None, alias="correlationId", exclude_if=lambda e: e is None
     )
-    spec_version: Literal[1, 2, 3, 4, 5] = pydantic.Field(
-        default=SPEC_VERSION_CURRENT, alias="specVersion"
+    spec_version: int = pydantic.Field(
+        default=SPEC_VERSION_CURRENT,
+        alias="specVersion",
+        ge=1,
+        le=SPEC_VERSION_MAX_SUPPORTED,
     )
     server_props: ServerProps | None = pydantic.Field(default=None, exclude=True)
 
