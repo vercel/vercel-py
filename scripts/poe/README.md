@@ -54,7 +54,7 @@ The shared include defines these Poe tasks:
 - `typecheck`: runs `$POE typecheck-mypy` and `$POE typecheck-ty` in parallel.
 - `typecheck-mypy`: runs `$MYPY`.
 - `typecheck-ty`: runs `$TY`.
-- `test`: runs `$PYTEST` with pytest-xdist `-n auto` by default.
+- `test`: runs `$PYTEST`, which prefers `ggt` and falls back to pytest.
 
 Most packages should not redefine these tasks. Prefer tool configuration in
 `pyproject.toml` and inherit the shared tasks.
@@ -83,7 +83,7 @@ disables the default pytest-xdist worker flag.
 `poe.toml` exposes these environment variables:
 
 - `POE`: nested Poe task runner, `tasks/poe`.
-- `PYTEST`: pytest wrapper, `tasks/pytest`.
+- `PYTEST`: test-runner wrapper, `tasks/pytest`; uses `ggt` when available.
 - `RUFF_CHECK`: ruff check wrapper, `tasks/ruff-check`.
 - `RUFF_CHECK_FIX`: ruff check --fix wrapper, `tasks/ruff-check-fix`.
 - `RUFF_FORMAT`: ruff format check wrapper, `tasks/ruff-format`.
@@ -103,8 +103,14 @@ portable regardless of current working directory. Unless the caller provides
 `--cache-dir`, the wrapper uses `.mypy_cache/<package-name>` for workspace
 package checks and `.mypy_cache/root` for root checks.
 
-The `pytest` wrapper adds `-n auto` unless the caller provides `-n` or
-`--numprocesses`, or disables parallel mode with `WORKSPACE_POE_PARALLEL=0`.
+The `pytest` wrapper uses `ggt` when it is installed and falls back to pytest.
+Set `FORCE_PYTEST=1` (`true` and `yes` are also accepted) to force pytest.
+`ggt` chooses its worker count automatically; disabling parallel mode with
+`WORKSPACE_POE_PARALLEL=0` adds `-j 1`. The pytest fallback adds `-n auto`
+unless the caller provides a worker option or disables parallel mode.
+
+`ggt` and pytest both read package-local pytest configuration, including
+`addopts`.
 
 ## Local Overrides
 
