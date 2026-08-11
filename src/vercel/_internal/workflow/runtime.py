@@ -232,9 +232,18 @@ class WorkflowOrchestratorContext:
     _ctx: contextvars.ContextVar[Self] = contextvars.ContextVar("WorkflowContext")
 
     def __init__(
-        self, events: list[w.Event], *, seed: str, started_at: int, registry: core.Workflows
+        self,
+        events: list[w.Event],
+        *,
+        seed: str,
+        started_at: int,
+        registry: core.Workflows,
+        run_key: bytes | None = None,
     ):
         self.events = events
+        # The key is per-run, so it is resolved once and reused for every
+        # payload in the replay.
+        self.run_key = run_key
         # List of Out-of-order HookReceivedEvent: such events may arrive at any time unexpectedly,
         # so we stash them separately for delayed consumption
         self.ooo_hook_received_events: deque[w.HookReceivedEvent] = deque()
@@ -267,7 +276,9 @@ class WorkflowOrchestratorContext:
                 obj = getattr(obj, attr)
 
             what = f"the input of run {workflow_run.run_id}"
-            args, kwargs = ser.call_arguments(ser.hydrate(workflow_run.input, what=what), what=what)
+            args, kwargs = ser.call_arguments(
+                ser.hydrate(workflow_run.input, what=what, key=self.run_key), what=what
+            )
 
             token = self._ctx.set(self)
             try:
@@ -468,7 +479,11 @@ class WorkflowOrchestratorContext:
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
                     assert isinstance(sus, Suspension)
-                    result = ser.hydrate(data, what=f"the result of step {event.correlation_id}")
+                    result = ser.hydrate(
+                        data,
+                        what=f"the result of step {event.correlation_id}",
+                        key=self.run_key,
+                    )
                     if not sus.future.cancelled():
                         sus.future.set_result(result)
 
@@ -500,7 +515,11 @@ class WorkflowOrchestratorContext:
                 case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
                     hook = self.suspensions[event.correlation_id]
                     assert isinstance(hook, Hook)
-                    result = ser.hydrate(data, what=f"the payload of hook {event.correlation_id}")
+                    result = ser.hydrate(
+                        data,
+                        what=f"the payload of hook {event.correlation_id}",
+                        key=self.run_key,
+                    )
                     hook.set_result(result)
                     if not hook.futures:
                         self.suspensions.pop(event.correlation_id)
@@ -518,6 +537,18 @@ class WorkflowOrchestratorContext:
         # Suspend.
         else:
             raise _SuspendException()
+
+
+async def _resolve_run_key(
+    world: w.World, run: w.WorkflowRun, events: list[w.Event]
+) -> bytes | None:
+    """The key this run's payloads need, or ``None`` when none of them is encrypted."""
+    encrypted = ser.is_encrypted(run.input) or any(
+        ser.is_encrypted(payload) for event in events for payload in event.payloads()
+    )
+    if not encrypted:
+        return None
+    return await world.run_key(run.run_id, deployment_id=run.deployment_id)
 
 
 async def workflow_handler(
@@ -624,7 +655,11 @@ async def workflow_handler(
             return None
 
     context = WorkflowOrchestratorContext(
-        events, seed=run_id, started_at=workflow_started_at, registry=registry
+        events,
+        seed=run_id,
+        started_at=workflow_started_at,
+        registry=registry,
+        run_key=await _resolve_run_key(world, workflow_run, events),
     )
     try:
         output = context.run_workflow(workflow_run)
@@ -851,7 +886,12 @@ async def _execute_step(
         if not step_run.input:
             raise RuntimeError(f"Step '{req.step_id}' has no input")
         what = f"the input of step {req.step_id}"
-        args, kwargs = ser.step_call_arguments(ser.hydrate(step_run.input, what=what), what=what)
+        # No deployment id: the queue message routed this step to the deployment
+        # that owns the run, so the key resolves against the current one.
+        run_key = await world.run_key(req.run_id) if ser.is_encrypted(step_run.input) else None
+        args, kwargs = ser.step_call_arguments(
+            ser.hydrate(step_run.input, what=what, key=run_key), what=what
+        )
 
         logger.debug(
             "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
@@ -1077,7 +1117,10 @@ class Run:
             if run.status == "completed":
                 if not run.output:
                     raise RuntimeError(f"Completed workflow {run.run_id} has no output")
-                return ser.hydrate(run.output, what=f"the output of run {run.run_id}")
+                key = None
+                if ser.is_encrypted(run.output):
+                    key = await self._world.run_key(run.run_id, deployment_id=run.deployment_id)
+                return ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
 
             elif run.status == "cancelled":
                 raise RuntimeError("workflow cancelled")
