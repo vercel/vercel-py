@@ -25,6 +25,7 @@ from vercel.queue import (
     PayloadValidationError,
     QueueError,
     QueueSubscriber,
+    RawJsonTransport,
     RetryAfter,
     SanitizedName,
     StrContainer,
@@ -106,6 +107,42 @@ def _typecheck_str_container_examples() -> None:
 
     string_topics: StrContainer = "events-one"  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     del string_topics
+
+
+def test_transport_payload_validator_replaces_annotation_validation(
+    isolated_subscriptions: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, int]] = []
+
+    class ValidatingTransport(RawJsonTransport[dict[str, int]]):
+        def validate_payload(self, payload: Any) -> dict[str, int]:
+            assert payload == {"count": "3"}
+            return {"count": 3}
+
+    transport = ValidatingTransport()
+    monkeypatch.setattr(
+        queue_subscribers,
+        "import_module",
+        lambda name: pytest.fail(f"unexpected import: {name}"),
+    )
+
+    @subscribe(topic=Topic[dict[str, int]]("explicit", transport=transport))
+    def handle(payload: dict[str, int]) -> None:
+        calls.append(payload)
+
+    subscription = get_subscriptions()[0]
+    call_subscribers_sync(
+        Message(
+            payload={"count": "3"},
+            metadata=make_metadata(
+                topic=subscription.topic,
+                consumer_group=subscription.consumer_group,
+            ),
+        )
+    )
+
+    assert calls == [{"count": 3}]
 
 
 def _queue_debug_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:

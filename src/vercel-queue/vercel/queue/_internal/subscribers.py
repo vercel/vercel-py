@@ -71,6 +71,14 @@ class PayloadAdapter(Protocol):
     def validate_python(self, value: Any, /) -> Any: ...
 
 
+class _TransportPayloadAdapter:
+    def __init__(self, validate_payload: Callable[[Any], Any]) -> None:
+        self._validate_payload = validate_payload
+
+    def validate_python(self, value: Any, /) -> Any:
+        return self._validate_payload(value)
+
+
 class EmbeddedDispatcher(Protocol):
     def register_subscription(
         self,
@@ -383,7 +391,11 @@ def _payload_adapter(
     annotation: Any,
     *,
     localns: dict[str, Any] | None = None,
+    transport: Transport[Any] | None = None,
 ) -> PayloadAdapter | None:
+    validate_payload = getattr(transport, "validate_payload", None)
+    if callable(validate_payload):
+        return _TransportPayloadAdapter(validate_payload)
     annotation = strip_annotated(annotation)
     if is_untyped_payload_annotation(annotation):
         return None
@@ -474,6 +486,7 @@ def _build_invocation_plan(
         payload_adapter=_payload_adapter(
             payload_annotation,
             localns=resolved_annotation.localns,
+            transport=transport,
         ),
         mode=mode,
         transport_kind=_transport_kind(payload_annotation),
