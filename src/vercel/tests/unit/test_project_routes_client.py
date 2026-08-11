@@ -6,10 +6,10 @@ from vercel.client import AsyncVercel, Vercel
 from vercel.project_routes import (
     AsyncProjectRoutesClient,
     ProjectRoute,
-    RouteDefinition,
     ProjectRoutesClient,
     RedirectRoute,
     RewriteRoute,
+    RouteDefinition,
     SetStatusRoute,
     add_route,
     delete_routes,
