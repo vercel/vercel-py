@@ -53,10 +53,11 @@ def test_shared_references_survive() -> None:
 
 
 def test_envelope_formats_are_reported_by_name() -> None:
-    # Written by the TS SDK when a run has encryption or compression enabled.
-    # Unsupported here, but the payload is not corrupt and should not read as if
-    # it were.
-    for prefix in (ser.ENCRYPTED, ser.SEALED, ser.GZIP, ser.ZSTD):
+    # Written by the TS SDK when a run has compression enabled, or seals a
+    # payload to another run. Unsupported here, but the payload is not corrupt
+    # and should not read as if it were. `encr` is the one that is read --
+    # ``test_workflow_encryption.py`` covers it.
+    for prefix in (ser.SEALED, ser.GZIP, ser.ZSTD):
         with pytest.raises(ser.SerializationError, match=f"{prefix.decode()}.*cannot read"):
             ser.hydrate(prefix + b"...", what="a payload")
 
