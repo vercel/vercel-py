@@ -419,6 +419,13 @@ class VercelWorld(w.World):
             raise ValueError("VERCEL_DEPLOYMENT_ID environment variable is not set.")
         return deployment_id
 
+    def get_environment(self) -> str | None:
+        """utils.ts, resolveClientEnvironment."""
+        header = self._headers.get("x-vercel-environment")
+        if header:
+            return header
+        return os.getenv("VERCEL_TARGET_ENV") or os.getenv("VERCEL_ENV") or None
+
     async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
         """Resolve the key that opens *run_id*'s ``encr`` payloads.
 
