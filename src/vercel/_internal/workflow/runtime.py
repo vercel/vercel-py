@@ -745,6 +745,41 @@ async def _resolve_run_key(
     return await world.run_key(run.run_id, deployment_id=run.deployment_id)
 
 
+def refuse_cross_environment_delivery(
+    world: w.World, run_input: w.RunInput | None, run_id: str
+) -> bool:
+    """runtime.ts, refuseCrossEnvironmentDelivery.
+
+    Resiliently creating the run would put a second copy of the same run id in
+    this environment, so this has to be caught before ``run_started`` — the
+    write that would fork it. Skipped when either side is unknown.
+    """
+    creator = run_input.environment if run_input is not None else None
+    if not creator:
+        return False
+    current = world.get_environment()
+    if not current or current == creator:
+        return False
+
+    logger.error(
+        "[Workflows] '%s' - refusing to run this workflow: it was created in the "
+        '"%s" environment but this deployment runs in "%s". Executing it here '
+        "would create a second copy of the same run id in both environments — "
+        "one pending forever, one running — so the queue message is being "
+        "discarded without executing and without retrying. The client that "
+        "called start() wrote the run to its own environment but addressed the "
+        "queue message to a deployment in another one. Check that the "
+        "environment that client authenticates as matches the environment of "
+        'the deployment it targets. The run it created is still pending in "%s" '
+        "and will not run.",
+        run_id,
+        creator,
+        current,
+        creator,
+    )
+    return True
+
+
 async def workflow_handler(
     message: Any,
     *,
@@ -760,16 +795,34 @@ async def workflow_handler(
         return await _execute_step(req, queue_name=queue_name, registry=registry)
 
     run_id = req.run_id
-    workflow_run = await world.runs_get(run_id)
-    if workflow_run.status == "pending":
-        try:
-            result = await world.events_create(run_id, w.RunStartedEvent())
-        except w.EntityConflictError:
-            logger.debug(f"Workflow run {run_id} has already been started")
-            return None
-        assert result.run is not None
-        workflow_run = result.run
-    elif workflow_run.status == "cancelled":
+    if refuse_cross_environment_delivery(world, req.run_input, run_id):
+        return None
+
+    # Write `run_started` rather than read the run first: it transitions the run
+    # *and* hands back the entity, and on a run whose `run_created` has not
+    # landed it is the write that creates it. Reading first turned that legal
+    # state into a permanent failure, since the queue does not redeliver a 404.
+    # Relies on the world contract that this event is idempotent for a run
+    # already running.
+    run_input = req.run_input
+    started = w.RunStartedEvent(
+        eventData=(
+            w.RunStartedEventData.from_run_input(run_input) if run_input is not None else None
+        ),
+        # The creating client's version, so a run created here is not relabelled.
+        specVersion=(run_input.spec_version if run_input is not None else w.SPEC_VERSION_CURRENT),
+    )
+    try:
+        result = await world.events_create(run_id, started)
+    except (w.EntityConflictError, w.RunExpiredError):
+        # Concurrently completed, failed or cancelled — either during setup or
+        # before we got here. Nothing to do and nothing to retry.
+        logger.debug(f"Workflow run {run_id} is already finished or started")
+        return None
+    assert result.run is not None
+    workflow_run = result.run
+
+    if workflow_run.status == "cancelled":
         return None
 
     # At this point, the workflow is "running" and `startedAt` should
