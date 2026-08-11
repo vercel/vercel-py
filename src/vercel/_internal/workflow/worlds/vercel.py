@@ -14,9 +14,10 @@ import pydantic
 
 import vercel.queue as vqs
 from vercel._internal.core.polyfills import UTC
+from vercel.oidc import VercelOidcTokenError
 from vercel.oidc.aio import get_vercel_oidc_token
 
-from .. import world as w
+from .. import encryption, world as w
 
 MAX_DELAY_SECONDS = float(
     os.getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "82800")
@@ -73,6 +74,10 @@ class _QueueTransport:
 _QUEUE_TRANSPORT = _QueueTransport()
 
 
+def _vercel_api_url() -> str:
+    return os.getenv("WORKFLOW_VERCEL_BACKEND_URL") or "https://api.vercel.com/v1/workflow"
+
+
 # Events whose result the runtime reads back resolved (run/step entity fields);
 # everything else is fetched lazily.
 _EVENTS_NEEDING_RESOLVE = frozenset({"run_created", "run_started", "step_started"})
@@ -87,6 +92,10 @@ class _LazyWorkflowRun(w.BaseWorkflowRun):
     error: Any = None
     input: Any = None
     output: Any = None
+
+
+class _RunKeyResponse(w.BaseModel):
+    key: str | None
 
 
 class _LazyEventResult(w.EventResult):
@@ -110,6 +119,8 @@ class VercelWorld(w.World):
         team_id: str | None = None,
     ) -> None:
         self._token = token
+        self._project_id = project_id
+        self._team_id = team_id
         self._queue_callbacks: list[Any] = []
         # Points the world at a workflow-server other than production, e.g. a
         # branch deployment. world-vercel also has an inline constant that
@@ -126,9 +137,7 @@ class VercelWorld(w.World):
         if self._using_proxy:
             # WORKFLOW_VERCEL_BACKEND_URL swaps the proxy itself, independently
             # of the workflow-server override above.
-            self._base_url = (
-                os.getenv("WORKFLOW_VERCEL_BACKEND_URL") or "https://api.vercel.com/v1/workflow"
-            )
+            self._base_url = _vercel_api_url()
         else:
             default_host = server_url_override or "https://vercel-workflow.com"
             self._base_url = f"{default_host}/api"
@@ -263,6 +272,100 @@ class VercelWorld(w.World):
         if not deployment_id:
             raise ValueError("VERCEL_DEPLOYMENT_ID environment variable is not set.")
         return deployment_id
+
+    async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
+        """Resolve the key that opens *run_id*'s ``encr`` payloads.
+
+        Two paths, mirroring `@workflow/world-vercel`. A run of the deployment
+        we are running in derives its key in-process from the deployment secret
+        the platform injects; anything else — external tooling, or a run of a
+        different deployment — asks the API for the derived per-run key.
+        """
+        # `VERCEL_PROJECT_ID` backs the constructor argument here and nowhere
+        # else, which is where JS puts it too. Widening it to `__init__` would
+        # change how `_using_proxy` is decided, which is, by default, whether
+        # WORKFLOW_VERCEL_PROJECT and WORKFLOW_VERCEL_TEAM are both set.
+        project_id = self._project_id or os.getenv("VERCEL_PROJECT_ID")
+        if not project_id:
+            raise RuntimeError(
+                f"Cannot resolve the encryption key for run {run_id}: no project id. "
+                "Set VERCEL_PROJECT_ID, or pass one to the world."
+            )
+
+        current_deployment = os.getenv("VERCEL_DEPLOYMENT_ID")
+        own_deployment = deployment_id is None or deployment_id == current_deployment
+        # `VERCEL=1` only inside a serverless function. Outside one -- the CLI,
+        # the e2e driver -- the deployment secret is not there to derive from,
+        # so even a run of the current deployment goes to the API.
+        if os.getenv("VERCEL") == "1" and own_deployment:
+            deployment_key = os.getenv("VERCEL_DEPLOYMENT_KEY")
+            # No secret here means the run is not encrypted, the same as JS does.
+            if not deployment_key:
+                return None
+            return encryption.derive_run_key(
+                encryption.decode_key(deployment_key, what="VERCEL_DEPLOYMENT_KEY"),
+                project_id=project_id,
+                run_id=run_id,
+            )
+
+        return await self._fetch_run_key(
+            deployment_id or current_deployment, project_id=project_id, run_id=run_id
+        )
+
+    async def _fetch_run_key(
+        self, deployment_id: str | None, *, project_id: str, run_id: str
+    ) -> bytes | None:
+        """Ask the API for a run's key. ``None`` means the run is not encrypted."""
+        if not deployment_id:
+            raise RuntimeError(
+                f"Cannot resolve the encryption key for run {run_id}: no deployment id. "
+                "Set VERCEL_DEPLOYMENT_ID."
+            )
+        # `resolveVercelApiToken`'s order. `VERCEL_TOKEN` is the rung for
+        # tooling with no OIDC token to fetch -- the CLI, the e2e driver.
+        token = self._token or os.getenv("VERCEL_TOKEN")
+        if not token:
+            try:
+                token = await get_vercel_oidc_token()
+            except VercelOidcTokenError as e:
+                raise RuntimeError(
+                    f"Cannot resolve the encryption key for run {run_id}: "
+                    "no OIDC token or VERCEL_TOKEN available"
+                ) from e
+        params = {"projectId": project_id, "runId": run_id}
+        # No environment fallback for the team, matching the JS impl.
+        # VERCEL_PROJECT_ID was gated earlier anyways.
+        if self._team_id:
+            params["teamId"] = self._team_id
+
+        url = f"{_vercel_api_url()}/run-key/{deployment_id}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                url, params=params, headers={"Authorization": f"Bearer {token}"}
+            )
+        if not resp.is_success:
+            body = resp.text[:500]
+            raise w.WorkflowWorldError(
+                f"Cannot resolve the encryption key for run {run_id}: "
+                f"HTTP {resp.status_code}: {resp.reason_phrase}{f' — {body}' if body else ''}",
+                status=resp.status_code,
+                url=url,
+            )
+
+        try:
+            parsed = _RunKeyResponse.model_validate(resp.json())
+        except ValueError as error:
+            raise w.WorkflowWorldError(
+                f'Invalid response from the Vercel API: expected {{"key": string | null}}, '
+                f"got {resp.text[:200]!r}",
+                status=resp.status_code,
+                url=url,
+            ) from error
+
+        if parsed.key is None:
+            # Encryption is disabled for this run; its payloads are plaintext.
+            return None
+        return encryption.decode_key(parsed.key, what=f"the key for run {run_id}")
 
     async def queue(
         self,

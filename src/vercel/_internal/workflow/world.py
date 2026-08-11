@@ -315,6 +315,13 @@ class BaseEvent(BaseModel):
     )
     server_props: ServerProps | None = pydantic.Field(default=None, exclude=True)
 
+    def payloads(self) -> tuple[Any, ...]:
+        """The serialized payloads this event carries, if any.
+
+        One per entry in JS's ``EVENT_DATA_PAYLOAD_FIELD_BY_EVENT_TYPE``.
+        """
+        return ()
+
     @pydantic.model_validator(mode="before")
     @classmethod
     def fold_server_props(cls, data: Any) -> Any:
@@ -350,6 +357,9 @@ class RunCreatedEvent(BaseEvent):
     event_type: Literal["run_created"] = pydantic.Field(default="run_created", alias="eventType")
     event_data: RunCreatedEventData = pydantic.Field(alias="eventData")
 
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.input,)
+
 
 class RunStartedEvent(BaseEvent):
     """
@@ -382,6 +392,9 @@ class RunCompletedEvent(BaseEvent):
     )
     event_data: RunCompletedEventData = pydantic.Field(alias="eventData")
 
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.output,)
+
 
 class RunFailedEventData(BaseModel):
     error: Any
@@ -402,6 +415,9 @@ class RunFailedEvent(BaseEvent):
         alias="eventType",
     )
     event_data: RunFailedEventData = pydantic.Field(alias="eventData")
+
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.error,)
 
 
 class StepCreatedEventData(BaseModel):
@@ -424,6 +440,9 @@ class StepCreatedEvent(BaseEvent):
     )
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: StepCreatedEventData = pydantic.Field(alias="eventData")
+
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.input,)
 
 
 class StepStartedEventData(BaseModel):
@@ -469,6 +488,9 @@ class StepRetryingEvent(BaseEvent):
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: StepRetryingEventData = pydantic.Field(alias="eventData")
 
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.error,)
+
 
 class StepCompletedEventData(BaseModel):
     result: bytes | Any = None
@@ -484,6 +506,9 @@ class StepCompletedEvent(BaseEvent):
     )
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: StepCompletedEventData = pydantic.Field(alias="eventData")
+
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.result,)
 
 
 class StepFailedEventData(BaseModel):
@@ -501,6 +526,9 @@ class StepFailedEvent(BaseEvent):
     )
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: StepFailedEventData = pydantic.Field(alias="eventData")
+
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.error,)
 
 
 class Hook(BaseModel):
@@ -538,6 +566,9 @@ class HookCreatedEvent(BaseEvent):
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: HookCreatedEventData = pydantic.Field(alias="eventData")
 
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.metadata,)
+
 
 class HookReceivedEventData(BaseModel):
     payload: bytes
@@ -553,6 +584,9 @@ class HookReceivedEvent(BaseEvent):
     )
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: HookReceivedEventData = pydantic.Field(alias="eventData")
+
+    def payloads(self) -> tuple[Any, ...]:
+        return (self.event_data.payload,)
 
 
 class HookDisposedEvent(BaseEvent):
@@ -847,6 +881,13 @@ class World(metaclass=abc.ABCMeta):
             An HTTP handler that processes incoming queue requests.
         """
         ...
+
+    async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
+        """The encryption key that opens the payloads of *run_id*.
+
+        ``None`` means the run's payloads are plaintext.
+        """
+        return None
 
     @abc.abstractmethod
     async def runs_get(self, run_id: str) -> WorkflowRun: ...

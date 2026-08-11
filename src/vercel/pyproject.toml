@@ -11,6 +11,11 @@ requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 
+[project.optional-dependencies]
+encryption = [
+    "cryptography>=48.0.1",
+]
+
 [tool.hatch.metadata.hooks.custom]
 path = "hatch_build.py"
 
