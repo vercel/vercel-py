@@ -35,6 +35,22 @@ def _cbor_filter_undefined(value: Mapping[Any, Any], shareable: bool = False) ->
     return {k: None if v is cbor2.undefined else v for k, v in value.items()}
 
 
+def _parse_response_body(resp: httpx.Response) -> Any:
+    """utils.ts, parseResponseBody."""
+    if "application/cbor" in resp.headers.get("Content-Type", ""):
+        return cbor2.loads(
+            resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
+        )
+    try:
+        return resp.json()
+    except Exception:
+        # Server may return CBOR without the correct Content-Type header
+        # (e.g. through a proxy). Try CBOR decoding as fallback.
+        return cbor2.loads(
+            resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
+        )
+
+
 class _QueueTransport:
     """CBOR queue transport with a JSON fallback on receive.
 
@@ -173,6 +189,40 @@ class VercelWorld(w.World):
     async def aclose(self) -> None:
         self._queue_clients.clear()
 
+    async def _auth_headers(self) -> dict[str, str]:
+        """utils.ts, getHttpConfig."""
+        headers = self._headers.copy()
+        if self._using_proxy:
+            # The api-workflow proxy authenticates the caller with a regular
+            # Vercel auth token; it does not accept OIDC. Fail loudly instead
+            # of letting an opaque 401 bubble up at request time.
+            if not self._token:
+                raise ValueError(
+                    f"VercelWorld: api-workflow proxy requested ({self._base_url}) but no "
+                    "Vercel auth token was provided. Pass one as `token` (the SDK reads it "
+                    "from `WORKFLOW_VERCEL_AUTH_TOKEN`)."
+                )
+            headers["Authorization"] = f"Bearer {self._token}"
+        else:
+            # Direct workflow-server path. The bearer prefers an explicitly
+            # configured token (CLI / GitHub Actions runner / local dev) and
+            # falls back to the per-request Vercel OIDC token. The
+            # trusted-sources bypass header always uses the OIDC token.
+            oidc_token: str | None = None
+            try:
+                oidc_token = await get_vercel_oidc_token()
+            except Exception:
+                # No OIDC available outside a Vercel function context.
+                pass
+            auth_token = self._token or oidc_token
+            if auth_token:
+                headers["Authorization"] = f"Bearer {auth_token}"
+            if oidc_token:
+                # Deployment protection's Trusted Sources bypass reads this
+                # header, not Authorization.
+                headers["x-vercel-trusted-oidc-idp-token"] = oidc_token
+        return headers
+
     async def _cbor_request(
         self,
         method: str,
@@ -182,13 +232,7 @@ class VercelWorld(w.World):
         data: Any = None,
     ) -> T:
         # utils.ts, getHttpConfig, makeRequest
-        if self._token is None:
-            token = await get_vercel_oidc_token()
-        else:
-            token = self._token
-        headers = self._headers.copy()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        headers = await self._auth_headers()
 
         headers["Accept"] = "application/cbor"
         # NOTE: Add a unique header to bypass RSC request memoization.
@@ -208,55 +252,65 @@ class VercelWorld(w.World):
                 content=body,
             )
 
-        # utils.ts, parseResponseBody
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/cbor" in content_type:
-            result = cbor2.loads(
-                resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
-            )
-        else:
-            try:
-                result = resp.json()
-            except Exception:
-                # Server may return CBOR without the correct Content-Type header
-                # (e.g. through a proxy). Try CBOR decoding as fallback.
-                result = cbor2.loads(
-                    resp.content, tag_hook=_cbor_tag_hook, object_hook=_cbor_filter_undefined
-                )
+        # utils.ts, makeRequest: the status decides, not the body. A body only
+        # has to parse when the server said the call succeeded — otherwise an
+        # HTML login page from a protected deployment surfaces as a CBOR
+        # framing error instead of the redirect it is.
+        if not resp.is_success:
+            raise self._error_for_response(method, endpoint, resp)
 
-        if resp.is_success:
-            if isinstance(schema, pydantic.TypeAdapter):
-                return schema.validate_python(result)
-            else:
-                return schema.model_validate(result)
+        result = _parse_response_body(resp)
+        if isinstance(schema, pydantic.TypeAdapter):
+            return schema.validate_python(result)
         else:
-            if not isinstance(result, dict):
-                result = {}
-            message = (
-                result.get("message")
-                or f"{method} {endpoint} -> HTTP {resp.status_code}: {resp.reason_phrase}"
+            return schema.model_validate(result)
+
+    def _error_for_response(self, method: str, endpoint: str, resp: httpx.Response) -> Exception:
+        """utils.ts, makeRequest — map a non-2xx response to a typed error."""
+        try:
+            result = _parse_response_body(resp)
+        except Exception:
+            # An error body is whatever the server felt like sending: an HTML
+            # error page, an empty body, a gateway's own framing. The status
+            # still has to reach the caller.
+            result = None
+        if not isinstance(result, dict):
+            result = {}
+        message = result.get("message") or self._status_message(method, endpoint, resp)
+        url = f"{self._base_url}{endpoint}"
+        code = result.get("code")
+        if resp.status_code == 409:
+            return w.EntityConflictError(message)
+        if resp.status_code == 410:
+            return w.RunExpiredError(message, status=resp.status_code, code=code, url=url)
+        # retryAfter (seconds) is carried in the Retry-After header.
+        retry_after_header = resp.headers.get("retry-after")
+        retry_after: int | None = None
+        if retry_after_header is not None:
+            try:
+                retry_after = int(retry_after_header)
+            except ValueError:
+                retry_after = None
+        if resp.status_code == 425:
+            return w.TooEarlyError(message, retry_after=retry_after)
+        if resp.status_code == 429:
+            return w.ThrottleError(
+                message, status=resp.status_code, code=code, url=url, retry_after=retry_after
             )
-            url = f"{self._base_url}{endpoint}"
-            code = result.get("code")
-            if resp.status_code == 409:
-                raise w.EntityConflictError(message)
-            if resp.status_code == 410:
-                raise w.RunExpiredError(message, status=resp.status_code, code=code, url=url)
-            # retryAfter (seconds) is carried in the Retry-After header.
-            retry_after_header = resp.headers.get("retry-after")
-            retry_after: int | None = None
-            if retry_after_header is not None:
-                try:
-                    retry_after = int(retry_after_header)
-                except ValueError:
-                    retry_after = None
-            if resp.status_code == 425:
-                raise w.TooEarlyError(message, retry_after=retry_after)
-            if resp.status_code == 429:
-                raise w.ThrottleError(
-                    message, status=resp.status_code, code=code, url=url, retry_after=retry_after
-                )
-            raise w.WorkflowWorldError(message, status=resp.status_code, code=code, url=url)
+        return w.WorkflowWorldError(message, status=resp.status_code, code=code, url=url)
+
+    @staticmethod
+    def _status_message(method: str, endpoint: str, resp: httpx.Response) -> str:
+        message = f"{method} {endpoint} -> HTTP {resp.status_code}: {resp.reason_phrase}"
+        if resp.has_redirect_location:
+            # httpx does not follow redirects, so the 302 arrives intact. A
+            # workflow-server that redirects is a workflow-server behind
+            # deployment protection that did not recognise this caller.
+            message += (
+                f" (redirect to {resp.headers['location']}) — deployment protection rejected "
+                "this request; the Trusted Sources bypass needs a Vercel OIDC token"
+            )
+        return message
 
     async def get_deployment_id(self) -> str:
         deployment_id = os.getenv("VERCEL_DEPLOYMENT_ID")
