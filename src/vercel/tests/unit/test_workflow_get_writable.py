@@ -280,13 +280,13 @@ async def test_a_failing_step_still_flushes_what_it_wrote(registry) -> None:
 
 
 async def test_get_writable_outside_a_run_is_refused() -> None:
-    # There is no stream to name without a run, so this cannot answer.
+    # Without a run there is no stream to refer to, so this cannot answer.
     with pytest.raises(RuntimeError, match="inside a workflow or a step"):
         runtime.get_writable()
 
 
 class TestHandOff:
-    """A workflow body naming a stream and a step writing to it.
+    """A workflow body picking out a stream and a step writing to it.
 
     The workflow cannot write -- it replays, and its sandbox has no network --
     but it can say *which* stream, which is what lets one workflow fan the same
@@ -335,7 +335,7 @@ class TestHandOff:
 
         The handle is dehydrated into the step's arguments as `@workflow/core`'s
         `WritableStream` tag and revived on the other side as a live writer, so
-        the step writes to the stream the workflow named.
+        the step writes to the stream the workflow chose.
         """
         handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
         payload = ser.dehydrate(ser.step_arguments((), {"out": handle}))

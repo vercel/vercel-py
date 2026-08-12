@@ -167,7 +167,7 @@ server ends a long read at its own time limit. Resuming is exact, so nothing is
 duplicated or skipped.
 
 `run.stream_info()` gives the last chunk index and whether the stream is closed
-(`tail_index` is `-1` before anything is written), `run.list_streams()` names
+(`tail_index` is `-1` before anything is written), `run.list_streams()` lists
 every stream the run has, and `read_stream(run_id, name)` reads one by name.
 
 The same stream is readable from the TypeScript SDK (`run.readable`), the

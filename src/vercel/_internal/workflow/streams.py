@@ -57,6 +57,12 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     Mirrors `@workflow/world`'s ``envNumber``: an unset, non-numeric or
     out-of-range value is ignored rather than fatal, since these are
     operational overrides and a typo should not take a deployment down.
+
+    Every caller reads the knob where it uses it, rather than into a module
+    global once at import, so an override still applies when the environment
+    is populated after this module loads -- which is how the tests set these,
+    and how the JS side reads its own (``envNumber`` behind a getter, called
+    per use).
     """
     raw = os.getenv(name)
     if raw is None:
@@ -150,20 +156,21 @@ class FrameDecoder:
 # ═══════════════════════════════════════════════════════════════════════════
 
 MAX_RECONNECTS = 50
-"""Consecutive reconnects allowed before a read gives up.
+"""How many reconnects in a row may deliver nothing before the read gives up.
 
-Reset by any reconnect that delivers a frame, so this bounds *consecutive*
-failures rather than the lifetime total: a long-lived stream may reconnect far
-more than this and stay healthy, as long as it keeps making progress.
+Any reconnect that delivers a frame resets this to zero, so it measures being
+stuck, not how often the connection dropped -- a read that runs for hours may
+reconnect far more than 50 times and never come close. Same value as
+`@workflow/core`'s ``FRAMED_STREAM_MAX_RECONNECTS``.
 """
 
 MAX_TOTAL_RECONNECTS = 1000
-"""Absolute backstop, independent of progress.
+"""How many reconnects in total. Never resets.
 
-The consecutive cap resets on forward progress, which is correct against a
-backend that honours ``start_index``. One that ignored it would re-deliver
-earlier frames, look like progress every time, and never trip that cap -- so
-this guarantees the loop terminates regardless.
+The cap above resets whenever a frame arrives, which works as long as a new
+frame really means the read moved forward. A backend that ignored
+``start_index`` would re-send the same old frames after every break, so it
+would reset forever and the read would never end. This one cannot reset.
 """
 
 
@@ -267,10 +274,10 @@ MAX_BYTES_PER_BATCH = 1024 * 1024
 class WorkflowWritable(abc.ABC):
     """One of a run's streams, as :func:`vercel.workflow.get_writable` hands it out.
 
-    Two things wear this interface. In a step it is a
-    :class:`WorkflowStreamWriter` and every method works. In a workflow body it
-    is a :class:`WorkflowStreamHandle`, which knows which stream it is but
-    refuses to write to it.
+    Two classes implement it. In a step it is a :class:`WorkflowStreamWriter`
+    and every method works. In a workflow body it is a
+    :class:`WorkflowStreamHandle`, which refers to the stream but refuses to
+    write to it.
 
     One interface rather than two so that a workflow can take a writable and
     pass it to a step without the type changing on the way, which is also how
@@ -307,18 +314,18 @@ class WorkflowWritable(abc.ABC):
 
 @dataclasses.dataclass(frozen=True)
 class WorkflowStreamHandle(WorkflowWritable):
-    """A stream that can be named here but only written to from a step.
+    """A reference to a stream, writable only once it reaches a step.
 
     A workflow body re-executes on every replay and its sandbox has no network,
-    so writing from there is not on offer -- but naming the stream is, and that
-    is what a step needs. Pass the handle into a step and it arrives as a
-    :class:`WorkflowStreamWriter`. Hydrating a payload outside a step yields a
-    handle for the same reason: a writer sends from a task the step handler
-    owns, and there is no such owner out there.
+    so writing from there is not on offer -- but referring to the stream is,
+    and that is what a step needs. Pass the handle into a step and it arrives
+    as a :class:`WorkflowStreamWriter`. Hydrating a payload outside a step
+    yields a handle for the same reason: a writer sends from a task the step
+    handler owns, and there is no such owner out there.
 
-    Deterministic by construction: the name comes from the run id and the
-    namespace, so a replay produces the same handle rather than pointing a
-    later attempt at a different stream.
+    Deterministic by construction: the stream name is derived from the run id
+    and the namespace, so a replay produces the same handle rather than
+    pointing a later attempt at a different stream.
     """
 
     # Underscored because the interface declares `run_id` and `name` as

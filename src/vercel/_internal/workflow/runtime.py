@@ -283,7 +283,7 @@ def get_writable(
 
     In a step this is a :class:`~.streams.WorkflowStreamWriter`, ready to write.
     In a workflow body it is a :class:`~.streams.WorkflowStreamHandle`, which
-    names the stream but cannot write to it: that body re-executes on every
+    refers to the stream but cannot write to it: that body re-executes on every
     replay and its sandbox has no network. Pass the handle to a step and it
     arrives as the writer -- the same one the step would get by asking for the
     stream itself, so ordering holds however the step obtained it.
@@ -1431,10 +1431,12 @@ class Run:
 def read_stream(
     run_id: str, name: str, *, start_index: int | None = None
 ) -> AsyncGenerator[Any, None]:
-    """Read any stream of a run by name, for a stream :class:`Run` cannot name.
+    """Read one of a run's streams by its full name.
 
-    :meth:`Run.readable` covers the run's own streams; this is the way in when
-    the name came from :meth:`Run.list_streams` or from another SDK.
+    :meth:`Run.readable` derives the name from the run id and a namespace, so
+    it only reaches streams that follow that scheme. This takes the name
+    verbatim, which is what :meth:`Run.list_streams` returns and what another
+    SDK may have used.
     """
 
     async def values() -> AsyncGenerator[Any, None]:
