@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Mapping
 
 import pytest
 
+import vercel.workflow
 from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -40,7 +41,7 @@ class Delivery(w.HTTPRequest):
 
     @property
     def url(self) -> str:
-        return runtime.FLOW_ROUTE
+        return runtime.ENDPOINT_PATH
 
     @property
     def headers(self) -> Mapping[str, str]:
@@ -90,3 +91,51 @@ async def test_a_delivery_is_dispatched_whatever_case_its_headers_use(
     # handler wrote, so a 200 alone could not have produced it.
     assert json.loads(response.body) == {"ok": True}
     assert await world.streams_list(f"wrun_hc_{CID}") == [f"__health_check__{CID}"]
+
+
+async def test_the_public_surface_serves_a_delivery(tmp_path, monkeypatch) -> None:
+    """What a user has to reach for, reached for the way a user would.
+
+    Nothing here imports `vercel._internal`: a registry, the path to mount it
+    at, and an adapter built structurally -- `PlainRequest` inherits nothing,
+    which is what `HTTPRequest` being a Protocol is for.
+    """
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    world = local_mod.LocalWorld()
+    w.set_world(world)
+
+    app = vercel.workflow.Workflows()
+
+    class PlainRequest:
+        method = "POST"
+        url = vercel.workflow.ENDPOINT_PATH
+        headers = {"x-vqs-queue-name": HEALTH_QUEUE}
+
+        async def aiter_bytes(self, chunk_size: int | None = None) -> AsyncIterator[bytes]:
+            yield PROBE
+
+    try:
+        response = await app.http_handler(PlainRequest())
+    finally:
+        await world.aclose()
+
+    assert isinstance(response, vercel.workflow.HTTPResponse)
+    assert response.status == 200
+    assert await world.streams_list(f"wrun_hc_{CID}") == [f"__health_check__{CID}"]
+
+
+def test_the_endpoint_path_is_the_one_the_tools_probe() -> None:
+    """Hard-coded on both sides, so it is pinned rather than derived."""
+    assert vercel.workflow.ENDPOINT_PATH == "/.well-known/workflow/v1/flow"
+
+
+def test_a_registry_that_serves_nothing_says_so(tmp_path, monkeypatch) -> None:
+    """`as_vercel_job=False` skips the subscription, and a handler without one
+    would accept deliveries and dispatch them nowhere."""
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    w.set_world(local_mod.LocalWorld())
+
+    app = vercel.workflow.Workflows(as_vercel_job=False)
+
+    with pytest.raises(RuntimeError, match="no HTTP handler"):
+        _ = app.http_handler

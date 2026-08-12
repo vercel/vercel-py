@@ -8,6 +8,7 @@ from vercel.workflow._internal.core import (
     time_ns,
 )
 from vercel.workflow._internal.runtime import (
+    ENDPOINT_PATH,
     Run,
     StepInfo,
     get_step_metadata,
@@ -21,6 +22,7 @@ from vercel.workflow._internal.streams import (
     WorkflowStreamWriter,
     WorkflowWritable,
 )
+from vercel.workflow._internal.world import HTTPHandler, HTTPRequest, HTTPResponse
 
 from . import sandbox
 from .errors import (
@@ -37,6 +39,10 @@ from .sandbox import SandboxPolicy
 
 __all__ = [
     "Workflows",
+    "ENDPOINT_PATH",
+    "HTTPHandler",
+    "HTTPRequest",
+    "HTTPResponse",
     "now",
     "random",
     "sleep",

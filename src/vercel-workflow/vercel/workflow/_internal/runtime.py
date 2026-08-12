@@ -1347,7 +1347,7 @@ async def _execute_step(
     return None
 
 
-FLOW_ROUTE = "/.well-known/workflow/v1/flow"
+ENDPOINT_PATH = "/.well-known/workflow/v1/flow"
 """The common route `workflow_entrypoint`'s handler belongs on.
 
 The tools do not discover this path, they hard-code it: `workflow health`

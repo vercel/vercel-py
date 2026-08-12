@@ -281,15 +281,24 @@ class Workflows:
         if sandbox_policy is None:
             sandbox_policy = py_sandbox.SandboxPolicy()
         self._sandbox_policy = sandbox_policy
+        self._http_handler: w.HTTPHandler | None = None
         if as_vercel_job and not py_sandbox.in_sandbox():
             from . import runtime
 
-            runtime.workflow_entrypoint(self)
+            self._http_handler = runtime.workflow_entrypoint(self)
 
     @property
     def namespace(self) -> str | None:
         """The immutable queue namespace for this registry."""
         return self._namespace
+
+    @property
+    def http_handler(self) -> w.HTTPHandler:
+        if self._http_handler is None:
+            raise RuntimeError(
+                "This Workflows registry does not serve its queue topic, so it has no HTTP handler."
+            )
+        return self._http_handler
 
     def workflow(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
         rv = Workflow(func, registry=self)

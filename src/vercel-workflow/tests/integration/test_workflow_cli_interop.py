@@ -522,7 +522,7 @@ def _serving(handler: w.HTTPHandler, seen: list[str]) -> Iterator[str]:
         def _serve(self) -> None:
             body = self.rfile.read(int(self.headers.get("content-length") or 0))
             seen.append(f"{self.command} {self.path}")
-            if self.path.split("?")[0] != runtime.FLOW_ROUTE:
+            if self.path.split("?")[0] != runtime.ENDPOINT_PATH:
                 self.send_response(404)
                 self.send_header("content-length", "0")
                 self.end_headers()
@@ -630,6 +630,6 @@ async def test_cli_health_check_is_answered_by_python(workflow_cli, tmp_path, mo
     # Both transports, in the order the command uses them: the HTTP probe as a
     # reachability precheck, then the queue probe as the actual health check.
     assert seen == [
-        f"POST {runtime.FLOW_ROUTE}?__health",
-        f"POST {runtime.FLOW_ROUTE}",
+        f"POST {runtime.ENDPOINT_PATH}?__health",
+        f"POST {runtime.ENDPOINT_PATH}",
     ]
