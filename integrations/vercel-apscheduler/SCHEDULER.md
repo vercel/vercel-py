@@ -101,10 +101,11 @@ evicted. Each guarantee therefore lives on something that can carry it:
   remains within the documented best-effort envelope.
 - **Code-declared jobs are durable because code is the backup.**
   Reconciliation rewrites them from the declarations whenever the documents
-  are missing. Runtime-added jobs and lifecycle flags are best-effort by
-  declared policy; `pause()` additionally publishes a queue-borne control
-  message so the flag reaches the process serving the chain even where cache
-  state does not.
+  are missing, and the store holds nothing code cannot restate: runtime
+  creation of new jobs is rejected. Runtime changes to declared jobs and
+  lifecycle flags are best-effort by declared policy; `pause()` additionally
+  publishes a queue-borne control message so the flag reaches the process
+  serving the chain even where cache state does not.
 
 Under `vercel dev` the cache client falls back to per-process memory, so the
 integration becomes a zero-infrastructure development mode with the
@@ -126,20 +127,21 @@ start_status         pending | published | processing | active
 activation_time      when the current generation activated
 current              the one current wake: sequence, logical time, status
 last_sequence        dedup watermark that survives dormancy
-dirty_logical_time   earliest candidate parked by a concurrent mutation
+dirty_logical_time   earliest candidate parked by a concurrent store write
 idle_expires_at      preview idle deadline, when enabled
 ```
 
 Jobs live in a second document beside it, one record per job with a revision
-counter and provenance tag; the takeover reconciliation marker shares the
-jobs document so eviction clears them together. Documents are rewritten on
-every touch and carry a long TTL, so only an abandoned namespace is reaped;
-LRU eviction is survivable by design (see above).
+counter; the takeover reconciliation marker shares the jobs document so
+eviction clears them together. Documents are rewritten on every touch and
+carry a long TTL, so only an abandoned namespace is reaped; LRU eviction is
+survivable by design (see above).
 
-Each persisted job records its provenance: `declared` for jobs materialized
-from code declarations, `runtime` for jobs added through the mutation APIs
-after `start()`. Code owns declared jobs across deployments; the store owns
-runtime jobs.
+Every record is a code declaration plus execution progress; the store holds
+nothing else. A record the reconciling code cannot load is rewritten from
+its declaration when the code still declares it and removed when it does
+not; a record found unreadable while planning due jobs is sidelined until
+the next sync repairs it.
 
 ## Starting
 
@@ -248,59 +250,48 @@ that became due while paused are skipped, regardless of misfire settings: the
 new generation rebases every job to its next occurrence at or after the
 resume.
 
-## Runtime job mutations
+## Runtime immutability
 
-Runtime calls through APScheduler's public APIs are event-driven:
+The durable inputs to the scheduler are code and time. The managed store
+holds only code-declared jobs and their execution progress, so it never
+holds the only copy of anything: `add_job()` with a new id at runtime is
+rejected, and so is every runtime mutation (`modify_job`, `reschedule_job`,
+`pause_job`, `resume_job`, `remove_job`, `remove_all_jobs`, and
+`add_job(replace_existing=True)` of an existing id), from request handlers
+and from executing jobs alike.
 
-```python
-scheduler.start()  # idempotent activation boundary in this Function instance
-scheduler.add_job(...)
-scheduler.modify_job(...)
-scheduler.reschedule_job(...)
-scheduler.pause_job(...)
-scheduler.resume_job(...)
-scheduler.remove_job(...)
-```
+The reasoning is the store's substrate: runtime state changes would live
+only on an evictable cache, where their loss is silent. A lost "job removed"
+or "job paused" resurrects work that an operator stopped; a lost reschedule
+silently reverts. Rather than offer mutations with three different survival
+profiles, the store offers none: a job is changed by deploying its changed
+declaration, and a job that must not run is stopped by removing or gating
+its declaration in code, or by a flag in application-owned storage checked
+inside the job. Dynamic schedules belong in an application-owned database;
+one-shot work belongs in a delayed queue message.
 
-The integration coordinates the job write and wake rearm:
-
-- while paused, only the job is changed;
-- while running with no active claimant, an earlier or missing current wake
-  is replaced with one new monotonic sequence;
-- while a start or wake holds the driver, the mutation records its earliest
-  candidate time and the claimant folds that value into its one successor.
-
-Moving or removing a job may leave an already published wake in Queue. Queue
-messages cannot be canceled, so that now-empty wake is allowed to arrive; it
-recomputes the next exact due time and cannot fork the chain.
+Before the activation boundary, `add_job()` calls are module-level
+declarations; automatic activation establishes that boundary before a
+production request reaches the application. Raw writes to the store's cache
+keys are unsupported because they bypass wake rearming and revision checks.
 
 Each persisted job has a monotonic revision. After executing a job, the wake
-updates or removes it only if the revision it read is still current. A
-concurrent runtime mutation therefore wins instead of being overwritten or
-resurrected by a late handler.
+updates or removes it only if the revision it read is still current, so a
+concurrent reconciliation write wins instead of being overwritten by a late
+handler.
 
-Executing jobs may also mutate the store through the same APIs. An in-job
-`add_job()` of an existing id honors `replace_existing=True` by updating the
-persisted job, and the finishing wake reads the store again, so the change is
-reflected in the successor it reserves.
+A stale wake for a schedule the declarations no longer produce may already
+sit in Queue. Messages cannot be canceled, so that wake is allowed to
+arrive; it recomputes the next exact due time and cannot fork the chain.
 
-Automatic activation establishes the boundary before a production request
-reaches the application. Without automatic activation, every cold Function
-instance that performs a runtime mutation must first call the idempotent
-`scheduler.start()`. Before that boundary, `add_job()` calls are treated as
-module-level declarations. Raw writes to the store's cache keys are
-unsupported because they bypass wake rearming and revision checks.
-
-The no-heartbeat design has one deliberate liveness contract: `start()` and
-mutation calls are durable after they return successfully. If a process dies
-after committing the store but before publishing Queue, an idempotent
-`start()` republishes the pending token. Repeating an interrupted mutation is
-also safe: a retried mutation republishes the pending wake even when the
-retry itself fails, for example on a conflicting job id. A completely dormant
-scheduler does not wake periodically to repair an otherwise unobserved
-ambiguous failure. A delayed repair can pass a finite misfire window; jobs
-that opt into one and must remain eligible after repairs should size it
-accordingly.
+The no-heartbeat design has one deliberate liveness contract: `start()` is
+durable after it returns successfully. If a process dies after committing
+the store but before publishing Queue, an idempotent `start()` or the
+request-driven activation sweep republishes the pending token. A completely
+dormant scheduler does not wake periodically to repair an otherwise
+unobserved ambiguous failure. A delayed repair can pass a finite misfire
+window; jobs that opt into one and must remain eligible after repairs should
+size it accordingly.
 
 ## Execution requirements
 
@@ -449,12 +440,9 @@ requests through that alias would let the old deployment take the chain.
 On takeover the new owner reconciles the
 store against its own declarations, before planning any due jobs: a job the
 code no longer declares is deleted and never runs, a changed trigger restarts
-its schedule, an unchanged job keeps its progress, and `runtime` jobs are
-never touched. A declared job whose persisted record no longer loads under
-the new code (typically because its function moved) is rewritten from the
-declaration and restarts its schedule. A `runtime` job whose definition no
-longer loads is quarantined: it leaves the due index, keeps its record for
-the operator, and logs an error.
+its schedule, and an unchanged job keeps its progress. A job whose persisted
+record no longer loads under the new code (typically because its function
+moved) is rewritten from the declaration and restarts its schedule.
 
 Reconciliation completes only once it converges. A revision race with a
 concurrent owner write reruns the pass against fresh state, and only the
@@ -491,9 +479,7 @@ Deleting a deployment prevents its Functions from receiving further work.
 | resume while an old wake runs | the old generation cannot reserve a successor |
 | crash before Queue send | pending token is republished |
 | old message after resume | generation check makes it stale |
-| concurrent runtime add/modify | one token is rearmed; no second chain |
-| handler finishes after a job mutation | revision check preserves the mutation |
-| retried mutation fails on a conflicting id | the pending wake is still republished |
+| handler finishes after a concurrent reconcile write | revision check preserves the newer record |
 | takeover while a wake is in flight | the demoted deployment consumes it and acks it as stale |
 | the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
 | takeover reconciliation races a demoted deployment's handler | the demoted write aborts on the ownership fence |
