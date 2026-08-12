@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import contextvars
 import dataclasses
 import functools
@@ -10,7 +11,7 @@ import re
 import sys
 import traceback
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 
@@ -19,7 +20,7 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, errors, loop, nanoid, serialization as ser, ulid, world as w
+from . import core, errors, loop, nanoid, serialization as ser, streams, ulid, world as w
 from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
@@ -141,6 +142,105 @@ class StepInfo:
 _step_ctx: contextvars.ContextVar[StepInfo] = contextvars.ContextVar("WorkflowStepContext")
 
 
+@dataclasses.dataclass
+class _StepStreams:
+    """The stream writers one step invocation opened.
+
+    Kept out of :class:`StepInfo` because that is public, frozen metadata; this
+    is mutable bookkeeping the handler owns.
+    """
+
+    run_id: str
+    writers: dict[str, streams.WorkflowStreamWriter] = dataclasses.field(default_factory=dict)
+    _task_group: anyio.abc.TaskGroup | None = None
+
+    @contextlib.asynccontextmanager
+    async def dispatching(self) -> AsyncIterator[None]:
+        """Own the writers' background sends for the duration of the block.
+
+        A writer sends from a task rather than from `write()`, so those tasks
+        need a group whose lifetime covers every write *and* the flush that
+        follows. Leaving the block waits for them, so nothing is still in
+        flight once it returns.
+
+        If the block raises, the chunks the step did manage to stream are
+        flushed first: those are as real as any other, and a reader tailing the
+        run should see the progress that led up to the failure. Best-effort by
+        construction -- the step is already failing, and a flush error here
+        would replace the cause with a symptom. (`@workflow/core` does not do
+        this at all: its `ops` flush lives only on the success path, so a
+        throwing step's buffered chunks are never awaited.)
+
+        The error comes back out as itself rather than wrapped in the task
+        group's exception group, because callers up the stack switch on
+        `FatalError` and count retries.
+        """
+        error: BaseException | None = None
+        async with anyio.create_task_group() as task_group:
+            self._task_group = task_group
+            try:
+                yield
+            except Exception as exc:
+                error = exc
+                await self.drain_quietly()
+            except BaseException as exc:
+                # Cancellation, or the interpreter going down. Draining would
+                # need a shield and could stall the teardown it is racing.
+                error = exc
+            finally:
+                self._task_group = None
+        if error is not None:
+            raise error
+
+    def writer(
+        self, namespace: str | None, *, reentrant_ctx_on_err: bool = True
+    ) -> streams.WorkflowStreamWriter:
+        """The writer for this run's *namespace* stream, created on first use.
+
+        One writer per stream per step, deliberately. Handing out a fresh writer
+        each call would give each its own buffer over the same stream, and two
+        buffers flushing independently interleave their chunks by whichever
+        request happens to win -- so `get_writable()` twice in a loop would
+        scramble the order the caller wrote in. Sharing one serial sink makes
+        that pattern correct instead of subtly wrong.
+        """
+        if self._task_group is None:
+            raise RuntimeError("stream writers are only available while a step is running")
+        name = streams.workflow_run_stream_id(self.run_id, namespace)
+        writer = self.writers.get(name)
+        if writer is None:
+            writer = streams.WorkflowStreamWriter(
+                world=w.get_world(),
+                run_id=self.run_id,
+                name=name,
+                task_group=self._task_group,
+                reentrant_ctx_on_err=reentrant_ctx_on_err,
+            )
+            self.writers[name] = writer
+        return writer
+
+    async def drain(self) -> None:
+        for writer in self.writers.values():
+            await writer.drain()
+
+    async def drain_quietly(self) -> None:
+        for writer in self.writers.values():
+            try:
+                await writer.drain()
+            except Exception:
+                logger.debug(
+                    "[Workflows] '%s' - could not flush stream %r while failing",
+                    self.run_id,
+                    writer.name,
+                    exc_info=True,
+                )
+
+
+_step_streams_ctx: contextvars.ContextVar[_StepStreams] = contextvars.ContextVar(
+    "WorkflowStepStreams"
+)
+
+
 def get_step_metadata() -> StepInfo:
     """Return metadata for the step currently executing.
 
@@ -150,6 +250,43 @@ def get_step_metadata() -> StepInfo:
         return _step_ctx.get()
     except LookupError:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
+
+
+def get_writable(
+    *,
+    namespace: str | None = None,
+    reentrant_ctx_on_err: bool = True,
+) -> streams.WorkflowStreamWriter:
+    """The run's writable stream, for streaming output as the step runs.
+
+    Chunks become readable immediately -- through ``run.readable`` on the
+    TypeScript side, the dashboard, or ``workflow inspect stream`` -- without
+    waiting for the step or the run to finish. This SDK has no reader of its own
+    yet; :meth:`vercel._internal.workflow.world.World.streams_get` is the
+    unstable way in.
+
+    Pass *namespace* to write to a second, independent stream on the same run.
+
+    Must be called from within a step body; raises ``RuntimeError`` otherwise.
+    A workflow body cannot stream: unlike the TypeScript SDK it cannot even take
+    a handle to pass into a step, which is why a streaming step calls this
+    itself.
+
+    Nothing closes the stream implicitly. Call :meth:`close` on the writer when
+    the run has nothing more to say, or readers will wait until the run expires.
+
+    When used as an asynchronous context in ``async with`` statements, the stream
+    will be closed on a clean exit by default. Exceptions will not close the
+    stream on exit of the context, unless ``reentrant_ctx_on_err`` is ``False``.
+    """
+    try:
+        state = _step_streams_ctx.get()
+    except LookupError:
+        raise RuntimeError(
+            "get_writable() can only be called inside a step; a workflow body "
+            "cannot write to a stream directly"
+        ) from None
+    return state.writer(namespace, reentrant_ctx_on_err=reentrant_ctx_on_err)
 
 
 if sys.version_info >= (3, 11):
@@ -878,6 +1015,10 @@ async def _execute_step(
         )
         return None
 
+    # Bound before the try so the failure path can flush whatever the step
+    # managed to write before it raised.
+    step_streams = _StepStreams(run_id=req.run_id)
+
     try:
         if not step_run.started_at:
             raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
@@ -908,11 +1049,31 @@ async def _execute_step(
                 attempt=current_attempt,
             )
         )
-        # Execute the step function
-        try:
-            result = await step.func(*args, **kwargs)
-        finally:
-            _step_ctx.reset(token)
+        streams_token = _step_streams_ctx.set(step_streams)
+        async with step_streams.dispatching():
+            # Execute the step function
+            try:
+                result = await step.func(*args, **kwargs)
+            finally:
+                _step_ctx.reset(token)
+                _step_streams_ctx.reset(streams_token)
+
+            # A stream write returns as soon as it is buffered, so the chunks
+            # this step wrote are not durable yet. Force them out before
+            # recording the step as complete, so "the step finished" keeps
+            # implying "everything it streamed is readable" -- and so a failure
+            # to write fails the step rather than being discovered by a reader
+            # that never sees the chunk.
+            #
+            # Stricter than `@workflow/core`, deliberately. Its step executor
+            # caps the same flush at 500ms and completes the step regardless,
+            # handing the rest to `waitUntil`, because its `ops` include
+            # lock-release polling on a `WritableStream` the user may hold open
+            # across steps -- that can never settle, so it cannot be awaited
+            # unbounded. Nothing here waits on a lock: `drain()` waits only for
+            # chunks already handed over, so it always terminates and needs no
+            # escape hatch.
+            await step_streams.drain()
 
         # Serialize the result
         output = ser.dehydrate(result)

@@ -23,6 +23,7 @@ import respx
 
 from vercel._internal.core.polyfills import UTC
 from vercel._internal.workflow import core, runtime, serialization as ser, world as w
+from vercel.tests.world_stubs import NoStreams
 from vercel.workflow import FatalError
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -45,7 +46,7 @@ def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
     )
 
 
-class FakeWorld(w.World):
+class FakeWorld(NoStreams, w.World):
     """In-memory world driving the handler's step path.
 
     ``step`` is the persisted step ``steps_get`` returns (the pre-read snapshot).

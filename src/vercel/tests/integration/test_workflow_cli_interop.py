@@ -42,6 +42,7 @@ from typing import Any
 import pytest
 
 from vercel._internal.workflow import core, runtime, serialization as ser, world as w
+from vercel._internal.workflow.streams import workflow_run_stream_id as stream_id
 from vercel._internal.workflow.worlds import local as local_mod
 from vercel.queue.testing import clear_subscriptions
 
@@ -165,8 +166,8 @@ def workflow_cli() -> Path:
     return entry
 
 
-def _inspect(cli: Path, data_dir: Path, *args: str) -> Any:
-    """Run ``workflow inspect … --json`` against ``data_dir`` and parse stdout.
+def _inspect_raw(cli: Path, data_dir: Path, *args: str) -> str:
+    """Run ``workflow inspect … --json`` against ``data_dir``, returning stdout.
 
     In JSON mode the CLI sends every log line to stderr, so stdout is pure
     JSON. The environment is scrubbed of the other ``WORKFLOW_*`` variables so
@@ -193,13 +194,30 @@ def _inspect(cli: Path, data_dir: Path, *args: str) -> Any:
             f"`workflow inspect {' '.join(args)}` exited {result.returncode}\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         )
+    return result.stdout
+
+
+def _inspect(cli: Path, data_dir: Path, *args: str) -> Any:
+    """Run ``workflow inspect … --json`` and parse stdout as one JSON value."""
+    raw = _inspect_raw(cli, data_dir, *args)
     try:
-        return json.loads(result.stdout)
+        return json.loads(raw)
     except json.JSONDecodeError as error:
         raise AssertionError(
             f"`workflow inspect {' '.join(args)}` did not print JSON: {error}\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+            f"--- stdout ---\n{raw}"
         ) from None
+
+
+def _inspect_lines(cli: Path, data_dir: Path, *args: str) -> list[Any]:
+    """Like :func:`_inspect`, for a command that prints one JSON value per line.
+
+    ``inspect stream`` streams: it writes a line per chunk and returns when the
+    stream closes. The timeout inside `_inspect` is what keeps a stream the
+    workflow forgot to close from hanging the suite instead of failing it.
+    """
+    raw = _inspect_raw(cli, data_dir, *args)
+    return [json.loads(line) for line in raw.splitlines() if line.strip()]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -217,19 +235,34 @@ registry = core.Workflows(as_vercel_job=False)
 @registry.step
 async def charge(*, amount: int) -> int:
     """A named parameter, so the call is recorded name-keyed: `[{"amount": 21}]`."""
+    # Streams the progress a client would render, then leaves the stream open:
+    # the run's stream spans steps, and `finish` is what ends it.
+    writable = runtime.get_writable()
+    await writable.write("charging")
+    await writable.write({"amount": amount})
     return amount * 2
 
 
 @registry.step
 async def notify(total: int, /) -> str:
     """Positional-only, so the call is recorded the way TS records `[42]`."""
+    await runtime.get_writable().write(f"notifying about {total}")
     return f"charged {total}"
+
+
+@registry.step
+async def finish() -> None:
+    # The CLI's stream reader blocks until EOF, which is exactly the behavior a
+    # browser client sees: nothing closes a run's stream implicitly.
+    await runtime.get_writable().close()
 
 
 @registry.workflow
 async def checkout(amount: int) -> str:
     total = await charge(amount=amount)
-    return await notify(total)
+    result = await notify(total)
+    await finish()
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -307,7 +340,7 @@ async def test_cli_lists_the_steps_python_wrote(workflow_cli, py_run) -> None:
 
     steps = _inspect(workflow_cli, data_dir, "steps", f"--runId={run_id}")
 
-    assert {step["stepName"] for step in steps} == {charge.name, notify.name}
+    assert {step["stepName"] for step in steps} == {charge.name, notify.name, finish.name}
     for step in steps:
         assert step["runId"] == run_id
         assert step["status"] == "completed"
@@ -327,16 +360,15 @@ async def test_cli_lists_the_event_log_python_wrote(workflow_cli, py_run) -> Non
     assert [event["eventType"] for event in reversed(events)] == [
         "run_created",
         "run_started",
-        "step_created",
-        "step_started",
-        "step_completed",
-        "step_created",
-        "step_started",
-        "step_completed",
+        *["step_created", "step_started", "step_completed"] * 3,
         "run_completed",
     ]
     created = [event for event in events if event["eventType"] == "step_created"]
-    assert {event["eventData"]["stepName"] for event in created} == {charge.name, notify.name}
+    assert {event["eventData"]["stepName"] for event in created} == {
+        charge.name,
+        notify.name,
+        finish.name,
+    }
 
 
 async def test_cli_shows_the_single_run_python_wrote(workflow_cli, py_run) -> None:
@@ -383,3 +415,31 @@ async def test_cli_hydrates_the_step_payloads_python_wrote(workflow_cli, py_run)
     assert by_name[charge.name]["output"] == 42
     assert by_name[notify.name]["input"] == {"args": [42]}
     assert by_name[notify.name]["output"] == "charged 42"
+
+
+async def test_cli_lists_the_stream_python_wrote(workflow_cli, py_run) -> None:
+    data_dir, run_id = py_run
+
+    streams = _inspect(workflow_cli, data_dir, "streams", f"--runId={run_id}")
+
+    # Reads `streams/runs/<runId>.json`, the registry py writes alongside the
+    # chunk files.
+    assert streams == [{"runId": run_id, "streamId": stream_id(run_id)}]
+
+
+async def test_cli_reads_the_stream_chunks_python_wrote(workflow_cli, py_run) -> None:
+    """The real consumer for a stream: `world.streams.get` piped through
+    `getDeserializeStream`.
+
+    This is the assertion that would catch a framing regression. Everything
+    else about a stream can look right -- the files exist, the CLI lists it --
+    while the frames inside are unreadable, and only a consumer that actually
+    decodes them notices. It also proves the ordering: the CLI emits chunks in
+    stored index order, so the sequence here is the order the steps wrote in,
+    across three separate step invocations.
+    """
+    data_dir, run_id = py_run
+
+    chunks = _inspect_lines(workflow_cli, data_dir, "stream", stream_id(run_id), f"--run={run_id}")
+
+    assert chunks == ["charging", {"amount": 21}, "notifying about 42"]

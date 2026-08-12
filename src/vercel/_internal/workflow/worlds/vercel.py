@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import math
@@ -5,8 +6,8 @@ import os
 import platform
 import traceback
 import urllib.parse
-from collections.abc import AsyncIterator, Mapping
-from typing import Any, TypeVar
+from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Any, TypeVar, overload
 
 import cbor2
 import httpx
@@ -24,6 +25,9 @@ MAX_DELAY_SECONDS = float(
 )  # 23 hours - leave 1h buffer before 24h retention limit
 
 T = TypeVar("T", bound=w.BaseModel)
+# A `TypeAdapter` can validate anything, not just a model -- the stream list
+# endpoint answers a bare array of names.
+U = TypeVar("U")
 
 
 def _cbor_tag_hook(tag: cbor2.CBORTag, shareable: bool = False) -> Any:
@@ -97,6 +101,84 @@ def _vercel_api_url() -> str:
 # Events whose result the runtime reads back resolved (run/step entity fields);
 # everything else is fetched lazily.
 _EVENTS_NEEDING_RESOLVE = frozenset({"run_created", "run_started", "step_started"})
+
+
+# ── stream transport ───────────────────────────────────────────────────────
+
+_MAX_CHUNKS_PER_REQUEST = 1000
+"""Chunks per multi-write request, matching the server's ``MAX_CHUNKS_PER_BATCH``."""
+
+_STREAM_MAX_ATTEMPTS = 3
+
+_WRITE_RETRY_STATUS = frozenset({429})
+"""Statuses a chunk append may be resent on.
+
+Deliberately excludes 5xx. An append is not idempotent, and a 5xx may mean the
+write *did* land -- resending it would duplicate a chunk and shift every index
+after it. 429 is safe because the request was rejected before being applied.
+"""
+
+_CLOSE_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+"""Statuses a close may be resent on -- closing twice is harmless."""
+
+
+def _quote(value: str) -> str:
+    return urllib.parse.quote(value, safe="")
+
+
+def _encode_multi_chunks(chunks: Sequence[bytes]) -> bytes:
+    """Pack chunks for one multi-write request.
+
+    ``[4-byte big-endian length][chunk]…`` — the same length framing the stream
+    itself uses, for the same reason: the server has to recover the original
+    chunk boundaries so each becomes its own index, or ``start_index`` would
+    stop meaning anything to a reader.
+    """
+    parts = []
+    for chunk in chunks:
+        parts.append(len(chunk).to_bytes(4, "big"))
+        parts.append(chunk)
+    return b"".join(parts)
+
+
+async def _stream_retry_delay(attempt: int, retry_after: str | None) -> None:
+    """Wait before resending: the server's ``Retry-After``, else backoff."""
+    if retry_after is not None:
+        try:
+            await asyncio.sleep(max(0.0, float(retry_after)))
+            return
+        except ValueError:
+            pass
+    await asyncio.sleep(0.1 * 2**attempt)
+
+
+def _stream_http_error(
+    operation: str, endpoint: str, resp: httpx.Response, *, url: str
+) -> w.WorkflowWorldError:
+    """Turn a failed stream request into an error worth reading.
+
+    The ``x-vercel-*`` headers are what makes a report actionable when the
+    failure happened in the platform rather than the workflow server, so they
+    are carried into the message instead of being dropped.
+    """
+    diagnostics = [
+        f"{header}={resp.headers[header]}"
+        for header in ("x-vercel-id", "x-vercel-error", "x-vercel-mitigated")
+        if header in resp.headers
+    ]
+    context = "; ".join(
+        [f"PUT {endpoint}" if operation != "read" else f"GET {endpoint}"] + diagnostics
+    )
+    message = f"Stream {operation} failed: HTTP {resp.status_code} ({context})"
+    retry_after = resp.headers.get("retry-after")
+    if resp.status_code == 429:
+        return w.ThrottleError(
+            message,
+            status=resp.status_code,
+            url=url,
+            retry_after=int(retry_after) if retry_after and retry_after.isdigit() else None,
+        )
+    return w.WorkflowWorldError(message, status=resp.status_code, url=url)
 
 
 # Lazy wire schema for EventResult — mirrors the JS SDK's EventResultLazyWireSchema.
@@ -232,14 +314,24 @@ class VercelWorld(w.World):
                 headers["x-vercel-trusted-oidc-idp-token"] = oidc_token
         return headers
 
+    @overload
+    async def _cbor_request(
+        self, method: str, endpoint: str, *, schema: type[T], data: Any = None
+    ) -> T: ...
+
+    @overload
+    async def _cbor_request(
+        self, method: str, endpoint: str, *, schema: pydantic.TypeAdapter[U], data: Any = None
+    ) -> U: ...
+
     async def _cbor_request(
         self,
         method: str,
         endpoint: str,
         *,
-        schema: type[T] | pydantic.TypeAdapter[T],
+        schema: type[T] | pydantic.TypeAdapter[Any],
         data: Any = None,
-    ) -> T:
+    ) -> Any:
         # utils.ts, getHttpConfig, makeRequest
         headers = await self._auth_headers()
 
@@ -604,4 +696,157 @@ class VercelWorld(w.World):
             "GET",
             f"/v3/runs/{run_id}/events{query}",
             schema=w.PaginatedResult[w.Event],
+        )
+
+    # ── streams ────────────────────────────────────────────────────────────
+
+    def _stream_path(self, run_id: str, name: str) -> str:
+        return f"/v2/runs/{_quote(run_id)}/stream/{_quote(name)}"
+
+    async def _write_stream_request(
+        self,
+        endpoint: str,
+        *,
+        body: bytes | None,
+        extra_headers: Mapping[str, str],
+        retry_status: frozenset[int],
+        operation: str,
+    ) -> None:
+        """PUT to a stream endpoint, retrying only what is safe to retry.
+
+        A chunk append is not idempotent, so *retry_status* decides what may be
+        resent. See :data:`_WRITE_RETRY_STATUS`.
+        """
+        headers = await self._auth_headers()
+        headers.update(extra_headers)
+        if body is not None:
+            headers["Content-Type"] = "application/octet-stream"
+
+        last_error: Exception | None = None
+        for attempt in range(_STREAM_MAX_ATTEMPTS):
+            try:
+                async with httpx.AsyncClient(
+                    base_url=self._base_url, headers=headers, timeout=None
+                ) as client:
+                    resp = await client.request("PUT", endpoint, content=body)
+            except httpx.TransportError as error:
+                # The request never reached a server that could have applied
+                # it, so resending cannot duplicate a chunk.
+                last_error = error
+                await _stream_retry_delay(attempt, None)
+                continue
+
+            if resp.is_success:
+                return
+
+            if resp.status_code in retry_status and attempt < _STREAM_MAX_ATTEMPTS - 1:
+                await _stream_retry_delay(attempt, resp.headers.get("retry-after"))
+                continue
+
+            raise _stream_http_error(operation, endpoint, resp, url=self._base_url + endpoint)
+
+        assert last_error is not None
+        raise w.WorkflowWorldError(
+            f"Stream {operation} failed after {_STREAM_MAX_ATTEMPTS} attempts: {last_error}",
+            status=0,
+            url=self._base_url + endpoint,
+        ) from last_error
+
+    async def streams_write(self, run_id: str, name: str, chunk: bytes) -> None:
+        await self._write_stream_request(
+            self._stream_path(run_id, name),
+            body=chunk,
+            extra_headers={},
+            retry_status=_WRITE_RETRY_STATUS,
+            operation="write",
+        )
+
+    async def streams_write_multi(self, run_id: str, name: str, chunks: Sequence[bytes]) -> None:
+        if not chunks:
+            return
+        # Page at the server's per-batch cap so an oversized flush is split
+        # rather than rejected whole. Atomicity relaxes across pages: an earlier
+        # page can land while a later one fails, and the caller retains its
+        # whole buffer, so a retry may duplicate. That beats refusing the write.
+        for start in range(0, len(chunks), _MAX_CHUNKS_PER_REQUEST):
+            batch = chunks[start : start + _MAX_CHUNKS_PER_REQUEST]
+            await self._write_stream_request(
+                self._stream_path(run_id, name),
+                body=_encode_multi_chunks(batch),
+                extra_headers={"X-Stream-Multi": "true"},
+                retry_status=_WRITE_RETRY_STATUS,
+                operation="write",
+            )
+
+    async def streams_close(self, run_id: str, name: str) -> None:
+        await self._write_stream_request(
+            self._stream_path(run_id, name),
+            body=None,
+            extra_headers={"X-Stream-Done": "true"},
+            # Close is idempotent, so a 5xx whose effect may or may not have
+            # applied is safe to resend -- and the server's close barrier relies
+            # on it, surfacing transient reconciliation as a retriable 503 with
+            # the stream left durably closing.
+            retry_status=_CLOSE_RETRY_STATUS,
+            operation="close",
+        )
+
+    def streams_get(
+        self, run_id: str, name: str, start_index: int | None = None
+    ) -> AsyncIterator[bytes]:
+        return self._iter_stream(run_id, name, start_index)
+
+    async def _iter_stream(
+        self, run_id: str, name: str, start_index: int | None
+    ) -> AsyncIterator[bytes]:
+        # The live read is v3, not v2, and that is load-bearing: on its
+        # max-duration timeout (or a mid-stream drop) v3 *errors* the response
+        # body where v2 closes it cleanly. Only the error tells a resuming
+        # reader that a timeout is not the end of the stream, so reading from v2
+        # would silently truncate any stream outliving the server's limit.
+        endpoint = f"/v3/runs/{_quote(run_id)}/stream/{_quote(name)}"
+        params = {} if start_index is None else {"startIndex": str(start_index)}
+        headers = await self._auth_headers()
+        # No timeout at all: this request is meant to stay open, and a
+        # whole-request deadline would cut a healthy stream off mid-flight.
+        async with httpx.AsyncClient(
+            base_url=self._base_url, headers=headers, timeout=None
+        ) as client:
+            async with client.stream("GET", endpoint, params=params) as resp:
+                if not resp.is_success:
+                    await resp.aread()
+                    raise _stream_http_error("read", endpoint, resp, url=self._base_url + endpoint)
+                async for chunk in resp.aiter_bytes():
+                    # The server flushes a leading empty chunk to commit
+                    # response headers before any data exists.
+                    if chunk:
+                        yield chunk
+
+    async def streams_list(self, run_id: str) -> list[str]:
+        return await self._cbor_request(
+            "GET",
+            f"/v2/runs/{_quote(run_id)}/streams",
+            schema=pydantic.TypeAdapter(list[str]),
+        )
+
+    async def streams_get_chunks(
+        self, run_id: str, name: str, *, limit: int | None = None, cursor: str | None = None
+    ) -> w.StreamChunksPage:
+        params = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor:
+            params["cursor"] = cursor
+        query = f"?{urllib.parse.urlencode(params)}" if params else ""
+        return await self._cbor_request(
+            "GET",
+            f"/v2/runs/{_quote(run_id)}/streams/{_quote(name)}/chunks{query}",
+            schema=w.StreamChunksPage,
+        )
+
+    async def streams_get_info(self, run_id: str, name: str) -> w.StreamInfo:
+        return await self._cbor_request(
+            "GET",
+            f"/v2/runs/{_quote(run_id)}/streams/{_quote(name)}/info",
+            schema=w.StreamInfo,
         )
