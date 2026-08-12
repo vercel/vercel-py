@@ -31,11 +31,13 @@ is being made on both sides at once.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,12 @@ _IS_CI = bool(os.getenv("CI"))
 # this is only here so that a run which never finishes fails the test instead of
 # hanging until the CI job's own timeout.
 RUN_DEADLINE_SECONDS = 30
+
+# How long a `workflow health` run gets. Generous on purpose: the command's own
+# health-check timeout is 30s, and a failure to answer should surface as its
+# report saying so -- which names what went wrong -- rather than as this
+# deadline firing first, which names nothing.
+CLI_DEADLINE_SECONDS = 90
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -443,3 +451,185 @@ async def test_cli_reads_the_stream_chunks_python_wrote(workflow_cli, py_run) ->
     chunks = _inspect_lines(workflow_cli, data_dir, "stream", stream_id(run_id), f"--run={run_id}")
 
     assert chunks == ["charging", {"amount": 21}, "notifying about 42"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# serving the flow route over real HTTP
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Everything above reads files. `workflow health` cannot: both of its transports
+# are HTTP requests to a running server -- `@workflow/world-local`'s queue *is*
+# an HTTP POST to `<baseUrl>/.well-known/workflow/v1/flow`, with no shared broker
+# to hand a message over on disk.
+#
+# So this stands up the half the SDK does not ship: a socket, and an app owner's
+# routing. That adapter is as much under test as the handler is; it is the same
+# shape as `workbench/python/app.py` in the `workflow` repo.
+
+
+@contextlib.contextmanager
+def _serving(handler: w.HTTPHandler, seen: list[str]) -> Iterator[str]:
+    """Serve *handler* on a real port for the duration of the block.
+
+    The server thread hands each request to the event loop the test runs on
+    rather than to one of its own: the world, its embedded queue service and the
+    subscribed handler all live there, and a second loop would mean two of
+    everything.
+    """
+    # Imported here because replay re-imports this module -- the one defining
+    # `checkout` -- inside the workflow sandbox, and executes its imports there.
+    # `import httpx` alone fails a run: `httpx/__init__` pulls in its CLI entry
+    # point, which pulls in `rich`, which calls `random.getrandbits()` on import.
+    import http.server
+    import threading
+
+    import httpx
+
+    class ServerRequest(w.HTTPRequest):
+        """One `BaseHTTPRequestHandler` request, as an SDK `HTTPRequest`.
+
+        The body arrives already read: the handler runs on the event loop, and
+        reading the socket from there would reach into another thread's file
+        object.
+        """
+
+        def __init__(self, method: str, target: str, headers: Any, body: bytes) -> None:
+            self._method = method
+            self._target = target
+            self._headers = httpx.Headers(headers.items())
+            self._body = body
+
+        @property
+        def method(self) -> str:
+            return self._method
+
+        @property
+        def url(self) -> str:
+            return self._target
+
+        @property
+        def headers(self) -> httpx.Headers:
+            return self._headers
+
+        async def aiter_bytes(self, chunk_size: int | None = None):
+            yield self._body
+
+    loop = asyncio.get_event_loop()
+
+    class Route(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _serve(self) -> None:
+            body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            seen.append(f"{self.command} {self.path}")
+            if self.path.split("?")[0] != runtime.FLOW_ROUTE:
+                self.send_response(404)
+                self.send_header("content-length", "0")
+                self.end_headers()
+                return
+            request = ServerRequest(self.command, self.path, self.headers, body)
+            future = asyncio.run_coroutine_threadsafe(handler(request), loop)
+            response = future.result(timeout=RUN_DEADLINE_SECONDS)
+            self.send_response(response.status)
+            for name, value in response.headers.items():
+                self.send_header(name, value)
+            self.send_header("content-length", str(len(response.body)))
+            self.end_headers()
+            self.wfile.write(response.body)
+
+        do_POST = do_GET = do_HEAD = do_OPTIONS = _serve
+
+        def log_message(self, *args: Any) -> None:
+            """Silence the default stderr access log."""
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Route)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=RUN_DEADLINE_SECONDS)
+
+
+async def _health(cli: Path, data_dir: Path, base_url: str) -> Any:
+    """Run ``workflow health --json`` against a server at *base_url*.
+
+    `WORKFLOW_LOCAL_BASE_URL` is what both halves of the command read: the CLI
+    resolves the URL to precheck from it, and `@workflow/world-local` publishes
+    the queue probe to it. Setting it also settles which port is used, instead
+    of leaving that to the CLI's port detection.
+
+    Run on the loop rather than through `subprocess.run`: this loop serves the
+    requests the command is waiting for, so blocking it would deadlock.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("WORKFLOW_")}
+    env.pop("DEBUG", None)
+    env["WORKFLOW_LOCAL_DATA_DIR"] = str(data_dir)
+    env["WORKFLOW_LOCAL_BASE_URL"] = base_url
+    env["WORKFLOW_NO_UPDATE_CHECK"] = "1"
+
+    process = await asyncio.create_subprocess_exec(
+        "node",
+        str(cli),
+        "health",
+        "--backend",
+        "local",
+        "--json",
+        cwd=data_dir,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), CLI_DEADLINE_SECONDS)
+    if process.returncode != 0:
+        raise AssertionError(
+            f"`workflow health` exited {process.returncode}\n"
+            f"--- stdout ---\n{stdout.decode()}\n--- stderr ---\n{stderr.decode()}"
+        )
+    return json.loads(stdout)
+
+
+async def test_cli_health_check_is_answered_by_python(workflow_cli, tmp_path, monkeypatch) -> None:
+    """The real `workflow health`, end to end, against a real Python endpoint.
+
+    The only test here where the CLI writes as well as reads, so it covers what
+    no file-format assertion can: that the probe Node publishes is recognised,
+    and that the answer its reader polls for is one it can parse. Every name in
+    the exchange -- queue topic, response stream, synthetic run -- is derived on
+    each side and never sent, so one drifting shows up here and nowhere else.
+    """
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    world = local_mod.LocalWorld()
+    w.set_world(world)
+    flow = runtime.workflow_entrypoint(registry)
+
+    # Start the embedded queue service from this task, before any request can.
+    # Its cancel scope has to be exited by the task that entered it, and the
+    # deliveries below run in tasks of their own -- so `aclose()` in the
+    # `finally` would fail if the first delivery had opened it.
+    await world._get_queue_client()
+
+    seen: list[str] = []
+    try:
+        with _serving(flow, seen) as base_url:
+            report = await _health(workflow_cli, tmp_path, base_url)
+    finally:
+        await world.aclose()
+
+    assert report["allHealthy"] is True, report
+    assert report["results"] == [
+        {
+            "endpoint": "workflow",
+            "healthy": True,
+            "latencyMs": report["results"][0].get("latencyMs"),
+        }
+    ]
+
+    # Both transports, in the order the command uses them: the HTTP probe as a
+    # reachability precheck, then the queue probe as the actual health check.
+    assert seen == [
+        f"POST {runtime.FLOW_ROUTE}?__health",
+        f"POST {runtime.FLOW_ROUTE}",
+    ]
