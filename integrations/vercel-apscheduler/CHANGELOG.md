@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 - 2026-08-12
+
+### Features
+
+- Job stores added under non-default aliases are now supported as source stores: read-only schedules owned by an external system. (#271)
+
 ## 0.1.0 - 2026-08-07
 
 ### Features

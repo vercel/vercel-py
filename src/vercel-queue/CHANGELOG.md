@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 - 2026-08-12
+
+### Features
+
+- Add `TopicPattern` for subscribing to several topics at once, and use a transport attached to a `Topic` or `TopicPattern` to decode that subscription's deliveries. (#266)
+- Allow custom queue transports to validate decoded subscriber payloads without requiring annotation-based Pydantic validation. (#281)
+
 ## 0.7.3 - 2026-08-07
 
 ### Internal
