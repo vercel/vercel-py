@@ -492,6 +492,39 @@ redis.call(
 return 1
 """
 
+_REARM_WAKE_SCRIPT = """
+-- vercel-apscheduler-v1:rearm-wake
+if redis.call("HGET", KEYS[1], "state") ~= "running" then
+  return 0
+end
+if redis.call("HGET", KEYS[1], "owner_deployment") ~= ARGV[3] then
+  return 0
+end
+if redis.call("HGET", KEYS[1], "active_owner") then
+  local dirty = redis.call("HGET", KEYS[1], "dirty_logical_time")
+  if not dirty or ARGV[1] < dirty then
+    redis.call("HSET", KEYS[1], "dirty_logical_time", ARGV[1])
+  end
+  return 1
+end
+if redis.call("HGET", KEYS[1], "start_status") ~= "active" then
+  return 0
+end
+local current = redis.call("HGET", KEYS[1], "current_logical_time")
+if not current or ARGV[1] < current then
+  local sequence = tonumber(redis.call("HGET", KEYS[1], "current_sequence") or "0") + 1
+  redis.call(
+    "HSET",
+    KEYS[1],
+    "current_sequence", tostring(sequence),
+    "current_logical_time", ARGV[1],
+    "current_status", "pending",
+    "updated_at", ARGV[2]
+  )
+end
+return 1
+"""
+
 _RENEW_SCRIPT = """
 -- vercel-apscheduler-v1:renew
 if redis.call("HGET", KEYS[1], "active_owner") ~= ARGV[1] then
@@ -854,6 +887,21 @@ class RedisDriver:
             self.deployment,
         )
         return bool(int(result))
+
+    def rearm_wake(self, candidate: datetime, now: datetime) -> None:
+        """Pull the current wake in to ``candidate`` when that is earlier.
+
+        The same rearm branch the job-write scripts run, without a job
+        write: a source store added to an already-active generation has no
+        job write to ride on, but still needs a wake that will read it.
+        """
+        now_utc = as_utc(now, name="now")
+        self._eval(
+            _REARM_WAKE_SCRIPT,
+            as_utc(candidate, name="candidate").isoformat(),
+            now_utc.isoformat(),
+            self.deployment,
+        )
 
     def owner_deployment(self) -> str | None:
         """Return the deployment currently driving this chain."""

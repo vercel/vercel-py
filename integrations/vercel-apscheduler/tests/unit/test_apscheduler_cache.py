@@ -16,6 +16,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 import vercel.cache.runtime_cache as runtime_cache_module
@@ -924,3 +925,23 @@ def test_cache_identity_defaults_without_a_mapping(
 
     assert backend.identity_ready(scheduler) is True
     assert backend.derive_identity(scheduler).scheduler_id == "default"
+
+
+def test_cache_backend_accepts_source_stores() -> None:
+    scheduler = BlockingScheduler(timezone=UTC)
+    scheduler.add_jobstore(MemoryJobStore(), "source")
+
+    stores = CacheBackend().validate_configuration(scheduler)
+
+    assert "source" in stores
+
+
+def test_cache_backend_rejects_a_durable_store_under_a_source_alias() -> None:
+    scheduler = BlockingScheduler(timezone=UTC)
+    scheduler.add_jobstore(CacheJobStore(), "secondary")
+
+    with pytest.raises(
+        APSchedulerConfigurationError,
+        match='durable store must be the one named "default"',
+    ):
+        CacheBackend().validate_configuration(scheduler)

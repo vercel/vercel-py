@@ -297,11 +297,14 @@ into one and must remain eligible after repairs should size it accordingly.
 
 ## Backends and execution requirements
 
-v1 supports exactly one job store named `default`. With APScheduler's
-Redis-backed `RedisJobStore` configured, it is also the lifecycle
-coordinator: the integration namespaces the job-store keys with the state
-scope and the scheduler identity, so distinct environments and previews can
-share a Redis database without sharing jobs or driver state. Redis lifecycle
+Exactly one durable job store, named `default`, coordinates the lifecycle;
+job stores under other aliases are source stores (see below), and a durable
+store type under a non-default alias is rejected at validation. With
+APScheduler's Redis-backed `RedisJobStore` configured as `default`, it is
+also the lifecycle coordinator: the integration namespaces the job-store
+keys with the state scope and the scheduler identity, so distinct
+environments and previews can share a Redis database without sharing jobs
+or driver state. Redis lifecycle
 state has no TTL, so use a durable Redis service rather than an ephemeral
 cache. Redis failures fail closed: lifecycle methods raise instead of
 claiming success, Queue handlers fail and are retried, and no job runs
@@ -353,6 +356,67 @@ already persisted, the declaration must permit replacement, but materializing
 the declaration does not overwrite the persisted runtime value. The
 `scheduled_job()` decorator enables replacement automatically; declaration
 calls to `add_job()` should pass `replace_existing=True`.
+
+## Source job stores
+
+Any job store added under a non-default alias is a *source store*: a store
+whose schedule an external system owns, typically a `BaseJobStore` subclass
+that materializes its data into jobs. The integration reads source stores
+but never manages them:
+
+- Each wake reads `get_due_jobs()` and runs the due jobs inline with stock
+  APScheduler semantics: after a run, a job with a further fire time is
+  advanced through the store's `update_job()`, and a finished one is
+  removed through `remove_job()`. A store may give `remove_job()` dispatch
+  semantics — claim a row, enqueue real work elsewhere — and the
+  integration calls it exactly where the stock scheduler loop would.
+- Declarations, takeover reconciliation, revision fencing, and the paused
+  interval rebase apply only to the durable store. Source entries that came
+  due while paused therefore still dispatch on the next evaluation; skip
+  semantics belong to the external system.
+- `add_job()` and the other mutation APIs may only target `default`;
+  targeting a source store raises a configuration error, and a mutation
+  whose `jobstore` is unset is pinned to `default` instead of APScheduler's
+  fall-through search across every store (a source store's `remove_job()`
+  can carry dispatch semantics, so an app-level removal must never reach
+  one).
+
+A source store's schedule changes out of band — rows appear or move without
+passing through scheduler APIs — and there is no polling to notice that.
+Each wake arms the successor at the exact earliest next run time across the
+durable store and every source store's `get_next_run_time()`, and a chain
+with nothing scheduled goes dormant, source stores or not. An out-of-band
+change is therefore picked up at the next chain-scheduled wake, or
+immediately when the application signals it: after writing a row whose due
+time is earlier than anything the chain knows about, call
+`scheduler.wakeup()` from a web Function on the deployment that drives the
+chain. The call recomputes the next due time across every store and pulls
+the current wake in to it (never later), exactly like APScheduler's native
+`wakeup()` recomputes the scheduler thread's wait.
+
+A source store may also appear after a generation is already active — a
+runtime `add_jobstore()`, or a process whose activation finds a running
+generation created before the store existed. Both paths rearm the current
+wake to the store's reported next due time, so a store present at boot
+needs no application-level `wakeup()` call for its existing rows.
+
+Delivery to source-store jobs is at least once, and the store owns its own
+dedup. Under Redis the active-owner lease serializes evaluation; under the
+cache backend claims are best-effort and duplicate wake executions are more
+likely. A store whose dispatch must not double should claim its rows
+conditionally (for example an atomic `UPDATE ... WHERE locked_at IS NULL`)
+before acting and treat zero claimed rows as already dispatched.
+
+Store failures are bounded, not fatal: a failing `get_due_jobs()` or
+`get_next_run_time()` retries on APScheduler's `jobstore_retry_interval`,
+and a failed `update_job()`/`remove_job()` — or a job the wake had to skip,
+for example one naming an unknown executor or one whose materialized form
+does not load — leaves the entry due and floors that store's contribution
+to the successor at the same retry interval, so a persistent failure
+retries on a bounded cadence instead of spinning immediate wakes. The
+store must still ensure *successfully* dispatched entries leave its due
+view; one that keeps reporting an overdue next run time it never clears
+will wake the chain immediately and continuously.
 
 ## Development under `vercel dev`
 

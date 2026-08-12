@@ -99,6 +99,15 @@ class Driver(Protocol):
 
     def snapshot(self) -> DriverSnapshot: ...
 
+    def rearm_wake(self, candidate: datetime, now: datetime) -> None:
+        """Pull the current wake in to ``candidate`` when that is earlier.
+
+        Owner-fenced. While a processing owner holds the driver, the
+        candidate folds into the dirty time instead, and the owner's one
+        successor honors it.
+        """
+        ...
+
     def repair_overdue_wake(self, now: datetime) -> WakeToken | bool | None:
         """Demote an overdue published wake back to pending.
 

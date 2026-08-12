@@ -21,12 +21,14 @@ from ._control import LifecyclePayload
 from ._executor import VercelInlineExecutor
 from ._imports import (
     EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_REMOVED,
     EVENT_JOB_SUBMITTED,
     STATE_PAUSED,
     STATE_RUNNING,
     STATE_STOPPED,
     BaseScheduler,
     IntervalTrigger,
+    JobEvent,
     JobSubmissionEvent,
     MaxInstancesReachedError,
 )
@@ -329,6 +331,7 @@ class SchedulerAdapter:
         self._reconcile_takeover(now)
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
+            self._rearm_wake_from_stores(now)
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
 
@@ -366,6 +369,7 @@ class SchedulerAdapter:
             return True
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
+            self._rearm_wake_from_stores(now)
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
         return True
@@ -519,6 +523,25 @@ class SchedulerAdapter:
             )
         return self.publish_pending_wakeup()
 
+    def _rearm_wake_from_stores(self, now: datetime | None = None) -> None:
+        """Pull the current wake in to the stores' exact next due time.
+
+        Source-store schedules change without a job write to ride on, so a
+        dormant or far-armed chain only learns about them here: at explicit
+        ``wakeup()`` calls, at a runtime ``add_jobstore()``, and at
+        activation against an already-active generation.
+        """
+        if not self.source_jobstores:
+            return
+        if not self._owns_namespace():
+            return
+        now_utc = as_utc(now or datetime.now(UTC), name="now")
+        next_time = self.get_next_wakeup_time(now_utc)
+        if next_time is None:
+            return
+        self.driver.rearm_wake(self.canonical_wakeup_time(next_time, now=now_utc), now_utc)
+        self.publish_pending_wakeup()
+
     def canonical_wakeup_time(
         self,
         logical_time: datetime,
@@ -607,17 +630,64 @@ class SchedulerAdapter:
             self._suppress_wakeup = previous
 
     def activate_generation(self, activation_time: datetime) -> None:
-        """Start locally and skip occurrences from the paused interval."""
+        """Start locally and skip occurrences from the paused interval.
+
+        Only the durable store is rebased: source entries that came due
+        while paused must still dispatch on the next evaluation.
+        """
         self.ensure_local_started()
         self._rebase_before(
             as_utc(activation_time, name="activation_time").astimezone(self.scheduler.timezone)
         )
 
-    def get_next_wakeup_time(self, reference_time: datetime) -> datetime | None:
-        """Return the exact next durable due time, if any."""
-        del reference_time
+    @property
+    def source_jobstores(self) -> dict[str, Any]:
+        """Non-default job stores, whose schedules an external system owns.
+
+        Read at each wake and at explicit ``wakeup()`` calls; never
+        declared into, reconciled, or rebased.
+        """
+        return {
+            alias: store for alias, store in self.scheduler._jobstores.items() if alias != "default"
+        }
+
+    def get_next_wakeup_time(
+        self,
+        reference_time: datetime,
+        *,
+        source_floors: dict[str, datetime] | None = None,
+    ) -> datetime | None:
+        """Return the exact next due time across the durable and source stores.
+
+        Source stores change out of band, and there is no polling: an entry
+        that appears after this wake is noticed at the next chain-scheduled
+        wake or at an explicit ``scheduler.wakeup()`` call. ``source_floors``
+        names stores that kept an entry due (a failed or skipped advance);
+        their overdue times are floored to the bounded retry so a persistent
+        failure cannot hot-spin the chain with immediate wakes.
+        """
+        reference = as_utc(reference_time, name="reference_time")
+        retry_delay = timedelta(seconds=self.scheduler.jobstore_retry_interval)
+        floors = source_floors or {}
         with self.scheduler._jobstores_lock:
-            return self.scheduler._jobstores["default"].get_next_run_time()
+            next_time = self.scheduler._jobstores["default"].get_next_run_time()
+            for alias, store in self.source_jobstores.items():
+                try:
+                    candidate = store.get_next_run_time()
+                    if candidate is not None:
+                        candidate = as_utc(candidate, name=f'job store "{alias}" next run time')
+                except Exception as exc:
+                    self._logger.warning(
+                        'Error getting the next run time from job store "%s": %s',
+                        alias,
+                        exc,
+                    )
+                    candidate = reference + retry_delay
+                floor = floors.get(alias)
+                if floor is not None:
+                    candidate = floor if candidate is None else max(candidate, floor)
+                next_time = earliest(next_time, candidate)
+        return next_time
 
     def process_wakeup(
         self,
@@ -638,15 +708,16 @@ class SchedulerAdapter:
         try:
             due_jobs, retry_time = self._plan_due_jobs(evaluation_time)
             self._submit_due_jobs(due_jobs, logical_time=evaluation_time)
+            source_job_ids, source_floors = self._dispatch_source_jobs(evaluation_time)
             next_wakeup_time = earliest(
                 retry_time,
-                self.get_next_wakeup_time(evaluation_time),
+                self.get_next_wakeup_time(evaluation_time, source_floors=source_floors),
             )
         finally:
             self._suppress_wakeup = previous
         return WakeupProcessingResult(
             logical_time=evaluation_time.astimezone(UTC),
-            due_job_ids=tuple(plan.job.id for plan in due_jobs),
+            due_job_ids=tuple(plan.job.id for plan in due_jobs) + tuple(source_job_ids),
             next_wakeup_time=(
                 next_wakeup_time.astimezone(UTC) if next_wakeup_time is not None else None
             ),
@@ -659,6 +730,12 @@ class SchedulerAdapter:
         replace_existing: bool,
     ) -> bool:
         jobstore = self.scheduler._lookup_jobstore(jobstore_alias)
+        if jobstore_alias != "default":
+            raise APSchedulerConfigurationError(
+                f'job store "{jobstore_alias}" is a source store owned by its '
+                "external system; scheduler-managed jobs may only target the "
+                'durable "default" store'
+            )
         if not self.backend.supports_store(jobstore):
             raise APSchedulerConfigurationError(
                 f"the {self.backend.name} backend does not support job store "
@@ -740,6 +817,12 @@ class SchedulerAdapter:
             return
         if self._suppress_wakeup or self.scheduler.state != STATE_RUNNING:
             return
+        # An explicit wakeup is the signal that a source store changed out
+        # of band: recompute the exact next due time across every store and
+        # pull the chain's wake in to it. Durable-store writes rearm
+        # transactionally, so without source stores publishing the pending
+        # wake is all that is left to do.
+        self._rearm_wake_from_stores()
         self.publish_pending_wakeup()
 
     def warn_ignored_queue_lifecycle(self, method: str) -> None:
@@ -779,6 +862,15 @@ class SchedulerAdapter:
             bound = backend.bind(self, scope=scope, deployment=deployment)
             self._driver = bound.driver
             self._coordinator = bound.coordinator
+            for alias, store in self.source_jobstores.items():
+                self._logger.info(
+                    'Job store "%s" (%s) is a source store: its due jobs run '
+                    "at each wake, and out-of-band schedule changes are "
+                    "noticed at the next chain-scheduled wake or at an "
+                    "explicit scheduler.wakeup() call",
+                    alias,
+                    type(store).__name__,
+                )
 
     @property
     def backend(self) -> Backend:
@@ -800,13 +892,14 @@ class SchedulerAdapter:
             self.scheduler.add_executor(VercelInlineExecutor(), "default")
 
     def _validate_materialized_jobs(self) -> None:
+        # Enumerating a source store can be a full table scan; its jobs are
+        # validated at dispatch instead.
         with self.scheduler._jobstores_lock:
-            for alias, jobstore in self.scheduler._jobstores.items():
-                for job in jobstore.get_all_jobs():
-                    if job.executor != "default":
-                        raise APSchedulerConfigurationError(
-                            f'job "{job.id}" in "{alias}" must use the default executor'
-                        )
+            for job in self.scheduler._jobstores["default"].get_all_jobs():
+                if job.executor != "default":
+                    raise APSchedulerConfigurationError(
+                        f'job "{job.id}" in "default" must use the default executor'
+                    )
 
     def _reconcile_takeover(self, now: datetime) -> None:
         """Sync code-declared jobs into a namespace another deployment wrote.
@@ -1001,6 +1094,147 @@ class SchedulerAdapter:
                         )
         return due_jobs, retry_time
 
+    def _dispatch_source_jobs(
+        self,
+        logical_time: datetime,
+    ) -> tuple[list[str], dict[str, datetime]]:
+        """Run due source-store jobs with stock ``_process_jobs`` semantics.
+
+        No revisions and no ownership fencing: delivery is at least once,
+        and a source store dedupes its own dispatch (see SCHEDULER.md).
+        Returns the submitted job ids and a retry floor for every store
+        that kept an entry due, so the successor cannot hot-spin on it.
+        """
+        submitted: list[str] = []
+        floors: dict[str, datetime] = {}
+        events: list[Any] = []
+        retry_time = logical_time + timedelta(seconds=self.scheduler.jobstore_retry_interval)
+        with self.scheduler._jobstores_lock:
+            for alias, store in self.source_jobstores.items():
+                try:
+                    due_jobs = store.get_due_jobs(logical_time)
+                except Exception as exc:
+                    self._logger.warning(
+                        'Error getting due jobs from job store "%s": %s',
+                        alias,
+                        exc,
+                    )
+                    floors[alias] = retry_time
+                    continue
+                store_submitted, needs_retry = self._run_due_source_jobs(
+                    alias,
+                    store,
+                    due_jobs,
+                    logical_time,
+                    events,
+                )
+                submitted.extend(store_submitted)
+                if needs_retry:
+                    floors[alias] = retry_time
+        for event in events:
+            self.scheduler._dispatch_event(event)
+        return submitted, floors
+
+    def _run_due_source_jobs(
+        self,
+        alias: str,
+        store: Any,
+        due_jobs: list[Any],
+        logical_time: datetime,
+        events: list[Any],
+    ) -> tuple[list[str], bool]:
+        """Submit one store's due jobs and advance them in the store.
+
+        A True result means at least one entry stayed due: a failed store
+        write abandons the store's remaining jobs, a malformed or skipped
+        job is stepped over, and either way the caller floors the store's
+        next wake to the bounded retry.
+        """
+        submitted: list[str] = []
+        needs_retry = False
+        for job in due_jobs:
+            try:
+                outcome, submitted_id = self._run_source_job(
+                    alias, store, job, logical_time, events
+                )
+            except Exception:
+                # A user-written store can materialize a malformed job;
+                # step over it instead of stalling the wake.
+                self._logger.exception('Error running a job from source store "%s"', alias)
+                needs_retry = True
+                continue
+            if submitted_id is not None:
+                submitted.append(submitted_id)
+            if outcome == "abort":
+                return submitted, True
+            if outcome == "skipped":
+                needs_retry = True
+        return submitted, needs_retry
+
+    def _run_source_job(
+        self,
+        alias: str,
+        store: Any,
+        job: Any,
+        logical_time: datetime,
+        events: list[Any],
+    ) -> tuple[str, str | None]:
+        """Run one due source job and advance it through its store.
+
+        Returns "ok" when the job advanced, "skipped" when it stayed due,
+        and "abort" when the store write failed.
+        """
+        try:
+            executor = self.scheduler._lookup_executor(job.executor)
+        except Exception:
+            # Upstream removes the job here, but a source store's remove
+            # can carry dispatch semantics; skip instead.
+            self._logger.error(
+                'Executor lookup ("%s") failed for job "%s" in source store "%s"; skipping it',
+                getattr(job, "executor", None),
+                job.id,
+                alias,
+            )
+            return "skipped", None
+        run_times = job._get_run_times(logical_time)
+        if run_times and job.coalesce:
+            run_times = run_times[-1:]
+        if not run_times:
+            return "ok", None
+        submitted_id: str | None = None
+        try:
+            if hasattr(executor, "set_reference_time"):
+                executor.set_reference_time(logical_time)
+            executor.submit_job(job, run_times)
+        except MaxInstancesReachedError:
+            events.append(JobSubmissionEvent(EVENT_JOB_MAX_INSTANCES, job.id, alias, run_times))
+        except Exception:
+            self._logger.exception(
+                'Error submitting job "%s" to executor "%s"',
+                job,
+                job.executor,
+            )
+        else:
+            events.append(JobSubmissionEvent(EVENT_JOB_SUBMITTED, job.id, alias, run_times))
+            submitted_id = str(job.id)
+        next_run_time = job.trigger.get_next_fire_time(run_times[-1], logical_time)
+        if next_run_time is not None:
+            job._modify(next_run_time=next_run_time)
+        try:
+            if next_run_time is not None:
+                store.update_job(job)
+            else:
+                store.remove_job(job.id)
+                events.append(JobEvent(EVENT_JOB_REMOVED, job.id, alias))
+        except Exception:
+            self._logger.exception(
+                'Error advancing job "%s" in source store "%s"',
+                job.id,
+                alias,
+            )
+            return "abort", submitted_id
+        return "ok", submitted_id
+
     def _submit_due_jobs(
         self,
         due_jobs: list[_DueJobPlan],
@@ -1191,6 +1425,13 @@ def _patched_add_jobstore(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any
     adapter = get_adapter(self)
     if adapter is not None and adapter._registration_deferred:
         _register_queues_when_ready(self, adapter)
+    alias = kwargs.get("alias", args[1] if len(args) > 1 else "default")
+    if adapter is None or alias == "default" or not adapter._lifecycle_called:
+        return result
+    if is_vercel_runtime() and not is_discovery_runtime() and not is_queue_serving_runtime():
+        # A source store added after activation gets no wake from any other
+        # path; pull the chain in to its reported next due time.
+        adapter._rearm_wake_from_stores()
     return result
 
 
@@ -1234,18 +1475,57 @@ def _patched_real_add_job(
     return _original("real_add_job")(self, job, jobstore_alias, replace_existing)
 
 
+# Positional index of the jobstore alias in each patched mutation's
+# arguments (after self).
+_MUTATION_JOBSTORE_INDEX = {
+    "modify_job": 1,
+    "remove_job": 1,
+    "resume_job": 1,
+    "remove_all_jobs": 0,
+}
+
+
+def _pin_mutation_to_default(
+    name: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Pin a durable mutation to the default store.
+
+    Stock APScheduler lets ``jobstore=None`` fall through to every store,
+    but a source store's ``remove_job`` can carry dispatch semantics, so an
+    app-level mutation must never reach one.
+    """
+    index = _MUTATION_JOBSTORE_INDEX[name]
+    if len(args) > index:
+        alias = args[index]
+        if alias is None:
+            args = (*args[:index], "default", *args[index + 1 :])
+            alias = "default"
+    else:
+        alias = kwargs.get("jobstore")
+        if alias is None:
+            kwargs = {**kwargs, "jobstore": "default"}
+            alias = "default"
+    if alias != "default":
+        raise APSchedulerConfigurationError(
+            f'scheduler-managed jobs may only target the durable "default" '
+            f'job store, not "{alias}"; source stores are owned by their '
+            "external system"
+        )
+    return args, kwargs
+
+
 def _patched_mutation(name: str) -> Callable[..., Any]:
     """Runtime job mutations run inside one repair-aware mutation scope."""
 
     def patched(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any:
         original = _original(name)
         adapter = get_adapter(self)
-        if (
-            adapter is None
-            or not is_vercel_runtime()
-            or is_discovery_runtime()
-            or is_queue_serving_runtime()
-        ):
+        if adapter is None or not is_vercel_runtime() or is_discovery_runtime():
+            return original(self, *args, **kwargs)
+        args, kwargs = _pin_mutation_to_default(name, args, kwargs)
+        if is_queue_serving_runtime():
             return original(self, *args, **kwargs)
         with adapter.runtime_mutation():
             return original(self, *args, **kwargs)

@@ -10,6 +10,7 @@ from ..._imports import RedisJobStore
 from ..._options import _SchedulerIdentity
 from ..._types import APSchedulerConfigurationError
 from .._protocols import Driver, JobCoordinator
+from ..cache import CacheJobStore
 from ._driver import RedisDriver
 from ._jobstore import RedisJobCoordinator
 
@@ -24,25 +25,27 @@ class _Bound:
     coordinator: JobCoordinator
 
 
+def _is_durable_store_type(store: Any) -> bool:
+    return isinstance(store, (RedisJobStore, CacheJobStore))
+
+
 class RedisBackend:
     name = "redis"
 
     def validate_configuration(self, scheduler: Any) -> dict[str, Any]:
         stores = scheduler._jobstores
-        if "default" not in stores:
+        if not isinstance(stores.get("default"), RedisJobStore):
             raise APSchedulerConfigurationError(
                 "vercel-apscheduler requires a configured default RedisJobStore"
             )
-        if set(stores) != {"default"}:
-            aliases = ", ".join(sorted(stores))
-            raise APSchedulerConfigurationError(
-                "vercel-apscheduler v1 supports exactly one job store named "
-                f'"default"; configured: {aliases}'
-            )
-        if not isinstance(stores["default"], RedisJobStore):
-            raise APSchedulerConfigurationError(
-                "vercel-apscheduler requires a configured default RedisJobStore"
-            )
+        for alias, store in stores.items():
+            if alias != "default" and _is_durable_store_type(store):
+                raise APSchedulerConfigurationError(
+                    f'job store "{alias}" is a {type(store).__name__}, but '
+                    'the durable store must be the one named "default"; '
+                    "non-default stores are source stores owned by their "
+                    "external system"
+                )
         return cast("dict[str, Any]", dict(stores))
 
     def supports_store(self, store: Any) -> bool:
@@ -72,6 +75,9 @@ class RedisBackend:
         tag = f"{{{scope}:{adapter.identity.scheduler_id}}}"
         expected_namespace = (scope, adapter.identity.scheduler_id)
         for alias, store in stores.items():
+            if not isinstance(store, RedisJobStore):
+                # Source stores keep their own keys.
+                continue
             namespace = getattr(store, "_vercel_apscheduler_namespace", None)
             if namespace is not None and namespace != expected_namespace:
                 raise APSchedulerConfigurationError(

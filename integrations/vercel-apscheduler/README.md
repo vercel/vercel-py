@@ -49,11 +49,14 @@ installs the integration, and extracts its internal Queue subscriptions from
 the same registry used by Celery and Dramatiq. Topic names, consumer groups,
 scheduler IDs, and installation hooks are not application configuration.
 
-No Vercel-specific job store is required. v1 requires exactly one job store,
-named `default`, and it must be APScheduler's Redis-backed `RedisJobStore`.
-The integration uses that store's configured Redis client for its internal
-lifecycle coordination. A missing `REDIS_URL` fails the import with a
-`KeyError`, which is intended: there is no implicit localhost fallback.
+No Vercel-specific job store is required. The durable job store must be the
+one named `default`, and for the Redis backend it must be APScheduler's
+Redis-backed `RedisJobStore`. The integration uses that store's configured
+Redis client for its internal lifecycle coordination. Additional job stores
+under other aliases are treated as source stores — read-only views whose
+schedules an external system (typically a database) owns. A missing `REDIS_URL`
+fails the import with a `KeyError`, which is intended: there is no implicit
+localhost fallback.
 
 Set explicit socket timeouts on the connection pool, as shown above. The
 runtime performs its automatic-activation Redis work around request handling,
@@ -247,7 +250,9 @@ messages themselves rather than shared state.
 ## v1 restrictions
 
 - APScheduler 3.x only.
-- Exactly one Redis-backed job store named `default`.
+- Exactly one durable job store, named `default` (Redis-backed on the Redis
+  backend). Other aliases hold source stores, which the scheduler reads but
+  never manages.
 - The default inline executor only; custom thread/process executors are
   rejected.
 - Jobs declared in code need explicit stable IDs.
