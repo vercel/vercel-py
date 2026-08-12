@@ -9,7 +9,7 @@ declaration instead of buried thirty lines down.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 
 from vercel._internal.workflow import world as w
 
@@ -32,7 +32,7 @@ class NoStreams:
 
     def streams_get(
         self, run_id: str, name: str, start_index: int | None = None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         raise NotImplementedError
 
     async def streams_list(self, run_id: str) -> list[str]:

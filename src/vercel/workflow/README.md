@@ -94,9 +94,23 @@ async def analyze(*, document: str) -> str:
     return summary
 ```
 
-`get_writable()` works inside a step only. Where the TypeScript SDK lets a
-workflow body take a handle and pass it into a step, here it cannot yet, so each
-step that streams calls `get_writable()` itself.
+A workflow body can call `get_writable()` too and pass the result to its steps,
+which take it as a `WorkflowWritable` and write to it:
+
+```python
+@app.step
+async def summarize(*, document: str, out: WorkflowWritable) -> str:
+    await out.write("starting")
+    ...
+
+
+@app.workflow
+async def analyze(*, document: str) -> str:
+    out = get_writable()
+    return await summarize(document=document, out=out)
+```
+
+Only a step can write. Calling `write()` on what the workflow body holds raises.
 
 Chunks are values, not just bytes: anything the payload format carries (see
 below) can be written, and a reader gets it back. A `bytes` chunk arrives on the
@@ -123,12 +137,41 @@ Three things are worth knowing:
 `async with get_writable() as writable:` closes the stream on the way out — on
 the clean path only, so a step that raises leaves the stream open for its retry.
 
-There is no public reader yet. A stream is consumed today by the TypeScript SDK
-(`run.readable`), the dashboard, or `workflow inspect stream <id> --run=<run-id>`.
-Python can read one through the world (`streams_get()` yields transport bytes,
-`FrameDecoder` turns them into payloads), but those live under
-`vercel._internal` and have no auto-reconnect, so a long read will not survive
-the server's stream timeout.
+### Reading it back
+
+`run.readable()` yields the values as they are written, and ends when a step
+closes the stream:
+
+```python
+run = await start(analyze, document=text)
+
+async for chunk in run.readable():
+    print(chunk)
+```
+
+`run.readable_bytes()` is the same thing narrowed to `bytes`, which is what an
+HTTP body wants — hand it to a streaming response as-is.
+
+Pass `start_index` to resume: a positive index picks up exactly where a client
+left off, a negative one reads that many chunks back from the end. Only the
+positive form survives a dropped connection, because a negative index resolves
+against wherever the tail happened to be when it connected.
+
+```python
+async for chunk in run.readable(start_index=last_seen + 1):
+    ...
+```
+
+A read reconnects on its own when the transport drops, which it will: the
+server ends a long read at its own time limit. Resuming is exact, so nothing is
+duplicated or skipped.
+
+`run.stream_info()` gives the last chunk index and whether the stream is closed
+(`tail_index` is `-1` before anything is written), `run.list_streams()` lists
+every stream the run has, and `read_stream(run_id, name)` reads one by name.
+
+The same stream is readable from the TypeScript SDK (`run.readable`), the
+dashboard, and `workflow inspect stream <id> --run=<run-id>`.
 
 ## Serializing your own types
 

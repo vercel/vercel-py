@@ -4,7 +4,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from datetime import datetime
 from typing import (
     Annotated,
@@ -1008,7 +1008,7 @@ class World(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def streams_get(
         self, run_id: str, name: str, start_index: int | None = None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         """Read a stream live, waiting for chunks that have not arrived yet.
 
         The iterator ends when the stream is closed, not when it runs out of

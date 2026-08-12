@@ -22,9 +22,12 @@ frame boundaries without understanding the payload format at all.
 
 from __future__ import annotations
 
+import abc
 import base64
+import contextlib
+import dataclasses
 import os
-from collections.abc import AsyncIterable, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -54,6 +57,12 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     Mirrors `@workflow/world`'s ``envNumber``: an unset, non-numeric or
     out-of-range value is ignored rather than fatal, since these are
     operational overrides and a typo should not take a deployment down.
+
+    Every caller reads the knob where it uses it, rather than into a module
+    global once at import, so an override still applies when the environment
+    is populated after this module loads -- which is how the tests set these,
+    and how the JS side reads its own (``envNumber`` behind a getter, called
+    per use).
     """
     raw = os.getenv(name)
     if raw is None:
@@ -143,6 +152,92 @@ class FrameDecoder:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# reader
+# ═══════════════════════════════════════════════════════════════════════════
+
+MAX_RECONNECTS = 50
+"""How many reconnects in a row may deliver nothing before the read gives up.
+
+Any reconnect that delivers a frame resets this to zero, so it measures being
+stuck, not how often the connection dropped -- a read that runs for hours may
+reconnect far more than 50 times and never come close. Same value as
+`@workflow/core`'s ``FRAMED_STREAM_MAX_RECONNECTS``.
+"""
+
+MAX_TOTAL_RECONNECTS = 1000
+"""How many reconnects in total. Never resets.
+
+The cap above resets whenever a frame arrives, which works as long as a new
+frame really means the read moved forward. A backend that ignored
+``start_index`` would re-send the same old frames after every break, so it
+would reset forever and the read would never end. This one cannot reset.
+"""
+
+
+async def reconnecting_frames(
+    world: w.World, run_id: str, name: str, start_index: int | None = None
+) -> AsyncGenerator[bytes, None]:
+    """Read a stream's frames, reopening the connection when it breaks.
+
+    A live read is long-lived and the transport under it is not: the Vercel
+    world's read endpoint errors the response body when the server's max
+    duration expires, which is what tells this loop apart from the end of the
+    stream. A clean end of iteration means the stream is closed and the read is
+    done; an error means reopen at the next unread frame and carry on.
+
+    Resuming is exact because one frame is one stored chunk, so the position is
+    ``start_index`` plus the frames already handed to the caller. Bytes of a
+    frame that had not fully arrived are dropped -- the reopened connection
+    re-sends that chunk whole.
+
+    A negative *start_index* (last-N) cannot be resumed: its meaning depends on
+    where the tail was at connect time, and re-resolving it after a break would
+    silently move the window. Such a read is single-shot.
+    """
+    resumable = start_index is None or start_index >= 0
+    position = start_index or 0
+    consumed = 0
+    consecutive = 0
+    total = 0
+    max_reconnects = _env_int("WORKFLOW_FRAMED_STREAM_MAX_RECONNECTS", MAX_RECONNECTS)
+    max_total = _env_int("WORKFLOW_FRAMED_STREAM_MAX_TOTAL_RECONNECTS", MAX_TOTAL_RECONNECTS)
+
+    while True:
+        # A fresh decoder per connection: whatever partial frame the broken
+        # connection left behind is not continued, it is re-sent.
+        decoder = FrameDecoder()
+        effective = position + consumed if resumable else start_index
+        try:
+            source = world.streams_get(run_id, name, effective)
+            async with contextlib.aclosing(source):
+                async for data in source:
+                    for payload in decoder.feed(data):
+                        consumed += 1
+                        consecutive = 0
+                        yield payload
+        except Exception as error:
+            if not resumable:
+                raise
+            consecutive += 1
+            total += 1
+            if consecutive > max_reconnects:
+                raise ser.SerializationError(
+                    f"Stream {name!r} exceeded {max_reconnects} consecutive reconnection attempts"
+                ) from error
+            if total > max_total:
+                raise ser.SerializationError(
+                    f"Stream {name!r} exceeded {max_total} total reconnection attempts"
+                ) from error
+            position += consumed
+            consumed = 0
+            continue
+
+        # Iteration ended without error: the stream is closed and complete.
+        decoder.finish()
+        return
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # writer
 # ═══════════════════════════════════════════════════════════════════════════
 #
@@ -176,7 +271,99 @@ MAX_BYTES_PER_BATCH = 1024 * 1024
 """Cumulative bytes in one write request, under platform body limits."""
 
 
-class WorkflowStreamWriter:
+class WorkflowWritable(abc.ABC):
+    """One of a run's streams, as :func:`vercel.workflow.get_writable` hands it out.
+
+    Two classes implement it. In a step it is a :class:`WorkflowStreamWriter`
+    and every method works. In a workflow body it is a
+    :class:`WorkflowStreamHandle`, which refers to the stream but refuses to
+    write to it.
+
+    One interface rather than two so that a workflow can take a writable and
+    pass it to a step without the type changing on the way, which is also how
+    `@workflow/core` does it -- its workflow-side `getWritable()` returns
+    something with `WritableStream`'s prototype whose methods throw.
+    """
+
+    @property
+    @abc.abstractmethod
+    def run_id(self) -> str:
+        """The run that owns the stream."""
+
+    @property
+    @abc.abstractmethod
+    def name(self) -> str:
+        """The stream this writes to."""
+
+    @abc.abstractmethod
+    async def write(self, value: Any) -> None:
+        """Append *value* as one chunk."""
+
+    @abc.abstractmethod
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        """Append every item *source* yields, in order."""
+
+    @abc.abstractmethod
+    async def drain(self) -> None:
+        """Wait until every accepted chunk is durably written."""
+
+    @abc.abstractmethod
+    async def close(self) -> None:
+        """Mark the stream complete, ending its readers."""
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkflowStreamHandle(WorkflowWritable):
+    """A reference to a stream, writable only once it reaches a step.
+
+    A workflow body re-executes on every replay and its sandbox has no network,
+    so writing from there is not on offer -- but referring to the stream is,
+    and that is what a step needs. Pass the handle into a step and it arrives
+    as a :class:`WorkflowStreamWriter`. Hydrating a payload outside a step
+    yields a handle for the same reason: a writer sends from a task the step
+    handler owns, and there is no such owner out there.
+
+    Deterministic by construction: the stream name is derived from the run id
+    and the namespace, so a replay produces the same handle rather than
+    pointing a later attempt at a different stream.
+    """
+
+    # Underscored because the interface declares `run_id` and `name` as
+    # properties, and a dataclass field only annotates -- it puts nothing in the
+    # class body for `abc` to see as the implementation. Constructed
+    # positionally, so the names stay out of the way.
+    _run_id: str
+    _name: str
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def _refuse(self) -> RuntimeError:
+        return RuntimeError(
+            f"cannot write to stream {self._name!r} from here: a workflow body re-runs "
+            f"on every replay and cannot reach the network, and outside a run there is "
+            f"nothing to carry the sends. Pass this to a step and write to it there."
+        )
+
+    async def write(self, value: Any) -> None:
+        raise self._refuse()
+
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        raise self._refuse()
+
+    async def drain(self) -> None:
+        raise self._refuse()
+
+    async def close(self) -> None:
+        raise self._refuse()
+
+
+class WorkflowStreamWriter(WorkflowWritable):
     """A stream that workflow steps can write to.
 
     Sending happens in a task of *task_group*, not in ``write()``, which is
