@@ -223,6 +223,7 @@ class BaseWorkflowRun(BaseModel):
     # Plaintext string-string metadata. Always materialized (as `{}` when
     # unset) so a run row carries the same field set the TS SDK writes.
     attributes: dict[str, str] = pydantic.Field(default_factory=dict)
+    encryption_public_key: str | None = pydantic.Field(default=None, alias="encryptionPublicKey")
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
     started_at: datetime | None = pydantic.Field(default=None, alias="startedAt")
     completed_at: datetime | None = pydantic.Field(default=None, alias="completedAt")
