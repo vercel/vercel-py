@@ -22,15 +22,18 @@ frame boundaries without understanding the payload format at all.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import os
 from collections.abc import AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
+import anyio
+
 from . import serialization as ser
 
 if TYPE_CHECKING:
+    from anyio.abc import TaskGroup
+
     from . import world as w
 
 FRAME_HEADER_SIZE = 4
@@ -176,6 +179,11 @@ MAX_BYTES_PER_BATCH = 1024 * 1024
 class WorkflowStreamWriter:
     """A stream that workflow steps can write to.
 
+    Sending happens in a task of *task_group*, not in ``write()``, which is
+    what lets a producer keep filling the buffer while a request is in flight.
+    The group therefore has to outlive every write and the final
+    :meth:`drain` -- the step handler owns one for exactly that span.
+
     Not safe to use from more than one event loop; within one loop, concurrent
     writers are fine and their chunks land in call order.
     """
@@ -186,6 +194,7 @@ class WorkflowStreamWriter:
         world: w.World,
         run_id: str,
         name: str,
+        task_group: TaskGroup,
         reentrant_ctx_on_err: bool = True,
     ) -> None:
         if not name:
@@ -193,6 +202,7 @@ class WorkflowStreamWriter:
         self._world = world
         self._run_id = run_id
         self._name = name
+        self._task_group = task_group
 
         self._buffer: list[bytes] = []
         self._buffered_bytes = 0
@@ -201,7 +211,7 @@ class WorkflowStreamWriter:
         # not just on the queued follow-up group.
         self._inflight_chunks = 0
         self._inflight_bytes = 0
-        self._dispatch: asyncio.Task[None] | None = None
+        self._dispatching = False
         # Sticky: once a request fails, its group stays at the head of the
         # buffer and every later call raises the original error. Chunks whose
         # `write()` already returned surface their failure at the barrier --
@@ -209,11 +219,11 @@ class WorkflowStreamWriter:
         self._sink_error: BaseException | None = None
         self._closed = False
         # Every critical section under this condition is await-free -- the only
-        # `await` taken while holding it is `wait()`, which releases it. The
-        # cancellation handler in `_dispatch_loop` depends on that: re-acquiring
-        # there must not suspend, or a second cancel could land mid-restore and
-        # drop the in-flight group.
-        self._condition = asyncio.Condition()
+        # `await` taken while holding it is `wait()`, which releases it. That
+        # keeps the restore in `_dispatch_loop`'s cancellation handler short
+        # enough to run under a shield without holding cancellation off for
+        # anything that can block.
+        self._condition = anyio.Condition()
 
         self._max_inflight_chunks = _env_int(
             "WORKFLOW_STREAM_MAX_INFLIGHT_CHUNKS", MAX_INFLIGHT_CHUNKS
@@ -289,8 +299,9 @@ class WorkflowStreamWriter:
         Exactly one runs at a time, which is what keeps groups reaching the
         server in write order. Called with the condition held.
         """
-        if self._dispatch is None and self._sink_error is None and self._buffer:
-            self._dispatch = asyncio.ensure_future(self._dispatch_loop())
+        if not self._dispatching and self._sink_error is None and self._buffer:
+            self._dispatching = True
+            self._task_group.start_soon(self._dispatch_loop)
 
     def _take_group(self) -> tuple[list[bytes], int]:
         """The largest leading group that fits one request.
@@ -317,14 +328,22 @@ class WorkflowStreamWriter:
         self._buffered_bytes += octets
         self._inflight_chunks = 0
         self._inflight_bytes = 0
-        self._dispatch = None
+        self._dispatching = False
 
     async def _dispatch_loop(self) -> None:
+        """Send buffered groups until the buffer runs dry.
+
+        Runs as a task in the owner's group, so raising here would tear down
+        the step that is writing. It doesn't: a send failure is reported by
+        poisoning the sink, which is where ``write()`` and ``drain()`` already
+        look. Cancellation still propagates -- that is the group taking the
+        loop down rather than the loop failing.
+        """
         try:
             while True:
                 async with self._condition:
                     if not self._buffer:
-                        self._dispatch = None
+                        self._dispatching = False
                         # Nothing buffered and nothing in flight: the
                         # durability barrier is satisfied.
                         self._condition.notify_all()
@@ -335,16 +354,19 @@ class WorkflowStreamWriter:
 
                 try:
                     await self._send(group)
-                except asyncio.CancelledError:
-                    async with self._condition:
-                        self._put_back_group(group, octets)
-                        self._condition.notify_all()
-                    raise
                 except BaseException as error:
-                    async with self._condition:
-                        self._put_back_group(group, octets)
-                        self._sink_error = error
-                        self._condition.notify_all()
+                    cancelled = isinstance(error, anyio.get_cancelled_exc_class())
+                    # Shielded because acquiring the condition is a checkpoint:
+                    # in a cancelled task it would raise instead, leaving the
+                    # group booked as in flight forever.
+                    with anyio.CancelScope(shield=True):
+                        async with self._condition:
+                            self._put_back_group(group, octets)
+                            if not cancelled:
+                                self._sink_error = error
+                            self._condition.notify_all()
+                    if cancelled:
+                        raise
                     return
 
                 async with self._condition:
@@ -354,17 +376,20 @@ class WorkflowStreamWriter:
                     # bound. They re-check it and may block again.
                     self._condition.notify_all()
         except BaseException as error:
-            # Cancellation, or a bug in the loop itself. Either way no one is
-            # driving this buffer any more, so waiters have to be released --
-            # and for anything that is not cancellation the sink is poisoned
-            # too, because `drain()` would otherwise see an idle buffer, start
-            # a fresh loop, and hit the same bug forever.
-            async with self._condition:
-                self._dispatch = None
-                if not isinstance(error, asyncio.CancelledError):
-                    self._sink_error = error
-                self._condition.notify_all()
-            raise
+            # Cancellation outside `_send`, or a bug in the loop itself. Either
+            # way no one is driving this buffer any more, so waiters have to be
+            # released -- and for anything that is not cancellation the sink is
+            # poisoned too, because `drain()` would otherwise see an idle
+            # buffer, start a fresh loop, and hit the same bug forever.
+            cancelled = isinstance(error, anyio.get_cancelled_exc_class())
+            with anyio.CancelScope(shield=True):
+                async with self._condition:
+                    self._dispatching = False
+                    if not cancelled:
+                        self._sink_error = error
+                    self._condition.notify_all()
+            if cancelled:
+                raise
 
     async def _send(self, group: Sequence[bytes]) -> None:
         if len(group) == 1:
@@ -382,7 +407,7 @@ class WorkflowStreamWriter:
             while True:
                 if self._sink_error is not None:
                     raise self._sink_error
-                if not self._buffer and self._inflight_chunks == 0 and self._dispatch is None:
+                if not self._buffer and self._inflight_chunks == 0 and not self._dispatching:
                     return
                 self._start_dispatch()
                 await self._condition.wait()
