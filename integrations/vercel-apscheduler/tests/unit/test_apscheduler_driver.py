@@ -21,6 +21,36 @@ def test_payloads_round_trip_generation_and_sequence() -> None:
     assert WakeupPayload.from_payload(wake.to_payload()) == wake
 
 
+def test_payloads_round_trip_idle_boundedness() -> None:
+    start = StartPayload("scheduler_scheduler", 3, idle_bounded=True)
+    wake = WakeupPayload(
+        "scheduler_scheduler",
+        3,
+        7,
+        datetime(2026, 7, 30, 12, 0, tzinfo=UTC),
+        idle_bounded=True,
+    )
+
+    assert StartPayload.from_payload(start.to_payload()).idle_bounded is True
+    assert WakeupPayload.from_payload(wake.to_payload()).idle_bounded is True
+
+
+def test_payloads_without_the_idle_field_parse_as_unbounded() -> None:
+    """Messages published before the field existed keep working."""
+    start = StartPayload("scheduler_scheduler", 3).to_payload()
+    wake = WakeupPayload(
+        "scheduler_scheduler",
+        3,
+        7,
+        datetime(2026, 7, 30, 12, 0, tzinfo=UTC),
+    ).to_payload()
+    del start["idle_bounded"]
+    del wake["idle_bounded"]
+
+    assert StartPayload.from_payload(start).idle_bounded is False
+    assert WakeupPayload.from_payload(wake).idle_bounded is False
+
+
 def test_far_future_wakes_bridge_without_an_idle_poll() -> None:
     now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
     due = now + timedelta(seconds=70)

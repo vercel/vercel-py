@@ -91,6 +91,7 @@ def _process_start(
         payload.generation,
         owner,
         datetime.now(UTC),
+        idle_bounded=payload.idle_bounded,
     )
     if claim.state == "busy":
         raise vqs.RetryAfter(BUSY_RETRY_SECONDS)
@@ -143,7 +144,12 @@ def _process_wakeup(
 
     token = payload.to_token()
     owner = uuid4().hex
-    claim = adapter.driver.claim_wake(token, owner, datetime.now(UTC))
+    claim = adapter.driver.claim_wake(
+        token,
+        owner,
+        datetime.now(UTC),
+        idle_bounded=payload.idle_bounded,
+    )
     if claim.state == "busy":
         raise vqs.RetryAfter(BUSY_RETRY_SECONDS)
     if claim.state == "stale":
