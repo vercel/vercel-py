@@ -1406,32 +1406,31 @@ def test_source_store_rows_dispatch_on_wakeup() -> None:
     assert source.dispatched == ["sub-1"]
     assert "sub-1" in result.due_job_ids
     assert source.rows == {}
-    # Nothing left in any store: the poll cap keeps the chain alive.
-    assert result.next_wakeup_time is not None
-    assert result.next_wakeup_time >= now + timedelta(seconds=29)
-    assert result.next_wakeup_time <= datetime.now(UTC) + timedelta(seconds=30)
+    # Nothing left in any store: no polling, the chain goes dormant.
+    assert result.next_wakeup_time is None
 
 
-def test_source_store_poll_cap_bounds_an_idle_chain() -> None:
+def test_empty_source_store_lets_the_chain_go_dormant() -> None:
     _scheduler, adapter, _driver, source = scheduler_with_source_store()
     now = datetime.now(UTC)
-    source.rows["sub-far"] = now + timedelta(days=30)
 
     result = adapter.process_wakeup(now)
 
     assert source.dispatched == []
-    assert result.next_wakeup_time is not None
-    assert result.next_wakeup_time <= datetime.now(UTC) + timedelta(seconds=30)
+    assert result.next_wakeup_time is None
 
 
-def test_source_store_near_due_time_is_trusted_below_the_poll_cap() -> None:
+def test_source_store_next_run_time_is_trusted_exactly() -> None:
     _scheduler, adapter, _driver, source = scheduler_with_source_store()
     now = datetime.now(UTC)
-    due = now + timedelta(seconds=10)
-    source.rows["sub-soon"] = due
+    due = now + timedelta(days=30)
+    source.rows["sub-far"] = due
 
     result = adapter.process_wakeup(now)
 
+    # The successor arms at the store's exact next run time; there is no
+    # poll cap pulling it closer.
+    assert source.dispatched == []
     assert result.next_wakeup_time == due
 
 
@@ -1603,27 +1602,61 @@ def test_adding_a_source_store_rearms_an_active_chain() -> None:
     )
     assert driver.current is None
 
-    before = datetime.now(UTC)
+    source = InMemorySourceJobStore()
+    due = datetime.now(UTC) + timedelta(minutes=5)
+    source.rows["sub-1"] = due
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_wake",
+    ):
+        scheduler.add_jobstore(source, "subscription")
+
+    armed = driver.current
+    assert armed is not None
+    assert armed.status == "published"
+    assert armed.logical_time == due
+
+
+def test_adding_an_empty_source_store_leaves_the_chain_dormant() -> None:
+    scheduler, _adapter, driver = scheduler_with_driver()
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+    start_subscription.func(
+        message(
+            start_payload,
+            message_id="start",
+            topic=start_subscription.topic,
+            consumer_group=start_subscription.consumer_group,
+        )
+    )
+    assert driver.current is None
+
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
         return_value="msg_wake",
     ):
         scheduler.add_jobstore(InMemorySourceJobStore(), "subscription")
 
-    armed = driver.current
-    assert armed is not None
-    assert armed.status == "published"
-    assert armed.logical_time <= before + timedelta(seconds=31)
+    # Nothing scheduled anywhere: no polling wake is armed.
+    assert driver.current is None
 
 
-def test_start_rearms_source_poll_on_unchanged_generation() -> None:
-    scheduler, _adapter, driver, _source = scheduler_with_source_store()
+def test_start_rearms_wake_from_source_store_on_unchanged_generation() -> None:
+    scheduler, _adapter, driver, source = scheduler_with_source_store()
     register_scheduler(scheduler)
     # A prior session's generation is active and dormant.
     driver.start(datetime.now(UTC))
     driver.start_status = "active"
+    due = datetime.now(UTC) + timedelta(minutes=5)
+    source.rows["sub-1"] = due
 
-    before = datetime.now(UTC)
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
         return_value="msg_wake",
@@ -1633,7 +1666,43 @@ def test_start_rearms_source_poll_on_unchanged_generation() -> None:
     armed = driver.current
     assert armed is not None
     assert armed.status == "published"
-    assert armed.logical_time <= before + timedelta(seconds=31)
+    assert armed.logical_time == due
+
+
+def test_explicit_wakeup_rearms_the_chain_from_source_stores() -> None:
+    scheduler, _adapter, driver, source = scheduler_with_source_store()
+    register_scheduler(scheduler)
+    start_subscription = get_subscriptions()[0]
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+        start_payload = send.call_args.args[1]
+    start_subscription.func(
+        message(
+            start_payload,
+            message_id="start",
+            topic=start_subscription.topic,
+            consumer_group=start_subscription.consumer_group,
+        )
+    )
+    assert driver.current is None
+
+    # A row appears out of band; the application signals it explicitly.
+    due = datetime.now(UTC) + timedelta(minutes=5)
+    source.rows["sub-1"] = due
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_wake",
+    ):
+        scheduler.wakeup()
+
+    armed = driver.current
+    assert armed is not None
+    assert armed.status == "published"
+    assert armed.logical_time == due
 
 
 def test_redis_backend_rejects_a_cache_store_under_a_source_alias() -> None:
@@ -1667,10 +1736,12 @@ def test_add_job_into_a_source_store_is_rejected() -> None:
         adapter.ensure_local_started()
 
 
-def test_start_with_only_a_source_store_arms_the_poll_wake() -> None:
-    scheduler, _adapter, driver, _source = scheduler_with_source_store()
+def test_start_with_only_a_source_store_arms_the_wake_at_its_due_time() -> None:
+    scheduler, _adapter, driver, source = scheduler_with_source_store()
     register_scheduler(scheduler)
     start_subscription = get_subscriptions()[0]
+    due = datetime.now(UTC) + timedelta(minutes=5)
+    source.rows["sub-1"] = due
 
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
@@ -1679,7 +1750,6 @@ def test_start_with_only_a_source_store_arms_the_poll_wake() -> None:
         scheduler.start()
         start_payload = send.call_args.args[1]
 
-    before = datetime.now(UTC)
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
         return_value="msg_wake",
@@ -1693,13 +1763,13 @@ def test_start_with_only_a_source_store_arms_the_poll_wake() -> None:
             )
         )
 
-    # No dormancy with a source store: the poll cap arms the first wake.
+    # The first wake arms at the source store's exact next due time.
     assert driver.current is not None
     assert driver.current.status == "published"
-    assert driver.current.logical_time <= before + timedelta(seconds=31)
+    assert driver.current.logical_time == due
 
 
-def test_wake_delivery_dispatches_source_rows_and_rearms_the_poll() -> None:
+def test_wake_delivery_dispatches_source_rows_and_arms_the_successor() -> None:
     scheduler, _adapter, driver, source = scheduler_with_source_store()
     register_scheduler(scheduler)
     wake_subscription = get_subscriptions()[1]
@@ -1709,6 +1779,8 @@ def test_wake_delivery_dispatches_source_rows_and_rearms_the_poll() -> None:
     token = WakeToken(1, 1, logical, status="published")
     driver.current = token
     source.rows["sub-1"] = logical - timedelta(seconds=5)
+    later = logical + timedelta(minutes=5)
+    source.rows["sub-2"] = later
 
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
@@ -1727,7 +1799,7 @@ def test_wake_delivery_dispatches_source_rows_and_rearms_the_poll() -> None:
     successor = driver.current
     assert successor is not None
     assert successor.sequence == 2
-    assert successor.logical_time <= datetime.now(UTC) + timedelta(seconds=30)
+    assert successor.logical_time == later
 
 
 def test_pause_resume_fences_old_start_messages() -> None:

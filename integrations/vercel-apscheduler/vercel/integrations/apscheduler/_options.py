@@ -12,7 +12,6 @@ from sys import modules
 
 DEFAULT_MAX_DELAY_SECONDS = 23 * 60 * 60
 DEFAULT_RETRY_AFTER_SECONDS = 30
-DEFAULT_SOURCE_POLL_INTERVAL_SECONDS = 30
 # A wake message must outlive its own delay by enough redelivery attempts to
 # ride out an incident and self-heal; one further day of retention buys that
 # healing window for even a maximally delayed hop.
@@ -33,7 +32,6 @@ _STORE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 __all__ = [
     "DEFAULT_MAX_DELAY_SECONDS",
     "DEFAULT_RETRY_AFTER_SECONDS",
-    "DEFAULT_SOURCE_POLL_INTERVAL_SECONDS",
     "RETENTION_MARGIN_SECONDS",
     "SUBSCRIBERS_ENV",
     "VercelAPSchedulerOptions",
@@ -224,9 +222,6 @@ class VercelAPSchedulerOptions:
     retention_seconds: int | None = DEFAULT_MAX_DELAY_SECONDS + RETENTION_MARGIN_SECONDS
     retry_after_seconds: int = DEFAULT_RETRY_AFTER_SECONDS
     max_concurrency: int = 1
-    # Source stores change out of band, so the chain never sleeps longer
-    # than this while one is configured.
-    source_poll_interval_seconds: int = DEFAULT_SOURCE_POLL_INTERVAL_SECONDS
     # Escape hatch: pins the durable identity independently of the job
     # store's configured key, for example across a deliberate key rename.
     scheduler_id: str | None = None
@@ -234,8 +229,6 @@ class VercelAPSchedulerOptions:
     def __post_init__(self) -> None:
         if self.max_delay_seconds <= 0:
             raise ValueError("max_delay_seconds must be a positive integer")
-        if self.source_poll_interval_seconds <= 0:
-            raise ValueError("source_poll_interval_seconds must be a positive integer")
         if self.max_delay_seconds > VQS_MAX_DELAY_SECONDS:
             raise ValueError(
                 f"max_delay_seconds cannot exceed {VQS_MAX_DELAY_SECONDS} "
@@ -284,10 +277,6 @@ class VercelAPSchedulerOptions:
                 DEFAULT_RETRY_AFTER_SECONDS,
             ),
             max_concurrency=_int_env("VERCEL_APSCHEDULER_MAX_CONCURRENCY", 1),
-            source_poll_interval_seconds=_int_env(
-                "VERCEL_APSCHEDULER_SOURCE_POLL_INTERVAL_SECONDS",
-                DEFAULT_SOURCE_POLL_INTERVAL_SECONDS,
-            ),
         )
 
     @classmethod

@@ -382,23 +382,23 @@ but never manages them:
   one).
 
 A source store's schedule changes out of band — rows appear or move without
-passing through scheduler APIs — so the wake chain cannot stay purely
-event-driven with respect to it. While at least one source store is
-configured, the successor wake is capped at the source poll interval
-(default 30 seconds, `VERCEL_APSCHEDULER_SOURCE_POLL_INTERVAL_SECONDS` or
-the `source_poll_interval_seconds` integration option) and the chain never
-goes dormant. An exact next run time reported below the cap is trusted
-as-is, so precision does not degrade to the poll granularity. Budget for
-the cadence: a 30-second cap is about two Function invocations per minute
-for an otherwise idle scheduler. Preview idle expiry still applies —
-polling does not renew a preview's idle deadline, so an opted-in preview
-stops polling when requests stop.
+passing through scheduler APIs — and there is no polling to notice that.
+Each wake arms the successor at the exact earliest next run time across the
+durable store and every source store's `get_next_run_time()`, and a chain
+with nothing scheduled goes dormant, source stores or not. An out-of-band
+change is therefore picked up at the next chain-scheduled wake, or
+immediately when the application signals it: after writing a row whose due
+time is earlier than anything the chain knows about, call
+`scheduler.wakeup()` from a web Function on the deployment that drives the
+chain. The call recomputes the next due time across every store and pulls
+the current wake in to it (never later), exactly like APScheduler's native
+`wakeup()` recomputes the scheduler thread's wait.
 
 A source store may also appear after a generation is already active — a
 runtime `add_jobstore()`, or a process whose activation finds a running
 generation created before the store existed. Both paths rearm the current
-wake to the computed next time, so polling starts within one interval
-instead of waiting for a wake that would never come.
+wake to the store's reported next due time, so a store present at boot
+needs no application-level `wakeup()` call for its existing rows.
 
 Delivery to source-store jobs is at least once, and the store owns its own
 dedup. Under Redis the active-owner lease serializes evaluation; under the

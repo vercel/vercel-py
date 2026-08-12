@@ -331,7 +331,7 @@ class SchedulerAdapter:
         self._reconcile_takeover(now)
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
-            self._rearm_source_poll(now)
+            self._rearm_wake_from_stores(now)
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
 
@@ -369,7 +369,7 @@ class SchedulerAdapter:
             return True
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
-            self._rearm_source_poll(now)
+            self._rearm_wake_from_stores(now)
             self.repair_wakeup(now=now)
         self._resume_local_if_paused()
         return True
@@ -523,12 +523,13 @@ class SchedulerAdapter:
             )
         return self.publish_pending_wakeup()
 
-    def _rearm_source_poll(self, now: datetime | None = None) -> None:
-        """Arm the chain for source polling on an already-active generation.
+    def _rearm_wake_from_stores(self, now: datetime | None = None) -> None:
+        """Pull the current wake in to the stores' exact next due time.
 
-        A generation activated before a source store existed has no wake
-        that will ever read it: ``add_jobstore`` performs no job write, so
-        nothing rearms a dormant or far-armed chain.
+        Source-store schedules change without a job write to ride on, so a
+        dormant or far-armed chain only learns about them here: at explicit
+        ``wakeup()`` calls, at a runtime ``add_jobstore()``, and at
+        activation against an already-active generation.
         """
         if not self.source_jobstores:
             return
@@ -643,7 +644,7 @@ class SchedulerAdapter:
     def source_jobstores(self) -> dict[str, Any]:
         """Non-default job stores, whose schedules an external system owns.
 
-        Read at each wake and re-polled on a bounded interval; never
+        Read at each wake and at explicit ``wakeup()`` calls; never
         declared into, reconciled, or rebased.
         """
         return {
@@ -656,22 +657,21 @@ class SchedulerAdapter:
         *,
         source_floors: dict[str, datetime] | None = None,
     ) -> datetime | None:
-        """Return the next due time, bounded by the source-store poll interval.
+        """Return the exact next due time across the durable and source stores.
 
-        Source stores change out of band, so a source entry that appears
-        after this wake must be noticed within one poll, not after the next
-        known due time. ``source_floors`` names stores that kept an entry
-        due (a failed or skipped advance); their overdue times are floored
-        to the bounded retry so a persistent failure cannot hot-spin the
-        chain with immediate wakes.
+        Source stores change out of band, and there is no polling: an entry
+        that appears after this wake is noticed at the next chain-scheduled
+        wake or at an explicit ``scheduler.wakeup()`` call. ``source_floors``
+        names stores that kept an entry due (a failed or skipped advance);
+        their overdue times are floored to the bounded retry so a persistent
+        failure cannot hot-spin the chain with immediate wakes.
         """
         reference = as_utc(reference_time, name="reference_time")
         retry_delay = timedelta(seconds=self.scheduler.jobstore_retry_interval)
         floors = source_floors or {}
         with self.scheduler._jobstores_lock:
             next_time = self.scheduler._jobstores["default"].get_next_run_time()
-            source_stores = self.source_jobstores
-            for alias, store in source_stores.items():
+            for alias, store in self.source_jobstores.items():
                 try:
                     candidate = store.get_next_run_time()
                     if candidate is not None:
@@ -687,11 +687,6 @@ class SchedulerAdapter:
                 if floor is not None:
                     candidate = floor if candidate is None else max(candidate, floor)
                 next_time = earliest(next_time, candidate)
-        if source_stores:
-            next_time = earliest(
-                next_time,
-                reference + timedelta(seconds=self.options.source_poll_interval_seconds),
-            )
         return next_time
 
     def process_wakeup(
@@ -822,6 +817,12 @@ class SchedulerAdapter:
             return
         if self._suppress_wakeup or self.scheduler.state != STATE_RUNNING:
             return
+        # An explicit wakeup is the signal that a source store changed out
+        # of band: recompute the exact next due time across every store and
+        # pull the chain's wake in to it. Durable-store writes rearm
+        # transactionally, so without source stores publishing the pending
+        # wake is all that is left to do.
+        self._rearm_wake_from_stores()
         self.publish_pending_wakeup()
 
     def warn_ignored_queue_lifecycle(self, method: str) -> None:
@@ -864,11 +865,11 @@ class SchedulerAdapter:
             for alias, store in self.source_jobstores.items():
                 self._logger.info(
                     'Job store "%s" (%s) is a source store: its due jobs run '
-                    "at each wake and its schedule is re-polled at least "
-                    "every %s seconds",
+                    "at each wake, and out-of-band schedule changes are "
+                    "noticed at the next chain-scheduled wake or at an "
+                    "explicit scheduler.wakeup() call",
                     alias,
                     type(store).__name__,
-                    self.options.source_poll_interval_seconds,
                 )
 
     @property
@@ -1429,8 +1430,8 @@ def _patched_add_jobstore(self: BaseScheduler, *args: Any, **kwargs: Any) -> Any
         return result
     if is_vercel_runtime() and not is_discovery_runtime() and not is_queue_serving_runtime():
         # A source store added after activation gets no wake from any other
-        # path; arm the poll so it is read within one interval.
-        adapter._rearm_source_poll()
+        # path; pull the chain in to its reported next due time.
+        adapter._rearm_wake_from_stores()
     return result
 
 
