@@ -1,15 +1,15 @@
-"""Runtime Cache backend: redis-less coordination with documented tradeoffs.
+"""Runtime Cache backend: managed coordination with documented tradeoffs.
 
 The Vercel Runtime Cache offers ``get``/``set``/``delete`` with TTLs and tags
-— no compare-and-swap, no transactions, and entries may be evicted. This
-backend therefore divides responsibility differently from Redis:
+— no compare-and-swap, no transactions, and entries may be evicted. The
+backend therefore places each guarantee on something that can carry it:
 
 - **Chain integrity** does not live here at all. The single-successor
   guarantee comes from the queue's idempotency keys: racing finishers compute
   identical successor payloads (logical times are canonical), and the queue
   accepts the publication once. Claims are best-effort filters that shrink,
   but cannot eliminate, duplicate wake *executions*; the contract is
-  at-least-once with a wider duplicate window than Redis mode.
+  at-least-once.
 - **Declared jobs are reconstructable, not durable.** Code is the backup: a
   missing driver or job document is rebuilt from declarations by the existing
   reconcile/materialize machinery, so eviction can only cost state that code
@@ -30,7 +30,6 @@ from typing import Any
 from dataclasses import dataclass
 from os import environ
 
-from ..._imports import RedisJobStore
 from ..._options import (
     SUBSCRIBER_ID_ENV,
     SUBSCRIBERS_ENV,
@@ -60,12 +59,11 @@ class CacheBackend:
         if default is not None and not isinstance(default, CacheJobStore):
             raise APSchedulerConfigurationError(
                 f'job store "{type(default).__name__}" is not suitable for the '
-                "cache backend, which injects its own store; remove the "
-                "explicit default store, or select the matching backend via "
-                "VERCEL_APSCHEDULER_BACKEND"
+                "cache backend, which injects its own managed store; remove "
+                "the explicit default store"
             )
         for alias, store in stores.items():
-            if alias != "default" and isinstance(store, (CacheJobStore, RedisJobStore)):
+            if alias != "default" and isinstance(store, CacheJobStore):
                 raise APSchedulerConfigurationError(
                     f'job store "{alias}" is a {type(store).__name__}, but the '
                     'durable store must be the one named "default"; '

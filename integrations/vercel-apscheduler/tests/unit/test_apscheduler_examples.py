@@ -18,9 +18,10 @@ from vercel.queue.testing import clear_subscriptions
 EXAMPLE_ROOT = Path(__file__).parents[2] / "examples" / "cleanup"
 SCHEDULER_PATH = "scheduler.py"
 # Identity derives from the example store's default jobs_key.
-START_TOPIC = "__aps_apscheduler-jobs_start"
-WAKEUP_TOPIC = "__aps_apscheduler-jobs_wakeup"
-CONSUMER_GROUP = "apscheduler-apscheduler-jobs"
+# Identity is the builder-assigned subscriber id ("scheduler_scheduler").
+START_TOPIC = "__aps_scheduler_scheduler_start"
+WAKEUP_TOPIC = "__aps_scheduler_scheduler_wakeup"
+CONSUMER_GROUP = "apscheduler-scheduler_scheduler"
 
 
 def test_cleanup_example_uses_pyproject_subscriber_contract() -> None:
@@ -40,13 +41,12 @@ def test_cleanup_example_uses_pyproject_subscriber_contract() -> None:
     assert "[tool.vercel.apscheduler.control]" not in pyproject
     assert "topics =" not in pyproject
     assert '"vercel-apscheduler>=0.1.0"' in pyproject
-    assert '"redis>=5,<7"' in pyproject
+    assert "redis" not in pyproject
 
     scheduler_source = (EXAMPLE_ROOT / SCHEDULER_PATH).read_text(encoding="utf-8")
     assert "VercelAPSchedulerOptions" not in scheduler_source
     assert "install_vercel_apscheduler_integration" not in scheduler_source
-    assert "from apscheduler.jobstores.redis import RedisJobStore" in scheduler_source
-    assert "RedisJobStore(" in scheduler_source
+    assert "jobstores" not in scheduler_source
 
     app_source = (EXAMPLE_ROOT / "main.py").read_text(encoding="utf-8")
     assert "scheduler.start()" in app_source
@@ -69,7 +69,6 @@ def test_cleanup_scheduler_registers_introspectable_queue_subscriptions(
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_REGION", "iad1")
     monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "scheduler_scheduler")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     clear_subscriptions()
     install_vercel_apscheduler_integration()
     sys.modules[module_name] = module
