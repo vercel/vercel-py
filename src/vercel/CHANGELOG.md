@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.10.0 - 2026-08-12
+
+### Breaking Changes
+
+- `bytes` now crosses the wire as a `Uint8Array` instead of an `ArrayBuffer`, and a JavaScript `ArrayBuffer` decodes to `bytearray` instead of `bytes`. (#272)
+
+### Features
+
+- A step can now stream output while it runs with `get_writable()`, and `run.readable()` reads it back. A workflow body can take the stream and pass it to its steps. The same stream is readable from the TypeScript SDK, the dashboard and `workflow inspect stream`. (#258)
+- Add support to read the encrypted (`encr`) workflow payloads (AES-GCM) under the new `encryption` extra. (#279)
+- Workflow steps can raise `FatalError` to skip the remaining retries. The step fails on the attempt that raised it, instead of replaying the same call until `max_retries` is spent. (#260)
+
+### Bug Fixes
+
+- Send and receive workflow queue messages as CBOR, mirroring `DualTransport` in `@workflow/world-vercel`. (#265)
+- Allow workflow events with `specVersion` 6. (#280)
+- Send the Trusted Sources bypass header on direct workflow-server requests, and derive a non-2xx error from the HTTP status before parsing the body. (#278)
+
 ## 0.9.0 - 2026-08-07
 
 ### Breaking Changes
