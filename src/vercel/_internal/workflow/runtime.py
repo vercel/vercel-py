@@ -700,14 +700,11 @@ class WorkflowOrchestratorContext:
                     hook = self.suspensions.pop(event.correlation_id, None)
                     if hook is not None:
                         assert isinstance(hook, Hook)
+                        conflict = f'Hook token "{token}" is already in use by another workflow'
                         while hook.futures:
                             future = hook.futures.popleft()
                             if not future.cancelled():
-                                future.set_exception(
-                                    RuntimeError(
-                                        f'Hook token "{token}" is already in use by another workflow'
-                                    )
-                                )
+                                future.set_exception(RuntimeError(conflict))
 
                 case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
                     hook = self.suspensions[event.correlation_id]
