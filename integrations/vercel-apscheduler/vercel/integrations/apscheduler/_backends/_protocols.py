@@ -178,8 +178,8 @@ class Backend(Protocol):
         """Check the scheduler's job stores fit this backend; return them.
 
         Raises ``APSchedulerConfigurationError`` with a backend-specific
-        message otherwise (e.g. Redis requires a default ``RedisJobStore``;
-        cache mode rejects an explicitly configured Redis store).
+        message otherwise (e.g. the cache backend rejects an explicitly
+        configured third-party default store).
         """
         ...
 

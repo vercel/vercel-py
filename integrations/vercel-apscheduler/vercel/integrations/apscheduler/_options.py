@@ -24,10 +24,6 @@ DISCOVERY_ENV = "VERCEL_APSCHEDULER_DISCOVERY"
 SUBSCRIBER_ID_ENV = "VERCEL_PYTHON_SUBSCRIBER_ID"
 SUBSCRIBERS_ENV = "VERCEL_APSCHEDULER_SUBSCRIBERS"
 _SCHEDULER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-# The identity slug maps "." to "-", so both charsets collapse into the VQS
-# name alphabet. Two keys that collapse to the same slug are rejected as an
-# identity collision when both are bound.
-_STORE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 __all__ = [
     "DEFAULT_MAX_DELAY_SECONDS",
@@ -145,14 +141,14 @@ def development_deployment_id() -> str:
     deployment-scoped, and the web process and queue sidecars of one project
     must agree on the scope, so the id is derived from the project directory
     they are all spawned in. The hash also keeps two projects apart when
-    development points them at one shared Redis database.
+    development points them at one shared store.
     """
     digest = sha256(_DEV_PROJECT_DIR.encode()).hexdigest()[:12]
     return f"dpl_dev_{digest}"
 
 
 def resolve_state_scope(deployment: str) -> str:
-    """Return the namespace scope for a scheduler's durable Redis state.
+    """Return the namespace scope for a scheduler's durable state.
 
     Named environments (production and custom environments) share one durable
     namespace across deployments, so schedules, dynamic jobs, and the wake
@@ -170,8 +166,8 @@ def resolve_state_scope(deployment: str) -> str:
         return deployment
     project = environ.get("VERCEL_PROJECT_ID", "").strip()
     if not project:
-        # Without the project, two projects sharing one Redis database would
-        # silently interleave a namespace. Refuse rather than guess.
+        # Without the project, two projects sharing one store would silently
+        # interleave a namespace. Refuse rather than guess.
         raise ValueError(
             "VERCEL_PROJECT_ID is required to scope durable scheduler state "
             f'in the "{environment}" environment'
@@ -181,11 +177,11 @@ def resolve_state_scope(deployment: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _SchedulerIdentity:
-    """A scheduler's durable identity, derived from its job store.
+    """A scheduler's durable identity.
 
-    The configured ``jobs_key`` is the one user-controlled value that is both
-    refactor-stable (module and variable renames never touch it) and exactly
-    as durable as the state it names. Entrypoints stay locators only.
+    Derived from the builder-assigned subscriber id, which is refactor-stable
+    (module and variable renames never touch it). Entrypoints stay locators
+    only; the ``scheduler_id`` option pins an identity explicitly.
     """
 
     scheduler_id: str
@@ -206,15 +202,6 @@ class _SchedulerIdentity:
             consumer_group=f"apscheduler-{scheduler_id}",
         )
 
-    @classmethod
-    def from_store_key(cls, jobs_key: str) -> _SchedulerIdentity:
-        if not _STORE_KEY_PATTERN.fullmatch(jobs_key):
-            raise ValueError(
-                "a durable RedisJobStore jobs_key must contain only ASCII "
-                "letters, digits, dots, underscores, and hyphens"
-            )
-        return cls.from_scheduler_id(jobs_key.replace(".", "-"))
-
 
 @dataclass(frozen=True, slots=True)
 class VercelAPSchedulerOptions:
@@ -222,8 +209,8 @@ class VercelAPSchedulerOptions:
     retention_seconds: int | None = DEFAULT_MAX_DELAY_SECONDS + RETENTION_MARGIN_SECONDS
     retry_after_seconds: int = DEFAULT_RETRY_AFTER_SECONDS
     max_concurrency: int = 1
-    # Escape hatch: pins the durable identity independently of the job
-    # store's configured key, for example across a deliberate key rename.
+    # Escape hatch: pins the durable identity independently of the
+    # builder-assigned subscriber id.
     scheduler_id: str | None = None
 
     def __post_init__(self) -> None:

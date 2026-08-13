@@ -47,7 +47,7 @@ from vercel.queue.testing import clear_subscriptions
 
 UTC = timezone.utc
 CACHE_SCHEDULER_MODULE = "cache_test_scheduler"
-# No RedisJobStore and no subscriber env: cache identity falls back to this.
+# No subscriber id env: cache identity falls back to the declared mapping.
 CACHE_SCHEDULER_ID = "default"
 
 _EXECUTIONS: list[str] = []
