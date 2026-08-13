@@ -83,6 +83,10 @@ EXTERNAL_DEPENDENCIES = {
     # the `vercel-oidc[verify]` extra rather than this package's own table, and
     # extras are already passed through unvendored.
     "vercel-connect": {"pydantic"},
+    # Pydantic again, and `cbor2` for the same reason: its fast path is the
+    # `_cbor2` C extension, which vendoring drops along with every other `.so`,
+    # leaving a bundle that silently falls back to the pure-Python codec.
+    "vercel-workflow": {"pydantic", "cbor2"},
     # redis-py's dotted self-imports cannot be rewritten for namespace
     # vendoring, and applications import redis directly to build the job
     # store's connection pool anyway.
