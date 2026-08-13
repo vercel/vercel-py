@@ -1429,19 +1429,22 @@ def _manifest_file(module: str) -> str:
     return f"{module.replace('.', '/')}.py"
 
 
-def build_manifest(registry: core.Workflows) -> dict[str, Any]:
+def build_manifest(*registries: core.Workflows) -> dict[str, Any]:
     workflows: dict[str, dict[str, Any]] = {}
-    for workflow in registry._workflows.values():
-        by_name = workflows.setdefault(_manifest_file(workflow.module), {})
-        by_name[workflow.qualname] = {
-            "workflowId": workflow.workflow_id,
-            "graph": {"nodes": [], "edges": []},
-        }
-
     steps: dict[str, dict[str, Any]] = {}
-    for step in registry._steps.values():
-        by_name = steps.setdefault(_manifest_file(step.func.__module__), {})
-        by_name[step.func.__qualname__] = {"stepId": step.name}
+    # Several registries when an app namespaces its topics, and the document is
+    # the app's rather than any one registry's.
+    for registry in registries:
+        for workflow in registry._workflows.values():
+            by_name = workflows.setdefault(_manifest_file(workflow.module), {})
+            by_name[workflow.qualname] = {
+                "workflowId": workflow.workflow_id,
+                "graph": {"nodes": [], "edges": []},
+            }
+
+        for step in registry._steps.values():
+            by_name = steps.setdefault(_manifest_file(step.func.__module__), {})
+            by_name[step.func.__qualname__] = {"stepId": step.name}
 
     return {
         "version": MANIFEST_VERSION,

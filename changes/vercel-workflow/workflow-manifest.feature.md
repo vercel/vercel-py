@@ -1,1 +1,1 @@
-Serve the workflow manifest from `Workflows.manifest_handler`, mounted at `MANIFEST_PATH` and published when `WORKFLOW_PUBLIC_MANIFEST=1`.
+Added semi-internal manifest API for TS tools and e2e test.
