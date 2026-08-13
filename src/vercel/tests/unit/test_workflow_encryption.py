@@ -1,12 +1,16 @@
-"""Reading the `encr` payloads `@workflow/world-vercel` writes.
+"""Reading the `encr` and `encp` payloads `@workflow/world-vercel` writes.
 
-Every input the format fixes is checkable without a deployment: the HKDF
-parameters that derive the key, the AES-GCM envelope around the payload, and
-what a missing or wrong key is reported as.
+Every input the formats fix is checkable without a deployment: the HKDF
+parameters that derive the key, the AES-GCM envelope around the payload, the
+X25519 sealed box an outside writer puts a payload in, and what a missing or
+wrong key is reported as.
 
-Sealing is done with `cryptography`'s own AES-GCM and HKDF, so what is under
-test is this SDK's reading of the format rather than a round trip through one
-implementation.
+Encrypting is done with `cryptography`'s own AES-GCM, HKDF and X25519, so what
+is under test is this SDK's reading of the formats rather than a round trip
+through one implementation. The `encp` labels, on which two implementations
+agreeing is the whole game, are pinned additionally by frozen vectors taken
+from `@workflow/core`'s own sealed box under Node's WebCrypto -- see
+:data:`TS_SEALED`.
 """
 
 from __future__ import annotations
@@ -21,9 +25,16 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 
 from vercel._internal.workflow import (
     encryption,
@@ -40,6 +51,34 @@ from vercel.tests.world_stubs import NoStreams
 DEPLOYMENT_KEY = bytes(range(32))
 PROJECT_ID = "prj_test"
 RUN_ID = "wrun_test"
+
+RUN_KEY = bytes.fromhex("e522c64592a43259bb4556108ddf2d6d45140f972598a512d59caf88a736f75f")
+"""``derive_run_key(DEPLOYMENT_KEY, PROJECT_ID, RUN_ID)``, spelled out.
+
+Frozen so the vectors below are reproducible from the file: they were generated
+against these bytes, and a change to the symmetric derivation should fail
+:func:`test_the_run_key_is_hkdf_over_project_then_run` rather than quietly
+invalidate them.
+"""
+
+# Vectors from `@workflow/core`'s `sealed-box.ts`, run under Node's WebCrypto
+# against RUN_KEY. Between them they pin everything a reimplementation can get
+# wrong quietly: both HKDF labels, the zero salts, the order of the two public
+# keys in the content key's `info`, and the absence of AAD.
+TS_PUBLIC_KEY = bytes.fromhex("45414d375e4b6293fde5e196eb25ec0ec72bd7d34e374fbc7b2cc492be235f73")
+TS_SEALED = bytes.fromhex(
+    "c7fcdb12dbbe8bb7153833f61d39f4be9ad80280044fed28135f20d68f5e0e11"
+    "28259a396106e81bbac16637e12a5cbba8ab4b948391e30548983c6472dba9e7"
+    "9599d23d46c1ee7720c7f4b086d32f"
+)
+"""``seal(publicKey, 'devl[["amount"],21]')`` -- no AAD, which is what TS sends."""
+
+TS_SEALED_WITH_AAD = bytes.fromhex(
+    "d59040c072755a12b5be6804c8f33ef8ef4851f14f63cf454e91f2e21e932203"
+    "089425b4b0718dacc2b782437cca67974aa136708011501ae80b5460ef77c8de"
+    "cec7a860bcc41b231f78f2964d7246"
+)
+"""The same payload sealed under ``runAad(projectId, runId)``, which TS never does."""
 
 
 def _oidc_token(token: str | None):
@@ -77,6 +116,34 @@ def seal(key: bytes, plaintext: bytes, nonce: bytes = bytes(12)) -> bytes:
     return ser.ENCRYPTED + nonce + AESGCM(key).encrypt(nonce, plaintext, None)
 
 
+def _hkdf(ikm: bytes, info: bytes) -> bytes:
+    return HKDF(algorithm=SHA256(), length=32, salt=bytes(32), info=info).derive(ikm)
+
+
+def seal_to(run_key: bytes, plaintext: bytes, *, aad: bytes | None = None) -> bytes:
+    """An `encp` payload addressed to the run *run_key* belongs to.
+
+    What an external hook resumer writes: it knows the recipient's public key
+    and nothing else, so everything secret here is the fresh ephemeral keypair.
+    """
+    recipient = X25519PrivateKey.from_private_bytes(
+        _hkdf(run_key, encryption.SCALAR_INFO)
+    ).public_key()
+    ephemeral = X25519PrivateKey.generate()
+    ephemeral_public_key = ephemeral.public_key().public_bytes_raw()
+    content_key = _hkdf(
+        ephemeral.exchange(recipient),
+        encryption.CONTENT_KEY_INFO + ephemeral_public_key + recipient.public_bytes_raw(),
+    )
+    nonce = os.urandom(12)
+    return (
+        ser.SEALED
+        + ephemeral_public_key
+        + nonce
+        + AESGCM(content_key).encrypt(nonce, plaintext, aad)
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # the key
 # ═══════════════════════════════════════════════════════════════════════════
@@ -112,9 +179,13 @@ def test_the_run_key_is_hkdf_over_project_then_run() -> None:
     # The `info` string is `<projectId>|<runId>`: project first, a literal pipe,
     # no spaces. Every way of getting it wrong produces a well-formed key that
     # simply decrypts nothing.
-    assert encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID) == HKDF(
+    key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
+
+    assert key == HKDF(
         algorithm=SHA256(), length=32, salt=bytes(32), info=f"{PROJECT_ID}|{RUN_ID}".encode()
     ).derive(DEPLOYMENT_KEY)
+    # And it is still the key the `encp` vectors were generated against.
+    assert key == RUN_KEY
 
 
 def test_the_salt_length_does_not_change_the_key() -> None:
@@ -250,6 +321,141 @@ def test_decryption_works_inside_the_workflow_sandbox() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# the sealed box
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_run_keypair_is_hkdf_over_the_run_key() -> None:
+    # The labelled derivation is what keeps the scalar independent of every
+    # other use of the same 32 bytes -- the AES key among them.
+    scalar, public_key = encryption.derive_run_key_pair(RUN_KEY)
+
+    assert scalar == _hkdf(RUN_KEY, b"workflow/encp/x25519/v1")
+    assert public_key == X25519PrivateKey.from_private_bytes(scalar).public_key().public_bytes_raw()
+
+
+def test_the_keypair_matches_the_one_typescript_derives() -> None:
+    # The public key is what a resumer seals to, so a Python reader deriving a
+    # different one cannot open anything -- and the failure would surface only
+    # as an authentication error, naming nothing.
+    assert encryption.derive_run_key_pair(RUN_KEY).public_key == TS_PUBLIC_KEY
+
+
+def test_a_keypair_is_bound_to_its_run_key() -> None:
+    other = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id="wrun_2")
+
+    assert encryption.derive_run_key_pair(other).public_key != TS_PUBLIC_KEY
+
+
+def test_the_der_prefixes_are_the_headers_cryptography_itself_writes() -> None:
+    # Both prefixes are hand-assembled hex that every other test reaches only
+    # through a key operation, so a wrong byte gets diagnosed somewhere else:
+    # `exchange` catches the DER failure as a refused point, and the caller
+    # reports it as the sealed payload's ephemeral key being invalid -- blaming
+    # the incoming payload, which is fine. Comparing against the library's own
+    # encoding of the same key names the constant instead.
+    private = X25519PrivateKey.generate()
+    pkcs8 = private.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+    spki = private.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+
+    assert pkcs8 == encryption.PKCS8_X25519_PREFIX + private.private_bytes_raw()
+    assert spki == encryption.SPKI_X25519_PREFIX + private.public_key().public_bytes_raw()
+
+
+def test_a_run_key_must_be_thirty_two_bytes_to_derive_a_keypair() -> None:
+    with pytest.raises(ValueError, match="32 bytes, got 16"):
+        encryption.derive_run_key_pair(bytes(16))
+
+
+@pytest.mark.parametrize("size", [0, 1, 15, 16, 17, 1000])
+def test_the_sealed_box_opens_what_an_outside_writer_sealed(size: int) -> None:
+    plaintext = os.urandom(size)
+
+    payload = seal_to(RUN_KEY, plaintext)
+
+    assert encryption.open_sealed_envelope(RUN_KEY, payload[4:]) == plaintext
+
+
+def test_the_sealed_box_opens_what_typescript_sealed() -> None:
+    # The end of the argument: a payload this SDK never produced, from the
+    # implementation that will be on the other side of every real hook resume.
+    assert encryption.open_sealed_envelope(RUN_KEY, TS_SEALED) == b'devl[["amount"],21]'
+
+
+def test_the_sealed_box_carries_no_additional_data() -> None:
+    # `resumeHook` seals with `sealTo(runPublicKey)` and passes no AAD; the
+    # construction binds the payload to its recipient through the content key's
+    # `info` instead. Reading one *with* AAD would mean we had guessed at an
+    # AAD the writer does not send, and every real payload would fail.
+    with pytest.raises(encryption.DecryptionError, match="authentication failed"):
+        encryption.open_sealed_envelope(RUN_KEY, TS_SEALED_WITH_AAD)
+
+
+def test_a_payload_sealed_to_another_run_does_not_open() -> None:
+    # The content key covers both public keys, so a payload replayed at a
+    # different run fails to authenticate rather than opening under the wrong
+    # identity.
+    other = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id="wrun_2")
+
+    with pytest.raises(encryption.DecryptionError, match="authentication failed"):
+        encryption.open_sealed_envelope(other, TS_SEALED)
+
+
+def test_a_tampered_sealed_payload_says_authentication_failed() -> None:
+    payload = bytearray(seal_to(RUN_KEY, b"devl[42]")[4:])
+    payload[-1] ^= 0x01
+
+    with pytest.raises(encryption.DecryptionError, match="authentication failed"):
+        encryption.open_sealed_envelope(RUN_KEY, bytes(payload))
+
+
+def test_a_truncated_sealed_payload_is_rejected_before_the_cipher() -> None:
+    # 32 bytes of ephemeral public key, then the 28 an AES-GCM envelope needs.
+    with pytest.raises(encryption.DecryptionError, match="at least 60 bytes"):
+        encryption.open_sealed_envelope(RUN_KEY, os.urandom(59))
+
+
+def test_an_unusable_ephemeral_key_is_named_rather_than_authenticated() -> None:
+    # A low-order point agrees to an all-zero secret. Deriving a content key
+    # from it anyway would report an authentication failure and send the reader
+    # after the key material instead of the payload.
+    payload = bytes(32) + os.urandom(28)
+
+    with pytest.raises(encryption.DecryptionError, match="not a valid curve point"):
+        encryption.open_sealed_envelope(RUN_KEY, payload)
+
+
+def test_without_the_extra_the_sealed_failure_names_the_remedy(monkeypatch) -> None:
+    monkeypatch.setattr(encryption, "_X25519_IMPL", None)
+
+    with pytest.raises(encryption.DecryptionError, match=r'pip install "vercel\[encryption\]"'):
+        encryption.open_sealed_envelope(RUN_KEY, os.urandom(60))
+    with pytest.raises(encryption.DecryptionError, match=r'pip install "vercel\[encryption\]"'):
+        encryption.derive_run_key_pair(RUN_KEY)
+
+
+def test_x25519_is_bound_once_at_import(monkeypatch) -> None:
+    # As with AES-GCM, and the reason the DER loaders are the entry point rather
+    # than `X25519PrivateKey.from_private_bytes`: a sealed hook payload is opened
+    # inside the sandbox, where an import would re-execute the native extension.
+    # Blocking every `cryptography` import and opening one anyway is what pins
+    # that no call reaches for one.
+    payload = seal_to(RUN_KEY, b"devl[42]")
+    monkeypatch.setattr(builtins, "__import__", _no_cryptography(monkeypatch))
+
+    assert encryption.open_sealed_envelope(RUN_KEY, payload[4:]) == b"devl[42]"
+
+
+def test_opening_a_sealed_payload_works_inside_the_workflow_sandbox() -> None:
+    payload = seal_to(RUN_KEY, ser.dehydrate({"type": "approve"}))
+
+    with py_sandbox.workflow_sandbox():
+        assert ser.hydrate(payload, what="the payload of hook hook_1", key=RUN_KEY) == {
+            "type": "approve"
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # the payload
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -271,9 +477,33 @@ def test_a_decrypted_payload_that_is_not_a_payload_is_reported() -> None:
         ser.hydrate(payload, what="the input of run wrun_1", key=key)
 
 
+def test_a_sealed_payload_hydrates_through_its_inner_prefix() -> None:
+    # The shape of every hook resume on the Vercel world: the payload comes
+    # from outside the run, so it arrives sealed rather than encrypted.
+    payload = seal_to(RUN_KEY, ser.dehydrate({"type": "approve", "id": "1"}))
+
+    assert ser.hydrate(payload, what="the payload of hook hook_1", key=RUN_KEY) == {
+        "type": "approve",
+        "id": "1",
+    }
+
+
 def test_an_encrypted_payload_without_a_key_names_the_problem() -> None:
     with pytest.raises(ser.SerializationError, match="the input of run wrun_1 is encrypted"):
         ser.hydrate(ser.ENCRYPTED + bytes(28), what="the input of run wrun_1")
+
+
+def test_a_sealed_payload_without_a_key_says_which_way_it_is_encrypted() -> None:
+    # Distinguished from `encr` because the two are resolved differently on the
+    # writing side: nobody wrote this run's own key, so "the run that wrote it"
+    # would point at the wrong run.
+    with pytest.raises(ser.SerializationError, match="the payload of hook hook_1 is sealed"):
+        ser.hydrate(ser.SEALED + bytes(56), what="the payload of hook hook_1")
+
+
+def test_a_sealed_payload_that_does_not_authenticate_names_the_payload() -> None:
+    with pytest.raises(ser.SerializationError, match="Cannot decrypt the payload of hook hook_1"):
+        ser.hydrate(ser.SEALED + TS_SEALED, what="the payload of hook hook_1", key=bytes(32))
 
 
 def test_a_payload_that_does_not_authenticate_names_the_payload() -> None:
@@ -286,10 +516,11 @@ def test_a_payload_that_does_not_authenticate_names_the_payload() -> None:
 
 def test_only_an_encrypted_payload_asks_for_a_key() -> None:
     # What keeps a plaintext run off the resolution path, and with it the API
-    # request that resolving can cost.
+    # request that resolving can cost. A sealed payload asks for the same 32
+    # bytes -- its keypair derives from them -- so it belongs on that path too.
     assert ser.is_encrypted(ser.ENCRYPTED + bytes(28))
+    assert ser.is_encrypted(ser.SEALED + bytes(60))
     assert not ser.is_encrypted(ser.dehydrate(42))
-    assert not ser.is_encrypted(ser.SEALED + bytes(28))
     # A run's `input` is `bytes | str`: `run_created` echoes back '[Circular]'.
     assert not ser.is_encrypted("[Circular]")
     assert not ser.is_encrypted(None)
@@ -636,3 +867,23 @@ async def test_one_encrypted_payload_anywhere_resolves_the_key_once(where: str) 
 
     assert await runtime._resolve_run_key(world, run, events) == key
     assert world.asks == 1
+
+
+async def test_a_sealed_hook_payload_resolves_the_key() -> None:
+    # Gap 18 from the runtime's side, and the reason the scan cannot look for
+    # `encr` alone: a run whose own payloads are plaintext still has to read a
+    # hook payload an outside resumer sealed to it, and a scan that skipped
+    # `encp` would answer "this run is not encrypted" and then fail the run.
+    world = _CountingWorld(RUN_KEY)
+    run = _run(input=ser.dehydrate([]))
+    payload = seal_to(RUN_KEY, ser.dehydrate({"type": "approve"}))
+    events: list[w.Event] = [
+        w.HookCreatedEventData(token="tok").into_event("hook_0"),
+        w.HookReceivedEventData(payload=payload).into_event("hook_0"),
+    ]
+
+    key = await runtime._resolve_run_key(world, run, events)
+
+    assert key == RUN_KEY
+    assert world.asks == 1
+    assert ser.hydrate(payload, what="the payload of hook hook_0", key=key) == {"type": "approve"}
