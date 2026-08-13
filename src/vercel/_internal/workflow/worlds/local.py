@@ -454,7 +454,9 @@ class LocalWorld(w.World):
         **kwargs,
     ) -> str:
         payload = {
-            "payload": message.model_dump(),
+            # Same JSON dialect the file store uses: the transport is plain
+            # JSON, which has nowhere to put `bytes`.
+            "payload": _encode_js(message.model_dump()),
             "queueName": queue_name,
             "deploymentId": "<local>",
         }
@@ -480,7 +482,10 @@ class LocalWorld(w.World):
                 if "queueName" not in body:
                     raise ValueError("Invalid message body: missing 'queueName' field")
                 queue_name = body["queueName"]
-                payload = body["payload"]
+                # `jsonReviver`'s counterpart: restore the `bytes` the envelope
+                # stands in for before anything validates the payload, which is
+                # what lets `RunInput.input` stay as loose as TS's `z.unknown()`.
+                payload = _decode_js(body["payload"])
                 result = await handler(
                     payload,
                     queue_name=queue_name,
