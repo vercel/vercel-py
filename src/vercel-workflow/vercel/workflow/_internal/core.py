@@ -304,6 +304,12 @@ class Workflows:
             )
         return self._http_handler
 
+    @property
+    def manifest_handler(self) -> w.HTTPHandler:
+        from . import runtime
+
+        return runtime.manifest_entrypoint(self)
+
     def workflow(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
         rv = Workflow(func, registry=self)
         assert rv.workflow_id not in self._workflows, f"Duplicate workflow ID: {rv.workflow_id}"
