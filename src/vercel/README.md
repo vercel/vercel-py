@@ -15,7 +15,8 @@ helpers.
 - `vercel.projects` - project list, create, update, and delete helpers
 - `vercel.sandbox` - Sandbox creation, commands, files, and snapshots, delivered by the
   separately owned `vercel-sandbox` dependency
-- `vercel.workflow` - Workflows, steps, sleeps, hooks, and run startup
+- `vercel.workflow` - Workflows, steps, sleeps, hooks, and run startup, delivered by the
+  separately owned `vercel-workflow` dependency
 - `vercel.client` - `AsyncVercel` and `Vercel` grouped clients
 - `vercel.env` - Vercel system environment variable parsing
 - `vercel.headers` - request header context, IP, and geolocation helpers

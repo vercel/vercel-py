@@ -30,6 +30,7 @@ members = [
     "vercel-oidc",
     "vercel-queue",
     "vercel-sandbox",
+    "vercel-workflow",
 ]
 
 [manifest.dependency-groups]
@@ -659,7 +660,7 @@ name = "ggt"
 version = "1.5.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/94/fe/85fc86ad1900ba592c69d3a9135c0e105110df4ede4274169f9e8e401d17/ggt-1.5.2.tar.gz", hash = "sha256:68b66d46009192c556fc247407f4298523a246e7712b36ed9c6405ea68100822", size = 197150, upload-time = "2026-08-09T02:08:11.562Z" }
 wheels = [
@@ -2501,7 +2502,6 @@ name = "vercel"
 source = { editable = "src/vercel" }
 dependencies = [
     { name = "anyio" },
-    { name = "cbor2" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -2513,19 +2513,18 @@ dependencies = [
     { name = "vercel-oidc" },
     { name = "vercel-queue" },
     { name = "vercel-sandbox" },
+    { name = "vercel-workflow" },
     { name = "websockets" },
 ]
 
 [package.optional-dependencies]
 encryption = [
-    { name = "cryptography" },
+    { name = "vercel-workflow", extra = ["encryption"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
-    { name = "cbor2", specifier = ">=6.0,<7" },
-    { name = "cryptography", marker = "extra == 'encryption'", specifier = ">=48.0.1" },
     { name = "httpx", specifier = ">=0.27.0,<1" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
@@ -2537,6 +2536,8 @@ requires-dist = [
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
     { name = "vercel-queue", editable = "src/vercel-queue" },
     { name = "vercel-sandbox", editable = "src/vercel-sandbox" },
+    { name = "vercel-workflow", editable = "src/vercel-workflow" },
+    { name = "vercel-workflow", extras = ["encryption"], marker = "extra == 'encryption'", editable = "src/vercel-workflow" },
     { name = "websockets", specifier = ">=12.0,<17" },
 ]
 provides-extras = ["encryption"]
@@ -2742,6 +2743,39 @@ requires-dist = [
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]
+
+[[package]]
+name = "vercel-workflow"
+source = { editable = "src/vercel-workflow" }
+dependencies = [
+    { name = "anyio" },
+    { name = "cbor2" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "vercel-internal-core" },
+    { name = "vercel-oidc" },
+    { name = "vercel-queue" },
+]
+
+[package.optional-dependencies]
+encryption = [
+    { name = "cryptography" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4.0.0,<5" },
+    { name = "cbor2", specifier = ">=6.0,<7" },
+    { name = "cryptography", marker = "extra == 'encryption'", specifier = ">=48.0.1" },
+    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "pydantic", specifier = ">=2.7.0,<3" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
+    { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
+    { name = "vercel-oidc", editable = "src/vercel-oidc" },
+    { name = "vercel-queue", editable = "src/vercel-queue" },
+]
+provides-extras = ["encryption"]
 
 [[package]]
 name = "vine"
