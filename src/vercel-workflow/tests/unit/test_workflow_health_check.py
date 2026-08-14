@@ -7,8 +7,8 @@ The probe carries no ``runId``, so before this existed it was not merely
 unanswered -- parsing it as an invoke payload raised, the message was never
 acked, and the queue redelivered it forever.
 
-Its reader gates capability decisions on individual fields, so the three fields
-this SDK deliberately omits are asserted as directly as the ones it sends.
+Its reader gates capability decisions on individual fields, so the ones this SDK
+deliberately omits are asserted as directly as the ones it sends.
 """
 
 from __future__ import annotations
@@ -77,7 +77,9 @@ class StreamsWorld(NoStreams, w.World):
     async def hooks_get_by_token(self, token: str) -> w.Hook:
         raise NotImplementedError
 
-    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+    async def events_create(
+        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
+    ) -> w.EventResult:
         raise NotImplementedError
 
     async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:
@@ -148,9 +150,9 @@ async def test_the_answer_is_plain_json(registry) -> None:
 
 
 async def test_the_answer_claims_no_capability_it_does_not_have(registry) -> None:
-    """The three deliberate omissions -- see `_health_check_response`. Each is
-    read as a capability claim, and the consequence of a wrong one lands in the
-    caller, not here."""
+    """The deliberate omissions -- see `_health_check_response`. Each is read as
+    a capability claim, and the consequence of a wrong one lands in the caller,
+    not here."""
     world = StreamsWorld()
     w.set_world(world)
 
@@ -158,8 +160,22 @@ async def test_the_answer_claims_no_capability_it_does_not_have(registry) -> Non
 
     body = json.loads(world.writes[0][2])
     assert "workflowCoreVersion" not in body
-    assert "hookResumeInputVersion" not in body
     assert "encryptionPublicKey" not in body
+
+
+async def test_the_answer_advertises_the_hook_resume_input_version(registry) -> None:
+    """The one of the three omissions that has since become claimable. A
+    cross-deployment `start()` stamps the *target's* value onto the run it
+    creates, so this is what lets a resume of such a run take the parallel path
+    -- and it is only honest because the consumer re-ensures `hook_received`
+    from the queue message's `hookInput`."""
+    world = StreamsWorld()
+    w.set_world(world)
+
+    await _probe(registry)
+
+    body = json.loads(world.writes[0][2])
+    assert body["hookResumeInputVersion"] == w.HOOK_RESUME_INPUT_VERSION
 
 
 async def test_a_probe_naming_a_run_is_still_a_probe(registry) -> None:

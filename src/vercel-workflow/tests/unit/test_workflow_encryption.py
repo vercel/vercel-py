@@ -751,7 +751,7 @@ class _CountingWorld(NoStreams, w.World):
     async def hooks_get_by_token(self, token: str):
         raise NotImplementedError
 
-    async def events_create(self, run_id, data):
+    async def events_create(self, run_id, data, *, resume=None):
         raise NotImplementedError
 
     async def events_list(self, run_id, *, pagination=None):

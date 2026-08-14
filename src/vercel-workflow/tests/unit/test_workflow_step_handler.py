@@ -94,7 +94,9 @@ class FakeWorld(NoStreams, w.World):
     async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:
         raise NotImplementedError
 
-    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+    async def events_create(
+        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
+    ) -> w.EventResult:
         if data.event_type == "step_started":
             if self.start_error is not None:
                 raise self.start_error

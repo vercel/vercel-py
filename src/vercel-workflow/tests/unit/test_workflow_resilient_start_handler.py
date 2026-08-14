@@ -110,7 +110,9 @@ class FakeWorld(NoStreams, w.World):
         self.events_list_calls.append(run_id)
         return w.PaginatedResult(data=list(self.events), cursor=None, hasMore=False)
 
-    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+    async def events_create(
+        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
+    ) -> w.EventResult:
         if data.event_type == "run_started":
             if self.start_error is not None:
                 raise self.start_error

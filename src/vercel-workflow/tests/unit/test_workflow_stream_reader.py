@@ -90,7 +90,9 @@ class ReplayWorld(NoStreams, w.World):
     async def hooks_get_by_token(self, token: str) -> w.Hook:
         raise NotImplementedError
 
-    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+    async def events_create(
+        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
+    ) -> w.EventResult:
         raise NotImplementedError
 
     async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:

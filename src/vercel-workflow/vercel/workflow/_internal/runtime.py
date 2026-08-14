@@ -735,6 +735,91 @@ class WorkflowOrchestratorContext:
             raise _SuspendException()
 
 
+# ── lazy hook resume ───────────────────────────────────────────────────────
+#
+# A hook resume takes two writes: the `hook_received` event, and the queue
+# message that wakes the run. `resumeHook()` can do both at once, which means a
+# delivery can get here before the event exists. It copies the payload onto the
+# message so we can write the event ourselves, which is what the code below
+# does, before the run is replayed.
+#
+# Mirrors the same step in `@workflow/core`'s runtime.ts.
+
+
+def _has_resume_event(events: list[w.Event], hook_input: w.HookResumeInput) -> bool:
+    return any(
+        event.event_type == "hook_received"
+        and event.server_props is not None
+        and event.server_props.resume_id == hook_input.resume_id
+        for event in events
+    )
+
+
+def _resume_occurred_at(resume_id: str) -> datetime | None:
+    """When the resume happened, read out of the id the producer minted for it.
+
+    Resume ids are ULIDs, which carry the time they were made. Using it means the
+    event is dated when the payload was sent rather than when this delivery got
+    around to writing it. Ids that are not ULIDs (older producers, hand-written
+    ones in tests) have no time to read, and the world dates the event itself.
+    """
+    try:
+        return datetime.fromtimestamp(ulid.decode_time(resume_id) / 1000, UTC)
+    except ValueError:
+        return None
+
+
+async def _ensure_hook_received(
+    world: w.World, run: w.WorkflowRun, hook_input: w.HookResumeInput
+) -> bool:
+    """Write the resume's ``hook_received`` event. ``False`` means stop here.
+
+    Safe to call when the other writer of this resume also wrote the event, or is
+    writing it right now: the world is told which resume this is
+    (:class:`~world.HookResume`) and collapses the two into one event.
+
+    Note what it does *not* catch. Every other write in this module swallows
+    ``EntityConflictError``; here it is allowed out. A conflict means the other
+    writer has claimed this resume but its event is not readable yet, which is
+    temporary -- so the message goes unacked and a later delivery finds the
+    event. Swallowing it would ack a message that may hold the only copy of the
+    payload.
+    """
+    # The producer's bytes, passed along rather than re-encoded, so the payload
+    # digests on both writes match.
+    #
+    # The event is labelled with the run's spec version, not ours: this is
+    # another writer's event and its payload is encoded to that version. Same
+    # reason `run_started` carries the version of whoever created the run.
+    event = w.HookReceivedEvent(
+        correlationId=hook_input.hook_id,
+        eventData=w.HookReceivedEventData(payload=hook_input.payload, token=hook_input.token),
+        specVersion=run.spec_version or w.SPEC_VERSION_CURRENT,
+    )
+    try:
+        await world.events_create(
+            run.run_id,
+            event,
+            resume=w.HookResume(
+                resume_id=hook_input.resume_id,
+                payload_digest=hook_input.payload_digest,
+                occurred_at=_resume_occurred_at(hook_input.resume_id),
+            ),
+        )
+    except (w.HookNotFoundError, w.RunExpiredError):
+        # The hook is gone, or the run has finished, so this payload can never be
+        # delivered to anything. Retrying cannot change that, so ack the message
+        # and stop rather than replaying a run that is not waiting for us.
+        logger.debug(
+            "Hook %r of run %r can no longer receive a payload; dropping resume %r",
+            hook_input.hook_id,
+            run.run_id,
+            hook_input.resume_id,
+        )
+        return False
+    return True
+
+
 async def _resolve_run_key(
     world: w.World, run: w.WorkflowRun, events: list[w.Event]
 ) -> bytes | None:
@@ -782,6 +867,7 @@ def _health_check_response(correlation_id: str) -> dict[str, Any]:
         "healthy": True,
         "correlationId": correlation_id,
         "specVersion": w.SPEC_VERSION_CURRENT,
+        "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
         "timestamp": int(datetime.now(UTC).timestamp() * 1000),
     }
 
@@ -906,6 +992,21 @@ async def workflow_handler(
     loaded = await get_all_workflow_run_events(run_id)
     events = loaded.events
     events_cursor = loaded.cursor
+
+    # This message carries a hook payload whose event may not exist yet, so write
+    # it before replaying.
+    if req.hook_input is not None and not _has_resume_event(events, req.hook_input):
+        if not await _ensure_hook_received(world, workflow_run, req.hook_input):
+            return None
+        # Load the log again rather than appending the new event to what we have:
+        # where it belongs in the order is the world's decision, not ours, and
+        # this path is rare enough that one extra read is cheaper than getting
+        # that wrong.
+        loaded = await get_all_workflow_run_events(run_id)
+        events = loaded.events
+        events_cursor = loaded.cursor
+        if _has_terminal_run_event(events, run_id):
+            return None
 
     # Check for any elapsed waits and create wait_completed events
     now = datetime.now(UTC)
@@ -1636,11 +1737,14 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
     input_data = ser.dehydrate(ser.argument_array(bound_args, bound_kwargs))
+    execution_context: dict[str, Any] = {"hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION}
+    if namespace is not None:
+        execution_context["queueNamespace"] = namespace
     data = w.RunCreatedEventData(
         deploymentId=deployment_id,
         workflowName=wf.workflow_id,
         input=input_data,
-        executionContext={"queueNamespace": namespace} if namespace is not None else None,
+        executionContext=execution_context,
     )
     result = await world.events_create(None, data.into_event())
 

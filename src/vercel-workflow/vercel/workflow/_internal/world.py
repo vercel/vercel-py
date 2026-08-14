@@ -108,6 +108,26 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 SPEC_VERSION_CURRENT: Literal[2] = 2
 SPEC_VERSION_MAX_SUPPORTED = 6
 
+# Which version of "lazy hook resume" this SDK's queue consumer implements.
+#
+# Resuming a hook takes two writes: the `hook_received` event, and the queue
+# message that wakes the run. Doing them one after the other is always safe but
+# slower, so `resumeHook()` can also do both at once and put the payload on the
+# message. That is only safe if whoever consumes the message knows to write the
+# event itself from that payload, because otherwise a failed event write leaves
+# the payload nowhere. So the consumer has to say up front that it does.
+#
+# It says so by number, and a run records the number in its `executionContext`
+# when it is created. `resumeHook()` reads it off the run and only takes the
+# fast path when it is high enough; a run without one gets the safe path.
+#
+# This is not a spec version. Those describe how a run's rows are encoded, which
+# a reader can see in the rows. This describes what *code* will consume the
+# run's queue messages, which nothing in the data reveals.
+#
+# Mirrors `HOOK_RESUME_INPUT_VERSION` in `@workflow/world`'s `hooks.ts`.
+HOOK_RESUME_INPUT_VERSION = 1
+
 
 class BaseModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(serialize_by_alias=True)
@@ -131,6 +151,24 @@ class RunInput(BaseModel):
     environment: str | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
 
+class HookResumeInput(BaseModel):
+    resume_id: str = pydantic.Field(alias="resumeId")
+    hook_id: str = pydantic.Field(alias="hookId")
+    token: str
+    payload: bytes
+    payload_digest: str = pydantic.Field(alias="payloadDigest")
+    deployment_id: str | None = pydantic.Field(
+        default=None, alias="deploymentId", exclude_if=lambda e: e is None
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class HookResume:
+    resume_id: str
+    payload_digest: str | None = None
+    occurred_at: datetime | None = None
+
+
 class WorkflowInvokePayload(BaseModel):
     """Payload for invoking a workflow.
 
@@ -143,6 +181,11 @@ class WorkflowInvokePayload(BaseModel):
     # Run creation data for the resilient-start path, on first deliveries only.
     run_input: RunInput | None = pydantic.Field(
         default=None, alias="runInput", exclude_if=lambda e: e is None
+    )
+    # Hook payload for the lazy-hook-resume path, present only when the producer
+    # parallelized its `hook_received` write with this message.
+    hook_input: HookResumeInput | None = pydantic.Field(
+        default=None, alias="hookInput", exclude_if=lambda e: e is None
     )
     # Step ID for step execution on the combined handler. When present, the
     # receiver executes that step instead of replaying the run.
@@ -334,6 +377,9 @@ class ServerProps(BaseModel):
     run_id: str = pydantic.Field(alias="runId")
     event_id: str = pydantic.Field(alias="eventId")
     created_at: datetime = pydantic.Field(alias="createdAt")
+    resume_id: str | None = pydantic.Field(
+        default=None, alias="resumeId", exclude_if=lambda e: e is None
+    )
 
 
 class BaseEvent(BaseModel):
@@ -652,6 +698,7 @@ class HookCreatedEvent(BaseEvent):
 
 class HookReceivedEventData(BaseModel):
     payload: bytes
+    token: str | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
     def into_event(self, correlation_id: str) -> "HookReceivedEvent":
         return HookReceivedEvent(correlationId=correlation_id, eventData=self)
@@ -1037,20 +1084,27 @@ class World(metaclass=abc.ABCMeta):
         ...
 
     @overload
-    async def events_create(self, run_id: str, data: CreateEventRequest) -> EventResult:
+    async def events_create(
+        self, run_id: str, data: CreateEventRequest, *, resume: HookResume | None = None
+    ) -> EventResult:
         """
         Create an event for an existing workflow run and atomically update the entity.
         Returns both the event and the affected entity (run/step/hook).
         Args:
             run_id: The workflow run ID (required for all events except run_created)
             data: The event to create
+            resume: For `hook_received` only -- the lazy-resume identity to
+                deduplicate this write against a concurrent writer of the same
+                resume.
         Returns:
             The created event and affected entity
         """
         ...
 
     @abc.abstractmethod
-    async def events_create(self, run_id: str | None, data: Event) -> EventResult: ...
+    async def events_create(
+        self, run_id: str | None, data: Event, *, resume: HookResume | None = None
+    ) -> EventResult: ...
 
     @abc.abstractmethod
     async def events_list(

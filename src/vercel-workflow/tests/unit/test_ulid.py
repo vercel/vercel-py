@@ -2,7 +2,7 @@
 
 import pytest
 
-from vercel.workflow._internal.ulid import monotonic_factory
+from vercel.workflow._internal.ulid import decode_time, monotonic_factory
 
 
 class TestMonotonicFactory:
@@ -207,3 +207,35 @@ class TestMonotonicFactory:
         valid_chars = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
         for char in ulid:
             assert char in valid_chars, f"Invalid character: {char}"
+
+
+class TestDecodeTime:
+    """Read back the timestamp a ULID carries.
+
+    Used to date an event by when the thing it records actually happened rather
+    than by when it was written, so a wrong answer here misattributes latency.
+    """
+
+    def test_round_trips_the_encoded_timestamp(self):
+        ulid_gen = monotonic_factory()
+
+        for timestamp_ms in (0, 1, 1469918176385, 1786677123156):
+            assert decode_time(ulid_gen(timestamp_ms)) == timestamp_ms
+
+    def test_reads_a_ulid_minted_elsewhere(self):
+        """Off a captured event id whose row the world stamped
+        `2026-08-14T03:08:48.592Z`, so the expectation comes from the store
+        rather than from this implementation."""
+        assert decode_time("01KZZ3WR2G943C967SV6256P4M") == 1786676928592
+
+    @pytest.mark.parametrize("value", ["", "01ARYZ6S41", "01ARYZ6S41" + "A" * 17])
+    def test_rejects_a_string_that_is_not_a_ulid(self, value):
+        """Rather than return a plausible number: callers date something with
+        this, and a silent 0 would be the epoch."""
+        with pytest.raises(ValueError, match="malformed ulid"):
+            decode_time(value)
+
+    def test_rejects_a_character_outside_the_alphabet(self):
+        assert "U" not in "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        with pytest.raises(ValueError, match="invalid character"):
+            decode_time("01ARYZ6S4U" + "A" * 16)
