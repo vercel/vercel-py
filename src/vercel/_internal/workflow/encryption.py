@@ -1,18 +1,23 @@
-"""The `encr` payload format, as `@workflow/world-vercel` writes it.
+"""The `encr` and `encp` payload formats, as `@workflow/world-vercel` writes them.
 
-Decryption only, for now: writing `encr` is not implemented, so the payloads
+Decryption only, for now: writing either is not implemented, so the payloads
 this SDK produces are plain `devl`.
 
-The envelope is two nested layers::
+Both envelopes are two nested layers, and both descend from the same per-run
+key material :func:`derive_run_key` produces::
 
     encr payload:  [ 'e' 'n' 'c' 'r' ][ nonce (12) ][ ciphertext + tag (16) ]
+    encp payload:  [ 'e' 'n' 'c' 'p' ][ ephemeral public key (32) ][ nonce (12) ]
+                   [ ciphertext + tag (16) ]
     plaintext:     [ 'd' 'e' 'v' 'l' ][ devalue.stringify output, UTF-8 ]
 
-`encp`, the X25519 sealed-box format, is a different construction and is not
-read here.
+`encr` is what a run writes for itself, with the symmetric key it already
+holds. `encp` is what somebody *outside* the run writes to it — an external
+hook resumer, or a child run writing into a forwarded stream — who holds only
+the run's published X25519 public key and therefore cannot read anything back.
 
-AES-GCM comes from `cryptography`, which is a large native wheel and so ships
-in the ``encryption`` extra rather than in the default install.
+AES-GCM and X25519 come from `cryptography`, which is a large native wheel and
+so ships in the ``encryption`` extra rather than in the default install.
 """
 
 from __future__ import annotations
@@ -22,12 +27,24 @@ import binascii
 import hashlib
 import hmac
 from collections.abc import Callable
+from typing import Any, NamedTuple
 
 KEY_LENGTH = 32
-"""AES-256."""
+"""AES-256, and an X25519 scalar or public key."""
 
 NONCE_LENGTH = 12
 TAG_LENGTH = 16
+
+SCALAR_INFO = b"workflow/encp/x25519/v1"
+"""HKDF ``info`` deriving a run's X25519 scalar from its key material."""
+
+CONTENT_KEY_INFO = b"workflow/encp/aes256gcm/v1"
+"""HKDF ``info`` prefix for a sealed payload's content key; two public keys follow."""
+
+_EXTRA_HINT = (
+    "Reading encrypted workflow payloads requires the 'encryption' extra: "
+    'pip install "vercel[encryption]"'
+)
 
 
 class DecryptionError(Exception):
@@ -57,6 +74,98 @@ def _load_aes_gcm_decrypt() -> Callable[[bytes, bytes, bytes], bytes | None] | N
 
 
 _AES_GCM_DECRYPT = _load_aes_gcm_decrypt()
+
+
+class RunKeyPair(NamedTuple):
+    """A run's X25519 keypair, both halves derived from its key material."""
+
+    scalar: bytes
+    """The private scalar. Secret."""
+
+    public_key: bytes
+    """The public key a sealing writer needs. Published on the run entity."""
+
+
+# Why these two exist at all: `cryptography` will take a raw X25519 key via
+# `X25519PrivateKey.from_private_bytes` / `X25519PublicKey.from_public_bytes`,
+# needing no DER, and we cannot use either. Both import the OpenSSL backend on
+# every call to probe for X25519 support, and a sealed payload is opened inside
+# the workflow sandbox, where that import fails. `_load_x25519` binds the DER
+# loaders instead -- aliases of the already-imported binding, so calling them
+# imports nothing -- which leaves us wrapping raw keys ourselves.
+#
+# Hence one prefix per direction, DER needing a different header per key type:
+# the scalar we hold goes in as `PrivateKeyInfo`, a peer's public key off the
+# wire as `SubjectPublicKeyInfo`. Both are fully determined for a 32-byte key,
+# so wrapping is a concatenation rather than an encoder.
+
+PKCS8_X25519_PREFIX = bytes.fromhex("302e020100300506032b656e04220420")
+"""RFC 8410 ``PrivateKeyInfo`` around a raw 32-byte X25519 scalar::
+
+    SEQUENCE (46)                              30 2e
+      INTEGER 0                                02 01 00
+      SEQUENCE (5)                             30 05
+        OBJECT IDENTIFIER 1.3.101.110          06 03 2b 65 6e
+      OCTET STRING (34)                        04 22
+        OCTET STRING (32)                      04 20
+          <scalar>
+
+`@workflow/core`'s `sealed-box.ts` carries the same 16 bytes for the same
+reason: WebCrypto cannot import a raw X25519 private key either.
+"""
+
+SPKI_X25519_PREFIX = bytes.fromhex("302a300506032b656e032100")
+"""RFC 8410 ``SubjectPublicKeyInfo`` around a raw 32-byte X25519 public key::
+
+    SEQUENCE (42)                              30 2a
+      SEQUENCE (5)                             30 05
+        OBJECT IDENTIFIER 1.3.101.110          06 03 2b 65 6e
+      BIT STRING (33), 0 unused bits           03 21 00
+        <public key>
+
+No counterpart in `sealed-box.ts`, unlike the private prefix: WebCrypto
+imports a raw X25519 *public* key happily, so TS only ever needs to wrap the
+private half.
+"""
+
+
+class _X25519(NamedTuple):
+    """`cryptography`'s X25519, bound once at import."""
+
+    public_key: Callable[[bytes], bytes]
+    """The public half of a private scalar."""
+
+    exchange: Callable[[bytes, bytes], bytes | None]
+    """The secret a scalar shares with a peer's public key; ``None`` if it cannot."""
+
+
+def _load_x25519() -> _X25519 | None:
+    """Bind `cryptography`'s X25519, or ``None`` without the extra installed."""
+    try:
+        from cryptography.hazmat.primitives.serialization import (
+            load_der_private_key,
+            load_der_public_key,
+        )
+    except ImportError:
+        return None
+
+    def private_key(scalar: bytes) -> Any:
+        return load_der_private_key(PKCS8_X25519_PREFIX + scalar, password=None)
+
+    def public_key(scalar: bytes) -> bytes:
+        return private_key(scalar).public_key().public_bytes_raw()
+
+    def exchange(scalar: bytes, peer_public_key: bytes) -> bytes | None:
+        try:
+            peer = load_der_public_key(SPKI_X25519_PREFIX + peer_public_key)
+            return private_key(scalar).exchange(peer)
+        except ValueError:
+            return None
+
+    return _X25519(public_key, exchange)
+
+
+_X25519_IMPL = _load_x25519()
 
 
 def hkdf_sha256(*, ikm: bytes, salt: bytes, info: bytes, length: int) -> bytes:
@@ -95,6 +204,60 @@ def derive_run_key(deployment_key: bytes, *, project_id: str, run_id: str) -> by
     )
 
 
+def derive_run_key_pair(run_key: bytes) -> RunKeyPair:
+    """The X25519 keypair a run opens its sealed payloads with.
+
+    Derived from the same 32 bytes :func:`derive_run_key` produces, so a run
+    that can decrypt its own `encr` payloads can open a sealed one with no
+    further key material — the deployment re-derives the scalar on demand
+    instead of anything storing it.
+
+    Any 32 bytes are a valid X25519 scalar, the low and high bits being clamped
+    during multiplication, so the HKDF output is used as it comes.
+    """
+    if _X25519_IMPL is None:
+        raise DecryptionError(_EXTRA_HINT)
+    if len(run_key) != KEY_LENGTH:
+        raise ValueError(f"A run key is {KEY_LENGTH} bytes, got {len(run_key)}")
+    scalar = hkdf_sha256(ikm=run_key, salt=bytes(32), info=SCALAR_INFO, length=KEY_LENGTH)
+    return RunKeyPair(scalar, _X25519_IMPL.public_key(scalar))
+
+
+def open_sealed_envelope(run_key: bytes, payload: bytes) -> bytes:
+    """Open the X25519 sealed box an `encp` payload carries.
+
+    *payload* is everything after the 4-byte format prefix: the sender's
+    ephemeral public key, then the AES-GCM envelope :func:`open_envelope`
+    reads. The content key comes from the ECDH shared secret, bound to both
+    public keys so that a payload sealed to one run cannot be replayed at
+    another.
+
+    No AAD: `@workflow/core` seals with ``sealTo(publicKey)`` and passes none.
+    The construction binds the payload to its recipient through the content
+    key's ``info`` regardless.
+    """
+    if _X25519_IMPL is None:
+        raise DecryptionError(_EXTRA_HINT)
+    minimum = KEY_LENGTH + NONCE_LENGTH + TAG_LENGTH
+    if len(payload) < minimum:
+        raise DecryptionError(f"A sealed payload is at least {minimum} bytes, got {len(payload)}")
+
+    ephemeral_public_key, envelope = payload[:KEY_LENGTH], payload[KEY_LENGTH:]
+    scalar, public_key = derive_run_key_pair(run_key)
+    shared = _X25519_IMPL.exchange(scalar, ephemeral_public_key)
+    if shared is None:
+        raise DecryptionError(
+            "the sealed payload's ephemeral public key is not a valid curve point"
+        )
+    content_key = hkdf_sha256(
+        ikm=shared,
+        salt=bytes(32),
+        info=CONTENT_KEY_INFO + ephemeral_public_key + public_key,
+        length=KEY_LENGTH,
+    )
+    return open_envelope(content_key, envelope)
+
+
 def decode_key(encoded: str, *, what: str) -> bytes:
     """Decode a base64 32-byte key."""
     normalized = encoded.strip().replace("-", "+").replace("_", "/")
@@ -115,10 +278,7 @@ def open_envelope(key: bytes, payload: bytes) -> bytes:
     so :class:`DecryptionError` names both.
     """
     if _AES_GCM_DECRYPT is None:
-        raise DecryptionError(
-            "Reading encrypted workflow payloads requires the 'encryption' extra: "
-            'pip install "vercel[encryption]"'
-        )
+        raise DecryptionError(_EXTRA_HINT)
     if len(key) != KEY_LENGTH:
         raise ValueError(f"A run key is {KEY_LENGTH} bytes, got {len(key)}")
     if len(payload) < NONCE_LENGTH + TAG_LENGTH:
