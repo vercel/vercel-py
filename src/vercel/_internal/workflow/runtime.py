@@ -4,6 +4,7 @@ import contextvars
 import dataclasses
 import functools
 import importlib
+import json
 import logging
 import math
 import random
@@ -14,6 +15,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
+from urllib.parse import parse_qsl, urlsplit
 
 import anyio
 import pydantic
@@ -745,6 +747,60 @@ async def _resolve_run_key(
     return await world.run_key(run.run_id, deployment_id=run.deployment_id)
 
 
+# ── health checks ──────────────────────────────────────────────────────────
+#
+# `workflow health`, `workflow inspect run` and a cross-deployment `start()`
+# probe a workflow deployment by publishing a probe message onto the workflow
+# queue. The workflow deployment then answers over a stream.
+#
+# Mirrors `handleHealthCheckMessage` in `@workflow/core`'s runtime/helpers.ts.
+
+
+def _health_check_stream_name(correlation_id: str) -> str:
+    return f"__health_check__{correlation_id}"
+
+
+def _health_check_run_id(correlation_id: str) -> str:
+    """The synthetic run the answer is stored under.
+
+    No such run exists. The name only has to agree with the prober, which
+    derives it the same way, because worlds scope stream reads by run.
+    """
+    return f"wrun_hc_{correlation_id}"
+
+
+def _parse_health_check(message: Any) -> w.HealthCheckPayload | None:
+    try:
+        return w.HealthCheckPayload.model_validate(message)
+    except pydantic.ValidationError:
+        # The main non-health-check path: see workflow_handler() below
+        return None
+
+
+def _health_check_response(correlation_id: str) -> dict[str, Any]:
+    return {
+        "healthy": True,
+        "correlationId": correlation_id,
+        "specVersion": w.SPEC_VERSION_CURRENT,
+        "timestamp": int(datetime.now(UTC).timestamp() * 1000),
+    }
+
+
+async def _answer_health_check(world: w.World, health: w.HealthCheckPayload) -> None:
+    run_id = _health_check_run_id(health.correlation_id)
+    name = _health_check_stream_name(health.correlation_id)
+    body = json.dumps(_health_check_response(health.correlation_id)).encode()
+    try:
+        await world.streams_write(run_id, name, body)
+        await world.streams_close(run_id, name)
+    except NotImplementedError:
+        logger.warning(
+            "Health check %r cannot be answered: %s has no streams",
+            health.correlation_id,
+            type(world).__name__,
+        )
+
+
 def refuse_cross_environment_delivery(
     world: w.World, run_input: w.RunInput | None, run_id: str
 ) -> bool:
@@ -790,6 +846,17 @@ async def workflow_handler(
     namespace: str | None = None,
 ) -> w.QueueContinuation | None:
     world = w.get_world()
+
+    # Before the invoke payload is parsed, matching `workflowEntrypoint` in
+    # `@workflow/core`: a probe carries no `runId`, so parsing it as an invoke
+    # would raise, leave the message unacked, and redeliver it forever.
+    # Deliberately unauthenticated -- answering discloses only that the
+    # endpoint is reachable, onto a stream named after the caller's own id.
+    health = _parse_health_check(message)
+    if health is not None:
+        await _answer_health_check(world, health)
+        return None
+
     req = w.WorkflowInvokePayload.model_validate(message)
     if req.step_id is not None:
         return await _execute_step(req, queue_name=queue_name, registry=registry)
@@ -1280,11 +1347,71 @@ async def _execute_step(
     return None
 
 
+FLOW_ROUTE = "/.well-known/workflow/v1/flow"
+"""The common route `workflow_entrypoint`'s handler belongs on.
+
+The tools do not discover this path, they hard-code it: `workflow health`
+prechecks it and dev-server port discovery probes it. An app serving the
+workflow_handler will use this path in the future.
+"""
+
+_HEALTH_CHECK_QUERY_PARAM = "__health"
+
+_HEALTH_CHECK_CORS_HEADERS = {
+    # So the observability UI can check an endpoint from another origin.
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "POST, OPTIONS, GET, HEAD",
+    "access-control-allow-headers": "Content-Type",
+}
+
+
+def _with_health_check(handler: w.HTTPHandler) -> w.HTTPHandler:
+    """Add the HTTP health probe to a flow route handler.
+
+    Mirrors `withHealthCheck` in `@workflow/core`, which wraps the flow route
+    the same way. This is the other probe transport, and it shares the flow
+    route's URL: a `__health` query parameter is the whole difference between
+    "is this endpoint alive" and a queue delivery, so the branch belongs inside
+    the handler rather than beside it -- one route, mounted once.
+
+    Both of its callers are local-development paths: the CLI's reachability
+    precheck before it runs the queue probe (which POSTs) and dev-server port
+    discovery (which sends HEAD, and reads only the status).
+    """
+
+    async def with_health_check(request: w.HTTPRequest) -> w.HTTPResponse:
+        target = urlsplit(request.url)
+        # `keep_blank_values`, because the probe is `?__health` with no value at
+        # all -- the default parse drops it and every probe reads as a delivery.
+        query = parse_qsl(target.query, keep_blank_values=True)
+        if not any(name == _HEALTH_CHECK_QUERY_PARAM for name, _ in query):
+            return await handler(request)
+        if request.method == "OPTIONS":
+            return w.HTTPResponse(204, b"", dict(_HEALTH_CHECK_CORS_HEADERS))
+        # Same omissions as `_health_check_response`, and `endpoint` in place of
+        # the correlation id: taken from the request, as `url.pathname` is
+        # upstream, so an app serving the route elsewhere reports where it
+        # actually answered.
+        response = w.HTTPResponse.json(
+            {
+                "healthy": True,
+                "endpoint": target.path,
+                "specVersion": w.SPEC_VERSION_CURRENT,
+            }
+        )
+        response.headers.update(_HEALTH_CHECK_CORS_HEADERS)
+        return response
+
+    return with_health_check
+
+
 def workflow_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     namespace = registry.namespace
-    return w.get_world().create_queue_handler(
-        w.get_queue_topic_prefix(namespace),
-        functools.partial(workflow_handler, registry=registry, namespace=namespace),
+    return _with_health_check(
+        w.get_world().create_queue_handler(
+            w.get_queue_topic_prefix(namespace),
+            functools.partial(workflow_handler, registry=registry, namespace=namespace),
+        )
     )
 
 

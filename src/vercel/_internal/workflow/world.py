@@ -174,8 +174,12 @@ class HealthCheckPayload(BaseModel):
     can deliver messages to the combined workflow endpoint.
     """
 
-    health_check: Literal[True] = pydantic.Field(default=True, alias="__healthCheck")
+    # Required, not defaulted: it is the discriminator. With a default, a
+    # message carrying only `correlationId` would validate as a probe, and the
+    # handler answers a probe *instead of* doing the work the message asked for.
+    health_check: Literal[True] = pydantic.Field(alias="__healthCheck")
     correlation_id: str = pydantic.Field(alias="correlationId")
+    run_id: str | None = pydantic.Field(default=None, alias="runId", exclude_if=lambda e: e is None)
 
 
 QueuePayload: TypeAlias = WorkflowInvokePayload | HealthCheckPayload
@@ -820,6 +824,15 @@ class EventResult(BaseModel):
 
 
 class HTTPRequest(metaclass=abc.ABCMeta):
+    @property
+    @abc.abstractmethod
+    def method(self) -> str: ...
+
+    @property
+    @abc.abstractmethod
+    def url(self) -> str:
+        """The request target as it arrived: a path, plus any query string."""
+
     @property
     @abc.abstractmethod
     def headers(self) -> httpx.Headers: ...
