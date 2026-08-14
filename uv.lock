@@ -605,7 +605,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -786,7 +786,7 @@ name = "importlib-metadata"
 version = "9.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.12'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405, upload-time = "2026-03-20T06:42:56.999Z" }
 wheels = [
@@ -2441,12 +2441,12 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.11'" },
-    { name = "jsonschema", marker = "python_full_version < '3.11'" },
-    { name = "packaging", marker = "python_full_version < '3.11'" },
-    { name = "requests", marker = "python_full_version < '3.11'" },
-    { name = "rich", marker = "python_full_version < '3.11'" },
-    { name = "toml", marker = "python_full_version < '3.11'" },
+    { name = "click" },
+    { name = "jsonschema" },
+    { name = "packaging" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "toml" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/bd/b92bbd4a5e6fb52c05af4fdef86726e05c38e5a36313716cf37e38183c65/vendoring-1.2.0.tar.gz", hash = "sha256:6340a84bf542222c96f22ebc3cb87e4d86932dc04bc8d446e38285594702c00e", size = 21475, upload-time = "2021-10-14T06:18:33.641Z" }
 wheels = [
@@ -2463,13 +2463,13 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "click", marker = "python_full_version >= '3.11'" },
-    { name = "jsonschema", marker = "python_full_version >= '3.11'" },
-    { name = "packaging", marker = "python_full_version >= '3.11'" },
-    { name = "pip", marker = "python_full_version >= '3.11'" },
-    { name = "requests", marker = "python_full_version >= '3.11'" },
-    { name = "rich", marker = "python_full_version >= '3.11'" },
-    { name = "tomli", marker = "python_full_version >= '3.11'" },
+    { name = "click" },
+    { name = "jsonschema" },
+    { name = "packaging" },
+    { name = "pip" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "tomli" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/55/a6/2ad9ec99117eccf78ba6e69e7c904a3dc08ca2fba50e8869a3f02c1bc518/vendoring-1.4.0.tar.gz", hash = "sha256:48113adfb29db5e5051da823c083219567b9b3405859682cc04400a7743279d9", size = 24761, upload-time = "2026-05-19T14:39:50.773Z" }
 wheels = [
@@ -2496,11 +2496,6 @@ dependencies = [
     { name = "websockets" },
 ]
 
-[package.optional-dependencies]
-encryption = [
-    { name = "vercel-workflow", extra = ["encryption"] },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
@@ -2516,10 +2511,8 @@ requires-dist = [
     { name = "vercel-queue", editable = "src/vercel-queue" },
     { name = "vercel-sandbox", editable = "src/vercel-sandbox" },
     { name = "vercel-workflow", editable = "src/vercel-workflow" },
-    { name = "vercel-workflow", extras = ["encryption"], marker = "extra == 'encryption'", editable = "src/vercel-workflow" },
     { name = "websockets", specifier = ">=12.0,<17" },
 ]
-provides-extras = ["encryption"]
 
 [[package]]
 name = "vercel-apscheduler"
@@ -2727,6 +2720,7 @@ source = { editable = "src/vercel-workflow" }
 dependencies = [
     { name = "anyio" },
     { name = "cbor2" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
@@ -2735,16 +2729,11 @@ dependencies = [
     { name = "vercel-queue" },
 ]
 
-[package.optional-dependencies]
-encryption = [
-    { name = "cryptography" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
     { name = "cbor2", specifier = ">=6.0,<7" },
-    { name = "cryptography", marker = "extra == 'encryption'", specifier = ">=48.0.1" },
+    { name = "cryptography", specifier = ">=43.0.0" },
     { name = "httpx", specifier = ">=0.27.0,<1" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
@@ -2752,7 +2741,6 @@ requires-dist = [
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
     { name = "vercel-queue", editable = "src/vercel-queue" },
 ]
-provides-extras = ["encryption"]
 
 [[package]]
 name = "vine"

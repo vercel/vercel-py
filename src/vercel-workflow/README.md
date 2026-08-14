@@ -7,12 +7,6 @@ registration, step registration, durable sleeps, hooks, and `start`.
 pip install vercel-workflow
 ```
 
-Payload encryption needs the `encryption` extra:
-
-```sh
-pip install "vercel-workflow[encryption]"
-```
-
 ## Basic Workflow
 
 ```python

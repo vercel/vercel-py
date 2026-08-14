@@ -290,17 +290,7 @@ def test_a_truncated_envelope_is_rejected_before_the_cipher() -> None:
         encryption.open_envelope(key, os.urandom(27))
 
 
-def test_without_the_extra_the_failure_names_the_remedy(monkeypatch) -> None:
-    # `cryptography` is not in the default install, and a run on a deployment is
-    # always encrypted -- so this is a plausible first encounter with the
-    # feature, and "No module named 'cryptography'" would not say what to do.
-    monkeypatch.setattr(encryption, "_AES_GCM_DECRYPT", None)
-
-    with pytest.raises(encryption.DecryptionError, match=r'pip install "vercel\[encryption\]"'):
-        encryption.open_envelope(bytes(32), os.urandom(28))
-
-
-def test_the_extra_is_probed_once_at_import(monkeypatch) -> None:
+def test_cryptography_is_probed_once_at_import(monkeypatch) -> None:
     # Not per call, because a run input is hydrated inside the sandbox, whose
     # context has a private `sys.modules` -- an import reached from there would
     # build a second copy of a native extension. Blocking the import and
@@ -313,7 +303,7 @@ def test_the_extra_is_probed_once_at_import(monkeypatch) -> None:
 
 def test_decryption_works_inside_the_workflow_sandbox() -> None:
     # A run input is hydrated inside the sandbox, so this is the path that
-    # `test_the_extra_is_probed_once_at_import` protects, driven end to end.
+    # `test_cryptography_is_probed_once_at_import` protects, driven end to end.
     key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
     payload = seal(key, ser.dehydrate([{"amount": 21}]))
 
@@ -424,15 +414,6 @@ def test_an_unusable_ephemeral_key_is_named_rather_than_authenticated() -> None:
 
     with pytest.raises(encryption.DecryptionError, match="not a valid curve point"):
         encryption.open_sealed_envelope(RUN_KEY, payload)
-
-
-def test_without_the_extra_the_sealed_failure_names_the_remedy(monkeypatch) -> None:
-    monkeypatch.setattr(encryption, "_X25519_IMPL", None)
-
-    with pytest.raises(encryption.DecryptionError, match=r'pip install "vercel\[encryption\]"'):
-        encryption.open_sealed_envelope(RUN_KEY, os.urandom(60))
-    with pytest.raises(encryption.DecryptionError, match=r'pip install "vercel\[encryption\]"'):
-        encryption.derive_run_key_pair(RUN_KEY)
 
 
 def test_x25519_is_bound_once_at_import(monkeypatch) -> None:

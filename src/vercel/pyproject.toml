@@ -11,13 +11,6 @@ requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE", "LICENSE.*"]
 
-[project.optional-dependencies]
-# Workflow payload encryption lives in `vercel-workflow`; forward the extra so
-# `vercel[encryption]` keeps meaning what it did before the split.
-encryption = [
-    "vercel-workflow[encryption]",
-]
-
 [tool.hatch.metadata.hooks.custom]
 path = "hatch_build.py"
 
