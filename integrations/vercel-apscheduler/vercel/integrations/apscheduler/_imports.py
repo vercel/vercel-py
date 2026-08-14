@@ -18,9 +18,6 @@ try:
         BaseExecutor,
         MaxInstancesReachedError,
     )
-    from apscheduler.jobstores.redis import (  # type: ignore[import-untyped]
-        RedisJobStore,
-    )
     from apscheduler.schedulers.base import (  # type: ignore[import-untyped]
         STATE_PAUSED,
         STATE_RUNNING,
@@ -32,8 +29,7 @@ try:
     )
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
-        "vercel-apscheduler requires APScheduler 3.x and redis. "
-        'Install "APScheduler>=3.10.4,<4" and "redis>=5,<7".'
+        'vercel-apscheduler requires APScheduler 3.x. Install "APScheduler>=3.10.4,<4".'
     ) from exc
 
 __all__ = [
@@ -53,5 +49,4 @@ __all__ = [
     "JobExecutionEvent",
     "JobSubmissionEvent",
     "MaxInstancesReachedError",
-    "RedisJobStore",
 ]

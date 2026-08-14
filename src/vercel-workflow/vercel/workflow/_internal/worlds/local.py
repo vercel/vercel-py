@@ -454,7 +454,9 @@ class LocalWorld(w.World):
         **kwargs,
     ) -> str:
         payload = {
-            "payload": message.model_dump(),
+            # Same JSON dialect the file store uses: the transport is plain
+            # JSON, which has nowhere to put `bytes`.
+            "payload": _encode_js(message.model_dump()),
             "queueName": queue_name,
             "deploymentId": "<local>",
         }
@@ -480,7 +482,10 @@ class LocalWorld(w.World):
                 if "queueName" not in body:
                     raise ValueError("Invalid message body: missing 'queueName' field")
                 queue_name = body["queueName"]
-                payload = body["payload"]
+                # `jsonReviver`'s counterpart: restore the `bytes` the envelope
+                # stands in for before anything validates the payload, which is
+                # what lets `RunInput.input` stay as loose as TS's `z.unknown()`.
+                payload = _decode_js(body["payload"])
                 result = await handler(
                     payload,
                     queue_name=queue_name,
@@ -582,8 +587,65 @@ class LocalWorld(w.World):
         with self._run_lock(run_id):
             return self._events_create_impl(run_id, data)
 
+    def _resilient_create_run(
+        self, run_id: str, data: w.Event, now: datetime
+    ) -> w.WorkflowRun | None:
+        """events-storage.ts, the resilient start branch.
+
+        Returns the run to continue with — the one we created, or the one a
+        concurrent ``run_created`` won the race with — or ``None`` when there is
+        nothing to recover from, which is every ordinary call.
+        """
+        if data.event_type != "run_started":
+            return None
+        assert isinstance(data, w.RunStartedEvent)
+        run_data = data.event_data
+        if run_data is None or not run_data.deployment_id or not run_data.workflow_name:
+            return None
+        if run_data.input is None:
+            return None
+
+        created = w.NonFinalWorkflowRun(
+            runId=run_id,
+            deploymentId=run_data.deployment_id,
+            status="pending",
+            workflowName=run_data.workflow_name,
+            specVersion=data.spec_version,
+            executionContext=run_data.execution_context,
+            input=run_data.input,
+            attributes=run_data.attributes or {},
+            encryptionPublicKey=run_data.encryption_public_key,
+            createdAt=now,
+            updatedAt=now,
+        )
+        run_path = self.data_dir / "runs" / f"{run_id}.json"
+        # Exclusive so a concurrent `run_created` cannot be overwritten — it may
+        # already have moved the run to 'running'.
+        if not write_exclusive(run_path, dumps_js(created.model_dump(exclude_none=True)).decode()):
+            return read_json(run_path, w.WorkflowRunAdaptor)
+
+        # The log needs the `run_created` it never got, in an earlier slot than
+        # the caller's event so replay reads it first.
+        run_created = w.RunCreatedEvent(
+            eventData=w.RunCreatedEventData(
+                deploymentId=run_data.deployment_id,
+                workflowName=run_data.workflow_name,
+                input=run_data.input,
+                executionContext=run_data.execution_context,
+            ),
+            specVersion=data.spec_version,
+        )
+        run_created_id = self._new_id("evnt")
+        event = w.EventAdaptor.validate_python(
+            run_created.model_dump()
+            | {"runId": run_id, "eventId": run_created_id, "createdAt": now}
+        )
+        write_json(
+            self.data_dir / "events" / f"{run_id}-{run_created_id}.json", event_record(event)
+        )
+        return created
+
     def _events_create_impl(self, run_id: str | None, data: w.Event) -> w.EventResult:
-        event_id = self._new_id("evnt")
         now = js_now()
 
         if data.event_type == "run_created" and not run_id:
@@ -598,6 +660,18 @@ class LocalWorld(w.World):
         if data.event_type != "run_created" and data.event_type not in skip_run_validation_events:
             run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
             current_run = read_json(run_path, w.WorkflowRunAdaptor)
+
+        if current_run is None:
+            current_run = self._resilient_create_run(effective_run_id, data, now)
+
+        # Match the Vercel world's 404 rather than persist an event for a run
+        # that was never created.
+        if current_run is None and data.event_type in ("run_started", "run_failed"):
+            raise RuntimeError(f"Run {effective_run_id} not found")
+
+        # Minted after the resilient path, whose synthetic `run_created` takes
+        # the earlier slot.
+        event_id = self._new_id("evnt")
 
         if current_run and is_run_terminal(current_run.status):
             run_terminal_events = ["run_started", "run_completed", "run_failed"]
@@ -655,8 +729,18 @@ class LocalWorld(w.World):
                 # Already disposed (or never created). Mirrors the backend's 404.
                 raise w.HookNotFoundError(hook_id=data.correlation_id)
 
+        # Idempotent for a run already running: the runtime issues `run_started`
+        # on every delivery, so appending one per replay would be unbounded.
+        if data.event_type == "run_started" and current_run and current_run.status == "running":
+            return w.EventResult(run=current_run)
+
+        stored = data.model_dump()
+        # `eventData` is transport for the resilient path above; it belongs to
+        # the `run_created` that path wrote, not on the row here.
+        if data.event_type == "run_started":
+            stored.pop("eventData", None)
         event = w.EventAdaptor.validate_python(
-            data.model_dump()
+            stored
             | {
                 "runId": effective_run_id,
                 "eventId": event_id,
@@ -697,6 +781,7 @@ class LocalWorld(w.World):
                     executionContext=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
+                    encryptionPublicKey=current_run.encryption_public_key,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     status="running",
@@ -717,6 +802,7 @@ class LocalWorld(w.World):
                     executionContext=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
+                    encryptionPublicKey=current_run.encryption_public_key,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     startedAt=current_run.started_at,
@@ -754,6 +840,7 @@ class LocalWorld(w.World):
                     executionContext=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
+                    encryptionPublicKey=current_run.encryption_public_key,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     startedAt=current_run.started_at,
@@ -780,6 +867,7 @@ class LocalWorld(w.World):
                     executionContext=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
+                    encryptionPublicKey=current_run.encryption_public_key,
                     createdAt=current_run.created_at,
                     expiredAt=current_run.expired_at,
                     startedAt=current_run.started_at,

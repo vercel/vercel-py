@@ -1,26 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from os import environ
 
-from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
-from redis import ConnectionPool
 
 UTC = timezone.utc
 
-scheduler = BlockingScheduler(
-    timezone=UTC,
-    jobstores={
-        "default": RedisJobStore(
-            connection_pool=ConnectionPool.from_url(
-                environ["REDIS_URL"],
-                socket_connect_timeout=5,
-                socket_timeout=5,
-            ),
-        )
-    },
-)
+scheduler = BlockingScheduler(timezone=UTC)
 
 
 @scheduler.scheduled_job(

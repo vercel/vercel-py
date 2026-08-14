@@ -5,7 +5,6 @@ requires-python = ">=3.10"
 dependencies = [
     "APScheduler>=3.10.4,<4",
     "vercel-apscheduler>=0.1.0",
-    "redis>=5,<7",
     "fastapi>=0.115.6,<0.116",
 ]
 

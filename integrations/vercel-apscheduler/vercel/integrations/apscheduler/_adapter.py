@@ -202,11 +202,11 @@ class SchedulerAdapter:
 
     @property
     def identity(self) -> _SchedulerIdentity:
-        """The scheduler's durable identity, derived from its job store.
+        """The scheduler's durable identity.
 
-        The configured ``jobs_key`` is refactor-stable and exactly as durable
-        as the state it names, so renaming the scheduler's variable or moving
-        its module never orphans the Redis namespace or the queue topics. The
+        Derived from the builder-assigned subscriber id, which is
+        refactor-stable, so renaming the scheduler's variable or moving its
+        module never orphans the durable namespace or the queue topics. The
         ``scheduler_id`` option pins the identity explicitly instead.
         """
         if self._identity is None:
@@ -272,14 +272,12 @@ class SchedulerAdapter:
     def _scope_outlives_deployments(self) -> bool:
         """Whether the namespace can outlive this code's view of it.
 
-        True for named environments (shared by successive deployments). Also
-        always true for the cache backend: its documents are evictable in
+        Always true on the cache backend: its documents are evictable in
         every scope, so reconciliation-from-code is the durability story
-        regardless of scoping.
+        regardless of scoping. A future durable backend would return
+        ``self._scope != self._deployment`` here.
         """
-        if self.backend.name == "cache":
-            return True
-        return self._scope != self._deployment
+        return True
 
     @property
     def is_runtime_mutation(self) -> bool:
@@ -386,12 +384,10 @@ class SchedulerAdapter:
     def _publish_lifecycle_control(self, action: str, now: datetime) -> None:
         """Carry a lifecycle flag over the queue where the cache cannot.
 
-        Cache-backend documents are per-process under ``vercel dev`` and
-        per-region in deployments, so the flag also rides the start topic to
-        whichever process serves the chain. Redis needs no counterpart.
+        Cache documents are per-process under ``vercel dev`` and per-region
+        in deployments, so the flag also rides the start topic to whichever
+        process serves the chain.
         """
-        if self.backend.name != "cache":
-            return
         payload = LifecyclePayload(
             scheduler_id=self.identity.scheduler_id,
             action=action,
@@ -1409,9 +1405,9 @@ def _register_queues_when_ready(
     if not (is_vercel_runtime() and (_PATCH_STATE.register_queues or is_queue_serving_runtime())):
         return
     if adapter.options.scheduler_id is None and not adapter.backend.identity_ready(scheduler):
-        # The backend cannot derive a durable identity yet (e.g. Redis needs
-        # the store's jobs_key, which may only arrive through a later
-        # add_jobstore()); registration re-runs when it can.
+        # The backend cannot derive a durable identity yet (the declared
+        # subscriber mapping resolves only once the declaring module finishes
+        # importing); registration re-runs when it can.
         adapter._registration_deferred = True
         return
     from ._subscriber import register_scheduler

@@ -46,9 +46,9 @@ class CacheJobStore(BaseJobStore):  # type: ignore[misc]
 
     All jobs live in a single JSON document so every mutation is one
     read-merge-write; the write methods are replaced by the coordinator at
-    bind time, exactly like the Redis store. Scaling note: this bounds the
-    practical job count by the cache's value-size limit; sharding is a
-    follow-up if real projects hit it.
+    bind time. Scaling note: this bounds the practical job count by the
+    cache's value-size limit; sharding is a follow-up if real projects hit
+    it.
     """
 
     def __init__(self) -> None:
@@ -87,7 +87,7 @@ class CacheJobStore(BaseJobStore):  # type: ignore[misc]
         get_cache().set(self.doc_key, doc, {"ttl": DOC_TTL_SECONDS, "tags": [self.tag]})
 
     def _reconstitute_job(self, job_state: dict[str, Any]) -> Any:
-        """Rebuild a Job exactly as the upstream Redis store does."""
+        """Rebuild a Job exactly as upstream APScheduler stores do."""
         job = Job.__new__(Job)
         job.__setstate__(job_state)
         job._scheduler = self._scheduler
@@ -167,10 +167,10 @@ class CacheJobStore(BaseJobStore):  # type: ignore[misc]
 class CacheJobCoordinator:
     """Couples the cache job store to its driver, best-effort.
 
-    Same surface as ``RedisJobCoordinator``; the revision counter and CAS
-    checks are read-merge-write rather than atomic, which shrinks but cannot
-    eliminate lost updates under concurrency. Declared jobs are protected by
-    reconciliation-from-code; runtime jobs accept the documented risk.
+    The revision counter and CAS checks are read-merge-write rather than
+    atomic, which shrinks but cannot eliminate lost updates under
+    concurrency. Declared jobs are protected by reconciliation-from-code;
+    runtime jobs accept the documented risk.
     """
 
     def __init__(self, store: CacheJobStore, driver: CacheDriver, adapter: Any) -> None:
@@ -235,10 +235,10 @@ class CacheJobCoordinator:
         raise RuntimeError("cache job store write failed") from last_error
 
     def _rearm(self, job: Any, *, always: bool = False) -> None:
-        # Adds rearm unconditionally, exactly like the Redis add script: a
-        # declaration restored onto a dormant chain (reconcile after jobs-doc
-        # eviction) must mint the wake nothing else will. rearm_wake's own
-        # guards make cold-start adds a no-op.
+        # Adds rearm unconditionally: a declaration restored onto a dormant
+        # chain (reconcile after jobs-doc eviction) must mint the wake
+        # nothing else will. rearm_wake's own guards make cold-start adds a
+        # no-op.
         if not (always or self.adapter.is_runtime_mutation):
             return
         next_run_time = getattr(job, "next_run_time", None)

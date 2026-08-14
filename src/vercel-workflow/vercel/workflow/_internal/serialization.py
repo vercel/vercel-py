@@ -6,12 +6,12 @@ payload. The only format this SDK writes is ``devl`` — UTF-8
 `devalue.stringify` output — so a payload written here parses with
 `devalue.parse` in JavaScript and vice versa.
 
-``encr`` — an encrypted payload — is read too.
+``encr`` — an encrypted payload — and ``encp`` — one sealed to the run's public
+key — are read too.
 
-The remaining tags are recognized so that an envelope written by the
-TypeScript SDK is reported as unsupported by name instead of as corrupt data:
-`encp` is a different (X25519) construction, and `gzip`/`zstd` wrap another
-prefixed payload.
+`gzip`/`zstd`, which wrap another prefixed payload, are recognized so that an
+envelope written by the TypeScript SDK is reported as unsupported by name
+instead of as corrupt data.
 """
 
 from __future__ import annotations
@@ -38,6 +38,9 @@ GZIP = b"gzip"
 ZSTD = b"zstd"
 
 KNOWN_FORMATS = (DEVALUE_V1, ENCRYPTED, SEALED, GZIP, ZSTD)
+
+ENCRYPTED_FORMATS = (ENCRYPTED, SEALED)
+"""The formats that need the run's key material. Both derive from the same 32 bytes."""
 
 
 class SerializationError(RuntimeError):
@@ -100,7 +103,7 @@ def is_encrypted(data: Any) -> bool:
     """
     if not isinstance(data, bytes | bytearray | memoryview):
         return False
-    return bytes(data[:FORMAT_PREFIX_LENGTH]) == ENCRYPTED
+    return bytes(data[:FORMAT_PREFIX_LENGTH]) in ENCRYPTED_FORMATS
 
 
 def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
@@ -114,7 +117,8 @@ def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
     *what* names the payload in the error message — it is the only context
     the caller has that would help someone reading the traceback.
 
-    *key* is the run's 32-byte key, needed only for an ``encr`` payload;
+    *key* is the run's 32-byte key material, needed for an ``encr`` payload and
+    for an ``encp`` one, which derives its keypair from the same bytes;
     :func:`is_encrypted` says in advance whether one will be asked for.
     """
     if not isinstance(data, bytes | bytearray | memoryview):
@@ -129,13 +133,19 @@ def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
             return devalue.parse(payload.decode(), REVIVERS)
         except (devalue.DevalueError, ValueError, TypeError) as error:
             raise SerializationError(f"Cannot deserialize {what}: {error}") from error
-    if prefix == ENCRYPTED:
+    if prefix in ENCRYPTED_FORMATS:
         if key is None:
             raise SerializationError(
                 f"{what} is encrypted, and no key was resolved for the run that wrote it"
+                if prefix == ENCRYPTED
+                else f"{what} is sealed, and no key was resolved for the run it is addressed to"
             )
         try:
-            plaintext = encryption.open_envelope(key, payload)
+            plaintext = (
+                encryption.open_envelope(key, payload)
+                if prefix == ENCRYPTED
+                else encryption.open_sealed_envelope(key, payload)
+            )
         except (encryption.DecryptionError, ValueError) as error:
             raise SerializationError(f"Cannot decrypt {what}: {error}") from error
         # The plaintext carries its own prefix, normally `devl`.
