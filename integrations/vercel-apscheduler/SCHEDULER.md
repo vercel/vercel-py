@@ -1,7 +1,7 @@
 # APScheduler runtime model
 
-`vercel-apscheduler` turns an APScheduler 3.x scheduler with a Redis job store
-into one durable delayed-message chain per Vercel deployment.
+`vercel-apscheduler` turns an APScheduler 3.x scheduler into one durable
+delayed-message chain per Vercel deployment, on a managed job store.
 
 The message model is:
 
@@ -30,14 +30,13 @@ two internal callbacks in `vercel.queue`:
 
 The builder extracts those callbacks and produces the Function and Queue
 triggers. The entrypoint is a locator only: the scheduler's durable identity
-derives from its `RedisJobStore` `jobs_key` (dots become dashes), the one
-value that is refactor-stable and exactly as durable as the state it names.
-Renaming the variable or moving the module never orphans the Redis namespace
-or the queue topics; deliberately renaming `jobs_key` is an identity
-migration. The `scheduler_id` integration option pins an identity explicitly.
+is the builder-assigned subscriber id, which is refactor-stable. Renaming the
+variable or moving the module never orphans the durable namespace or the
+queue topics. The `scheduler_id` integration option pins an identity
+explicitly.
 
-Two schedulers whose keys collapse to one identity fail loudly at import;
-give each scheduler's store a distinct `jobs_key`.
+Two schedulers that derive one identity fail loudly at import; give each
+scheduler a distinct identity.
 
 The topic names are implementation details. Applications do not configure or
 publish to them. Build-time imports run in discovery mode;
@@ -80,66 +79,91 @@ and never idles.
 
 Outside Vercel, APScheduler's original methods are used.
 
+## Coordination substrate
+
+The managed store runs on the Vercel Runtime Cache: `get`/`set`/`delete` with
+TTLs and tags — no compare-and-swap, no transactions, and entries may be
+evicted. Each guarantee therefore lives on something that can carry it:
+
+- **The single-successor rule lives in the queue.** Racing finishers compute
+  the same canonical successor and the same idempotency key, and the queue
+  accepts the publication once. Claims are best-effort filters that shrink,
+  but cannot eliminate, duplicate wake *executions*; the contract is
+  at-least-once.
+- **Chain progress travels in the messages.** A claim adopts a generation or
+  wake token that is ahead of the local document, so an evicted document —
+  or another process's memory under `vercel dev` — never strands the chain.
+  A `paused` document fences only its own and older generations; a resume's
+  new generation revives it.
+- **Job-store writes are owner-fenced best-effort.** The fence is checked
+  against the driver document rather than atomically with the write, so a
+  demoted deployment's stale pass aborts, but a narrow read-write race
+  remains within the documented best-effort envelope.
+- **Code-declared jobs are durable because code is the backup.**
+  Reconciliation rewrites them from the declarations whenever the documents
+  are missing. Runtime-added jobs and lifecycle flags are best-effort by
+  declared policy; `pause()` additionally publishes a queue-borne control
+  message so the flag reaches the process serving the chain even where cache
+  state does not.
+
+Under `vercel dev` the cache client falls back to per-process memory, so the
+integration becomes a zero-infrastructure development mode with the
+queue-serving sidecar as the effective scheduler process.
+
 ## Durable state
 
 State is scoped by environment for production and custom environments, and by
-deployment for previews and development. A named environment's schedules,
-dynamic jobs, and wake chain therefore survive promotions, while preview
-state stays disposable.
+deployment for previews and development. A named environment's schedules and
+wake chain therefore survive promotions, while preview state stays disposable.
 
-The driver stores one Redis hash per scope and scheduler:
+The driver keeps one cache document per scope and scheduler:
 
 ```text
-state              running | paused | inactive
-generation         monotonically increasing integer
-idle_expires_at    preview idle deadline, when enabled
-start_status       pending | published | processing | active
-current_sequence   monotonically increasing within a generation
-current_logical_time
-current_status     pending | published | processing
-active_owner
-active_lease_until
-reconciled_deployment
+state                running | paused | inactive
+generation           monotonically increasing integer
+owner_deployment     the deployment currently driving the chain
+start_status         pending | published | processing | active
+activation_time      when the current generation activated
+current              the one current wake: sequence, logical time, status
+last_sequence        dedup watermark that survives dormancy
+dirty_logical_time   earliest candidate parked by a concurrent mutation
+idle_expires_at      preview idle deadline, when enabled
 ```
 
-Redis Lua scripts update these fields atomically. Driver state has no TTL.
+Jobs live in a second document beside it, one record per job with a revision
+counter and provenance tag; the takeover reconciliation marker shares the
+jobs document so eviction clears them together. Documents are rewritten on
+every touch and carry a long TTL, so only an abandoned namespace is reaped;
+LRU eviction is survivable by design (see above).
 
-The driver key carries a `{scope:scheduler}` hash tag, so it always shares
-a Redis Cluster slot with the job-store keys that use the same namespace.
-Distinct scopes can use the same Redis database without sharing state.
-
-Each persisted job also records its provenance: `declared` for jobs
-materialized from code declarations, `runtime` for jobs added through the
-mutation APIs after `start()`. Code owns declared jobs across deployments;
-the store owns runtime jobs.
+Each persisted job records its provenance: `declared` for jobs materialized
+from code declarations, `runtime` for jobs added through the mutation APIs
+after `start()`. Code owns declared jobs across deployments; the store owns
+runtime jobs.
 
 ## Starting
 
 If the driver is already running, `start()` does not create a new generation.
-Otherwise it atomically:
+Otherwise it:
 
 1. increments `generation`;
 2. sets the state to running;
 3. marks the start message pending; and
 4. clears the prior generation's current wake.
 
-All concurrent callers observe the same generation, so they publish the same
-Queue payload with the same idempotency key. After Queue accepts that message,
-`mark_start_published` records it. If the process fails between those
-operations, a later `start()` retries the same payload and key.
+Concurrent callers converge on one live chain: racing writers publish under
+per-generation idempotency keys, the queue accepts each key once, and a
+newer generation permanently fences an older one at claim time.
 
-The start delivery acquires the driver's single active-owner lease through
-`claim_start`. It starts APScheduler's internals without starting a background
-scheduler thread and materializes code-declared jobs into Redis using
-insert-if-absent semantics, so a cold import cannot overwrite a job changed
-through a runtime API. `finish_start` then atomically marks the start active
-and reserves sequence 1 — or, when no job is scheduled, leaves the driver
-dormant with no current wake.
+The start delivery claims the driver. It starts APScheduler's internals
+without starting a background scheduler thread and materializes code-declared
+jobs into the store using insert-if-absent semantics, so a cold import cannot
+overwrite a job changed through a runtime API. `finish_start` then marks the
+start active and reserves sequence 1 — or, when no job is scheduled, leaves
+the driver dormant with no current wake.
 
 Automatic activation performs the same generation reservation, with one
-important distinction: it never changes an explicitly paused driver. Many cold
-Function instances can attempt activation concurrently, but the Redis
-transition produces one generation and one start identity.
+important distinction: it never changes an explicitly paused driver.
 
 ## One wake
 
@@ -151,15 +175,12 @@ sequence
 logical time
 ```
 
-Before doing work, its delivery must atomically prove all of the following
-through `claim_wake`:
+Before doing work, its delivery must prove through `claim_wake` that the
+driver is running, its generation and token are current, and no other live
+processing attempt holds the claim. A token ahead of the local document is
+adopted wholesale — the message is the authority on chain progress.
 
-- the driver is running;
-- its generation is current;
-- its sequence and logical time are the current wake token; and
-- no other processing attempt owns the active lease.
-
-Only that owner runs work. When it finishes, `finish_wake` verifies ownership
+Only a claimant runs work. When it finishes, `finish_wake` verifies the claim
 again and replaces the current token with exactly one successor:
 
 ```text
@@ -170,43 +191,33 @@ status = pending
 
 The successor is the exact next due time. There are no periodic or idle
 heartbeat wakes; once nothing remains scheduled, the chain goes dormant with
-no current wake.
+no current wake. The consumed position stays recorded in `last_sequence`, so
+a redelivered old wake is stale even on a dormant chain.
 
 If the handler reserves a successor and crashes before Queue publication, the
 current token remains pending. A retry or stale delivery sees it and
-republishes the exact same payload and key. The Redis token is the
-authoritative duplicate-chain fence; the Queue idempotency key is an
-additional publication safeguard.
+republishes the exact same payload and key. The Queue idempotency key is the
+single-successor fence; the document narrows duplicate executions.
 
-Completion is typed. `finish_start` and `finish_wake` atomically distinguish:
-
-- `advanced` — this owner committed the successor and must publish it;
-- `fenced` — the driver was paused, superseded, or already advanced;
-  acknowledging the delivery is safe;
-- `lost` — the token is still current but another owner replaced this one
-  (for example after its lease lapsed mid-execution). The delivery must be
-  retried rather than acknowledged, so an unacknowledged message always
-  remains as a watchdog while the token is unresolved.
-
-The active-owner lease lasts fifteen minutes and is renewed every minute by
-the processing handler. A claim by a different owner succeeds only after the
-lease lapses.
+A processing claim younger than fifteen minutes is treated as live and makes
+duplicate deliveries retry later; past it, the claimant is presumed crashed
+and the claim is retaken.
 
 ## Preview idle expiry
 
-An opted-in preview stores `idle_expires_at` in the same Redis driver hash.
+An opted-in preview stores `idle_expires_at` in the same driver document.
 The first request starts the preview generation. Later requests renew the
 deadline without changing the generation.
 
-A manual `start()` renews the deadline in the same atomic transition that
-starts the generation. Without that renewal, a `start()` issued after the
-deadline lapsed would create a generation whose own start message is already
-stale. Outside an opted-in preview, activation clears any stored deadline.
+A manual `start()` renews the deadline in the same transition that starts the
+generation. Without that renewal, a `start()` issued after the deadline
+lapsed would create a generation whose own start message is already stale.
+Outside an opted-in preview, activation clears any stored deadline.
 
-Start and wake claims check the deadline atomically before acquiring
-ownership. Start and wake completion check it again atomically before
-reserving a successor. If it expired, the transition sets the driver to
-`inactive`, clears the current token, and fails closed:
+Start and wake claims check the deadline before acquiring the claim.
+Completion checks it again before reserving a successor. If it expired, the
+transition sets the driver to `inactive`, clears the current token, and fails
+closed:
 
 - unclaimed Queue messages do no work;
 - work already in flight may finish, but cannot extend the chain; and
@@ -223,23 +234,19 @@ deadline; it does not resume the scheduler.
 
 ## Pausing and resuming
 
-`pause()` atomically changes the state to paused. After pause commits:
+`pause()` changes the state to paused and publishes a queue-borne control
+message carrying the flag to the process serving the chain. After pause
+commits:
 
 - an unclaimed start or wake is stale and does no work;
 - an in-flight handler may finish its current work;
-- its final Redis transaction cannot reserve a successor.
+- its completion cannot reserve a successor.
 
-Resuming reuses `start()`: it atomically creates one new generation. Old
-messages remain permanently stale because their generation no longer matches.
-Occurrences that became due while paused are skipped, regardless of misfire
-settings: the new generation rebases every job to its next occurrence at or
-after the resume.
-
-The active-owner lease is deliberately not removed by pause or resume. If an
-old handler is still executing, the new generation's start delivery retries
-until that handler releases its lease. This closes the rapid pause/resume
-race: the new generation cannot begin while the old generation is still
-inside its critical section.
+Resuming reuses `start()`: it creates one new generation. Old messages remain
+permanently stale because their generation no longer matches. Occurrences
+that became due while paused are skipped, regardless of misfire settings: the
+new generation rebases every job to its next occurrence at or after the
+resume.
 
 ## Runtime job mutations
 
@@ -255,14 +262,13 @@ scheduler.resume_job(...)
 scheduler.remove_job(...)
 ```
 
-The integration coordinates the Redis job write and wake rearm in one Lua
-transaction:
+The integration coordinates the job write and wake rearm:
 
 - while paused, only the job is changed;
-- while running with no active owner, an earlier or missing current wake is
-  replaced with one new monotonic sequence;
-- while a start or wake owns the driver, the mutation records its earliest
-  candidate time and the owner folds that value into its one successor.
+- while running with no active claimant, an earlier or missing current wake
+  is replaced with one new monotonic sequence;
+- while a start or wake holds the driver, the mutation records its earliest
+  candidate time and the claimant folds that value into its one successor.
 
 Moving or removing a job may leave an already published wake in Queue. Queue
 messages cannot be canceled, so that now-empty wake is allowed to arrive; it
@@ -282,62 +288,29 @@ Automatic activation establishes the boundary before a production request
 reaches the application. Without automatic activation, every cold Function
 instance that performs a runtime mutation must first call the idempotent
 `scheduler.start()`. Before that boundary, `add_job()` calls are treated as
-module-level declarations. Raw writes to Redis job-store keys
-are unsupported because they bypass atomic wake rearming and revision checks.
+module-level declarations. Raw writes to the store's cache keys are
+unsupported because they bypass wake rearming and revision checks.
 
 The no-heartbeat design has one deliberate liveness contract: `start()` and
 mutation calls are durable after they return successfully. If a process dies
-after committing Redis but before publishing Queue, an idempotent `start()`
-republishes the pending token. Repeating an interrupted mutation is also safe:
-a retried mutation republishes the pending wake even when the retry itself
-fails, for example on a conflicting job id. A completely dormant scheduler
-does not wake periodically to repair an otherwise unobserved ambiguous
-failure. A delayed repair can pass a finite misfire window; jobs that opt
-into one and must remain eligible after repairs should size it accordingly.
+after committing the store but before publishing Queue, an idempotent
+`start()` republishes the pending token. Repeating an interrupted mutation is
+also safe: a retried mutation republishes the pending wake even when the
+retry itself fails, for example on a conflicting job id. A completely dormant
+scheduler does not wake periodically to repair an otherwise unobserved
+ambiguous failure. A delayed repair can pass a finite misfire window; jobs
+that opt into one and must remain eligible after repairs should size it
+accordingly.
 
-## Backends and execution requirements
+## Execution requirements
 
-Exactly one durable job store, named `default`, coordinates the lifecycle;
-job stores under other aliases are source stores (see below), and a durable
-store type under a non-default alias is rejected at validation. With
-APScheduler's Redis-backed `RedisJobStore` configured as `default`, it is
-also the lifecycle coordinator: the integration namespaces the job-store
-keys with the state scope and the scheduler identity, so distinct
-environments and previews can share a Redis database without sharing jobs
-or driver state. Redis lifecycle
-state has no TTL, so use a durable Redis service rather than an ephemeral
-cache. Redis failures fail closed: lifecycle methods raise instead of
-claiming success, Queue handlers fail and are retried, and no job runs
-without acquiring the Redis owner lease.
-
-Without a `RedisJobStore` (or with `VERCEL_APSCHEDULER_BACKEND=cache`), the
-integration runs on the Vercel Runtime Cache, which is evictable and has no
-compare-and-swap. The cache backend therefore relocates each guarantee to
-something that can actually carry it:
-
-- The single-successor rule moves to the queue: racing finishers compute the
-  same canonical successor and the same idempotency key, and the queue
-  accepts the publication once. Claims become best-effort filters, so
-  duplicate wake *executions* are more likely than under Redis; the contract
-  stays at-least-once.
-- Chain progress travels in the messages: a claim adopts a generation or
-  wake token that is ahead of the local document, so an evicted document —
-  or another process's memory under `vercel dev` — never strands the chain.
-  A `paused` document fences only its own and older generations; a resume's
-  new generation revives it.
-- Job-store writes are owner-fenced best-effort: the fence is checked
-  against the driver document rather than atomically with the write, so a
-  demoted deployment's stale pass aborts with the same error as in Redis
-  mode, but a narrow read-write race remains within the documented
-  best-effort envelope.
-- Code-declared jobs are durable because code is the backup: reconciliation
-  rewrites them from the declarations whenever the documents are missing.
-  Runtime-added jobs and lifecycle flags are best-effort by declared policy;
-  `pause()` additionally publishes a queue-borne control message so the flag
-  reaches the process serving the chain even where cache state does not.
+Exactly one durable job store, the managed one named `default`, coordinates
+the lifecycle. Job stores under other aliases are source stores (see below);
+a third-party store named `default`, or the managed store type under a
+non-default alias, is rejected at validation.
 
 Jobs use the integration's inline executor so that a wake remains active until
-the job has completed and the durable job-store update has happened. Custom
+the job has completed and the job-store update has happened. Custom
 executors are rejected in v1. A scheduled function can enqueue longer work to
 another queue.
 
@@ -401,11 +374,10 @@ wake to the store's reported next due time, so a store present at boot
 needs no application-level `wakeup()` call for its existing rows.
 
 Delivery to source-store jobs is at least once, and the store owns its own
-dedup. Under Redis the active-owner lease serializes evaluation; under the
-cache backend claims are best-effort and duplicate wake executions are more
-likely. A store whose dispatch must not double should claim its rows
-conditionally (for example an atomic `UPDATE ... WHERE locked_at IS NULL`)
-before acting and treat zero claimed rows as already dispatched.
+dedup. Claims are best-effort filters on evictable state, so duplicate wake
+executions are possible. A store whose dispatch must not double should claim
+its rows conditionally (for example an atomic `UPDATE ... WHERE locked_at IS
+NULL`) before acting and treat zero claimed rows as already dispatched.
 
 Store failures are bounded, not fatal: a failing `get_due_jobs()` or
 `get_next_run_time()` retries on APScheduler's `jobstore_retry_interval`,
@@ -423,9 +395,8 @@ will wake the chain immediately and continuously.
 `vercel dev` runs each declared subscriber as a local queue-serving sidecar
 against the CLI's in-process queue broker, which honors the same delays and
 idempotency keys as the hosted queue. Without deployed cache credentials the
-Runtime Cache client falls back to per-process memory, so the cache backend
-becomes a zero-infrastructure development mode with the sidecar as the
-effective scheduler process.
+Runtime Cache client falls back to per-process memory, so development is a
+zero-infrastructure mode with the sidecar as the effective scheduler process.
 
 Activation follows the production rule: the first request to the app
 registers and runs the activation hook, which publishes the durable start,
@@ -435,8 +406,7 @@ session. `vercel dev` deliberately sets no
 `VERCEL_DEPLOYMENT_ID` (SDKs read its presence as "deployed"), so the
 integration derives a stable synthetic id from the project directory every
 dev process is spawned in. It is shared by the web process and every
-sidecar, names the development state scope, and keeps two projects apart
-when development points them at one shared Redis database.
+sidecar, names the development state scope, and keeps two projects apart.
 
 Identity is builder-assigned in every mode: sidecars receive their
 subscriber id directly, and publishing processes (web functions) resolve it
@@ -452,13 +422,13 @@ that sent it, promoted or not; when the platform enables queue aliasing for a
 project, in-flight messages are instead handed to the environment's current
 deployment. Ownership therefore decides who may act, never who received a
 delivery: `start()` on a non-owner is a takeover that transfers ownership and
-opens a new generation in one atomic step, and a promoted deployment takes
+opens a new generation in one step, and a promoted deployment takes
 over automatically on its first request that arrives through an environment
 alias. From that moment the demoted deployment is fenced out of the
-namespace entirely: its deliveries still arrive but every claim turns stale
+namespace: its deliveries still arrive but every claim turns stale
 and acks, it repairs and rearms nothing, its cold starts write no
-declarations, its mutation APIs refuse loudly, and every job-store write is
-refused atomically by owning deployment. Its queue simply drains.
+declarations, its mutation APIs refuse loudly, and its job-store writes are
+refused. Its queue simply drains.
 A rollback is the same operation in the other direction; the mechanism has
 no notion of old and new, only of who owns the chain now. An opted-in
 preview activates the same way and remains active only while requests renew
@@ -468,7 +438,7 @@ Automatic takeover is traffic-driven: it happens on the first request the
 promoted deployment serves through an environment alias, regardless of what
 arrived before it. Requests through the deployment's own URL neither take
 over nor delay it: while another deployment owns the chain, the activation
-hook stays eligible on every invocation and touches Redis only for an
+hook stays eligible on every invocation and touches the store only for an
 alias-routed request or a lapsed sweep interval. After promoting or
 rolling back a deployment that receives no organic traffic, send one request
 through the environment's domain (or schedule a cron heartbeat) so the chain
@@ -491,15 +461,14 @@ concurrent owner write reruns the pass against fresh state, and only the
 owner marks the sync as done, after a clean pass; a reconciliation that
 cannot converge stays unmarked and retries on the next activation. In-flight
 work is never interrupted: the demoted deployment's running job finishes or
-dies with its instance, its late writes are fenced, and the new generation's
-first claim waits for the active-owner lease to be released or to lapse.
+dies with its instance and its late writes are fenced best-effort.
 Jobs that run long should enqueue their work to another queue and return, so
 a promote is never delayed behind them.
 
 A takeover strands the previous owner's in-flight wake: it is consumed by
 the demoted deployment and acked as stale, and the new owner's chain starts
 from its own activation. Independently, a `published` or `processing` wake
-well past its logical time with no live owner lease is presumed lost and
+well past its logical time with no live claimant is presumed lost and
 republished by the owner into its own queue. Within a queue the idempotency
 key makes a false-positive republish a no-op; across queues the claim fences
 duplicates. Repairs run from `start()`, from stale queue deliveries, and log
@@ -509,30 +478,27 @@ Previews and development keep deployment-scoped namespaces: a preview chain
 dies with its deployment instead of following the branch.
 
 Deleting a deployment prevents its Functions from receiving further work.
-Redis records intentionally remain unless the operator removes them; automatic
-expiry would make reliable pause semantics impossible.
 
 ## Race outcomes
 
 | Race | Outcome |
 | --- | --- |
-| many concurrent `start()` calls while paused | one generation and one start identity |
+| many concurrent `start()` calls while paused | one live chain; newer generations fence older ones |
 | many `start()` calls while running | no lifecycle change |
-| duplicate delivery of the same wake | one processing-attempt lease wins |
+| duplicate delivery of the same wake | one live processing claim wins; duplicates retry and turn stale |
 | `pause()` before a wake claim | wake is stale |
 | `pause()` while a wake runs | current work may finish; no successor |
-| resume while an old wake runs | new start retries until old owner exits |
-| crash before Queue send | pending Redis token is republished |
+| resume while an old wake runs | the old generation cannot reserve a successor |
+| crash before Queue send | pending token is republished |
 | old message after resume | generation check makes it stale |
-| owner loses its lease mid-execution | `lost` result forces a retry instead of an acknowledgement |
 | concurrent runtime add/modify | one token is rearmed; no second chain |
 | handler finishes after a job mutation | revision check preserves the mutation |
 | retried mutation fails on a conflicting id | the pending wake is still republished |
 | takeover while a wake is in flight | the demoted deployment consumes it and acks it as stale |
 | the owner's wake message dies | the overdue wake is presumed lost and republished by the owner |
-| takeover reconciliation races a demoted deployment's handler | the demoted write is fenced atomically by owning deployment |
+| takeover reconciliation races a demoted deployment's handler | the demoted write aborts on the ownership fence |
 | reconciliation loses a revision race to a concurrent owner write | the pass reruns with fresh state; completion is marked only once converged |
-| a deployment loses the namespace mid-reconciliation | its writes fence, it cannot stamp the marker, and the owner reconciles |
+| a deployment loses the namespace mid-reconciliation | it cannot stamp the marker, and the owner reconciles |
 | concurrent first requests | one automatic generation and one start identity |
 | request arrives after explicit pause | idle deadline renews but state remains paused |
 | preview idle deadline expires before claim | message is stale and no job runs |
@@ -540,7 +506,7 @@ expiry would make reliable pause semantics impossible.
 | request arrives after preview expiry | one new generation; inactive time is skipped |
 | `start()` after the preview deadline lapsed | deadline renews; the new generation is claimable |
 
-These properties prevent parallel logical chains. They do not provide
-exactly-once job side effects. If a process dies after an external side effect
-but before the job's updated run time is durably stored, Queue redelivery can
-execute it again. Jobs must be idempotent.
+These properties prevent persistent parallel chains. They do not provide
+exactly-once job side effects: claims are best-effort filters on an evictable
+document, so duplicate executions are possible, and Queue redelivery can
+execute a job again after a crash. Jobs must be idempotent.

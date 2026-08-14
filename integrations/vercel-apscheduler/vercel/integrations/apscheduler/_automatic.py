@@ -75,7 +75,7 @@ def _automatic_activation_hook() -> float | None:
     The return value sets the hook's next eligibility on runtimes that
     support it. While another deployment owns the chain, only an
     alias-routed request can change anything, so the hook stays eligible on
-    every invocation but touches Redis only when one arrives or when the
+    every invocation but touches the store only when one arrives or when the
     sweep interval lapses (the fallback that also resyncs after a manual
     ``start()``). Once settled it returns to the registered cadence.
     """

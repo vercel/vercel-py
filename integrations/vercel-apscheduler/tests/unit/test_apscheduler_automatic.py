@@ -321,7 +321,7 @@ def test_own_host_run_does_not_blind_the_alias_request(
 def test_unsettled_own_host_requests_skip_the_sweep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """While a takeover is owed, own-host traffic must cost no Redis calls."""
+    """While a takeover is owed, own-host traffic must cost no store calls."""
     monkeypatch.setenv("VERCEL_ENV", "production")
     monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.delenv(_automatic.PREVIEW_IDLE_TIMEOUT_ENV, raising=False)

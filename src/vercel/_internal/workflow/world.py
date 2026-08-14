@@ -113,6 +113,24 @@ class BaseModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(serialize_by_alias=True)
 
 
+class RunInput(BaseModel):
+    input: Any
+    deployment_id: str = pydantic.Field(alias="deploymentId")
+    workflow_name: str = pydantic.Field(alias="workflowName")
+    spec_version: int = pydantic.Field(alias="specVersion")
+    execution_context: dict[str, Any] | None = pydantic.Field(
+        default=None, alias="executionContext", exclude_if=lambda e: e is None
+    )
+    attributes: dict[str, str] | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+    allow_reserved_attributes: Literal[True] | None = pydantic.Field(
+        default=None, alias="allowReservedAttributes", exclude_if=lambda e: e is None
+    )
+    encryption_public_key: str | None = pydantic.Field(
+        default=None, alias="encryptionPublicKey", exclude_if=lambda e: e is None
+    )
+    environment: str | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+
+
 class WorkflowInvokePayload(BaseModel):
     """Payload for invoking a workflow.
 
@@ -122,6 +140,10 @@ class WorkflowInvokePayload(BaseModel):
     """
 
     run_id: str = pydantic.Field(alias="runId")
+    # Run creation data for the resilient-start path, on first deliveries only.
+    run_input: RunInput | None = pydantic.Field(
+        default=None, alias="runInput", exclude_if=lambda e: e is None
+    )
     # Step ID for step execution on the combined handler. When present, the
     # receiver executes that step instead of replaying the run.
     step_id: str | None = pydantic.Field(
@@ -205,6 +227,7 @@ class BaseWorkflowRun(BaseModel):
     # Plaintext string-string metadata. Always materialized (as `{}` when
     # unset) so a run row carries the same field set the TS SDK writes.
     attributes: dict[str, str] = pydantic.Field(default_factory=dict)
+    encryption_public_key: str | None = pydantic.Field(default=None, alias="encryptionPublicKey")
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
     started_at: datetime | None = pydantic.Field(default=None, alias="startedAt")
     completed_at: datetime | None = pydantic.Field(default=None, alias="completedAt")
@@ -372,6 +395,44 @@ class RunCreatedEvent(BaseEvent):
         return (self.event_data.input,)
 
 
+class RunStartedEventData(BaseModel):
+    input: Any = None
+    deployment_id: str | None = pydantic.Field(
+        default=None, alias="deploymentId", exclude_if=lambda e: e is None
+    )
+    workflow_name: str | None = pydantic.Field(
+        default=None, alias="workflowName", exclude_if=lambda e: e is None
+    )
+    execution_context: dict[str, Any] | None = pydantic.Field(
+        default=None, alias="executionContext", exclude_if=lambda e: e is None
+    )
+    attributes: dict[str, str] | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
+    allow_reserved_attributes: Literal[True] | None = pydantic.Field(
+        default=None, alias="allowReservedAttributes", exclude_if=lambda e: e is None
+    )
+    # Mirrors `run_created.eventData.encryptionPublicKey`. This is the path that
+    # recreates a run from the queued message, which is exactly when the key
+    # would otherwise be lost for the rest of the run's life.
+    encryption_public_key: str | None = pydantic.Field(
+        default=None, alias="encryptionPublicKey", exclude_if=lambda e: e is None
+    )
+
+    @classmethod
+    def from_run_input(cls, run_input: RunInput) -> "RunStartedEventData":
+        return cls(
+            input=run_input.input,
+            deploymentId=run_input.deployment_id,
+            workflowName=run_input.workflow_name,
+            executionContext=run_input.execution_context,
+            attributes=run_input.attributes,
+            allowReservedAttributes=run_input.allow_reserved_attributes,
+            encryptionPublicKey=run_input.encryption_public_key,
+        )
+
+    def into_event(self, *, spec_version: int = SPEC_VERSION_CURRENT) -> "RunStartedEvent":
+        return RunStartedEvent(eventData=self, specVersion=spec_version)
+
+
 class RunStartedEvent(BaseEvent):
     """
     Event created when a workflow run starts executing.
@@ -382,6 +443,14 @@ class RunStartedEvent(BaseEvent):
         default="run_started",
         alias="eventType",
     )
+    event_data: RunStartedEventData | None = pydantic.Field(
+        default=None, alias="eventData", exclude_if=lambda e: e is None
+    )
+
+    def payloads(self) -> tuple[Any, ...]:
+        if self.event_data is None or self.event_data.input is None:
+            return ()
+        return (self.event_data.input,)
 
 
 class RunCompletedEventData(BaseModel):
@@ -892,6 +961,10 @@ class HTTPHandler(Protocol):
 class World(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def get_deployment_id(self) -> str: ...
+
+    def get_environment(self) -> str | None:
+        """The environment this World's writes are attributed to."""
+        return None
 
     @abc.abstractmethod
     async def queue(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import logging
 from contextlib import nullcontext
@@ -14,15 +14,15 @@ from unittest.mock import patch
 
 import pytest
 from apscheduler.job import Job
-from apscheduler.jobstores.base import BaseJobStore, ConflictingIdError, JobLookupError
+from apscheduler.jobstores.base import BaseJobStore, JobLookupError
 from apscheduler.jobstores.memory import MemoryJobStore
-from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_PAUSED, STATE_RUNNING
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+import vercel.cache.runtime_cache as runtime_cache_module
 from vercel.integrations.apscheduler import (
     APSchedulerConfigurationError,
     _adapter as _adapter_module,
@@ -31,14 +31,10 @@ from vercel.integrations.apscheduler import (
     is_scheduler_subscriber,
 )
 from vercel.integrations.apscheduler._adapter import SchedulerAdapter, get_adapter
-from vercel.integrations.apscheduler._backends.cache import CacheJobStore
-from vercel.integrations.apscheduler._backends.redis import RedisJobCoordinator
 from vercel.integrations.apscheduler._options import VercelAPSchedulerOptions
 from vercel.integrations.apscheduler._payload import StartPayload, WakeupPayload
 from vercel.integrations.apscheduler._subscriber import register_scheduler
 from vercel.integrations.apscheduler._types import (
-    PROVENANCE_DECLARED,
-    PROVENANCE_RUNTIME,
     ClaimResult,
     DriverSnapshot,
     FinishResult,
@@ -56,66 +52,12 @@ from vercel.queue.testing import clear_subscriptions
 
 UTC = timezone.utc
 TEST_SCHEDULER_MODULE = "test_scheduler"
-# Identity derives from the store's jobs_key ("apscheduler.jobs" by default).
-TEST_SCHEDULER_ID = "apscheduler-jobs"
+# Identity is the builder-assigned subscriber id from the declared mapping.
+TEST_SCHEDULER_ID = "test-scheduler"
 
 
 def durable_noop_job() -> None:
     return
-
-
-class InMemoryRedisJobStore(RedisJobStore):
-    def __init__(self, jobs_key: str = "apscheduler.jobs") -> None:
-        self.jobs_key = jobs_key
-        self.run_times_key = "apscheduler.run_times"
-        self.redis = object()
-        self.jobs: dict[str, Any] = {}
-        self._scheduler = None
-        self._alias = None
-
-    def lookup_job(self, job_id: str) -> Any | None:
-        return self.jobs.get(job_id)
-
-    def get_due_jobs(self, now: datetime) -> list[Any]:
-        return sorted(
-            (
-                job
-                for job in self.jobs.values()
-                if job.next_run_time is not None and job.next_run_time <= now
-            ),
-            key=lambda job: job.next_run_time,
-        )
-
-    def get_next_run_time(self) -> datetime | None:
-        times = [job.next_run_time for job in self.jobs.values() if job.next_run_time is not None]
-        return min(times) if times else None
-
-    def get_all_jobs(self) -> list[Any]:
-        return sorted(
-            self.jobs.values(),
-            key=lambda job: job.next_run_time or datetime.max.replace(tzinfo=UTC),
-        )
-
-    def add_job(self, job: Any) -> None:
-        if job.id in self.jobs:
-            raise ConflictingIdError(job.id)
-        self.jobs[job.id] = job
-
-    def update_job(self, job: Any) -> None:
-        if job.id not in self.jobs:
-            raise JobLookupError(job.id)
-        self.jobs[job.id] = job
-
-    def remove_job(self, job_id: str) -> None:
-        if job_id not in self.jobs:
-            raise JobLookupError(job_id)
-        del self.jobs[job_id]
-
-    def remove_all_jobs(self) -> None:
-        self.jobs.clear()
-
-    def shutdown(self) -> None:
-        return
 
 
 class InMemorySourceJobStore(BaseJobStore):
@@ -479,15 +421,31 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("VERCEL_ENV", "preview")
     monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
+    monkeypatch.delenv("VERCEL_APSCHEDULER_BACKEND", raising=False)
     monkeypatch.setenv(
         "VERCEL_APSCHEDULER_SUBSCRIBERS",
-        (f'[{{"id":"{TEST_SCHEDULER_ID}","entrypoint":"{TEST_SCHEDULER_MODULE}:scheduler"}}]'),
+        (
+            "["
+            f'{{"id":"{TEST_SCHEDULER_ID}","entrypoint":"{TEST_SCHEDULER_MODULE}:scheduler"}},'
+            f'{{"id":"reports","entrypoint":"{TEST_SCHEDULER_MODULE}:reports_scheduler"}},'
+            f'{{"id":"cleanup","entrypoint":"{TEST_SCHEDULER_MODULE}:cleanup_scheduler"}}'
+            "]"
+        ),
     )
     monkeypatch.delenv("VERCEL_APSCHEDULER_DISCOVERY", raising=False)
     monkeypatch.delenv("VERCEL_SERVICE_TYPE", raising=False)
     monkeypatch.delenv("VERCEL_SERVICE_TRIGGER", raising=False)
     monkeypatch.delenv("VERCEL_DEV_QUEUE_SERVING", raising=False)
     monkeypatch.setitem(modules, TEST_SCHEDULER_MODULE, ModuleType(TEST_SCHEDULER_MODULE))
+    # A fresh in-memory cache per test: the client caches its fallback
+    # instance in module globals.
+    for attribute in (
+        "_in_memory_cache_instance",
+        "_async_in_memory_cache_instance",
+        "_cached_cache_instance",
+        "_cached_async_cache_instance",
+    ):
+        monkeypatch.setattr(runtime_cache_module, attribute, None)
     _clear_scheduler_registrations()
     install_vercel_apscheduler_integration(register_queues=False)
     yield
@@ -504,146 +462,25 @@ def _clear_scheduler_registrations() -> None:
     _adapter_module._PATCH_STATE.register_queues = False
 
 
-def bind_test_scheduler(scheduler: BlockingScheduler) -> None:
-    modules[TEST_SCHEDULER_MODULE].__dict__["scheduler"] = scheduler
-
-
-class InMemoryJobCoordinator(RedisJobCoordinator):
-    """Mirrors the coordinator's Lua semantics against the in-memory store.
-
-    Versions, provenance, and the original store methods live on the store
-    object so a second coordinator (a takeover by another deployment in one
-    test process) observes the first one's durable state.
-    """
-
-    def __init__(self, store: Any, driver: Any, adapter: Any) -> None:
-        super().__init__(store, driver, adapter)
-        originals = store.__dict__.setdefault(
-            "_test_original_methods",
-            {
-                "add_job": store.add_job,
-                "update_job": store.update_job,
-                "remove_job": store.remove_job,
-                "remove_all_jobs": store.remove_all_jobs,
-            },
-        )
-        self._original_add_job = originals["add_job"]
-        self._original_update_job = originals["update_job"]
-        self._original_remove_job = originals["remove_job"]
-        self._original_remove_all_jobs = originals["remove_all_jobs"]
-        self._state: dict[str, Any] = store.__dict__.setdefault(
-            "_test_durable_state",
-            {"versions": {}, "provenance": {}, "revision": 0},
-        )
-
-    @property
-    def _versions(self) -> dict[str, int]:
-        return cast("dict[str, int]", self._state["versions"])
-
-    @property
-    def _provenance(self) -> dict[str, str]:
-        return cast("dict[str, str]", self._state["provenance"])
-
-    def add_job(self, job: Any) -> None:
-        try:
-            self._original_add_job(job)
-        except ConflictingIdError:
-            if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation:
-                raise
-            return
-        self._versions[job.id] = self._next_revision()
-        self._provenance[job.id] = (
-            PROVENANCE_RUNTIME
-            if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
-            else PROVENANCE_DECLARED
-        )
-        self._rearm(job, rearm=True)
-
-    def update_job(self, job: Any) -> None:
-        self._original_update_job(job)
-        self._versions[job.id] = self._next_revision()
-        self._rearm(job, rearm=self.adapter.is_runtime_mutation)
-
-    def remove_job(self, job_id: str) -> None:
-        self._original_remove_job(job_id)
-        self._next_revision()
-        self._versions.pop(job_id, None)
-        self._provenance.pop(job_id, None)
-
-    def remove_all_jobs(self) -> None:
-        self._original_remove_all_jobs()
-        self._next_revision()
-        self._versions.clear()
-        self._provenance.clear()
-
-    def get_due_jobs_with_revisions(self, now: datetime) -> list[tuple[Any, int]]:
-        return [(job, self._versions.get(job.id, 0)) for job in self.store.get_due_jobs(now)]
-
-    def get_all_jobs_with_revisions(
-        self,
-    ) -> tuple[list[tuple[Any, int, str]], list[tuple[str, int, str]]]:
-        return (
-            [
-                (job, self._versions.get(job.id, 0), self._provenance.get(job.id, ""))
-                for job in self.store.get_all_jobs()
-            ],
-            [],
-        )
-
-    def cas_update_job(self, job: Any, expected_revision: int) -> bool:
-        if self._versions.get(job.id, 0) != expected_revision:
-            return False
-        self._original_update_job(job)
-        self._versions[job.id] = self._next_revision()
-        return True
-
-    def cas_remove_job(self, job_id: str, expected_revision: int) -> bool:
-        store: Any = self.store
-        if job_id not in store.jobs:
-            return False
-        if self._versions.get(job_id, 0) != expected_revision:
-            return False
-        self._original_remove_job(job_id)
-        self._next_revision()
-        self._versions.pop(job_id, None)
-        self._provenance.pop(job_id, None)
-        return True
-
-    def _next_revision(self) -> int:
-        self._state["revision"] += 1
-        return cast("int", self._state["revision"])
-
-    def _rearm(self, job: Any, *, rearm: bool) -> None:
-        if not rearm:
-            return
-        driver_owner = self.driver.owner_deployment()
-        if driver_owner is not None and driver_owner != self.driver.deployment:
-            return
-        next_run_time = getattr(job, "next_run_time", None)
-        if next_run_time is None:
-            return
-        driver: Any = self.driver
-        driver.rearm(
-            self.adapter.canonical_wakeup_time(next_run_time),
-            datetime.now(UTC),
-        )
+def bind_test_scheduler(scheduler: BlockingScheduler, variable: str = "scheduler") -> None:
+    modules[TEST_SCHEDULER_MODULE].__dict__[variable] = scheduler
 
 
 def scheduler_with_driver(
-    jobs_key: str = "apscheduler.jobs",
+    variable: str = "scheduler",
 ) -> tuple[BlockingScheduler, Any, FakeDriver]:
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore(jobs_key)},
-    )
-    bind_test_scheduler(scheduler)
+    """Bind a scheduler to the real cache store with a scripted fake driver.
+
+    The cache backend injects its managed store (running on the in-memory
+    Runtime Cache fallback); only the driver is replaced, so lifecycle
+    decisions stay scripted while job persistence exercises the real
+    coordinator.
+    """
+    scheduler = BlockingScheduler(timezone=UTC)
+    bind_test_scheduler(scheduler, variable)
     adapter = get_adapter(scheduler)
     assert adapter is not None
-    with patch(
-        "vercel.integrations.apscheduler._backends.redis.RedisJobCoordinator",
-        InMemoryJobCoordinator,
-    ):
-        adapter._bind_runtime()
+    adapter._bind_runtime()
     driver = FakeDriver()
     adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     adapter.coordinator.driver = driver
@@ -695,14 +532,16 @@ def test_memory_job_store_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         scheduler.start()
 
 
-def test_redis_backend_requires_a_redis_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_redis_backend_selection_reports_its_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("VERCEL_APSCHEDULER_BACKEND", "redis")
     scheduler = BlockingScheduler(timezone=UTC)
     bind_test_scheduler(scheduler)
 
     with pytest.raises(
         APSchedulerConfigurationError,
-        match="default RedisJobStore",
+        match="managed Redis backend was removed",
     ):
         scheduler.start()
 
@@ -741,7 +580,7 @@ def test_scheduler_lifecycle_remains_native_outside_vercel(
         scheduler.shutdown()
 
 
-def test_identity_derives_from_the_job_store_key() -> None:
+def test_identity_derives_from_the_declared_subscriber_id() -> None:
     """Variable and module renames never move a scheduler's durable identity."""
     _scheduler, adapter, _driver = scheduler_with_driver()
 
@@ -752,10 +591,7 @@ def test_identity_derives_from_the_job_store_key() -> None:
 
 
 def test_scheduler_id_option_pins_the_identity() -> None:
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore()},
-    )
+    scheduler = BlockingScheduler(timezone=UTC)
     adapter = SchedulerAdapter(
         scheduler,
         VercelAPSchedulerOptions(scheduler_id="pinned-id"),
@@ -774,7 +610,7 @@ def test_production_state_is_environment_scoped(
 
     assert adapter.scope == "prj_123:production"
     store = adapter.scheduler._jobstores["default"]
-    assert store.jobs_key == ("apscheduler.jobs:{prj_123:production:apscheduler-jobs}:jobs")
+    assert store.doc_key == f"aps:prj_123:production:{TEST_SCHEDULER_ID}:jobs"
 
 
 def test_custom_environment_state_is_environment_scoped(
@@ -794,10 +630,7 @@ def test_named_environment_without_project_id_fails_loudly(
     """A silent project-less scope could interleave two projects' state."""
     monkeypatch.setenv("VERCEL_ENV", "production")
     monkeypatch.delenv("VERCEL_PROJECT_ID", raising=False)
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore()},
-    )
+    scheduler = BlockingScheduler(timezone=UTC)
     adapter = get_adapter(scheduler)
     assert adapter is not None
 
@@ -811,10 +644,7 @@ def test_missing_environment_fails_loudly(
     """A silent deployment-scope fallback would fork a chain per deployment."""
     monkeypatch.delenv("VERCEL_ENV", raising=False)
     monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore()},
-    )
+    scheduler = BlockingScheduler(timezone=UTC)
     adapter = get_adapter(scheduler)
     assert adapter is not None
 
@@ -841,10 +671,7 @@ def test_unset_misfire_grace_defaults_to_none() -> None:
     latency, so keeping the stock default would skip occurrences as misfires
     on routine jitter.
     """
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore()},
-    )
+    scheduler = BlockingScheduler(timezone=UTC)
 
     assert scheduler._job_defaults["misfire_grace_time"] is None
 
@@ -853,7 +680,6 @@ def test_explicit_misfire_grace_default_is_preserved() -> None:
     scheduler = BlockingScheduler(
         timezone=UTC,
         job_defaults={"misfire_grace_time": 15},
-        jobstores={"default": InMemoryRedisJobStore()},
     )
 
     assert scheduler._job_defaults["misfire_grace_time"] == 15
@@ -863,7 +689,6 @@ def test_gconfig_misfire_grace_default_is_preserved() -> None:
     scheduler = BlockingScheduler(
         {"apscheduler.job_defaults.misfire_grace_time": "7"},
         timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore()},
     )
 
     assert scheduler._job_defaults["misfire_grace_time"] == 7
@@ -873,10 +698,7 @@ def test_misfire_grace_stays_stock_outside_vercel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("VERCEL", raising=False)
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={"default": InMemoryRedisJobStore()},
-    )
+    scheduler = BlockingScheduler(timezone=UTC)
 
     assert scheduler._job_defaults["misfire_grace_time"] == 1
 
@@ -885,7 +707,8 @@ def test_short_explicit_misfire_grace_warns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An explicit sub-transport grace is honored but named for what it is."""
-    scheduler, adapter, _driver = scheduler_with_driver()
+    scheduler, adapter, driver = scheduler_with_driver()
+    driver.owner_deployment_value = "dpl_test"
     scheduler.add_job(
         durable_noop_job,
         "interval",
@@ -944,26 +767,24 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
             id="dynamic",
         )
     store: Any = first._jobstores["default"]
-    kept_run_time = store.jobs["keep"].next_run_time
-    changed_run_time = store.jobs["changed"].next_run_time
+    kept_run_time = store.lookup_job("keep").next_run_time
+    changed_run_time = store.lookup_job("changed").next_run_time
     assert driver.reconciled == "dpl_test"
 
-    # A new deployment takes over the shared store and driver.
+    # A new deployment takes over the shared namespace and driver. Its own
+    # injected store reads the same cache documents.
     _clear_scheduler_registrations()
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_two")
-    second = BlockingScheduler(timezone=UTC, jobstores={"default": store})
+    second = BlockingScheduler(timezone=UTC)
+    bind_test_scheduler(second)
     second.add_job(durable_noop_job, "interval", hours=1, id="keep", replace_existing=True)
     second.add_job(durable_noop_job, "interval", hours=2, id="changed", replace_existing=True)
     second_adapter = get_adapter(second)
     assert second_adapter is not None
-    with patch(
-        "vercel.integrations.apscheduler._backends.redis.RedisJobCoordinator",
-        InMemoryJobCoordinator,
-    ):
-        second_adapter._bind_runtime()
+    second_adapter._bind_runtime()
     second_adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     second_adapter.coordinator.driver = driver
-    # The new deployment holds its own driver handle on the shared hash.
+    # The new deployment holds its own driver handle on the shared state.
     driver.deployment = "dpl_two"
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
@@ -971,10 +792,11 @@ def test_takeover_reconciles_declared_jobs_and_keeps_dynamic_ones(
     ):
         second.start()
 
-    assert set(store.jobs) == {"keep", "changed", "dynamic"}
-    assert store.jobs["keep"].next_run_time == kept_run_time
-    assert store.jobs["changed"].next_run_time != changed_run_time
-    assert store.jobs["changed"].trigger.interval == timedelta(hours=2)
+    shared: Any = second._jobstores["default"]
+    assert {job.id for job in shared.get_all_jobs()} == {"keep", "changed", "dynamic"}
+    assert shared.lookup_job("keep").next_run_time == kept_run_time
+    assert shared.lookup_job("changed").next_run_time != changed_run_time
+    assert shared.lookup_job("changed").trigger.interval == timedelta(hours=2)
     assert driver.reconciled == "dpl_two"
 
 
@@ -1033,21 +855,19 @@ def test_stale_deployment_touches_are_inert(
     ):
         owner_scheduler.start()
     store: Any = owner_scheduler._jobstores["default"]
-    assert set(store.jobs) == {"kept"}
+    assert {job.id for job in store.get_all_jobs()} == {"kept"}
 
-    # A demoted deployment cold-starts against the shared store: same code
-    # age, different declarations ("legacy" was deleted by the owner's code).
+    # A demoted deployment cold-starts against the shared namespace: same
+    # code age, different declarations ("legacy" was deleted by the owner's
+    # code).
     _clear_scheduler_registrations()
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_stale")
-    stale = BlockingScheduler(timezone=UTC, jobstores={"default": store})
+    stale = BlockingScheduler(timezone=UTC)
+    bind_test_scheduler(stale)
     stale.add_job(durable_noop_job, "interval", hours=1, id="legacy", replace_existing=True)
     stale_adapter = get_adapter(stale)
     assert stale_adapter is not None
-    with patch(
-        "vercel.integrations.apscheduler._backends.redis.RedisJobCoordinator",
-        InMemoryJobCoordinator,
-    ):
-        stale_adapter._bind_runtime()
+    stale_adapter._bind_runtime()
     stale_adapter._driver = driver  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     stale_adapter.coordinator.driver = driver
     driver.deployment = "dpl_stale"
@@ -1055,27 +875,31 @@ def test_stale_deployment_touches_are_inert(
 
     stale_adapter.ensure_local_started()
 
-    assert set(store.jobs) == {"kept"}  # no resurrection of "legacy"
+    # No resurrection of "legacy" in the shared namespace.
+    assert {job.id for job in store.get_all_jobs()} == {"kept"}
     assert stale_adapter.publish_pending_wakeup() is None
     stale_adapter._lifecycle_called = True
     with pytest.raises(APSchedulerConfigurationError, match="no longer drives"):
         stale_adapter.prepare_runtime_mutation()
 
 
-def test_two_schedulers_sharing_a_store_key_collide_loudly() -> None:
-    """Distinct durable schedulers require distinct jobs_key values.
+def test_two_schedulers_sharing_an_identity_collide_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two schedulers must never share one durable identity.
 
     Depending on whether the runtime registers queue handlers at
     construction, the collision surfaces at ``__init__`` (failing the build
     during introspection) or at the first identity use; both are loud.
     """
-    scheduler_with_driver()
+    monkeypatch.setenv("VERCEL_PYTHON_SUBSCRIBER_ID", "pinned")
+    first = BlockingScheduler(timezone=UTC)
+    first_adapter = get_adapter(first)
+    assert first_adapter is not None
+    assert first_adapter.identity.scheduler_id == "pinned"
 
     def build_second_scheduler_and_use_its_identity() -> None:
-        second = BlockingScheduler(
-            timezone=UTC,
-            jobstores={"default": InMemoryRedisJobStore()},
-        )
+        second = BlockingScheduler(timezone=UTC)
         second_adapter = get_adapter(second)
         assert second_adapter is not None
         _ = second_adapter.identity
@@ -1087,10 +911,10 @@ def test_two_schedulers_sharing_a_store_key_collide_loudly() -> None:
 def test_deliveries_reach_each_scheduler_by_intrinsic_identity() -> None:
     """Two schedulers in one module each serve their own subscriptions."""
     first_scheduler, _first_adapter, first_driver = scheduler_with_driver(
-        jobs_key="reports",
+        variable="reports_scheduler",
     )
     second_scheduler, _second_adapter, second_driver = scheduler_with_driver(
-        jobs_key="cleanup",
+        variable="cleanup_scheduler",
     )
     register_scheduler(first_scheduler)
     register_scheduler(second_scheduler)
@@ -1163,22 +987,33 @@ def test_repeated_start_publishes_one_generation() -> None:
 
 def test_automatic_activation_starts_once_and_respects_explicit_pause() -> None:
     scheduler, adapter, driver = scheduler_with_driver()
+    sent_payloads: list[dict[str, Any]] = []
+
+    def capture_send(topic: str, payload: dict[str, Any], **kwargs: Any) -> str:
+        del topic, kwargs
+        sent_payloads.append(payload)
+        return f"msg_{len(sent_payloads)}"
+
+    def start_payloads() -> list[dict[str, Any]]:
+        return [
+            payload for payload in sent_payloads if payload["vercel"]["kind"] == "apscheduler.start"
+        ]
 
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-        return_value="msg_start",
-    ) as send:
+        side_effect=capture_send,
+    ):
         adapter.auto_activate()
         adapter.auto_activate()
 
-        send.assert_called_once()
+        assert len(start_payloads()) == 1
         assert driver.state == "running"
         assert driver.generation == 1
 
         scheduler.pause()
         adapter.auto_activate()
 
-    send.assert_called_once()
+    assert len(start_payloads()) == 1
     assert driver.state == "paused"
     assert driver.generation == 1
     assert scheduler.state == STATE_PAUSED
@@ -1186,20 +1021,31 @@ def test_automatic_activation_starts_once_and_respects_explicit_pause() -> None:
 
 def test_start_paused_waits_for_resume_to_publish() -> None:
     scheduler, _, driver = scheduler_with_driver()
+    sent_payloads: list[dict[str, Any]] = []
+
+    def capture_send(topic: str, payload: dict[str, Any], **kwargs: Any) -> str:
+        del topic, kwargs
+        sent_payloads.append(payload)
+        return f"msg_{len(sent_payloads)}"
 
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-        return_value="msg_start",
-    ) as send:
+        side_effect=capture_send,
+    ):
         scheduler.start(paused=True)
-        send.assert_not_called()
+        # The pause flag rides the queue as a control message, but no start
+        # identity is published until resume.
+        assert [payload["vercel"]["kind"] for payload in sent_payloads] == ["apscheduler.lifecycle"]
         assert driver.state == "paused"
         assert driver.generation == 0
         assert scheduler.state == STATE_PAUSED
 
         scheduler.resume()
 
-    send.assert_called_once()
+    starts = [
+        payload for payload in sent_payloads if payload["vercel"]["kind"] == "apscheduler.start"
+    ]
+    assert len(starts) == 1
     assert driver.state == "running"
     assert driver.generation == 1
     assert scheduler.state == STATE_RUNNING
@@ -1258,7 +1104,7 @@ def test_runtime_add_rearms_dormant_chain_with_monotonic_sequence() -> None:
         return_value="wake-1",
     ) as send:
         scheduler.add_job(
-            lambda: None,
+            durable_noop_job,
             "date",
             run_date=datetime.now(UTC) + timedelta(minutes=5),
             id="first",
@@ -1279,7 +1125,7 @@ def test_runtime_add_rearms_dormant_chain_with_monotonic_sequence() -> None:
         return_value="wake-2",
     ) as send:
         scheduler.add_job(
-            lambda: None,
+            durable_noop_job,
             "date",
             run_date=datetime.now(UTC) + timedelta(minutes=10),
             id="second",
@@ -1321,7 +1167,7 @@ def test_failed_runtime_mutation_retry_repairs_pending_wake() -> None:
         pytest.raises(ConnectionError),
     ):
         scheduler.add_job(
-            lambda: None,
+            durable_noop_job,
             "date",
             run_date=run_date,
             id="repair",
@@ -1340,7 +1186,7 @@ def test_failed_runtime_mutation_retry_repairs_pending_wake() -> None:
         pytest.raises(APSchedulerConfigurationError, match="already exists"),
     ):
         scheduler.add_job(
-            lambda: None,
+            durable_noop_job,
             "date",
             run_date=run_date,
             id="repair",
@@ -1377,23 +1223,6 @@ def test_runtime_mutation_requires_lifecycle_activation() -> None:
         scheduler.modify_job("cleanup", name="changed")
 
     assert adapter.scheduler.state == 0
-
-
-def test_second_durable_store_is_rejected() -> None:
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={
-            "default": InMemoryRedisJobStore(),
-            "secondary": InMemoryRedisJobStore(),
-        },
-    )
-    bind_test_scheduler(scheduler)
-
-    with pytest.raises(
-        APSchedulerConfigurationError,
-        match='durable store must be the one named "default"',
-    ):
-        scheduler.start()
 
 
 def test_source_store_rows_dispatch_on_wakeup() -> None:
@@ -1705,23 +1534,6 @@ def test_explicit_wakeup_rearms_the_chain_from_source_stores() -> None:
     assert armed.logical_time == due
 
 
-def test_redis_backend_rejects_a_cache_store_under_a_source_alias() -> None:
-    scheduler = BlockingScheduler(
-        timezone=UTC,
-        jobstores={
-            "default": InMemoryRedisJobStore(),
-            "secondary": CacheJobStore(),
-        },
-    )
-    bind_test_scheduler(scheduler)
-
-    with pytest.raises(
-        APSchedulerConfigurationError,
-        match='durable store must be the one named "default"',
-    ):
-        scheduler.start()
-
-
 def test_add_job_into_a_source_store_is_rejected() -> None:
     scheduler, adapter, _driver, _source = scheduler_with_source_store()
     scheduler.add_job(
@@ -1825,7 +1637,10 @@ def test_pause_resume_fences_old_start_messages() -> None:
 
     assert driver.generation == 2
     assert scheduler.state == STATE_RUNNING
-    assert len(sent_payloads) == 2
+    starts = [
+        payload for payload in sent_payloads if payload["vercel"]["kind"] == "apscheduler.start"
+    ]
+    assert len(starts) == 2
 
     with (
         patch.object(adapter, "activate_generation") as activate,
@@ -1838,7 +1653,7 @@ def test_pause_resume_fences_old_start_messages() -> None:
     ):
         start_subscription.func(
             message(
-                sent_payloads[0],
+                starts[0],
                 message_id="old",
                 topic=start_subscription.topic,
                 consumer_group=start_subscription.consumer_group,
@@ -1849,7 +1664,7 @@ def test_pause_resume_fences_old_start_messages() -> None:
 
         start_subscription.func(
             message(
-                sent_payloads[1],
+                starts[1],
                 message_id="current",
                 topic=start_subscription.topic,
                 consumer_group=start_subscription.consumer_group,
@@ -1986,7 +1801,9 @@ def test_durable_job_requires_explicit_id() -> None:
 
 
 def test_cold_start_preserves_persisted_next_run_time() -> None:
-    scheduler, adapter, _ = scheduler_with_driver()
+    scheduler, adapter, driver = scheduler_with_driver()
+    driver.owner_deployment_value = "dpl_test"
+    driver.reconciled = "dpl_test"
     persisted_time = datetime.now(UTC) + timedelta(hours=2)
 
     scheduler.add_job(
@@ -2006,10 +1823,13 @@ def test_cold_start_preserves_persisted_next_run_time() -> None:
             setattr(persisted_job, attribute, getattr(pending_job, attribute))
     persisted_job._modify(
         name="runtime-name",
+        misfire_grace_time=None,
+        coalesce=True,
+        max_instances=1,
         next_run_time=persisted_time,
     )
     persisted_job._jobstore_alias = "default"
-    store.jobs["cleanup"] = persisted_job
+    adapter.coordinator.add_job(persisted_job)
 
     adapter.ensure_local_started()
 
@@ -2019,12 +1839,17 @@ def test_cold_start_preserves_persisted_next_run_time() -> None:
 
 
 def test_new_generation_skips_paused_interval() -> None:
-    scheduler, adapter, _ = scheduler_with_driver()
+    scheduler, adapter, driver = scheduler_with_driver()
+    driver.owner_deployment_value = "dpl_test"
     old_time = datetime.now(UTC) - timedelta(hours=1)
 
-    @scheduler.scheduled_job("interval", minutes=5, id="cleanup")
-    def cleanup() -> None:
-        return
+    scheduler.add_job(
+        durable_noop_job,
+        "interval",
+        minutes=5,
+        id="cleanup",
+        replace_existing=True,
+    )
 
     adapter.ensure_local_started()
     store = scheduler._jobstores["default"]

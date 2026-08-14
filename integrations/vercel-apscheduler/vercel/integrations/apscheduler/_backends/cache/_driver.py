@@ -30,7 +30,8 @@ UTC = timezone.utc
 LOGGER = logging.getLogger("vercel.integrations.apscheduler")
 
 # A processing claim younger than this is treated as live (busy); past it,
-# the owner is presumed crashed and the claim is retaken (redis lease parity).
+# the owner is presumed crashed and the claim is retaken. Matches the
+# active-owner lease duration a handler holds while processing.
 _PROCESSING_GRACE_SECONDS = 15 * 60
 
 _LIFECYCLE_STATES = {"running", "paused", "inactive"}
@@ -521,10 +522,10 @@ class CacheDriver:
 
     def mark_reconciled(self, deployment: str, now: datetime) -> bool:
         del now
-        # Same fence as Redis mode: a demoted straggler must not stamp the
-        # marker (best-effort here, exact there). The marker is written into
-        # the jobs document so eviction clears them together and the next
-        # wake re-runs reconciliation instead of trusting a reaped store.
+        # Owner fence, best-effort: a demoted straggler must not stamp the
+        # marker. The marker is written into the jobs document so eviction
+        # clears them together and the next wake re-runs reconciliation
+        # instead of trusting a reaped store.
         if self._store is None or self._read().get("owner_deployment") != deployment:
             return False
         doc = self._store._load()
@@ -542,7 +543,7 @@ class CacheDriver:
         return nullcontext()
 
     def rearm_wake(self, candidate: datetime, now: datetime) -> None:
-        """Best-effort mirror of the Redis write fragment's rearm branch."""
+        """Pull the current wake in to ``candidate`` when that is earlier."""
         now = as_utc(now, name="now")
         candidate = as_utc(candidate, name="candidate")
         doc = self._read()
@@ -561,8 +562,8 @@ class CacheDriver:
         ):
             # An in-flight wake owns the token; replacing it would race its
             # finish into a divergent payload under the same idempotency key.
-            # Fold the candidate into the successor instead (redis dirty
-            # parity): finish_wake takes min(dirty, computed next).
+            # Fold the candidate into the successor instead:
+            # finish_wake takes min(dirty, computed next).
             dirty = from_iso(doc.get("dirty_logical_time"))
             if dirty is None or candidate < dirty:
                 doc["dirty_logical_time"] = iso(candidate)
