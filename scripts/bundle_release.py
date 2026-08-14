@@ -83,14 +83,15 @@ EXTERNAL_DEPENDENCIES = {
     # the `vercel-oidc[verify]` extra rather than this package's own table, and
     # extras are already passed through unvendored.
     "vercel-connect": {"pydantic"},
-    # Pydantic again, and `cbor2` for the same reason: its fast path is the
-    # `_cbor2` C extension, which vendoring drops along with every other `.so`,
-    # leaving a bundle that silently falls back to the pure-Python codec.
-    "vercel-workflow": {"pydantic", "cbor2"},
     # redis-py's dotted self-imports cannot be rewritten for namespace
     # vendoring, and applications import redis directly to build the job
     # store's connection pool anyway.
     "vercel-apscheduler": {"redis"},
+}
+# Packages that ship no `-bundle` variant.
+UNBUNDLED_PACKAGES = {
+    # Workflow is not vendored by anything yet, so we don't need its -bundle
+    "vercel-workflow",
 }
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
@@ -137,6 +138,8 @@ class VendoringTransformations:
 
 
 def is_vendored_eligible(package: workspace.Package) -> bool:
+    if package.name in UNBUNDLED_PACKAGES:
+        return False
     data = _load_pyproject(package.path)
     return _vendoring_config_for_package(package, data) is not None
 
