@@ -1271,6 +1271,37 @@ name = "vercel-fallback"
     assert bundle_release.is_vendored_eligible(fallback)
 
 
+def test_unbundled_packages_are_excluded_despite_looking_eligible(tmp_path: Path) -> None:
+    # An opt-out has to be pinned, because the failure is silent: eligibility is
+    # structural, so a package with a single `vercel/...` wheel root qualifies
+    # by accident of layout. Drop the exclusion and nothing goes red -- the
+    # bundle just builds, and another distribution name appears on PyPI.
+    package_path = tmp_path / "src/vercel-workflow"
+    package = workspace.Package(
+        "vercel-workflow",
+        package_path,
+        package_path / "vercel/workflow/version.py",
+        (),
+    )
+    package.path.mkdir(parents=True)
+    (package.path / "pyproject.toml").write_text(
+        """
+[project]
+name = "vercel-workflow"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["/vercel/workflow"]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    assert package.name in bundle_release.UNBUNDLED_PACKAGES
+    assert not bundle_release.is_vendored_eligible(package)
+    # Both probes would otherwise say yes, so the exclusion is what decides it.
+    data = bundle_release._load_pyproject(package.path)  # noqa: SLF001
+    assert bundle_release._vendoring_config_for_package(package, data) is not None  # noqa: SLF001
+
+
 def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_deps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -78,6 +78,7 @@ mypy_path = [
     "src/vercel-internal-core",
     "src/vercel-internal-telemetry",
     "src/vercel-sandbox",
+    "src/vercel-workflow",
     "integrations/vercel-apscheduler",
     "integrations/vercel-celery",
     "integrations/vercel-dramatiq",
