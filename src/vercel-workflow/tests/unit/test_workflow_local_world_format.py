@@ -60,6 +60,21 @@ async def _populate(world) -> str:
     await world.events_create(
         run_id, w.StepCompletedEventData(result=ser.dehydrate(42)).into_event("step_0")
     )
+    # A second step, failed, so a serialized error is among the rows below. It
+    # rides the same `{__type: "Uint8Array"}` wrapper the inputs and outputs do.
+    await world.events_create(
+        run_id,
+        w.StepCreatedEventData(
+            stepName="step//./src/wf//refund", input=ser.dehydrate(ser.step_arguments((), {}))
+        ).into_event("step_1"),
+    )
+    await world.events_create(run_id, w.StepStartedEventData().into_event("step_1"))
+    await world.events_create(
+        run_id,
+        w.StepFailedEventData(
+            error=ser.dehydrate_error(RuntimeError("gateway said no"))
+        ).into_event("step_1"),
+    )
     await world.events_create(run_id, w.HookCreatedEventData(token="tok-abc").into_event("hook_0"))
     return run_id
 
@@ -177,6 +192,47 @@ async def test_run_row_always_carries_attributes(tmp_path, monkeypatch) -> None:
         run_id, w.RunCompletedEventData(output=ser.dehydrate(42)).into_event()
     )
     assert json.loads(run_path.read_text(encoding="utf-8"))["attributes"] == {"tier": "pro"}
+
+
+async def test_a_failed_run_row_keeps_the_payload_and_the_category_apart(
+    tmp_path, monkeypatch
+) -> None:
+    # `error` is the serialized thrown value, stored exactly as the event carried
+    # it -- the world has no key for it and no business reading it -- and
+    # `errorCode` is the plaintext half beside it, which is what lets `workflow
+    # inspect` and a dashboard attribute a failure without decrypting anything.
+    world = _world(tmp_path, monkeypatch)
+    run_id = await _populate(world)
+    payload = ser.dehydrate_error(RuntimeError("intentional failure"))
+    await world.events_create(
+        run_id, w.RunFailedEventData(error=payload, errorCode="USER_ERROR").into_event()
+    )
+
+    stored = json.loads((world.data_dir / "runs" / f"{run_id}.json").read_text(encoding="utf-8"))
+    assert stored["error"] == {
+        "__type": "Uint8Array",
+        "data": base64.b64encode(payload).decode(),
+    }
+    assert stored["errorCode"] == "USER_ERROR"
+
+    run = await world.runs_get(run_id)
+    assert run.status == "failed"
+    assert run.error_code == "USER_ERROR"
+    assert str(ser.hydrate_error(run.error, what="the error")) == "intentional failure"
+
+
+async def test_a_run_that_failed_without_a_category_omits_the_field(tmp_path, monkeypatch) -> None:
+    # `errorCode` is optional upstream, and the TS run schema would reject an
+    # explicit null where it expects the field to be absent.
+    world = _world(tmp_path, monkeypatch)
+    run_id = await _populate(world)
+    await world.events_create(
+        run_id,
+        w.RunFailedEventData(error=ser.dehydrate_error(RuntimeError("no code"))).into_event(),
+    )
+
+    stored = json.loads((world.data_dir / "runs" / f"{run_id}.json").read_text(encoding="utf-8"))
+    assert "errorCode" not in stored
 
 
 async def test_timestamps_survive_the_round_trip(tmp_path, monkeypatch) -> None:

@@ -21,7 +21,7 @@ from typing import Any
 
 from vercel.workflow._internal import devalue
 
-from . import encryption, serde
+from . import encryption, errors, serde
 
 FORMAT_PREFIX_LENGTH = 4
 
@@ -92,6 +92,37 @@ def dehydrate(value: Any) -> bytes:
         # A registered serializer failed. `serde` has already named the class,
         # so this only puts the codec-level frame behind a typed error.
         raise SerializationError(f"Cannot serialize value: {error}") from error
+
+
+def dehydrate_error(error: BaseException) -> bytes:
+    """Encode a thrown value for a ``run_failed`` / ``step_failed`` payload.
+
+    The same encoding as any other payload -- an error is a value, and
+    :mod:`.serde` gives it the tags `@workflow/core` reads. Separate from
+    :func:`dehydrate` only for the fallback: this is the payload of the event
+    that records a failure, so if encoding it raises there is no failure left to
+    report and the delivery loops. An error class registered with
+    `@serializable` can refuse, and so can a `__str__` of one's own. The class
+    name and the fact that it would not encode are worth more than that, so
+    they go instead.
+    """
+    try:
+        return dehydrate(error)
+    except Exception as encode_error:
+        name = type(error).__name__
+        return dehydrate(
+            errors.RemoteError(f"{name} could not be serialized: {encode_error}", name=name)
+        )
+
+
+def hydrate_error(data: Any, *, what: str, key: bytes | None = None) -> BaseException:
+    """Decode a thrown value, as something raisable.
+
+    :func:`hydrate` with the coercion the error path needs: a JavaScript peer
+    can throw a string or a plain object, and a Python caller has to raise an
+    exception.
+    """
+    return serde.as_exception(hydrate(data, what=what, key=key))
 
 
 def is_encrypted(data: Any) -> bool:

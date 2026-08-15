@@ -266,6 +266,42 @@ async def test_an_ordinary_failure_below_max_retries_asks_for_a_retry(
     assert result == w.QueueContinuation(delay_seconds=1.0)
     assert _event_types(fake) == ["step_retrying"]
     assert _workflow_enqueues(fake) == []
+    # The thrown value verbatim, not a summary of it: the next attempt's
+    # max-retries wrapper reads this back as its own cause.
+    (retrying,) = fake.events
+    recorded = ser.hydrate_error(retrying.event_data.error, what="the recorded error")
+    assert isinstance(recorded, RuntimeError)
+    assert str(recorded) == "flaky"
+
+
+async def test_the_last_attempt_wraps_the_thrown_error_in_a_fatal_one(
+    registry: core.Workflows,
+) -> None:
+    """Running out of attempts is a failure the step did not name itself.
+
+    So the recorded error is the SDK's, framed with the retry count, and what the
+    step raised hangs off it as the cause — reachable by a body that wants to
+    know what actually went wrong. Upstream's `step-executor.ts` does the same.
+    """
+
+    @registry.step
+    async def my_step() -> str:
+        raise RuntimeError("still flaky")
+
+    my_step.max_retries = 1
+    fake = FakeWorld(started_step=_running_step(my_step.name, attempt=2))
+    w.set_world(fake)
+
+    result = await _invoke(registry, my_step.name)
+
+    assert result is None
+    assert _event_types(fake) == ["step_failed"]
+    (failed,) = fake.events
+    recorded = ser.hydrate_error(failed.event_data.error, what="the recorded error")
+    assert isinstance(recorded, FatalError)
+    assert str(recorded) == f"Step '{my_step.name}' failed after 1 retry: RuntimeError: still flaky"
+    assert isinstance(recorded.__cause__, RuntimeError)
+    assert str(recorded.__cause__) == "still flaky"
 
 
 async def test_a_fatal_failure_gives_up_on_the_first_attempt(registry: core.Workflows) -> None:
@@ -292,10 +328,13 @@ async def test_a_fatal_failure_gives_up_on_the_first_attempt(registry: core.Work
     assert _event_types(fake) == ["step_failed"]
     assert len(_workflow_enqueues(fake)) == 1
     (failed,) = fake.events
-    # No retry count: none were spent, and the phrasing would be misleading.
-    assert failed.event_data.error == (
-        f"Step '{my_step.name}' failed: vercel.workflow._internal.errors.FatalError: card declined"
-    )
+    # Recorded as it was raised, class and message intact, so the workflow body
+    # catches the same error the step chose to raise. Nothing wraps it: a retry
+    # count would be misleading, since none were spent.
+    recorded = ser.hydrate_error(failed.event_data.error, what="the recorded error")
+    assert isinstance(recorded, FatalError)
+    assert str(recorded) == "card declined"
+    assert recorded.__cause__ is None
 
 
 async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) -> None:

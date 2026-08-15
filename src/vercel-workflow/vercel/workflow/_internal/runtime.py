@@ -65,6 +65,32 @@ class NondeterminismError(Exception):
     """
 
 
+def classify_run_error(error: BaseException) -> str:
+    """The plaintext category to record on a failed run.
+
+    `run_failed.errorCode` is what observability filters and dashboards attribute
+    an outage by, without decrypting the error itself, so the strings are
+    `@workflow/errors`' `RUN_ERROR_CODES` and the buckets are
+    `classifyRunError`'s.
+
+    Only the two this SDK can tell apart are named; upstream's other codes belong
+    to machinery Python does not have yet. In particular there is no
+    `WorkflowRuntimeError` here -- a broken invariant raises a bare `RuntimeError`
+    that a workflow body could just as well have raised itself -- so what would
+    be `RUNTIME_ERROR` there is `USER_ERROR` here. A misattributed SDK bug is the
+    cost; inventing a distinction the exception types cannot support would be
+    worse.
+    """
+    if isinstance(error, NondeterminismError):
+        return "REPLAY_DIVERGENCE"
+    # The backend's fault, not the user's -- including a throttle or a 5xx that
+    # the queue would normally have redelivered and that only lands here if the
+    # run gave up.
+    if isinstance(error, w.WorkflowWorldError):
+        return "WORLD_CONTRACT_ERROR"
+    return "USER_ERROR"
+
+
 @dataclasses.dataclass(kw_only=True)
 class BaseSuspension:
     correlation_id: str
@@ -549,7 +575,7 @@ class WorkflowOrchestratorContext:
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
 
-    def _fail_suspension(self, sus: BaseSuspension, exc: Exception) -> None:
+    def _fail_suspension(self, sus: BaseSuspension, exc: BaseException) -> None:
         """Surface ``exc`` on whichever future(s) a suspension is awaiting.
 
         The error propagates through the body's ``await`` of the step/wait/hook,
@@ -692,11 +718,19 @@ class WorkflowOrchestratorContext:
                     if not wait.future.cancelled():
                         wait.future.set_result(None)
 
-                case w.StepFailedEvent(event_data=w.StepFailedEventData(error=e)):
+                case w.StepFailedEvent(event_data=w.StepFailedEventData(error=data)):
                     sus = self.suspensions.pop(event.correlation_id)
                     assert isinstance(sus, Suspension)
-                    if not sus.future.cancelled():
-                        sus.future.set_exception(RuntimeError(e))
+                    what = f"the error of step {event.correlation_id}"
+                    try:
+                        failure = ser.hydrate_error(data, what=what, key=self.run_key)
+                    except ser.SerializationError as error:
+                        # A corrupt or unreadable payload is nothing the body can
+                        # be handed, and leaving the suspension unresolved would
+                        # hang the run rather than fail it. Fatal because a
+                        # replay would decode the same bytes again.
+                        failure = errors.FatalError(f"Cannot read {what}: {error}")
+                    self._fail_suspension(sus, failure)
 
                 case w.HookConflictEvent(event_data=w.HookConflictEventData(token=token)):
                     hook = self.suspensions.pop(event.correlation_id, None)
@@ -988,8 +1022,8 @@ async def workflow_handler(
             await world.events_create(
                 run_id,
                 w.RunFailedEventData(
-                    error={"message": error_message, "stack": traceback.format_exc()},
-                    code=type(e).__name__,
+                    error=ser.dehydrate_error(e),
+                    errorCode=classify_run_error(e),
                 ).into_event(),
             )
         except w.EntityConflictError:
@@ -1112,6 +1146,38 @@ async def workflow_handler(
     return w.QueueContinuation(delay_seconds=delay, idempotency_key=key)
 
 
+async def _retries_exhausted(
+    message: str, step_run: w.WorkflowStep, *, run_id: str
+) -> errors.FatalError:
+    """The error a step that has run out of attempts fails with.
+
+    Fatal, because there is nothing left to retry, and carrying the attempt that
+    actually failed as its cause -- so the retry-count framing is what a reader
+    sees first and the original failure is still reachable. Same shape as
+    `step-executor.ts`, including how much of it is best-effort: the previous
+    attempt's error is only on the step row if the world recorded `step_retrying`
+    there, and a failure to read it back must not stop this step from failing.
+    """
+    failure = errors.FatalError(message)
+    if step_run.error is None:
+        return failure
+    try:
+        key = None
+        if ser.is_encrypted(step_run.error):
+            key = await w.get_world().run_key(run_id)
+        failure.__cause__ = ser.hydrate_error(
+            step_run.error, what=f"the previous error of step {step_run.step_id}", key=key
+        )
+    except Exception as error:
+        logger.debug(
+            "[Workflows] '%s' - could not read the previous error of step '%s': %s",
+            run_id,
+            step_run.step_id,
+            error,
+        )
+    return failure
+
+
 async def _execute_step(
     req: w.WorkflowInvokePayload,
     *,
@@ -1179,7 +1245,9 @@ async def _execute_step(
         await world.events_create(
             req.run_id,
             w.StepFailedEventData(
-                error=error_message, stack=step_run.error.stack if step_run.error else None
+                error=ser.dehydrate_error(
+                    await _retries_exhausted(error_message, step_run, run_id=req.run_id)
+                )
             ).into_event(req.step_id),
         )
 
@@ -1272,8 +1340,13 @@ async def _execute_step(
 
         fatal = isinstance(e, errors.FatalError)
         if fatal or current_attempt >= step.max_retries + 1:
+            # What the workflow body will see. A fatal error is recorded as it
+            # was raised, so the class the step chose is the class the body
+            # catches; running out of attempts is a failure the step did not
+            # name, so that one gets the retry-count framing with the thrown
+            # error as its cause.
+            failure: BaseException = e
             if fatal:
-                error_message = f"Step '{step.name}' failed: {error_text}"
                 logger.exception(
                     "[Workflows] '%s' - Encountered Error "
                     "while executing step '%s' (attempt %d): %s"
@@ -1285,10 +1358,11 @@ async def _execute_step(
                 )
             else:
                 retry_count = step_run.attempt - 1
-                error_message = (
+                failure = errors.FatalError(
                     f"Step '{step.name}' failed after {step.max_retries} "
                     f"{'retry' if step.max_retries == 1 else 'retries'}: {error_text}"
                 )
+                failure.__cause__ = e
                 logger.exception(
                     "[Workflows] '%s' - Encountered Error "
                     "while executing step '%s' (attempt %d, "
@@ -1302,12 +1376,9 @@ async def _execute_step(
                 )
 
             # Fail the step via event
-            error_stack = traceback.format_exc()
             await world.events_create(
                 req.run_id,
-                w.StepFailedEventData(error=error_message, stack=error_stack).into_event(
-                    req.step_id
-                ),
+                w.StepFailedEventData(error=ser.dehydrate_error(failure)).into_event(req.step_id),
             )
         else:
             # Not at max retries yet - retry the step
@@ -1322,12 +1393,9 @@ async def _execute_step(
             )
 
             # Set step to pending for retry
-            error_stack = traceback.format_exc()
             await world.events_create(
                 req.run_id,
-                w.StepRetryingEventData(error=error_text, stack=error_stack).into_event(
-                    req.step_id
-                ),
+                w.StepRetryingEventData(error=ser.dehydrate_error(e)).into_event(req.step_id),
             )
 
             # Return timeout to keep message visible for retry
@@ -1516,6 +1584,25 @@ class Run:
         run = await self._world.runs_get(self._run_id)
         return run.status
 
+    async def _failure(self, run: w.WorkflowRun) -> BaseException:
+        """What a failed *run* raised, decoded from its row.
+
+        The run may have been written by either SDK, so the payload can be an
+        `encr` envelope or -- on a row older than the serialized-error pipeline --
+        the object that shape used to carry. Neither is worth failing the caller
+        over: it came here to be told why the run failed, and a reader that
+        raises instead has told it nothing.
+        """
+        what = f"the error of run {run.run_id}"
+        try:
+            key = None
+            if ser.is_encrypted(run.error):
+                key = await self._world.run_key(run.run_id, deployment_id=run.deployment_id)
+            return ser.hydrate_error(run.error, what=what, key=key)
+        except Exception as error:
+            logger.debug("[Workflows] '%s' - could not read %s: %s", run.run_id, what, error)
+            return RuntimeError(f"cannot read {what}: {error}")
+
     async def return_value(self) -> Any:
         while True:
             run = await self._world.runs_get(self._run_id)
@@ -1531,7 +1618,11 @@ class Run:
                 raise RuntimeError("workflow cancelled")
 
             elif run.status == "failed":
-                raise RuntimeError("workflow failed")
+                raise errors.WorkflowRunFailedError(
+                    run.run_id,
+                    await self._failure(run),
+                    error_code=run.error_code,
+                )
 
             else:
                 await asyncio.sleep(1)
