@@ -22,7 +22,7 @@ import vercel.queue as vqs
 import vercel.queue.embedded as vqs_embedded
 from vercel._internal.core.polyfills import UTC
 
-from .. import world as w
+from .. import attributes as attrs, world as w
 from ..ulid import monotonic_factory
 
 MAX_DELAY_SECONDS = float(
@@ -774,7 +774,7 @@ class LocalWorld(w.World):
 
         # Match the Vercel world's 404 rather than persist an event for a run
         # that was never created.
-        if current_run is None and data.event_type in ("run_started", "run_failed"):
+        if current_run is None and data.event_type in ("run_started", "run_failed", "attr_set"):
             raise RuntimeError(f"Run {effective_run_id} not found")
 
         # Minted after the resilient path, whose synthetic `run_created` takes
@@ -806,6 +806,11 @@ class LocalWorld(w.World):
             if data.event_type in ["step_created", "hook_created", "wait_created"]:
                 raise w.EntityConflictError(
                     f"Cannot create new entities on run in terminal state {current_run.status}"
+                )
+
+            if data.event_type == "attr_set":
+                raise w.EntityConflictError(
+                    f'Cannot set attributes on run in terminal state "{current_run.status}"'
                 )
 
         validated_step: w.WorkflowStep | None = None
@@ -1012,6 +1017,40 @@ class LocalWorld(w.World):
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
                 self.delete_all_hooks_for_run(effective_run_id)
+
+        elif data.event_type == "attr_set":
+            attr_data = data.event_data
+            assert current_run is not None  # a missing run was rejected above
+            changes = [(c.key, c.value) for c in attr_data.changes]
+            attrs.validate_attribute_changes(
+                changes,
+                existing_keys=current_run.attributes,
+                allow_reserved=attr_data.allow_reserved_attributes is True,
+            )
+            # Claimed after validation: a rejected write has to leave the correlation
+            # id free, or its retry comes back as "already exists" and the body waits
+            # for an event nobody writes. A step's write is not replayed and carries
+            # no correlation id, so it doesn't need a claim.
+            if data.correlation_id and isinstance(attr_data.writer, w.WorkflowAttributeWriter):
+                claim_path = (
+                    self.data_dir
+                    / ".locks"
+                    / "attributes"
+                    / f"{effective_run_id}-{data.correlation_id}.created"
+                )
+                if not write_exclusive(claim_path, ""):
+                    raise w.EntityConflictError(
+                        f'Attribute event "{data.correlation_id}" already exists'
+                    )
+            run = w.WorkflowRunAdaptor.from_wire(
+                current_run.model_dump()
+                | {
+                    "attributes": attrs.apply_attribute_changes(current_run.attributes, changes),
+                    "updatedAt": now,
+                }
+            )
+            run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
+            write_json(run_path, run, overwrite=True)
 
         elif data.event_type == "step_created":
             step_data = data.event_data
