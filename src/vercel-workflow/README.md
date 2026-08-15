@@ -62,6 +62,39 @@ Inside a step body, `get_step_metadata()` returns the run and step ids, the
 current `attempt`, and `step_started_at` -- when the *first* attempt began, so a
 body can measure how long the step has been going across its retries.
 
+## Run attributes
+
+`set_attributes()` puts plaintext key/value metadata on the run, where a client
+reading the run, the CLI and the observability UI can all see it. Callable from
+a workflow body or a step:
+
+```python
+from vercel.workflow import set_attributes
+
+
+@app.workflow
+async def renew_subscription(customer_id: str) -> None:
+    await set_attributes({"customer": customer_id, "phase": "charging"})
+    await charge_customer(customer_id)
+    await set_attributes({"phase": "done"})
+```
+
+`None` as a value removes the key. Attributes are never encrypted, so nothing
+private belongs in them; keys are capped at 256 characters, values at 256
+bytes, and a run at 64 attributes. Breaking a rule raises `FatalError` at the
+call, before anything is written, so a body can catch it.
+
+Awaiting is what waits for the write to be durable. In a workflow body the call
+itself records it, so dropping the awaitable is a fire-and-forget write that
+still lands:
+
+```python
+set_attributes({"phase": "charging"})  # flushed at the next suspension
+```
+
+Keys starting with `$` are reserved for frameworks and libraries built on the
+SDK; pass `allow_reserved_attributes=True` if that is what you are writing.
+
 ## Queue namespaces
 
 Pass a namespace to a workflow registry to isolate its messages on a dedicated

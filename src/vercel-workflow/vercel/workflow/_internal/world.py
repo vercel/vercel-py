@@ -105,6 +105,15 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 #
 # `CURRENT` is what we stamp on rows we create; `MAX_SUPPORTED` is the highest
 # version we accept when reading, mirroring the same split in TS.
+#
+# Writing `attr_set` does not move `CURRENT` to 4, even though 4 is the version
+# that named the event. The claim is cumulative, so 4 also claims 3, and a
+# TypeScript runtime handling a run that claims 3 switches its queue transport
+# to CBOR -- which this SDK does not speak on the local world. Nothing gates
+# reading or applying an `attr_set` on the run's version (`world-local` applies
+# it unconditionally; the only `>= 4` test is `start()`'s lineage seeding), so
+# attributes work on a run stamped 2. Moving the number is the spec-version
+# work, not this.
 SPEC_VERSION_CURRENT: Literal[2] = 2
 SPEC_VERSION_MAX_SUPPORTED = 6
 
@@ -546,6 +555,71 @@ class RunFailedEvent(BaseEvent):
         return (self.event_data.error,)
 
 
+class AttributeChange(BaseModel):
+    """One key of a `set_attributes()` call. ``value=None`` removes the key."""
+
+    key: str
+    value: str | None
+
+    @pydantic.model_serializer(mode="wrap")
+    def _keep_the_null(self, handler: Any) -> dict[str, Any]:
+        """Write ``value: null`` rather than dropping the key.
+
+        Everywhere else in these models a `None` is an absent field, and the
+        local world drops it to match what `JSON.stringify` does with
+        `undefined`. Here the null is the instruction -- it is what removes the
+        attribute -- and `AttributeChangeSchema` requires the field, so a
+        dropped one is a change a TypeScript reader rejects outright.
+        """
+        data: dict[str, Any] = handler(self)
+        data.setdefault("value", None)
+        return data
+
+
+class WorkflowAttributeWriter(BaseModel):
+    type: Literal["workflow"] = "workflow"
+
+
+class StepAttributeWriter(BaseModel):
+    type: Literal["step"] = "step"
+    step_id: str = pydantic.Field(alias="stepId")
+    attempt: int
+
+
+AttributeWriter: TypeAlias = Annotated[
+    WorkflowAttributeWriter | StepAttributeWriter,
+    pydantic.Field(discriminator="type"),
+]
+
+
+class AttrSetEventData(BaseModel):
+    changes: list[AttributeChange]
+    writer: AttributeWriter
+    allow_reserved_attributes: Literal[True] | None = pydantic.Field(
+        default=None, alias="allowReservedAttributes", exclude_if=lambda e: e is None
+    )
+
+    def into_event(self, correlation_id: str | None = None) -> "AttrSetEvent":
+        return AttrSetEvent(correlationId=correlation_id, eventData=self)
+
+
+class AttrSetEvent(BaseEvent):
+    """
+    Event created when workflow or step code changes the run's attributes.
+    The World materializes the changes into `run.attributes`.
+
+    The correlation id is what a replay matches a workflow-body call against,
+    and is absent on a step's write: a step body holds no replay position, so
+    there is nothing for the event to correlate with.
+    """
+
+    event_type: Literal["attr_set"] = pydantic.Field(
+        default="attr_set",
+        alias="eventType",
+    )
+    event_data: AttrSetEventData = pydantic.Field(alias="eventData")
+
+
 class StepCreatedEventData(BaseModel):
     step_name: str = pydantic.Field(alias="stepName")
     input: bytes | dict[str, Any]
@@ -774,6 +848,7 @@ CreateEventRequest: TypeAlias = (
     RunStartedEvent
     | RunCompletedEvent
     | RunFailedEvent
+    | AttrSetEvent
     | StepCreatedEvent
     | StepStartedEvent
     | StepRetryingEvent
@@ -791,6 +866,7 @@ Event: TypeAlias = Annotated[
         | RunStartedEvent
         | RunCompletedEvent
         | RunFailedEvent
+        | AttrSetEvent
         | StepCreatedEvent
         | StepStartedEvent
         | StepRetryingEvent

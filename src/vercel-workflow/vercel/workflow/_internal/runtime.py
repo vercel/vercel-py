@@ -11,7 +11,7 @@ import random
 import sys
 import traceback
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from datetime import datetime
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 from urllib.parse import parse_qsl, urlsplit
@@ -21,7 +21,17 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, errors, loop, nanoid, serialization as ser, streams, ulid, world as w
+from . import (
+    attributes as attrs,
+    core,
+    errors,
+    loop,
+    nanoid,
+    serialization as ser,
+    streams,
+    ulid,
+    world as w,
+)
 from .duration import parse_duration_to_date
 from .py_sandbox import workflow_sandbox
 
@@ -81,6 +91,20 @@ class Suspension(BaseSuspension, Generic[T]):
 @dataclasses.dataclass(kw_only=True)
 class Wait(BaseSuspension):
     resume_at: datetime
+    future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
+
+
+@dataclasses.dataclass(kw_only=True)
+class Attributes(BaseSuspension):
+    """A `set_attributes()` call from a workflow body, waiting for its event.
+
+    Unlike a step or a wait there is no work to do and nothing to wait for
+    other than the write itself: the flush appends the `attr_set`, the handler
+    replays, and the matching event resolves this.
+    """
+
+    changes: list[w.AttributeChange]
+    allow_reserved: bool = False
     future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
 
 
@@ -277,6 +301,102 @@ def get_step_metadata() -> StepInfo:
         return _step_ctx.get()
     except LookupError:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
+
+
+def set_attributes(
+    attributes: Mapping[str, str | None],
+    *,
+    allow_reserved_attributes: bool = False,
+) -> Awaitable[None]:
+    """Attach plaintext key/value metadata to the current run.
+
+    Callable from a workflow body or a step body::
+
+        await set_attributes({"phase": "charging", "tier": tier})
+        await set_attributes({"tier": None})  # remove the key
+
+    The pairs land on the run entity, where a client reading the run, the CLI
+    or the observability UI can see them -- they are never encrypted, so
+    nothing private belongs here. Keys are capped at 256 characters, values at
+    256 bytes, and a run at 64 attributes.
+
+    Keys starting with ``$`` are reserved for framework and library code.
+    ``allow_reserved_attributes=True`` writes them anyway, which is for a
+    caller that owns a ``$``-prefixed namespace rather than for getting past
+    the error.
+
+    An invalid call raises :class:`~vercel.workflow.FatalError` before
+    anything is written, so a body can catch it and carry on. An empty mapping
+    does nothing.
+
+    Awaiting is what waits for the write to be durable. In a workflow body the
+    call itself is what records it, so dropping the awaitable is a legitimate
+    fire-and-forget: the write is flushed at the next suspension, or when the
+    body finishes if there is none. (This is why it is a plain function
+    returning an awaitable rather than a coroutine function -- a coroutine
+    nobody awaits never runs, and the write would be lost.) A step body has no
+    such machinery behind it and writes the event directly, so there the
+    awaitable has to be awaited like any other.
+    """
+    changes = _normalize_attributes(attributes, allow_reserved=allow_reserved_attributes)
+
+    try:
+        ctx = WorkflowOrchestratorContext.current()
+    except LookupError:
+        pass
+    else:
+        return ctx.set_attributes(changes, allow_reserved=allow_reserved_attributes)
+
+    try:
+        step = _step_ctx.get()
+    except LookupError:
+        raise errors.FatalError(
+            "set_attributes() can only be called inside a workflow or a step"
+        ) from None
+
+    return _write_step_attributes(step, changes, allow_reserved=allow_reserved_attributes)
+
+
+async def _write_step_attributes(
+    step: StepInfo, changes: list[w.AttributeChange], *, allow_reserved: bool
+) -> None:
+    """The step-body half of `set_attributes()`.
+
+    A step runs in host context, so it writes the event itself rather than
+    parking a suspension: it holds no replay position for the event to
+    correlate with, and nothing in the body is waiting to be resumed by it.
+    """
+    if not changes:
+        return
+    await w.get_world().events_create(
+        step.run_id,
+        w.AttrSetEventData(
+            changes=changes,
+            writer=w.StepAttributeWriter(stepId=step.step_id, attempt=step.attempt),
+            allowReservedAttributes=True if allow_reserved else None,
+        ).into_event(),
+    )
+
+
+def _normalize_attributes(
+    attributes: Mapping[str, str | None], *, allow_reserved: bool
+) -> list[w.AttributeChange]:
+    """Validate a `set_attributes()` argument and turn it into wire changes.
+
+    Raises `FatalError` rather than the underlying `AttributeValidationError`,
+    for the same reason `@workflow/core` does: this is a mistake in the body,
+    and the body is where it should be catchable.
+    """
+    if not isinstance(attributes, Mapping):
+        raise errors.FatalError(
+            f"set_attributes requires a mapping, got {type(attributes).__name__}"
+        )
+    pairs = list(attributes.items())
+    try:
+        attrs.validate_attribute_changes(pairs, allow_reserved=allow_reserved)
+    except attrs.AttributeValidationError as e:
+        raise errors.FatalError(str(e)) from None
+    return [w.AttributeChange(key=key, value=value) for key, value in pairs]
 
 
 def get_writable(
@@ -505,6 +625,27 @@ class WorkflowOrchestratorContext:
         self.suspensions[wait.correlation_id] = wait
         await wait.future
 
+    def set_attributes(
+        self, changes: list[w.AttributeChange], *, allow_reserved: bool
+    ) -> asyncio.Future[None]:
+        """Record an attribute write and hand back what waits for it.
+
+        Not a coroutine: the suspension has to be registered by the *call*, so
+        that a body which drops the awaitable still gets its write. See
+        :func:`set_attributes`.
+        """
+        if not changes:
+            done: asyncio.Future[None] = asyncio.Future()
+            done.set_result(None)
+            return done
+        attr_sus = Attributes(
+            correlation_id=f"attr_{self.generate_ulid()}",
+            changes=changes,
+            allow_reserved=allow_reserved,
+        )
+        self.suspensions[attr_sus.correlation_id] = attr_sus
+        return attr_sus.future
+
     def now(self) -> datetime:
         if not self.events:
             raise RuntimeError("now() requires at least one event in the run's event log")
@@ -570,7 +711,7 @@ class WorkflowOrchestratorContext:
                 fut = sus.futures.popleft()
                 if not fut.done():
                     fut.set_exception(exc)
-        elif isinstance(sus, (Suspension, Wait)) and not sus.future.done():
+        elif isinstance(sus, (Suspension, Wait, Attributes)) and not sus.future.done():
             sus.future.set_exception(exc)
 
     def resume(self) -> None:
@@ -618,11 +759,29 @@ class WorkflowOrchestratorContext:
                     event = self.events[self.replay_index]
                     if event.correlation_id not in self.suspensions:
                         match event:
+                            # An attribute write a step body made. It correlates
+                            # with nothing in this body -- the step wrote it out
+                            # of band, from host context -- so there is no call
+                            # waiting on it and the run entity already carries
+                            # the change. Consume it and move on.
+                            case (
+                                w.AttrSetEvent(correlation_id=None)
+                                | w.AttrSetEvent(
+                                    event_data=w.AttrSetEventData(writer=w.StepAttributeWriter())
+                                )
+                            ):
+                                self.replay_index += 1
+                                continue
                             # In case of multitasking, one task may progress twice in a row,
                             # when we see the replayed event before actually having the
                             # suspension from the task. So we yield here and let the task
                             # suspend and resume again in next iteration.
-                            case w.StepCreatedEvent() | w.HookCreatedEvent() | w.WaitCreatedEvent():
+                            case (
+                                w.StepCreatedEvent(correlation_id=str() as slot_id)
+                                | w.HookCreatedEvent(correlation_id=str() as slot_id)
+                                | w.WaitCreatedEvent(correlation_id=str() as slot_id)
+                                | w.AttrSetEvent(correlation_id=str() as slot_id)
+                            ):
                                 # ...unless the body already registered a different-kind
                                 # call at this positional slot (same ULID, different
                                 # prefix). A same-kind match would have hit the dict
@@ -630,7 +789,7 @@ class WorkflowOrchestratorContext:
                                 # hook swap -- the body is non-deterministic. Fail loudly
                                 # instead of yielding forever (the matching ID will never
                                 # appear, so plain `return` would deadlock the run).
-                                pos = _correlation_ulid(event.correlation_id)
+                                pos = _correlation_ulid(slot_id)
                                 for sus in self.suspensions.values():
                                     if _correlation_ulid(sus.correlation_id) == pos:
                                         self._fail_suspension(
@@ -638,7 +797,7 @@ class WorkflowOrchestratorContext:
                                             NondeterminismError(
                                                 f"workflow replay diverged at position "
                                                 f"{pos}: recorded a "
-                                                f"{_correlation_kind(event.correlation_id)!r} "
+                                                f"{_correlation_kind(slot_id)!r} "
                                                 f"call, but the body now issues a "
                                                 f"{_correlation_kind(sus.correlation_id)!r} "
                                                 "call. The workflow body is "
@@ -684,6 +843,28 @@ class WorkflowOrchestratorContext:
                 case w.HookCreatedEvent() | w.WaitCreatedEvent():
                     self.suspensions[event.correlation_id].has_created_event = True
                     continue
+
+                case w.AttrSetEvent(
+                    correlation_id=str() as attr_id,
+                    event_data=w.AttrSetEventData(changes=recorded_changes),
+                ):
+                    # The write itself is the result: there is no second event
+                    # to wait for, so this both records and resolves the call.
+                    attr_sus = self.suspensions.pop(attr_id)
+                    assert isinstance(attr_sus, Attributes)
+                    if recorded_changes != attr_sus.changes:
+                        self._fail_suspension(
+                            attr_sus,
+                            NondeterminismError(
+                                f"workflow replay diverged at {attr_id}: recorded attributes "
+                                f"{[c.key for c in recorded_changes]!r}, but the body now sets "
+                                f"{[c.key for c in attr_sus.changes]!r}. The workflow body is "
+                                "non-deterministic."
+                            ),
+                        )
+                        return
+                    if not attr_sus.future.cancelled():
+                        attr_sus.future.set_result(None)
 
                 case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
                     sus = self.suspensions.pop(event.correlation_id)
@@ -828,6 +1009,39 @@ async def _ensure_hook_received(
         )
         return False
     return True
+
+
+async def _write_attr_set(world: w.World, run_id: str, sus: Attributes) -> None:
+    """Append the `attr_set` event one `set_attributes()` call is waiting on."""
+    data = w.AttrSetEventData(
+        changes=sus.changes,
+        writer=w.WorkflowAttributeWriter(),
+        allowReservedAttributes=True if sus.allow_reserved else None,
+    )
+    try:
+        await world.events_create(run_id, data.into_event(sus.correlation_id))
+    except w.EntityConflictError:
+        # A concurrent replay of this body wrote the same event first. Same
+        # correlation id, same changes -- the replay that follows reads theirs.
+        logger.debug(f"Workflow attributes {sus.correlation_id!r} have already been set")
+
+
+async def _drain_attribute_writes(
+    world: w.World, run_id: str, context: WorkflowOrchestratorContext
+) -> None:
+    """Write the attribute events still pending when the body finished.
+
+    A `set_attributes()` the body fired without awaiting has no further
+    suspension to be flushed by, and the run is about to reach a terminal
+    state -- which the World refuses attribute writes on. So this is the last
+    point at which the write the body asked for can still land.
+    """
+    pending = [s for s in context.suspensions.values() if isinstance(s, Attributes)]
+    if not pending:
+        return
+    async with anyio.create_task_group() as tg:
+        for sus in pending:
+            tg.start_soon(functools.partial(_write_attr_set, world, run_id, sus))
 
 
 async def _resolve_run_key(
@@ -1093,6 +1307,7 @@ async def workflow_handler(
         # Workflow suspended, continue outside the try..except block.
         pass
     except Exception as e:
+        await _drain_attribute_writes(world, run_id, context)
         error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
         logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
         try:
@@ -1107,6 +1322,7 @@ async def workflow_handler(
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
     else:
+        await _drain_attribute_writes(world, run_id, context)
         try:
             await world.events_create(
                 run_id,
@@ -1118,6 +1334,7 @@ async def workflow_handler(
 
     # Now that the workflow is fully suspended, we can create all pending events in parallel
     events_created = False
+    attributes_written = False
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
             if sus.has_created_event:
@@ -1176,6 +1393,11 @@ async def workflow_handler(
                 tg.start_soon(create_hook)
                 events_created = True
 
+            elif isinstance(sus, Attributes):
+                tg.start_soon(functools.partial(_write_attr_set, world, run_id, sus))
+                events_created = True
+                attributes_written = True
+
         for hook in context.hooks.values():
             if hook.disposed and not hook.has_dispose_event:
 
@@ -1193,9 +1415,19 @@ async def workflow_handler(
                 tg.start_soon(dispose_hook)
                 events_created = True
 
-    if not context.suspensions and events_created:
-        # We captured a _SuspendException but there is no suspension - this is likely caused
-        # by a disposed hook that cleared its suspensions. Just retry if event log changed.
+    if attributes_written or (not context.suspensions and events_created):
+        # An attribute write resolves through replay: the event is now in the
+        # log, so replaying reaches the `await set_attributes(...)` and the body
+        # carries on from there. In process rather than through the queue,
+        # because -- unlike a hook or a wait -- an `attr_set` introduces no
+        # out-of-band source of invocations for this handler to yield the
+        # message to, so a delivery round trip would only be latency. The steps
+        # this pass already created and queued are not created twice: the replay
+        # sees their events and leaves them alone.
+        #
+        # The second case is a suspension that resolved itself: we captured a
+        # _SuspendException but no suspension is left, which a disposed hook
+        # does. Same treatment -- retry now that the event log changed.
         return await workflow_handler(
             message,
             attempt=attempt,

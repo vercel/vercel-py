@@ -15,6 +15,7 @@ from vercel.workflow._internal.runtime import (
     get_step_metadata,
     get_writable,
     read_stream,
+    set_attributes,
     start,
 )
 from vercel.workflow._internal.serde import register_serializable, serializable
@@ -42,6 +43,7 @@ __all__ = [
     "Workflows",
     "now",
     "random",
+    "set_attributes",
     "sleep",
     "start",
     "time_ns",
