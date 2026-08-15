@@ -38,6 +38,22 @@ def is_step_terminal(status: str) -> bool:
     return status in ["completed", "failed"]
 
 
+def _error_message(error: Any) -> str:
+    """The human-readable half of whatever a step event carries as its error.
+
+    The field is `Any` on the wire (see gap 13 in the conformance notes -- it is
+    still the pre-pipeline shape), so this takes the three forms writers use: a
+    bare string, a `{message, stack}` object, or something with a `.message`.
+    """
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict) and "message" in error:
+        message = error["message"]
+        return message if isinstance(message, str) else str(message)
+    message = getattr(error, "message", None)
+    return message if isinstance(message, str) else "Unknown error"
+
+
 # Marker the TypeScript `world-local` package uses to smuggle binary payloads
 # through JSON. See its `jsonReplacer` / `jsonReviver`.
 UINT8ARRAY_TYPE_TAG = "Uint8Array"
@@ -1068,21 +1084,35 @@ class LocalWorld(w.World):
                 )
                 write_json(step_path, step, overwrite=True)
 
+        elif data.event_type == "step_retrying" and hasattr(data, "event_data"):
+            # Park the step until its next attempt. `retryAfter` is the whole
+            # point: `step_started` above answers TooEarlyError while it is in
+            # the future, which is how a RetryableError's delay is enforced
+            # against any handler that redelivers early.
+            retrying_data = data.event_data
+            if validated_step:
+                step_composite_key = f"{effective_run_id}-{data.correlation_id}"
+                step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
+                step = w.NonFinalWorkflowStep.model_validate(
+                    validated_step.model_dump()
+                    | {
+                        "status": "pending",
+                        "error": w.StructuredError(
+                            message=_error_message(retrying_data.error),
+                            stack=retrying_data.stack,
+                        ),
+                        "retryAfter": retrying_data.retry_after,
+                        "updatedAt": now,
+                    }
+                )
+                write_json(step_path, step, overwrite=True)
+
         elif data.event_type == "step_failed" and hasattr(data, "event_data"):
             step_failed_data = data.event_data
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
-                if isinstance(step_failed_data.error, str):
-                    error_msg = step_failed_data.error
-                elif (
-                    isinstance(step_failed_data.error, dict) and "message" in step_failed_data.error
-                ):
-                    error_msg = step_failed_data.error["message"]
-                elif hasattr(step_failed_data.error, "message"):
-                    error_msg = step_failed_data.error.message
-                else:
-                    error_msg = "Unknown error"
+                error_msg = _error_message(step_failed_data.error)
                 if isinstance(step_failed_data.error, dict) and "stack" in step_failed_data.error:
                     error_stack = step_failed_data.error["stack"]
                 elif hasattr(step_failed_data.error, "stack"):

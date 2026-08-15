@@ -98,6 +98,9 @@ async def test_step_metadata_available_inside_step(tmp_path, monkeypatch) -> Non
     # The step actually ran to completion, and the parent workflow was re-enqueued.
     step_run = await world.steps_get(run_id, step_id)
     assert step_run.status == "completed"
+    # The body was handed the step's own start, which the World keeps across
+    # retries -- so this is the first attempt's, not this attempt's.
+    assert info.step_started_at == step_run.started_at
     assert any(qn.startswith("__wkf_workflow_") for qn, _ in world.queued)
 
     # The context var is cleared once the step body returns.

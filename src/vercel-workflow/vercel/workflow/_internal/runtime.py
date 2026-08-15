@@ -8,12 +8,11 @@ import json
 import logging
 import math
 import random
-import re
 import sys
 import traceback
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 from urllib.parse import parse_qsl, urlsplit
 
@@ -23,6 +22,7 @@ import pydantic
 from vercel._internal.core.polyfills import UTC, Self
 
 from . import core, errors, loop, nanoid, serialization as ser, streams, ulid, world as w
+from .duration import parse_duration_to_date
 from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
@@ -134,12 +134,18 @@ class StepInfo:
     across retries and unique per logical step call, which makes it a good
     idempotency key for non-idempotent side effects (payments, emails, queue
     sends) performed inside a step body.
+
+    ``step_started_at`` is when the *first* attempt began, not this one: the
+    World keeps the timestamp the first ``step_started`` set, so a body can
+    measure how long the whole step -- retries and the waits between them
+    included -- has been going.
     """
 
     run_id: str
     step_id: str
     step_name: str
     attempt: int
+    step_started_at: datetime
 
 
 _step_ctx: contextvars.ContextVar[StepInfo] = contextvars.ContextVar("WorkflowStepContext")
@@ -1336,6 +1342,7 @@ async def _execute_step(
                     step_id=req.step_id,
                     step_name=step.name,
                     attempt=current_attempt,
+                    step_started_at=step_run.started_at,
                 )
             )
             # Execute the step function
@@ -1417,26 +1424,39 @@ async def _execute_step(
         else:
             # Not at max retries yet - retry the step
             logger.warning(
-                "[Workflows] '%s' - Encountered Error "
+                "[Workflows] '%s' - Encountered %s "
                 "while executing step '%s' (attempt %d): "
                 "%s\n\n  This step has failed but will be retried",
                 req.run_id,
+                "RetryableError" if isinstance(e, errors.RetryableError) else "Error",
                 step.name,
                 current_attempt,
                 e,
             )
 
+            # A RetryableError names when the next attempt may run; anything
+            # else retries a second later. The timestamp goes on the event so
+            # the World can reject an early step_started (425 TooEarlyError),
+            # which is what keeps the delay even if this delivery is redelivered
+            # by something other than the continuation below.
+            retry_after = e.retry_after if isinstance(e, errors.RetryableError) else None
+
             # Set step to pending for retry
             error_stack = traceback.format_exc()
             await world.events_create(
                 req.run_id,
-                w.StepRetryingEventData(error=error_text, stack=error_stack).into_event(
-                    req.step_id
-                ),
+                w.StepRetryingEventData(
+                    error=error_text, stack=error_stack, retryAfter=retry_after
+                ).into_event(req.step_id),
             )
 
             # Return timeout to keep message visible for retry
-            return w.QueueContinuation(delay_seconds=1.0)
+            delay_seconds = 1.0
+            if retry_after is not None:
+                delay_seconds = max(
+                    1.0, math.ceil((retry_after - datetime.now(UTC)).total_seconds())
+                )
+            return w.QueueContinuation(delay_seconds=delay_seconds)
 
     finally:
         _step_streams_ctx.reset(streams_token)
@@ -1558,54 +1578,6 @@ def _has_terminal_run_event(events: list[w.Event], run_id: str) -> bool:
         and e.event_type in ("run_completed", "run_failed", "run_cancelled")
         for e in events
     )
-
-
-duration_re = re.compile(
-    r"(-?\d+(?:\.\d+)?)\s*(ms|s|seconds?|m|minutes?|h|hours?|d|days?|w|weeks?)",
-    re.IGNORECASE,
-)
-duration_units = {
-    "ms": 1,
-    "s": 1_000,
-    "second": 1_000,
-    "seconds": 1_000,
-    "m": 60 * 1_000,
-    "minute": 60 * 1_000,
-    "minutes": 60 * 1_000,
-    "h": 60 * 60 * 1_000,
-    "hour": 60 * 60 * 1_000,
-    "hours": 60 * 60 * 1_000,
-    "d": 24 * 60 * 60 * 1_000,
-    "day": 24 * 60 * 60 * 1_000,
-    "days": 24 * 60 * 60 * 1_000,
-    "w": 7 * 24 * 60 * 60 * 1_000,
-    "week": 7 * 24 * 60 * 60 * 1_000,
-    "weeks": 7 * 24 * 60 * 60 * 1_000,
-}
-
-
-def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
-    if isinstance(param, str):
-        items = [float(v) * duration_units[u] for v, u in duration_re.findall(param)]
-        if not items:
-            raise RuntimeError(f"Invalid duration parameter: {param}")
-        ms = sum(items)
-        if ms < 0:
-            raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=ms)
-
-    elif isinstance(param, (int, float)):
-        if param < 0:
-            raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=param)
-
-    elif isinstance(param, datetime):
-        if param.tzinfo is None:
-            raise RuntimeError("Duration parameter must have tzinfo")
-        return param
-
-    else:
-        raise RuntimeError(f"Invalid duration parameter: {param}")
 
 
 class Run:
