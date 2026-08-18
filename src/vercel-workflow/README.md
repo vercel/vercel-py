@@ -65,6 +65,32 @@ async def wait_for_approval() -> bool:
 
 `BaseHook` supports dataclasses and Pydantic models for external resume events.
 
+Pass `metadata` to record data on the hook itself, for whoever resumes it:
+
+```python
+@app.workflow
+async def wait_for_approval(order_id: str) -> bool:
+    approval = await Approval.wait(token=f"order:{order_id}", metadata={"order": order_id})
+    return bool(approval and approval.approved)
+```
+
+Metadata is written once, when the hook is registered, and is not part of the
+payload. The resumer reads it back with `get_hook_by_token()`, already decoded,
+which is how a run tells it what it is waiting for:
+
+```python
+from vercel.workflow import get_hook_by_token
+
+hook = await get_hook_by_token(f"order:{order_id}")
+if hook.metadata["order"] == order_id:
+    await Approval(approved=True).resume(hook)
+```
+
+That `Hook` carries the token, hook and run ids, when it was created, and the
+decoded metadata. Pass it back to `resume()` rather than the token to reuse the
+lookup. `get_hook_by_token()` raises `HookNotFoundError` when no live hook holds
+the token.
+
 ## Streaming
 
 Every run has a stream a step can write to while it runs, so a client sees

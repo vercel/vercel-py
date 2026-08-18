@@ -1,5 +1,6 @@
 from vercel.workflow._internal.core import (
     BaseHook,
+    Hook,
     HookEvent,
     Workflows,
     now,
@@ -10,6 +11,7 @@ from vercel.workflow._internal.core import (
 from vercel.workflow._internal.runtime import (
     Run,
     StepInfo,
+    get_hook_by_token,
     get_step_metadata,
     get_writable,
     read_stream,
@@ -44,7 +46,9 @@ __all__ = [
     "time_ns",
     "Run",
     "BaseHook",
+    "Hook",
     "HookEvent",
+    "get_hook_by_token",
     "get_step_metadata",
     "get_writable",
     "read_stream",
