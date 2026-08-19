@@ -12,7 +12,13 @@ from typing import Any
 import httpx
 import pytest
 
-from vercel._internal.core.http import BaseTransport, JSONBody, ReadResponsePolicy, RequestBody
+from vercel._internal.core.http import (
+    BaseTransport,
+    JSONBody,
+    ReadResponsePolicy,
+    RequestBody,
+    RequestTimeout,
+)
 from vercel._internal.core.http.transport import HeaderTypes, QueryParamTypes
 from vercel.connect import (
     ConnectAppTokenSubject,
@@ -43,7 +49,7 @@ class FakeTransport(BaseTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,

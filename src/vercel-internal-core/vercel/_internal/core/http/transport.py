@@ -64,6 +64,16 @@ class RawBody:
 RequestBody = JSONBody | BytesBody | RawBody | None
 
 
+class _NoTimeout:
+    """Select no HTTPX timeout instead of inheriting the client default."""
+
+    __slots__ = ()
+
+
+NO_TIMEOUT = _NoTimeout()
+RequestTimeout: TypeAlias = timedelta | _NoTimeout | None
+
+
 class ReadResponsePolicy(StrEnum):
     ALWAYS = "always"
     NON_SUCCESS_ONLY = "non_success_only"
@@ -89,7 +99,7 @@ class BaseTransport(abc.ABC):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
@@ -104,7 +114,7 @@ class BaseTransport(abc.ABC):
         token: str | None = None,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         response_chunk_size: int | None = None,
@@ -121,7 +131,7 @@ class BaseTransport(abc.ABC):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         chunk_size: int | None = None,
@@ -139,7 +149,7 @@ class BaseTransport(abc.ABC):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
     ) -> httpx.Request:
         headers = httpx.Headers(headers)
         if token is not None:
@@ -156,7 +166,18 @@ class BaseTransport(abc.ABC):
             case RawBody():
                 content = body.data
 
-        if timeout is not None:
+        if timeout is NO_TIMEOUT:
+            return client.build_request(
+                method,
+                _normalize_path(path),
+                params=params,
+                timeout=None,
+                headers=headers,
+                json=json,
+                content=content,
+            )
+
+        if isinstance(timeout, timedelta):
             return client.build_request(
                 method,
                 _normalize_path(path),
@@ -604,7 +625,7 @@ class SyncTransport(BaseTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
@@ -638,7 +659,7 @@ class SyncTransport(BaseTransport):
         token: str | None = None,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         response_chunk_size: int | None = None,
@@ -683,7 +704,7 @@ class SyncTransport(BaseTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         chunk_size: int | None = None,
@@ -741,7 +762,7 @@ class AsyncTransport(BaseTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
@@ -776,7 +797,7 @@ class AsyncTransport(BaseTransport):
         token: str | None = None,
         params: QueryParamTypes | None = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         response_chunk_size: int | None = None,
@@ -838,7 +859,7 @@ class AsyncTransport(BaseTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
         chunk_size: int | None = None,
