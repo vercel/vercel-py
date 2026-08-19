@@ -12,8 +12,7 @@ import pydantic
 
 from vercel._internal.core.polyfills import Self
 
-from . import py_sandbox
-from .world import validate_queue_namespace
+from . import py_sandbox, world as w
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -278,7 +277,7 @@ class Workflows:
         namespace: str | None = None,
         sandbox_policy: py_sandbox.SandboxPolicy | None = None,
     ):
-        validate_queue_namespace(namespace)
+        w.validate_queue_namespace(namespace)
 
         self._namespace = namespace
         self._workflows: dict[str, Workflow] = {}
