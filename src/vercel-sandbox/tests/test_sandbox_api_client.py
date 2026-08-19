@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 import httpx
@@ -5,10 +6,12 @@ import pytest
 from httpx._types import HeaderTypes, QueryParamTypes
 
 from vercel._internal.core.http import (
+    NO_TIMEOUT,
     BaseTransport,
     JSONBody,
     ReadResponsePolicy,
     RequestBody,
+    RequestTimeout,
     StreamingRequest,
     StreamingResponse,
 )
@@ -16,6 +19,7 @@ from vercel._internal.core.url import format_url_path
 from vercel.sandbox._internal.api_client import SandboxApiClient, _WriteFilesUpload
 from vercel.sandbox._internal.errors import SandboxApiError, SandboxResponseError
 from vercel.sandbox._internal.options import SandboxCredentials
+from vercel.sandbox._internal.process_output import ProcessOutputRouter
 
 
 class InvalidJsonTransport(BaseTransport):
@@ -31,7 +35,7 @@ class InvalidJsonTransport(BaseTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
@@ -57,7 +61,7 @@ class JsonTransport(BaseTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
@@ -69,6 +73,7 @@ class RecordingJsonTransport(JsonTransport):
     def __init__(self, data: object) -> None:
         super().__init__(data)
         self.request: tuple[str, str, str | None, QueryParamTypes | None, RequestBody] | None = None
+        self.timeout: RequestTimeout = None
 
     async def send(
         self,
@@ -79,12 +84,13 @@ class RecordingJsonTransport(JsonTransport):
         params: QueryParamTypes | None = None,
         body: RequestBody = None,
         headers: HeaderTypes | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
         follow_redirects: bool | None = None,
         stream: bool = False,
         read_response: ReadResponsePolicy = ReadResponsePolicy.NEVER,
     ) -> httpx.Response:
         self.request = (method, path, token, params, body)
+        self.timeout = timeout
         return await super().send(
             method,
             path,
@@ -100,16 +106,17 @@ class RecordingJsonTransport(JsonTransport):
 
 
 class _CompletedResponse(StreamingResponse):
-    def __init__(self, response: httpx.Response) -> None:
+    def __init__(self, response: httpx.Response, *, lines: tuple[str, ...] = ()) -> None:
         self.response = response
         self.closed = False
+        self.lines = lines
 
     async def __anext__(self) -> bytes:
         raise StopAsyncIteration
 
     async def aiter_lines(self):  # type: ignore[no-untyped-def]
-        if False:
-            yield ""
+        for line in self.lines:
+            yield line
 
     async def aclose(self) -> None:
         self.closed = True
@@ -129,6 +136,31 @@ class _CompletedRequest(StreamingRequest):
         raise NotImplementedError
 
 
+class RecordingStreamTransport(JsonTransport):
+    def __init__(self, *, lines: tuple[str, ...] = ()) -> None:
+        super().__init__({})
+        self.lines = lines
+        self.timeout: RequestTimeout = None
+
+    async def open_response_stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str | None = None,
+        params: QueryParamTypes | None = None,
+        body: RequestBody = None,
+        headers: HeaderTypes | None = None,
+        timeout: RequestTimeout = None,
+        follow_redirects: bool | None = None,
+        read_response: ReadResponsePolicy = ReadResponsePolicy.NON_SUCCESS_ONLY,
+        chunk_size: int | None = None,
+    ) -> StreamingResponse:
+        self.timeout = timeout
+        response = httpx.Response(200, request=httpx.Request(method, path))
+        return _CompletedResponse(response, lines=self.lines)
+
+
 def _sandbox_client(transport: BaseTransport) -> SandboxApiClient:
     async def credentials_factory() -> SandboxCredentials:
         return SandboxCredentials(
@@ -143,6 +175,76 @@ def _sandbox_client(transport: BaseTransport) -> SandboxApiClient:
         transport=transport,
         file_transfer_timeout=timedelta(minutes=5),
     )
+
+
+def _command_response(*, exit_code: int | None) -> dict[str, object]:
+    return {
+        "command": {
+            "id": "cmd_1",
+            "name": "python",
+            "args": [],
+            "cwd": "/vercel/sandbox",
+            "sessionId": "sbx_1",
+            "exitCode": exit_code,
+            "startedAt": 1,
+        }
+    }
+
+
+async def test_waiting_for_command_disables_client_timeout() -> None:
+    transport = RecordingJsonTransport(_command_response(exit_code=0))
+    client = _sandbox_client(transport)
+
+    await client.get_command(session_id="sbx_1", command_id="cmd_1", wait=True)
+
+    assert transport.timeout is NO_TIMEOUT
+
+
+async def test_polling_command_uses_client_timeout() -> None:
+    transport = RecordingJsonTransport(_command_response(exit_code=None))
+    client = _sandbox_client(transport)
+
+    await client.get_command(session_id="sbx_1", command_id="cmd_1", wait=False)
+
+    assert transport.timeout is None
+
+
+async def test_run_process_disables_client_timeout() -> None:
+    transport = RecordingStreamTransport(
+        lines=(
+            json.dumps(_command_response(exit_code=None)),
+            json.dumps(_command_response(exit_code=0)),
+        )
+    )
+    client = _sandbox_client(transport)
+
+    await client.run_process(
+        session_id="sbx_1",
+        command="python",
+        output_router=ProcessOutputRouter(stdout=None, stderr=None, capture_output=False),
+    )
+
+    assert transport.timeout is NO_TIMEOUT
+
+
+async def test_command_logs_disable_client_timeout() -> None:
+    transport = RecordingStreamTransport()
+    client = _sandbox_client(transport)
+
+    response = await client.command_logs_response(session_id="sbx_1", command_id="cmd_1")
+    await response.aclose()
+
+    assert transport.timeout is NO_TIMEOUT
+
+
+async def test_file_read_uses_file_transfer_timeout() -> None:
+    transport = RecordingStreamTransport()
+    client = _sandbox_client(transport)
+
+    response = await client.open_read_response(session_id="sbx_1", path="large.bin")
+    await response.aclose()
+
+    assert transport.timeout == timedelta(minutes=5)
 
 
 async def test_invalid_json_response_raises_response_error(mock_env_clear: None) -> None:
