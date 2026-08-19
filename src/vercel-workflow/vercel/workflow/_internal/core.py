@@ -6,7 +6,7 @@ import functools
 import inspect
 import random as _random
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator
-from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
+from typing import Any, Generic, ParamSpec, TypeVar, overload
 
 import pydantic
 
@@ -14,10 +14,6 @@ from vercel._internal.core.polyfills import Self
 
 from . import py_sandbox
 from .world import validate_queue_namespace
-
-if TYPE_CHECKING:
-    from . import world as w
-
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -233,9 +229,18 @@ class HookEvent(Generic[T]):
         ctx.dispose_hook(correlation_id=self._correlation_id)
 
 
+@dataclasses.dataclass(frozen=True)
+class Hook:
+    token: str
+    hook_id: str
+    run_id: str
+    created_at: datetime.datetime
+    metadata: Any = None
+
+
 class BaseHook:
     @classmethod
-    def wait(cls, *, token: str | None = None) -> HookEvent[Self]:
+    def wait(cls, *, token: str | None = None, metadata: Any = None) -> HookEvent[Self]:
         from . import runtime
 
         try:
@@ -243,9 +248,9 @@ class BaseHook:
         except LookupError:
             raise RuntimeError("cannot call wait() outside workflow") from None
         else:
-            return ctx.create_hook(token, cls)
+            return ctx.create_hook(token, cls, metadata=metadata)
 
-    async def resume(self, token_or_hook: str | w.Hook, **kwargs) -> w.Hook:
+    async def resume(self, token_or_hook: str | Hook, **kwargs) -> Hook:
         from . import runtime
 
         try:

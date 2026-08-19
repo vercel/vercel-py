@@ -91,6 +91,7 @@ class Hook(BaseSuspension, Generic[T]):
     has_dispose_event: bool = False
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
     hook_cls: type[T]
+    metadata: bytes | None = None
 
     def set_result(self, raw_data: Any) -> None:
         if dataclasses.is_dataclass(self.hook_cls):
@@ -522,11 +523,14 @@ class WorkflowOrchestratorContext:
             self.run_id, streams.workflow_run_stream_id(self.run_id, namespace)
         )
 
-    def create_hook(self, token: str | None, hook_cls: type[T]) -> core.HookEvent[T]:
+    def create_hook(
+        self, token: str | None, hook_cls: type[T], *, metadata: Any = None
+    ) -> core.HookEvent[T]:
         hook = Hook(
             correlation_id=f"hook_{self.generate_ulid()}",
             token=token or self.generate_nanoid(),
             hook_cls=hook_cls,
+            metadata=None if metadata is None else ser.dehydrate(metadata),
         )
         self.hooks[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
@@ -1056,7 +1060,7 @@ async def workflow_handler(
             elif isinstance(sus, Hook):
 
                 async def create_hook(s=sus):
-                    hook_data = w.HookCreatedEventData(token=s.token)
+                    hook_data = w.HookCreatedEventData(token=s.token, metadata=s.metadata)
                     try:
                         await world.events_create(run_id, hook_data.into_event(s.correlation_id))
                     except w.EntityConflictError:
@@ -1658,13 +1662,40 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     return Run(run_id)
 
 
-async def resume_hook(token_or_hook: str | w.Hook, payload: Any) -> w.Hook:
+async def _public_hook(
+    world: w.World, hook: w.Hook, *, run: w.WorkflowRun | None = None
+) -> core.Hook:
+    metadata = hook.metadata
+    if metadata is not None:
+        key = None
+        if ser.is_encrypted(metadata):
+            if run is None:
+                run = await world.runs_get(hook.run_id)
+            key = await world.run_key(run.run_id, deployment_id=run.deployment_id)
+        metadata = ser.hydrate(metadata, what=f"the metadata of hook {hook.hook_id}", key=key)
+    return core.Hook(
+        token=hook.token,
+        hook_id=hook.hook_id,
+        run_id=hook.run_id,
+        created_at=hook.created_at,
+        metadata=metadata,
+    )
+
+
+async def get_hook_by_token(token: str) -> core.Hook:
+    world = w.get_world()
+    return await _public_hook(world, await world.hooks_get_by_token(token))
+
+
+async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook:
     world = w.get_world()
     if isinstance(token_or_hook, str):
-        hook = await world.hooks_get_by_token(token_or_hook)
+        entity = await world.hooks_get_by_token(token_or_hook)
+        run = await world.runs_get(entity.run_id)
+        hook = await _public_hook(world, entity, run=run)
     else:
         hook = token_or_hook
-    run = await world.runs_get(hook.run_id)
+        run = await world.runs_get(hook.run_id)
     data = w.HookReceivedEventData(payload=ser.dehydrate(payload))
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     execution_context = run.execution_context or {}
