@@ -30,6 +30,13 @@ def _round_trip(value):
     return ser.hydrate(ser.dehydrate(value), what="a payload")
 
 
+def _sandbox_registry() -> serde.Registry:
+    """A registry as `Sandbox` builds one: fresh, seeded with the built-ins."""
+    registry = serde.Registry()
+    serde._register_builtins(registry)
+    return registry
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # the wire form
 # ═══════════════════════════════════════════════════════════════════════════
@@ -251,7 +258,7 @@ def test_replays_do_not_accumulate_in_the_host_registry() -> None:
     classes, class_ids = len(serde._HOST.by_class), len(serde._HOST.by_class_id)
 
     for _ in range(50):
-        with serde.sandboxed_registrations():
+        with serde.sandboxed_registrations(_sandbox_registry()):
             _define_and_register()
     gc.collect()
 
@@ -270,7 +277,7 @@ def test_a_sandbox_registration_does_not_outlive_the_sandbox() -> None:
     """
     host = _define_and_register()
 
-    with serde.sandboxed_registrations():
+    with serde.sandboxed_registrations(_sandbox_registry()):
         sandboxed = _define_and_register()
         assert type(_round_trip(sandboxed())) is sandboxed, "its own class applies inside"
         # The classId is the same on both sides, which is what lets a payload
@@ -284,7 +291,7 @@ def test_a_sandbox_registration_does_not_outlive_the_sandbox() -> None:
 def test_a_sandbox_registration_does_not_reach_the_host() -> None:
     # Nothing carries a sandbox-registered class out: a run's payloads are all
     # serialized inside the sandbox, its return value included.
-    with serde.sandboxed_registrations():
+    with serde.sandboxed_registrations(_sandbox_registry()):
         serde.register_serializable(Point, class_id="class//sandbox-only//Point")
 
     with pytest.raises(ser.SerializationError, match="Register Point with @serializable"):
@@ -302,7 +309,7 @@ def test_a_host_registration_is_not_visible_inside_a_sandbox() -> None:
     serde.register_serializable(Point)
     payload = ser.dehydrate(Point(1, 2))
 
-    with serde.sandboxed_registrations():
+    with serde.sandboxed_registrations(_sandbox_registry()):
         with pytest.raises(ser.SerializationError, match="unknown class"):
             ser.hydrate(payload, what="a payload")
 
@@ -313,7 +320,7 @@ def test_the_sandbox_registers_the_stdlib_classes_it_imported_itself() -> None:
     Its `uuid.UUID` is a different class object, so a registry holding only the
     host's would not cover a `UUID` built inside a workflow.
     """
-    with py_sandbox.workflow_sandbox():
+    with py_sandbox.Sandbox().enter():
         import uuid as sandboxed  # noqa: PLC0415
 
         value = sandboxed.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
@@ -330,7 +337,7 @@ def test_a_restricted_stdlib_class_is_not_swapped_for_the_hosts() -> None:
     """
     payload = ser.dehydrate(datetime.date(2026, 8, 4))
 
-    with py_sandbox.workflow_sandbox():
+    with py_sandbox.Sandbox().enter():
         import datetime as sandboxed  # noqa: PLC0415
 
         revived = ser.hydrate(payload, what="a payload")
@@ -342,7 +349,7 @@ def test_a_restricted_stdlib_class_is_not_swapped_for_the_hosts() -> None:
 def test_the_wire_id_does_not_follow_the_sandbox_class_name() -> None:
     # Derived from the class it would read `class//...//_RestrictedDate`, which
     # the other side has never heard of.
-    with py_sandbox.workflow_sandbox():
+    with py_sandbox.Sandbox().enter():
         import datetime as sandboxed  # noqa: PLC0415
 
         wire = _wire(sandboxed.date(2026, 8, 4))
@@ -353,7 +360,7 @@ def test_the_wire_id_does_not_follow_the_sandbox_class_name() -> None:
 def test_datetime_stays_native_inside_a_sandbox() -> None:
     # `registry.native` has to hold the sandbox's `datetime`, not the host's,
     # or the `date` registration would capture it through the MRO.
-    with py_sandbox.workflow_sandbox():
+    with py_sandbox.Sandbox().enter():
         import datetime as sandboxed  # noqa: PLC0415
 
         value = sandboxed.datetime(2026, 7, 30, tzinfo=datetime.timezone.utc)
@@ -361,10 +368,9 @@ def test_datetime_stays_native_inside_a_sandbox() -> None:
 
 
 def test_built_ins_are_visible_inside_a_sandbox() -> None:
-    # They are registered when this module is imported, and `serde` is reached
-    # through to the host rather than re-imported, so a registry that started
-    # empty would not have them.
-    with serde.sandboxed_registrations():
+    # Each sandbox registry is seeded with them at construction; a registry
+    # that started empty would not have them.
+    with serde.sandboxed_registrations(_sandbox_registry()):
         assert _round_trip(decimal.Decimal("1.50")) == decimal.Decimal("1.50")
         assert _round_trip(pathlib.Path("/tmp/x")) == pathlib.Path("/tmp/x")
 
