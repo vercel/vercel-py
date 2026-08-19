@@ -10,6 +10,7 @@ from vercel.workflow._internal.core import (
 )
 from vercel.workflow._internal.runtime import (
     ENDPOINT_PATH,
+    MANIFEST_PATH,
     Run,
     StepInfo,
     get_hook_by_token,
@@ -42,6 +43,7 @@ from .sandbox import SandboxPolicy
 __all__ = [
     "Workflows",
     "ENDPOINT_PATH",
+    "MANIFEST_PATH",
     "HTTPHandler",
     "HTTPRequest",
     "HTTPResponse",

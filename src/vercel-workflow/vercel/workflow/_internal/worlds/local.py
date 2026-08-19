@@ -1080,6 +1080,11 @@ class LocalWorld(w.World):
             step=step,
         )
 
+    def write_manifest(self, manifest: dict[str, Any]) -> pathlib.Path | None:
+        path = self.data_dir / "manifest.json"
+        write_json(path, manifest, overwrite=True)
+        return path
+
     # ── streams ────────────────────────────────────────────────────────────
     #
     # One file per chunk, under a directory per stream. The directory matters:

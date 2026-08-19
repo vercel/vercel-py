@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import random
 import re
 import sys
@@ -1417,6 +1418,49 @@ def workflow_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
             functools.partial(workflow_handler, registry=registry, namespace=namespace),
         )
     )
+
+
+MANIFEST_PATH = "/.well-known/workflow/v1/manifest.json"
+MANIFEST_VERSION = "1.0.0"
+PUBLIC_MANIFEST_ENV = "WORKFLOW_PUBLIC_MANIFEST"
+
+
+def _manifest_file(module: str) -> str:
+    return f"{module.replace('.', '/')}.py"
+
+
+def build_manifest(*registries: core.Workflows) -> dict[str, Any]:
+    workflows: dict[str, dict[str, Any]] = {}
+    steps: dict[str, dict[str, Any]] = {}
+    # Several registries when an app namespaces its topics, and the document is
+    # the app's rather than any one registry's.
+    for registry in registries:
+        for workflow in registry._workflows.values():
+            by_name = workflows.setdefault(_manifest_file(workflow.module), {})
+            by_name[workflow.qualname] = {
+                "workflowId": workflow.workflow_id,
+                "graph": {"nodes": [], "edges": []},
+            }
+
+        for step in registry._steps.values():
+            by_name = steps.setdefault(_manifest_file(step.func.__module__), {})
+            by_name[step.func.__qualname__] = {"stepId": step.name}
+
+    return {
+        "version": MANIFEST_VERSION,
+        "steps": steps,
+        "workflows": workflows,
+        "classes": {},
+    }
+
+
+def manifest_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
+    async def handler(request: w.HTTPRequest) -> w.HTTPResponse:
+        if os.getenv(PUBLIC_MANIFEST_ENV) != "1":
+            return w.HTTPResponse(404, b"", {})
+        return w.HTTPResponse.json(build_manifest(registry))
+
+    return handler
 
 
 class _LoadedEvents:

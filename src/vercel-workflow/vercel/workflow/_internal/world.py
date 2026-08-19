@@ -2,6 +2,7 @@ import abc
 import dataclasses
 import json
 import os
+import pathlib
 import re
 import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
@@ -1010,6 +1011,9 @@ class World(metaclass=abc.ABCMeta):
 
         ``None`` means the run's payloads are plaintext.
         """
+        return None
+
+    def write_manifest(self, manifest: dict[str, Any]) -> pathlib.Path | None:
         return None
 
     @abc.abstractmethod
