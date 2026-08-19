@@ -11,7 +11,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
-from typing import Any, TypeAlias
+from typing import Any, Final, TypeAlias, final
 
 import anyio
 import httpx
@@ -64,13 +64,14 @@ class RawBody:
 RequestBody = JSONBody | BytesBody | RawBody | None
 
 
+@final
 class _NoTimeout:
     """Select no HTTPX timeout instead of inheriting the client default."""
 
     __slots__ = ()
 
 
-NO_TIMEOUT = _NoTimeout()
+NO_TIMEOUT: Final = _NoTimeout()
 RequestTimeout: TypeAlias = timedelta | _NoTimeout | None
 
 
