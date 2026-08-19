@@ -9,7 +9,7 @@ import pytest
 import respx
 from httpx import Response
 
-from vercel._internal.core.http import AsyncTransport, SyncTransport
+from vercel._internal.core.http import NO_TIMEOUT, AsyncTransport, SyncTransport
 from vercel._internal.core.iter_coroutine import iter_coroutine
 
 CLIENT_TIMEOUT = {
@@ -23,6 +23,12 @@ REQUEST_TIMEOUT = {
     "read": 9.0,
     "write": 9.0,
     "pool": 9.0,
+}
+DISABLED_TIMEOUT = {
+    "connect": None,
+    "read": None,
+    "write": None,
+    "pool": None,
 }
 
 
@@ -66,6 +72,21 @@ def test_sync_request_timeout_overrides_client_default() -> None:
 
 
 @respx.mock
+def test_sync_request_can_disable_client_timeout() -> None:
+    base_url = "https://api.example.com"
+    route = respx.get(f"{base_url}/ping").mock(return_value=Response(200, json={"ok": True}))
+    transport = SyncTransport(httpx.Client(base_url=base_url, timeout=_client_timeout()))
+
+    try:
+        response = iter_coroutine(transport.send("GET", "/ping", timeout=NO_TIMEOUT))
+        assert response.status_code == 200
+    finally:
+        transport.close()
+
+    assert route.calls.last.request.extensions["timeout"] == DISABLED_TIMEOUT
+
+
+@respx.mock
 @pytest.mark.asyncio
 async def test_async_request_without_timeout_uses_client_default() -> None:
     base_url = "https://api.example.com"
@@ -95,3 +116,19 @@ async def test_async_request_timeout_overrides_client_default() -> None:
         await transport.aclose()
 
     assert route.calls.last.request.extensions["timeout"] == REQUEST_TIMEOUT
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_async_request_can_disable_client_timeout() -> None:
+    base_url = "https://api.example.com"
+    route = respx.get(f"{base_url}/ping").mock(return_value=Response(200, json={"ok": True}))
+    transport = AsyncTransport(httpx.AsyncClient(base_url=base_url, timeout=_client_timeout()))
+
+    try:
+        response = await transport.send("GET", "/ping", timeout=NO_TIMEOUT)
+        assert response.status_code == 200
+    finally:
+        await transport.aclose()
+
+    assert route.calls.last.request.extensions["timeout"] == DISABLED_TIMEOUT

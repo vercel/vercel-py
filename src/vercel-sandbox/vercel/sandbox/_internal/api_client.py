@@ -22,10 +22,12 @@ from pydantic import (
 )
 
 from vercel._internal.core.http import (
+    NO_TIMEOUT,
     BaseTransport,
     JSONBody,
     ReadResponsePolicy,
     RequestBody,
+    RequestTimeout,
     StreamingRequest,
     StreamingResponse,
     extract_structured_error,
@@ -801,7 +803,7 @@ class SandboxApiClient:
         body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
     ) -> Response:
         query = cast(
             QueryParamTypes,
@@ -842,7 +844,7 @@ class SandboxApiClient:
         body: RequestBody = None,
         params: Mapping[str, JSONValue | None] | None = None,
         headers: Mapping[str, str] | None = None,
-        timeout: timedelta | None = None,
+        timeout: RequestTimeout = None,
     ) -> StreamingResponse:
         query = cast(
             QueryParamTypes,
@@ -885,6 +887,7 @@ class SandboxApiClient:
         credentials: SandboxCredentials,
         body: JSONValue | None = None,
         params: Mapping[str, JSONValue | None] | None = None,
+        timeout: RequestTimeout = None,
     ) -> JSONObject:
         response = await self._request(
             method,
@@ -893,6 +896,7 @@ class SandboxApiClient:
             body=JSONBody(body) if body is not None else None,
             params=params,
             headers={"content-type": "application/json"},
+            timeout=timeout,
         )
 
         try:
@@ -1352,6 +1356,7 @@ class SandboxApiClient:
             params={"wait": "true", "logs": "true"},
             body=JSONBody(request.to_api_dict()),
             headers={"connection": "close"},
+            timeout=NO_TIMEOUT,
         )
 
         initial: ProcessState | None = None
@@ -1430,6 +1435,7 @@ class SandboxApiClient:
             ),
             credentials=credentials,
             params={"wait": "true" if wait else "false"},
+            timeout=NO_TIMEOUT if wait else None,
         )
         return _validate_response(_CommandResponse, data).to_command()
 
@@ -1543,4 +1549,5 @@ class SandboxApiClient:
             ),
             credentials=credentials,
             headers={"connection": "close"},
+            timeout=NO_TIMEOUT,
         )
