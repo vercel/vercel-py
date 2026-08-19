@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
+import httpx
 import pydantic
 
 import vercel.queue as vqs
@@ -325,6 +326,7 @@ async def _chain_async_bytes(*chunks: bytes | AsyncIterator[bytes]) -> AsyncIter
 def _local_queue_delivery(
     request: w.HTTPRequest,
     *,
+    headers: httpx.Headers,
     queue_name: str,
     topic: str,
     consumer_group: str,
@@ -346,11 +348,11 @@ def _local_queue_delivery(
         "ce-type": "com.vercel.queue.v2beta",
         "ce-vqsqueuename": topic,
         "ce-vqsconsumergroup": consumer_group,
-        "ce-vqsmessageid": request.headers.get("x-vqs-message-id") or f"msg_{uuid4()}",
+        "ce-vqsmessageid": headers.get("x-vqs-message-id") or f"msg_{uuid4()}",
         "ce-vqsreceipthandle": _LOCAL_RECEIPT_HANDLE,
-        "ce-vqsdeliverycount": request.headers.get("x-vqs-message-attempt") or "1",
+        "ce-vqsdeliverycount": headers.get("x-vqs-message-attempt") or "1",
         "ce-vqscreatedat": datetime.now(UTC).isoformat(),
-        "content-type": request.headers.get("content-type") or "application/json",
+        "content-type": headers.get("content-type") or "application/json",
     }
 
 
@@ -526,7 +528,8 @@ class LocalWorld(w.World):
         self._queue_callbacks.append(async_handler)
 
         async def http_handler(request: w.HTTPRequest) -> w.HTTPResponse:
-            queue_name = request.headers.get("x-vqs-queue-name")
+            request_headers = httpx.Headers(request.headers)
+            queue_name = request_headers.get("x-vqs-queue-name")
 
             if not queue_name:
                 return w.HTTPResponse.json({"error": "Missing required headers"}, status=400)
@@ -537,6 +540,7 @@ class LocalWorld(w.World):
 
             body, headers = _local_queue_delivery(
                 request,
+                headers=request_headers,
                 queue_name=queue_name,
                 topic=str(w.get_physical_topic(queue_name)),
                 consumer_group=str(w.QUEUE_CONSUMER_GROUP),
