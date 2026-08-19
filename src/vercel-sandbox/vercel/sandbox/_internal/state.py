@@ -70,6 +70,7 @@ class SandboxState:
     project_id: str | None = None
     cwd: str | None = None
     region: str | None = None
+    regions: tuple[str, ...] = ("iad1",)
     memory: int | None = None
     vcpus: int | None = None
     execution_time_limit: timedelta | None = None
@@ -101,6 +102,7 @@ class SnapshotState:
     id: str
     source_session_id: str
     region: str
+    regions: tuple[str, ...]
     status: Literal["created", "deleted", "failed"]
     size_bytes: int
     expires_at: int | None = None

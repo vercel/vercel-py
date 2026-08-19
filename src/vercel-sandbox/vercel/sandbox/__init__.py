@@ -60,6 +60,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicySubnets,
     NetworkPolicyTransform,
     ProcessStatus,
+    RegionsInput,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -106,6 +107,7 @@ def create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    regions: RegionsInput = None,
     destroy: bool = True,
 ) -> CreateSandboxOperation:
     """Prepare an asynchronous sandbox creation operation.
@@ -132,6 +134,7 @@ def create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
+        regions: Ordered preferred and failover regions.
         destroy: Whether context-manager exit destroys the sandbox after
             stopping it. Awaiting the operation never triggers cleanup.
 
@@ -157,6 +160,7 @@ def create_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
+        regions=regions,
         destroy=destroy,
     )
 
@@ -176,6 +180,7 @@ def fork_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    regions: RegionsInput = None,
     destroy: bool = True,
 ) -> ForkSandboxOperation:
     """Prepare an asynchronous sandbox fork operation.
@@ -204,6 +209,7 @@ def fork_sandbox(
         tags: Metadata tag override.
         snapshot_expiration: Default snapshot lifetime override.
         snapshot_retention: Automatic snapshot retention override.
+        regions: Ordered preferred and failover region override.
         destroy: Whether context-manager exit destroys the fork after stopping
             it. Awaiting the operation never triggers cleanup.
 
@@ -228,6 +234,7 @@ def fork_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
+        regions=regions,
         destroy=destroy,
     )
 
@@ -249,6 +256,7 @@ async def get_or_create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    regions: RegionsInput = None,
 ) -> tuple[Sandbox, bool]:
     """Get a named sandbox or create it when it does not exist.
 
@@ -277,6 +285,7 @@ async def get_or_create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
+        regions: Ordered preferred and failover regions.
 
     Returns:
         A ``(sandbox, created)`` tuple. ``created`` is true when this call
@@ -300,6 +309,7 @@ async def get_or_create_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
+        regions=regions,
     )
 
 

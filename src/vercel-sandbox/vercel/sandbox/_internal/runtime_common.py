@@ -259,6 +259,10 @@ class SnapshotHandleBase:
         return self._payload.source_session_id
 
     @property
+    def regions(self) -> tuple[str, ...]:
+        return self._payload.regions
+
+    @property
     def region(self) -> str:
         return self._payload.region
 
@@ -457,6 +461,10 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     @property
     def cwd(self) -> str | None:
         return self._payload.cwd
+
+    @property
+    def regions(self) -> tuple[str, ...]:
+        return self._payload.regions
 
     @property
     def region(self) -> str | None:

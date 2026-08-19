@@ -75,6 +75,8 @@ def _sandbox_response(
             "image": "vercel/sandbox/universal:latest",
             "status": status,
             "persistent": True,
+            "region": "iad1",
+            "failoverRegions": ["sfo1", "cle1"],
             "timeout": 300000,
             "snapshotExpiration": 0,
             "keepLastSnapshots": {
@@ -91,6 +93,7 @@ def _sandbox_response(
             "projectId": project_id,
             "status": session_status or status,
             "cwd": "/vercel/sandbox",
+            "region": "cle1",
             "memory": 2048,
             "vcpus": 1,
             "timeout": 300000,
@@ -155,6 +158,7 @@ def _snapshot_response(
             "id": snapshot_id,
             "sourceSessionId": session_id,
             "region": "iad1",
+            "regions": ["iad1", "sfo1", "cle1"],
             "status": status,
             "sizeBytes": 1024,
             "createdAt": 1,
@@ -329,6 +333,8 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 "deleteEvicted": False,
             },
             "tags": {"env": "test"},
+            "region": "iad1",
+            "failoverRegions": ["sfo1", "cle1"],
         }
         response = _sandbox_response(project_id="prj_other")
         payload = response["sandbox"]
@@ -344,6 +350,8 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                     "name": "preview",
                     "currentSessionId": "sbx_123",
                     "tags": {"env": "updated"},
+                    "region": "sfo1",
+                    "failoverRegions": [],
                 }
             },
             {
@@ -390,8 +398,11 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 delete_evicted=False,
             ),
             tags={"env": "test"},
+            regions=("iad1", "sfo1", "cle1"),
         )
         assert handle.image == "vercel/sandbox/universal:latest"
+        assert handle.region == "iad1"
+        assert handle.regions == ("iad1", "sfo1", "cle1")
         assert not hasattr(handle, "runtime")
         assert handle.current_session is not None
         assert not hasattr(handle.current_session, "runtime")
@@ -407,11 +418,15 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             execution_time_limit=4.5,
             snapshot_expiration=0,
             snapshot_retention=SnapshotRetention(count=1, expiration=0),
+            regions=("sfo1",),
         )
         assert handle.tags == {"env": "updated"}
+        assert handle.region == "sfo1"
+        assert handle.regions == ("sfo1",)
+        assert handle.current_session is retained_session
+        assert handle.current_session.region == "cle1"
         assert handle.routes[0].url == "https://preview.sandbox.test"
         assert handle.project_id == "prj_other"
-        assert handle.current_session is retained_session
 
         await handle.update(tags={}, ports=[])
         assert handle.tags == {}
@@ -438,6 +453,8 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 "deleteEvicted": True,
             },
             "tags": {"env": "updated"},
+            "region": "sfo1",
+            "failoverRegions": [],
         },
         {"ports": [], "tags": {}},
         {"keepLastSnapshots": None},
@@ -491,6 +508,7 @@ async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
             env={},
             tags={},
             snapshot_expiration=0,
+            regions=("iad1", "sfo1"),
             snapshot_retention=SnapshotRetention(
                 count=2,
                 expiration=timedelta(days=1),
@@ -505,6 +523,8 @@ async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
     assert json.loads(request.content) == {
         "name": "forked",
         "ports": [],
+        "region": "iad1",
+        "failoverRegions": ["sfo1"],
         "timeout": 12500,
         "resources": {"vcpus": 2, "memory": 4096},
         "image": "team/project/image:v1",
@@ -1826,6 +1846,8 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
         runtime_session = resumed.current_session
         command = await handle.create_process("sleep", ["30"])
         snapshot = await handle.snapshot()
+        assert snapshot.region == "iad1"
+        assert snapshot.regions == ("iad1", "sfo1", "cle1")
 
     with pytest.raises(VercelSessionClosedError):
         await handle.create_process("true")

@@ -25,7 +25,10 @@ async def _main() -> None:
     restored = None
     snapshot = None
 
-    async with sandbox.create_sandbox(name=base_name) as base:
+    async with sandbox.create_sandbox(
+        name=base_name,
+        regions=("iad1", "sfo1"),
+    ) as base:
         try:
             await base.fs.write_text("state/message.txt", "restored from snapshot\n")
             snapshot = await base.snapshot()
@@ -36,7 +39,7 @@ async def _main() -> None:
             )
             content = await restored.fs.read_text("state/message.txt")
             assert content == "restored from snapshot\n"
-            print(f"{restored_name}: restored {snapshot.id}")
+            print(f"{restored_name}: restored {snapshot.id} from {snapshot.regions}")
         finally:
             if snapshot is not None:
                 await snapshot.delete()

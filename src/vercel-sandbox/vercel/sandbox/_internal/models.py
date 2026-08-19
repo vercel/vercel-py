@@ -21,9 +21,24 @@ from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
 JSONValue: TypeAlias = PydanticJsonValue
 JSONObject: TypeAlias = dict[str, JSONValue]
 DurationInput: TypeAlias = int | float | timedelta | None
+RegionsInput: TypeAlias = Iterable[str] | None
 _MIN_SNAPSHOT_EXPIRATION = timedelta(days=1)
 _MAX_SNAPSHOT_EXPIRATION = timedelta(days=365 * 10)
 _ZERO_DELTA = timedelta(0)
+
+
+def normalize_regions(regions: RegionsInput) -> tuple[str, ...] | None:
+    """Normalize an ordered sandbox region preference."""
+    if regions is None:
+        return None
+    normalized = tuple(regions)
+    if not normalized:
+        raise ValueError("regions must include at least one region")
+    if any(not isinstance(region, str) or not region for region in normalized):
+        raise ValueError("regions must contain non-empty strings")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("regions must not contain duplicates")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
