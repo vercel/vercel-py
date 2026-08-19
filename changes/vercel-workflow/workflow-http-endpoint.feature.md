@@ -1,1 +1,1 @@
-Serve workflows from your own web framework: `Workflows.http_handler`, `ENDPOINT_PATH`, `HTTPRequest` and `HTTPResponse` are now public.
+Expose unstable API to serve workflow HTTP endpoint from your own web framework.
