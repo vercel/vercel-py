@@ -2,9 +2,10 @@ import abc
 import dataclasses
 import json
 import os
+import pathlib
 import re
 import sys
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from typing import (
     Annotated,
@@ -22,7 +23,6 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import Self
 
-import httpx
 import pydantic
 
 from vercel._internal.core.polyfills import Self
@@ -870,7 +870,7 @@ class EventResult(BaseModel):
     has_more: bool | None = pydantic.Field(default=None, alias="hasMore")
 
 
-class HTTPRequest(metaclass=abc.ABCMeta):
+class HTTPRequest(Protocol):
     @property
     @abc.abstractmethod
     def method(self) -> str: ...
@@ -882,7 +882,7 @@ class HTTPRequest(metaclass=abc.ABCMeta):
 
     @property
     @abc.abstractmethod
-    def headers(self) -> httpx.Headers: ...
+    def headers(self) -> Mapping[str, str]: ...
 
     @abc.abstractmethod
     def aiter_bytes(self, chunk_size: int | None = None) -> AsyncIterator[bytes]: ...
@@ -1058,6 +1058,9 @@ class World(metaclass=abc.ABCMeta):
 
         ``None`` means the run's payloads are plaintext.
         """
+        return None
+
+    def write_manifest(self, manifest: dict[str, Any]) -> pathlib.Path | None:
         return None
 
     @abc.abstractmethod

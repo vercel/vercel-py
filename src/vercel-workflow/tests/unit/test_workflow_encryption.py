@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import builtins
 import os
+import subprocess
 import sys
 import typing
 from typing import Any
@@ -309,6 +310,70 @@ def test_decryption_works_inside_the_workflow_sandbox() -> None:
 
     with py_sandbox.workflow_sandbox():
         assert ser.hydrate(payload, what="the input of run wrun_1", key=key) == [{"amount": 21}]
+
+
+def _first_call_of_a_fresh_interpreter(body: str, payload: bytes) -> str:
+    """Run *body* with *payload* in ``sys.argv[1]``, in an interpreter of its own.
+
+    The two tests below need the process to have made no cipher call at all
+    before the one they make, and `cryptography` caches its deferred imports for
+    the life of a process, so nothing a test does can put a warmed interpreter
+    back. A fresh one per test is the only way to see the first call. It also
+    means the payload has to be built out here and handed over as hex: sealing it
+    in the child would be a cipher call, which is the thing being kept for later.
+    """
+    finished = subprocess.run(
+        [sys.executable, "-c", body, payload.hex()],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert finished.returncode == 0, (
+        f"exit {finished.returncode}\nstdout: {finished.stdout}\nstderr: {finished.stderr}"
+    )
+    return finished.stdout.strip()
+
+
+_DECRYPT_IN_SANDBOX = """\
+import sys
+from vercel.workflow._internal import encryption, py_sandbox, serialization as ser
+
+key = encryption.derive_run_key(bytes(range(32)), project_id="prj_test", run_id="wrun_test")
+with py_sandbox.workflow_sandbox():
+    print(ser.hydrate(bytes.fromhex(sys.argv[1]), what="the input of run wrun_1", key=key))
+"""
+
+_FAIL_TO_DECRYPT_IN_SANDBOX = """\
+import sys
+from vercel.workflow._internal import encryption, py_sandbox
+
+key = encryption.derive_run_key(bytes(range(32)), project_id="prj_test", run_id="wrun_test")
+with py_sandbox.workflow_sandbox():
+    try:
+        encryption.open_envelope(key, bytes.fromhex(sys.argv[1]))
+    except encryption.DecryptionError as exc:
+        print(exc)
+"""
+
+
+def test_the_first_decrypt_of_a_process_can_be_the_one_inside_the_sandbox() -> None:
+    payload = seal(RUN_KEY, ser.dehydrate([{"amount": 21}]))
+
+    assert _first_call_of_a_fresh_interpreter(_DECRYPT_IN_SANDBOX, payload) == "[{'amount': 21}]"
+
+
+def test_the_first_failure_of_a_process_can_be_the_one_inside_the_sandbox() -> None:
+    # Failing is its own path: raising `InvalidTag` is what imports
+    # `cryptography.exceptions`, and every release defers that import to the
+    # first call that needs it, on every Python. Reached inside the sandbox it
+    # raises `SystemError` instead of reporting a bad payload, and aborts the
+    # process outright on Python 3.14 -- so a run handed a payload it cannot
+    # open has to be able to say so from here.
+    payload = seal(AESGCM.generate_key(bit_length=256), b"devl[42]")
+
+    said = _first_call_of_a_fresh_interpreter(_FAIL_TO_DECRYPT_IN_SANDBOX, payload[4:])
+    assert "authentication failed" in said
 
 
 # ═══════════════════════════════════════════════════════════════════════════

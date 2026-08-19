@@ -30,7 +30,7 @@ DELIVERED = w.HTTPResponse(202, b"delivered", {})
 class Request(w.HTTPRequest):
     """The smallest thing a web framework adapter has to supply."""
 
-    def __init__(self, target: str = runtime.FLOW_ROUTE, method: str = "POST") -> None:
+    def __init__(self, target: str = runtime.ENDPOINT_PATH, method: str = "POST") -> None:
         self._target = target
         self._method = method
 
@@ -108,13 +108,13 @@ def flow() -> tuple[w.HTTPHandler, FlowWorld]:
 async def test_answers_a_probe_with_json(flow) -> None:
     handler, world = flow
 
-    response = await handler(Request(f"{runtime.FLOW_ROUTE}?__health"))
+    response = await handler(Request(f"{runtime.ENDPOINT_PATH}?__health"))
 
     assert response.status == 200
     assert response.headers["content-type"] == "application/json"
     assert json.loads(response.body) == {
         "healthy": True,
-        "endpoint": runtime.FLOW_ROUTE,
+        "endpoint": runtime.ENDPOINT_PATH,
         "specVersion": w.SPEC_VERSION_CURRENT,
     }
     # A probe is not a message: nothing was handed to the queue handler.
@@ -148,7 +148,7 @@ async def test_the_answer_claims_no_capability_it_does_not_have(flow) -> None:
     capability tables."""
     handler, _ = flow
 
-    response = await handler(Request(f"{runtime.FLOW_ROUTE}?__health"))
+    response = await handler(Request(f"{runtime.ENDPOINT_PATH}?__health"))
 
     assert "workflowCoreVersion" not in json.loads(response.body)
 
@@ -156,7 +156,7 @@ async def test_the_answer_claims_no_capability_it_does_not_have(flow) -> None:
 async def test_a_preflight_gets_an_empty_204(flow) -> None:
     handler, world = flow
 
-    response = await handler(Request(f"{runtime.FLOW_ROUTE}?__health", "OPTIONS"))
+    response = await handler(Request(f"{runtime.ENDPOINT_PATH}?__health", "OPTIONS"))
 
     assert response.status == 204
     assert response.body == b""
@@ -168,7 +168,7 @@ async def test_every_answer_carries_the_cors_headers(flow) -> None:
     handler, _ = flow
 
     for method in ("POST", "HEAD", "OPTIONS"):
-        response = await handler(Request(f"{runtime.FLOW_ROUTE}?__health", method))
+        response = await handler(Request(f"{runtime.ENDPOINT_PATH}?__health", method))
 
         assert response.headers["access-control-allow-origin"] == "*"
         assert response.headers["access-control-allow-methods"] == "POST, OPTIONS, GET, HEAD"

@@ -1,5 +1,6 @@
 from vercel.workflow._internal.core import (
     BaseHook,
+    Hook,
     HookEvent,
     Workflows,
     now,
@@ -8,8 +9,11 @@ from vercel.workflow._internal.core import (
     time_ns,
 )
 from vercel.workflow._internal.runtime import (
+    ENDPOINT_PATH,
+    MANIFEST_PATH,
     Run,
     StepInfo,
+    get_hook_by_token,
     get_step_metadata,
     get_writable,
     read_stream,
@@ -21,6 +25,7 @@ from vercel.workflow._internal.streams import (
     WorkflowStreamWriter,
     WorkflowWritable,
 )
+from vercel.workflow._internal.world import HTTPHandler, HTTPRequest, HTTPResponse
 
 from . import sandbox
 from .errors import (
@@ -37,6 +42,11 @@ from .sandbox import SandboxPolicy
 
 __all__ = [
     "Workflows",
+    "ENDPOINT_PATH",
+    "MANIFEST_PATH",
+    "HTTPHandler",
+    "HTTPRequest",
+    "HTTPResponse",
     "now",
     "random",
     "sleep",
@@ -44,7 +54,9 @@ __all__ = [
     "time_ns",
     "Run",
     "BaseHook",
+    "Hook",
     "HookEvent",
+    "get_hook_by_token",
     "get_step_metadata",
     "get_writable",
     "read_stream",

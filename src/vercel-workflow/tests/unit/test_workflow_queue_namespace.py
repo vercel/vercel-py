@@ -28,16 +28,10 @@ def _run(execution_context: dict[str, Any] | None = None) -> w.WorkflowRun:
     )
 
 
-def _hook() -> w.Hook:
-    return w.Hook(
-        runId=RUN_ID,
-        hookId="hook_test",
-        token="hook-token",
-        ownerId="team_test",
-        projectId="prj_test",
-        environment="development",
-        createdAt=NOW,
-    )
+def _hook() -> core.Hook:
+    """A hook as `get_hook_by_token()` hands it back, which is what
+    `resume_hook` takes -- the entity itself never leaves the world."""
+    return core.Hook(token="hook-token", hook_id="hook_test", run_id=RUN_ID, created_at=NOW)
 
 
 class FakeWorld(NoStreams, w.World):

@@ -57,6 +57,25 @@ def _aes_gcm_decrypt(key: bytes, nonce: bytes, sealed: bytes) -> bytes | None:
         return None
 
 
+# Make `cryptography` do its internal imports now.
+#
+# It's not enough to just import `cryptography` at the beginning of this file.
+# The *first* cipher call imports two more things, even when both are already
+# imported:
+#
+# - the native extension, on cryptography below 45 or on Python 3.10;
+# - `cryptography.exceptions`, on every version, when the call fails and has to
+#   raise `InvalidTag`. Importing that module loads the extension as well.
+#
+# The cipher call may happen inside a sandbox, where imports resolve against a
+# private module table. Either import then loads the native extension a second
+# time and dies there: `SystemError` on Python 3.10, an aborted process on 3.14.
+#
+# Enforcing a silently-failing (to go down the `cryptography.exceptions` path)
+# cipher call here in the host fixes all issues above.
+_aes_gcm_decrypt(bytes(KEY_LENGTH), bytes(NONCE_LENGTH), bytes(TAG_LENGTH))
+
+
 class RunKeyPair(NamedTuple):
     """A run's X25519 keypair, both halves derived from its key material."""
 
