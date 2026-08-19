@@ -151,7 +151,7 @@ def test_what_it_says_when_it_cannot(project, capsys, argv, expected) -> None:
 def test_a_project_without_pyproject_says_so(tmp_path, capsys) -> None:
     assert run(f"--project={tmp_path}") == 1
 
-    assert "nothing to read the app from" in capsys.readouterr().err
+    assert "Cannot find Workflows registry" in capsys.readouterr().err
 
 
 def test_a_pyproject_that_declares_nothing_says_so(project, capsys) -> None:

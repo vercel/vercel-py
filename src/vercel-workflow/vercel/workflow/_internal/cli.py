@@ -44,8 +44,8 @@ def _declared_entrypoints(project: pathlib.Path) -> list[str]:
             config = tomllib.load(f)
     except FileNotFoundError:
         raise CommandError(
-            f"no {PYPROJECT} in {project}, so there is nothing to read the app from. "
-            f"Name it instead: {PYTHON} -m vercel.workflow manifest module:app"
+            f"Cannot find Workflows registry: no {PYPROJECT} under {project}.\n"
+            f"  Specify it explicitly: {PYTHON} -m vercel.workflow manifest module:app"
         ) from None
     except tomllib.TOMLDecodeError as error:
         raise CommandError(f"could not read {path}: {error}") from None
@@ -58,9 +58,9 @@ def _declared_entrypoints(project: pathlib.Path) -> list[str]:
     ]
     if not specs:
         raise CommandError(
-            f"{path} declares no entrypoint under [[tool.vercel.workflows]], so there "
-            f"is nothing to import. Name the app instead: "
-            f"{PYTHON} -m vercel.workflow manifest module:app"
+            f"Cannot find Workflows registry: {path} declares no entrypoint "
+            f"under [[tool.vercel.workflows]].\n"
+            f"  Specify it explicitly: {PYTHON} -m vercel.workflow manifest module:app"
         )
     return specs
 
