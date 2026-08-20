@@ -282,7 +282,7 @@ class SandboxService:
             tags=tags,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=region or self._options.region,
             failover_regions=failover_regions,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
@@ -321,7 +321,7 @@ class SandboxService:
             tags=tags,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
-            region=region,
+            region=region or self._options.region,
             failover_regions=failover_regions,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
@@ -460,7 +460,7 @@ class SandboxService:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
-            region=region,
+            region=region or self._options.region,
             failover_regions=failover_regions,
         )
 
@@ -1126,6 +1126,7 @@ def get_sync_sandbox_service(session: "SyncSdkSession") -> SandboxService:
             base_url=sync_options.base_url,
             credentials_factory=_adapt_sync_credentials_factory(sync_options.credentials_factory),
             file_transfer_timeout=sync_options.file_transfer_timeout,
+            region=sync_options.region,
         )
         return SandboxService(
             api_client=SandboxApiClient(

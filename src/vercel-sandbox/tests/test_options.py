@@ -12,6 +12,23 @@ from vercel.sandbox._internal.options import (
 )
 
 
+def test_options_resolves_region_from_argument_or_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERCEL_REGION", raising=False)
+    assert SandboxServiceOptions().region is None
+
+    monkeypatch.setenv("VERCEL_REGION", "iad1")
+    assert SandboxServiceOptions().region == "iad1"
+    assert SandboxServiceOptions(region="sfo1").region == "sfo1"
+    assert sandbox.sync.SandboxServiceOptions().region == "iad1"
+    assert sandbox.sync.SandboxServiceOptions(region="cle1").region == "cle1"
+
+    monkeypatch.setenv("VERCEL_REGION", "")
+    assert SandboxServiceOptions().region is None
+    assert sandbox.sync.SandboxServiceOptions().region is None
+
+
 def test_options_equality_preserves_custom_credential_factory_identity() -> None:
     assert SandboxServiceOptions() == SandboxServiceOptions()
     assert SandboxServiceOptions(

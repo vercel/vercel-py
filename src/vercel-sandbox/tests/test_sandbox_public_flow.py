@@ -569,6 +569,58 @@ def test_sync_fork_sandbox_uses_inherited_defaults(mock_env_clear: None) -> None
 
 
 @respx.mock
+async def test_service_region_defaults_placement_operations_and_allows_call_overrides(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="created"))
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="forked"))
+    )
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/created").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sandbox": {"name": "created", "currentSessionId": "sbx_123"}},
+        )
+    )
+
+    async with session(service_options=_session_options(region="iad1")):
+        created = await sandbox.create_sandbox(name="created")
+        await sandbox.fork_sandbox(source_sandbox="source", region="sfo1")
+        await created.update(tags={"updated": "true"})
+
+    assert json.loads(create_route.calls.last.request.content) == {
+        "projectId": "prj_123",
+        "name": "created",
+        "region": "iad1",
+    }
+    assert json.loads(fork_route.calls.last.request.content) == {"region": "sfo1"}
+    assert json.loads(update_route.calls.last.request.content) == {
+        "tags": {"updated": "true"},
+        "region": "iad1",
+    }
+
+
+@respx.mock
+def test_sync_service_region_defaults_fork_from_environment(
+    mock_env_clear: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERCEL_REGION", "cle1")
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(
+            200, json=_sandbox_response(name="forked", session_id="sbx_fork")
+        )
+    )
+
+    with session(service_options=_session_options(sync=True)):
+        sandbox_sync.fork_sandbox(source_sandbox="source")
+
+    assert json.loads(fork_route.calls.last.request.content) == {"region": "cle1"}
+
+
+@respx.mock
 async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
     create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(
