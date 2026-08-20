@@ -431,12 +431,10 @@ class LocalWorld(w.World):
 
     @staticmethod
     def _is_resume_event(event: w.Event, claim: HookResumeClaim) -> bool:
-        # The event has to say it is this resume. `world-local` also accepts one
-        # with no resume id at all, on the grounds that it predates the field --
-        # but anyone who writes a claim writes the id too, so what that actually
-        # admits is an *unrelated* payload for the same hook sitting at the
-        # position the claim named, which is easy to hit when the other writer
-        # numbers its events by position. Adopting it would drop this payload.
+        # Stricter than `world-local`, which also accepts an event with no resume
+        # id at the claimed position. A claim's event id is only where its writer
+        # meant to publish, so whatever sits there may be another payload for the
+        # same hook.
         return (
             event.event_type == "hook_received"
             and event.correlation_id == claim.hook_id
@@ -479,10 +477,7 @@ class LocalWorld(w.World):
                     f'hook_received resumeId "{resume.resume_id}" already recorded '
                     "for a different hook"
                 )
-            if (
-                claim.payload_digest is not None
-                and claim.payload_digest != resume.payload_digest
-            ):
+            if claim.payload_digest is not None and claim.payload_digest != resume.payload_digest:
                 raise w.EntityConflictError(
                     f'hook_received resumeId "{resume.resume_id}" already recorded '
                     "with a different payload"

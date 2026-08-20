@@ -765,15 +765,15 @@ async def _ensure_hook_received(
 ) -> bool:
     """Write the resume's ``hook_received`` event. ``False`` means stop here.
 
-    Safe to call when the other writer of this resume also wrote the event, or is
-    writing it right now: the world is told which resume this is
-    (:class:`~world.HookResume`) and collapses the two into one event.
+    Safe to call even when the other writer of this resume has already written the
+    event, or is writing it right now. The write says which resume it is, and the
+    world uses that to keep the two of them to one event.
 
-    Note what it does *not* catch. Every other write in this module swallows
-    ``EntityConflictError``; here it is allowed out. A conflict means the other
-    writer has claimed this resume but its event is not readable yet, which is
-    temporary -- so the message goes unacked and a later delivery finds the
-    event. Swallowing it would ack a message that may hold the only copy of the
+    One thing to notice: this does not catch ``EntityConflictError``, which every
+    other write in this module does catch. A conflict here means the other writer
+    has claimed the resume but its event cannot be read yet. That is temporary, so
+    letting the error out leaves the message unacked and a later delivery finds the
+    event. Catching it would ack a message that may hold the only copy of the
     payload.
     """
     # The producer's bytes, passed along rather than re-encoded, so the payload
