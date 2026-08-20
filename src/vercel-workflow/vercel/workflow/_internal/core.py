@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
 import functools
 import inspect
 import random as _random
-from collections.abc import AsyncIterator, Callable, Coroutine, Generator
+from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator
 from typing import Any, Generic, ParamSpec, TypeVar, overload
 
 import pydantic
@@ -285,11 +286,23 @@ class Workflows:
         if sandbox_policy is None:
             sandbox_policy = py_sandbox.SandboxPolicy()
         self._sandbox_policy = sandbox_policy
+
+        self._cached_sandbox = None
+        if sandbox_policy.share_sandboxes and not py_sandbox.in_sandbox():
+            self._cached_sandbox = py_sandbox.Sandbox(policy=sandbox_policy, run_cleanups=False)
+
         self._http_handler: w.HTTPHandler | None = None
         if as_vercel_job and not py_sandbox.in_sandbox():
             from . import runtime
 
             self._http_handler = runtime.workflow_entrypoint(self)
+
+    @contextlib.contextmanager
+    def _get_sandbox(self) -> Iterator[py_sandbox.Sandbox]:
+        if self._cached_sandbox:
+            yield self._cached_sandbox
+        else:
+            yield py_sandbox.Sandbox(policy=self._sandbox_policy)
 
     @property
     def namespace(self) -> str | None:

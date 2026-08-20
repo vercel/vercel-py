@@ -34,8 +34,8 @@ _in_sandbox: contextvars.ContextVar[bool] = contextvars.ContextVar("_in_sandbox"
 # and writes this dict directly, so non-workflow code is unaffected.
 _real_sys_modules: dict[str, types.ModuleType] = sys.modules
 
-# Per-execution module table.  A workflow run sets this to its own private dict
-# (see workflow_sandbox) so concurrent runs — whether on different asyncio
+# Per-sandbox module table.  Each sandbox sets this to its own dict (see
+# Sandbox.enter) so runs in different sandboxes — whether on different asyncio
 # tasks or different threads — never share or clobber each other's modules.
 # ``None`` means "use the real table".
 _sandbox_sys_modules: contextvars.ContextVar[dict[str, types.ModuleType] | None] = (
@@ -692,11 +692,8 @@ class _DispatchingSysModules(MutableMapping[str, types.ModuleType]):
     """Installed once as ``sys.modules``.
 
     Every read/write dispatches to the current context's module table: a
-    workflow run's private dict while a sandbox is active in this context
-    (asyncio task or thread), or the real process table otherwise.  The real
-    dict object is never cleared, so concurrent workflows on different tasks or
-    threads can neither corrupt each other nor the host — which the previous
-    ``sys.modules.clear()`` approach could not guarantee.
+    sandbox's private dict while a sandbox is active in this context
+    (asyncio task or thread), or the real process table otherwise.
     """
 
     __slots__ = ()
@@ -850,6 +847,8 @@ def _new_sandbox_table() -> dict[str, types.ModuleType]:
     Everything else is served on demand by ``_SandboxFinder`` (passthrough
     from the host, a restricted proxy, or a fresh re-import into this table).
     """
+    _ensure_installed()
+
     table: dict[str, types.ModuleType] = {"sys": sys}
     # Snapshot atomically (list() over the view is a single C op) so a
     # concurrent import in another thread can't trip "dict changed size".
@@ -871,11 +870,11 @@ class SandboxCleanupContext:
     """Handed to each cleanup handler when a sandbox exits."""
 
     run_modules: Mapping[str, types.ModuleType]
-    """Snapshot of the run's private module table at exit.
+    """Snapshot of the sandbox's module table at exit.
 
     Values include host-shared (passthrough) modules, not just modules
-    imported freshly for the run.  Lets a handler evict host-cache
-    entries that reference the run's objects instead of clearing a
+    imported freshly into the sandbox.  Lets a handler evict host-cache
+    entries that reference the sandbox's objects instead of clearing a
     whole cache.
     """
 
@@ -922,16 +921,9 @@ ALL_CLEANUPS: tuple[CleanupHandler, ...] = (
 )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class SandboxPolicy:
     """Configuration for the workflow sandbox, passed to ``Workflows``.
-
-    ``cleanups`` are run on the host, in order, after every sandbox
-    teardown; they exist to purge host-shared caches that would
-    otherwise pin the run's module graph (see :data:`ALL_CLEANUPS`).
-    A handler that raises is logged and skipped, and never masks the
-    workflow's own exception.  Handlers must be thread-safe: other runs
-    may be executing concurrently.
 
     ``passthrough_modules`` are extra modules — each name covering its
     submodules too — served from the host instead of re-imported per
@@ -939,47 +931,91 @@ class SandboxPolicy:
     stateful modules that are safe to share; nothing checks them for
     nondeterminism, and their state is shared with the host and every
     concurrent run.
+
+    ``share_sandboxes`` indicates whether sandboxes can be reused for
+    multiple runs (including concurrent ones), or whether a
+    fresh one is created for each invocation. Shared sandboxes can
+    observe modifications made to globals by other runs, but are
+    much faster to launch.  Default is false, but this will change.
+
+    ``cleanups`` are run on the host, in order, after every sandbox
+    teardown; they exist to purge host-shared caches that would
+    otherwise pin the run's module graph (see :data:`ALL_CLEANUPS`).
+    A handler that raises is logged and skipped, and never masks the
+    workflow's own exception.  Handlers must be thread-safe: other runs
+    may be executing concurrently.
+    These are *not* run when share_sandboxes=True.
     """
 
-    cleanups: tuple[CleanupHandler, ...] = ()
     passthrough_modules: frozenset[str] = frozenset()
+    share_sandboxes: bool = False
+    cleanups: tuple[CleanupHandler, ...] = ()
 
 
-# TODO: we probably want to support some form of sandbox caching
-@contextmanager
-def workflow_sandbox(*, policy: SandboxPolicy | None = None) -> Iterator[None]:
-    """Activate the workflow sandbox for the current context.
+class Sandbox:
+    def __init__(self, *, policy: SandboxPolicy | None = None, run_cleanups: bool = True) -> None:
+        if policy is None:
+            policy = SandboxPolicy()
 
-    Gives this context its own private ``sys.modules`` table, its own
-    serializable-class registrations, and marks it as in-sandbox so proxy
-    modules enforce restrictions. All are ContextVars, so concurrent runs
-    are isolated without touching any shared global.
-    """
-    if policy is None:
-        policy = SandboxPolicy()
+        self.policy = policy
+        self.table = _new_sandbox_table()
+        self.run_cleanups = run_cleanups
 
-    _ensure_installed()
-    table = _new_sandbox_table()
-    table_token = _sandbox_sys_modules.set(table)
-    sandbox_token = _in_sandbox.set(True)
-    passthrough_token = _policy_passthroughs.set(frozenset(policy.passthrough_modules))
-    # Imported here rather than at module scope: `serde` is a leaf, but this
-    # module is imported by `core` before the rest of the package exists.
-    from . import serde
+        self.import_lock = threading.Lock()
 
-    try:
-        with serde.sandboxed_registrations():
-            yield
-    finally:
-        _policy_passthroughs.reset(passthrough_token)
-        _in_sandbox.reset(sandbox_token)
-        _sandbox_sys_modules.reset(table_token)
-        context = SandboxCleanupContext(run_modules=dict(table))
-        for handler in policy.cleanups:
+        # Imported here rather than at module scope: `serde` is a leaf, but this
+        # module is imported by `core` before the rest of the package exists.
+        from . import serde
+
+        self.serde_registry = serde.Registry()
+        # In-context, so the classes registered are the sandbox's own -- its
+        # re-imported `uuid.UUID`, the proxied `datetime`'s `_RestrictedDate`.
+        with self._activate():
+            serde._register_builtins(self.serde_registry)
+
+    def cleanup(self) -> None:
+        context = SandboxCleanupContext(run_modules=dict(self.table))
+        for handler in self.policy.cleanups:
             try:
                 handler(context)
             except Exception:
                 logger.exception("sandbox cleanup handler %r failed", handler)
+
+    @contextmanager
+    def _activate(self) -> Iterator[None]:
+        """Mark this context in-sandbox, on this sandbox's module table."""
+        table_token = _sandbox_sys_modules.set(self.table)
+        sandbox_token = _in_sandbox.set(True)
+        passthrough_token = _policy_passthroughs.set(frozenset(self.policy.passthrough_modules))
+        try:
+            yield
+        finally:
+            _policy_passthroughs.reset(passthrough_token)
+            _in_sandbox.reset(sandbox_token)
+            _sandbox_sys_modules.reset(table_token)
+
+    @contextmanager
+    def enter(self) -> Iterator[None]:
+        """Activate the workflow sandbox for the current context.
+
+        Gives this context its own private ``sys.modules`` table, its own
+        serializable-class registrations, and marks it as in-sandbox so proxy
+        modules enforce restrictions. All are ContextVars, so concurrent runs
+        using different sandboxes are isolated without touching any shared global.
+        """
+        # Imported here rather than at module scope: `serde` is a leaf, but this
+        # module is imported by `core` before the rest of the package exists.
+        from . import serde
+
+        try:
+            with (
+                self._activate(),
+                serde.sandboxed_registrations(self.serde_registry),
+            ):
+                yield
+        finally:
+            if self.run_cleanups:
+                self.cleanup()
 
 
 def in_sandbox() -> bool:

@@ -308,7 +308,7 @@ def test_decryption_works_inside_the_workflow_sandbox() -> None:
     key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
     payload = seal(key, ser.dehydrate([{"amount": 21}]))
 
-    with py_sandbox.workflow_sandbox():
+    with py_sandbox.Sandbox().enter():
         assert ser.hydrate(payload, what="the input of run wrun_1", key=key) == [{"amount": 21}]
 
 
@@ -340,7 +340,7 @@ import sys
 from vercel.workflow._internal import encryption, py_sandbox, serialization as ser
 
 key = encryption.derive_run_key(bytes(range(32)), project_id="prj_test", run_id="wrun_test")
-with py_sandbox.workflow_sandbox():
+with py_sandbox.Sandbox().enter():
     print(ser.hydrate(bytes.fromhex(sys.argv[1]), what="the input of run wrun_1", key=key))
 """
 
@@ -349,7 +349,7 @@ import sys
 from vercel.workflow._internal import encryption, py_sandbox
 
 key = encryption.derive_run_key(bytes(range(32)), project_id="prj_test", run_id="wrun_test")
-with py_sandbox.workflow_sandbox():
+with py_sandbox.Sandbox().enter():
     try:
         encryption.open_envelope(key, bytes.fromhex(sys.argv[1]))
     except encryption.DecryptionError as exc:
@@ -496,7 +496,7 @@ def test_x25519_is_bound_once_at_import(monkeypatch) -> None:
 def test_opening_a_sealed_payload_works_inside_the_workflow_sandbox() -> None:
     payload = seal_to(RUN_KEY, ser.dehydrate({"type": "approve"}))
 
-    with py_sandbox.workflow_sandbox():
+    with py_sandbox.Sandbox().enter():
         assert ser.hydrate(payload, what="the payload of hook hook_1", key=RUN_KEY) == {
             "type": "approve"
         }

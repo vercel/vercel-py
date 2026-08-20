@@ -49,7 +49,7 @@ class _Registration:
 
 
 @dataclasses.dataclass
-class _Registry:
+class Registry:
     """The registrations one side of the sandbox boundary can see.
 
     A sandbox gets its own, holding the classes it imported itself and nothing
@@ -58,7 +58,7 @@ class _Registry:
 
     by_class_id: dict[str, _Registration] = dataclasses.field(default_factory=dict)
     by_class: dict[type, str] = dataclasses.field(default_factory=dict)
-    # `type(value)` -> the classId that applies to it, or None. Dropped
+    # `type(value)` -> the classId that applies to it, or None. Superseded
     # whenever a registration lands here, since a new one can change the
     # answer.
     resolved: dict[type, str | None] = dataclasses.field(default_factory=dict)
@@ -72,19 +72,22 @@ class _Registry:
     def add(self, cls: type, registration: _Registration) -> None:
         self.by_class_id[registration.class_id] = registration
         self.by_class[cls] = registration.class_id
-        self.resolved.clear()
+        # Replaced rather than cleared: a `_resolve` on another thread must
+        # not have entries vanish mid-lookup or memoize a stale answer into
+        # the live dict.
+        self.resolved = {}
 
 
 # What the host registers, at import and afterwards.
-_HOST = _Registry()
+_HOST = Registry()
 # The registry in effect. Unset outside a sandbox, where there is one registry
 # and it is the host's; `sandboxed_registrations` sets one for the sandbox.
-_registry: contextvars.ContextVar[_Registry | None] = contextvars.ContextVar(
+_registry: contextvars.ContextVar[Registry | None] = contextvars.ContextVar(
     "_registry", default=None
 )
 
 
-def _current() -> _Registry:
+def _current() -> Registry:
     return _registry.get() or _HOST
 
 
@@ -179,25 +182,23 @@ def _registration(class_id: str) -> _Registration | None:
 
 
 @contextlib.contextmanager
-def sandboxed_registrations() -> Iterator[None]:
-    """Give this context a registry of its own, holding only the built-ins.
+def sandboxed_registrations(sandboxed: Registry) -> Iterator[None]:
+    """Give this context *sandboxed*'s registrations instead of the host's.
 
-    Entered by `workflow_sandbox`. The sandbox re-imports the workflow's
-    module, so the `@serializable` classes it needs are registered again here;
-    what the host registered elsewhere is deliberately not visible, which is
-    what keeps the sandbox from being handed a class its own code never
-    imported -- and through that class's `__globals__`, the host's module
-    graph.
+    Entered by `Sandbox.enter`. The sandbox imports the workflow's module
+    itself, so the `@serializable` classes it needs are registered here; what
+    the host registered elsewhere is deliberately not visible, which is what
+    keeps the sandbox from being handed a class its own code never imported --
+    and through that class's `__globals__`, the host's module graph.
 
-    Nothing shared is mutated, so there is nothing to restore and concurrent
-    runs do not interfere. The registry is dropped whole when the scope closes,
-    taking the sandbox's classes with it, which is why none of this needs weak
-    keys: no payload of this run crosses the boundary un-serialized.
+    The registry is the caller's, seeded with the built-ins at `Sandbox`
+    construction rather than here: a sandbox can outlive one run, its modules
+    -- and so its classes and their registrations -- persisting from run to
+    run, and re-adding the built-ins on every entry would churn state
+    concurrent runs are reading.
     """
-    sandboxed = _Registry()
     token = _registry.set(sandboxed)
     try:
-        _register_builtins(sandboxed)
         yield
     finally:
         _registry.reset(token)
@@ -212,8 +213,13 @@ def _resolve(tp: type) -> _Registration | None:
     needing an ordering rule of its own.
     """
     registry = _current()
-    if tp in registry.resolved:
-        class_id = registry.resolved[tp]
+    # Snapshot the resolved table, because add might replace it with a
+    # new one on a change and we want to make sure we write into the
+    # stale old version instead of writing something stale to the main
+    # table.
+    resolved = registry.resolved
+    if tp in resolved:
+        class_id = resolved[tp]
         return registry.registration(class_id) if class_id is not None else None
     found: str | None = None
     for base in tp.__mro__:
@@ -222,7 +228,7 @@ def _resolve(tp: type) -> _Registration | None:
         found = registry.by_class.get(base)
         if found is not None:
             break
-    registry.resolved[tp] = found
+    resolved[tp] = found
     return registry.registration(found) if found is not None else None
 
 
@@ -310,7 +316,7 @@ REVIVERS: dict[str, Callable[[Any], Any]] = {"Instance": revive_instance}
 # `_register_builtins` gives.
 
 
-def _register_builtins(registry: _Registry) -> None:
+def _register_builtins(registry: Registry) -> None:
     """Register the stdlib types this module carries into *registry*.
 
     Called for the host at import, and again for each sandbox. Each needs its
