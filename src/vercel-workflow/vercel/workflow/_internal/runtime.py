@@ -801,6 +801,18 @@ async def _ensure_hook_received(
             hook_input.resume_id,
         )
         return False
+    except w.HookResumeConflictError:
+        # Client bug. Nothing to retry, and nothing wrong with the run --
+        # so drop the message rather than fail anything.
+        logger.error(
+            "Dropping the resume of hook %r on run %r: resume id %r already stands "
+            "for a different hook or payload.",
+            hook_input.hook_id,
+            run.run_id,
+            hook_input.resume_id,
+            exc_info=True,
+        )
+        return False
     return True
 
 

@@ -473,12 +473,12 @@ class LocalWorld(w.World):
             # collision) rather than the same resume arriving twice. Reusing that
             # hook's event here would file this payload under the wrong hook.
             if claim.hook_id != data.correlation_id:
-                raise w.EntityConflictError(
+                raise w.HookResumeConflictError(
                     f'hook_received resumeId "{resume.resume_id}" already recorded '
                     "for a different hook"
                 )
             if claim.payload_digest is not None and claim.payload_digest != resume.payload_digest:
-                raise w.EntityConflictError(
+                raise w.HookResumeConflictError(
                     f'hook_received resumeId "{resume.resume_id}" already recorded '
                     "with a different payload"
                 )

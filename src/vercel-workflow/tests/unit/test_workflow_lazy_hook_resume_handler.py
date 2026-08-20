@@ -299,3 +299,22 @@ async def test_a_conflict_is_left_for_a_redelivery() -> None:
 
     with pytest.raises(w.EntityConflictError):
         await _invoke(hook_input=_hook_input())
+
+
+async def test_a_resume_id_that_means_something_else_is_not_retried() -> None:
+    """The opposite outcome to the one above, for the conflict a redelivery cannot
+    resolve."""
+    fake = FakeWorld(
+        events=[_hook_created()],
+        hook_received_error=w.HookResumeConflictError("already recorded for a different hook"),
+    )
+    w.set_world(fake)
+
+    assert await _invoke(hook_input=_hook_input()) is None
+    # Nothing replayed: a `hook_created` would have been flushed otherwise.
+    assert [e.event_type for e in fake.events] == ["hook_created"]
+
+
+async def test_the_permanent_conflict_still_reads_as_a_conflict() -> None:
+    """Handlers elsewhere catch `EntityConflictError` and must keep catching it."""
+    assert issubclass(w.HookResumeConflictError, w.EntityConflictError)

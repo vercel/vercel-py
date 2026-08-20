@@ -960,6 +960,15 @@ class EntityConflictError(Exception):
     pass
 
 
+class HookResumeConflictError(EntityConflictError):
+    """A resume id that already stands for a different hook, or a different payload.
+
+    Retrying cannot change this, unlike the conflict a resume gets while the other
+    writer's event is still on its way. A subclass, so handlers that catch
+    ``EntityConflictError`` are unaffected. Only ``LocalWorld`` raises it.
+    """
+
+
 class HookNotFoundError(Exception):
     """Raised when a hook lookup or hook event targets a hook that does not exist.
 

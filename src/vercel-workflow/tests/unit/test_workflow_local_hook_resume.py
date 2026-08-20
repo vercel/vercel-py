@@ -136,7 +136,7 @@ async def test_a_resume_id_reused_for_another_hook_is_a_conflict(tmp_path, monke
     await world.events_create(RUN_ID, w.HookCreatedEventData(token="other").into_event("hook_2"))
     _write_claim(world, hookId="hook_2")
 
-    with pytest.raises(w.EntityConflictError, match="different hook"):
+    with pytest.raises(w.HookResumeConflictError, match="different hook"):
         await world.events_create(RUN_ID, _received())
 
 
@@ -146,7 +146,7 @@ async def test_a_resume_id_reused_for_another_payload_is_a_conflict(tmp_path, mo
     world = await _world(tmp_path, monkeypatch)
     _write_claim(world, payloadDigest=OTHER_DIGEST)
 
-    with pytest.raises(w.EntityConflictError, match="different payload"):
+    with pytest.raises(w.HookResumeConflictError, match="different payload"):
         await world.events_create(RUN_ID, _received())
 
 
@@ -167,9 +167,12 @@ async def test_a_claim_whose_event_has_not_landed_is_transient(tmp_path, monkeyp
     world = await _world(tmp_path, monkeypatch)
     _write_claim(world)
 
-    with pytest.raises(w.EntityConflictError, match="not observable yet"):
+    with pytest.raises(w.EntityConflictError, match="not observable yet") as excinfo:
         await world.events_create(RUN_ID, _received())
 
+    # Pointedly not the permanent kind: the consumer retries this one, and by the
+    # next delivery the other writer's append has landed.
+    assert not isinstance(excinfo.value, w.HookResumeConflictError)
     assert await _hook_received_events(world) == []
 
 
