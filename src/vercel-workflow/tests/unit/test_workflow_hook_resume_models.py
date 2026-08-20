@@ -164,10 +164,18 @@ def test_resume_id_absent_on_every_other_event() -> None:
 # there the resume is not forwarded to a server but enforced on the spot.
 
 
-def _hook_received() -> w.HookReceivedEvent:
-    return w.HookReceivedEventData(payload=ser.dehydrate({"ok": True}), token=TOKEN).into_event(
+def _carried(**overrides: Any) -> w.HookResumeInput:
+    """The `hookInput` a delivery arrived with."""
+    return w.HookResumeInput.model_validate(HOOK_INPUT_WIRE | overrides)
+
+
+def _hook_received(carried: w.HookResumeInput | None = None) -> w.HookReceivedEvent:
+    event = w.HookReceivedEventData(payload=ser.dehydrate({"ok": True}), token=TOKEN).into_event(
         "hook_1"
     )
+    if carried is not None:
+        event._queue_input = carried
+    return event
 
 
 def _vercel_route(world: VercelWorld):
@@ -187,17 +195,14 @@ async def test_the_resume_rides_the_request_as_flat_keys() -> None:
     world = VercelWorld(token="test-token")
     route = _vercel_route(world)
 
-    occurred_at = datetime(2026, 8, 14, 3, 8, 48, tzinfo=UTC)
-    await world.events_create(
-        RUN_ID,
-        _hook_received(),
-        resume=w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST, occurred_at=occurred_at),
-    )
+    await world.events_create(RUN_ID, _hook_received(_carried()))
 
     body = _sent_body(route)
     assert body["resumeId"] == RESUME_ID
     assert body["resumePayloadDigest"] == DIGEST
-    assert body["occurredAt"] == occurred_at
+    # Dated when the resume happened, which the id carries. Not when this write
+    # happened -- the queue round trip is not the run's latency.
+    assert body["occurredAt"] == datetime(2026, 8, 14, 3, 12, 3, 156000, tzinfo=UTC)
     # The event body is untouched -- both writers of one resume send the same one.
     assert body["eventData"]["token"] == TOKEN
     assert body["remoteRefBehavior"] == "lazy"
@@ -219,18 +224,27 @@ async def test_a_write_without_a_resume_sends_no_extra_keys() -> None:
 
 
 @respx.mock
-async def test_the_digest_and_the_time_are_sent_only_when_known() -> None:
-    """The id alone identifies a resume, so a producer that has no digest, or an
-    id with no time in it, still gets a usable write."""
+async def test_a_resume_id_with_no_time_in_it_sends_no_date() -> None:
+    """Absent, not null: the reader on the other side types this `undefined`, and
+    a null would date the event to the epoch. Only ULID ids carry a time, and
+    older producers and hand-written ids are not ULIDs."""
     world = VercelWorld(token="test-token")
     route = _vercel_route(world)
 
-    await world.events_create(RUN_ID, _hook_received(), resume=w.HookResume(resume_id=RESUME_ID))
+    await world.events_create(RUN_ID, _hook_received(_carried(resumeId="not-a-ulid")))
 
     body = _sent_body(route)
-    assert body["resumeId"] == RESUME_ID
-    assert "resumePayloadDigest" not in body
+    assert body["resumeId"] == "not-a-ulid"
     assert "occurredAt" not in body
+
+
+def test_a_ulid_resume_id_carries_the_time_it_was_minted() -> None:
+    """Which is what the world dates the event by."""
+    assert _carried().occurred_at() == datetime(2026, 8, 14, 3, 12, 3, 156000, tzinfo=UTC)
+
+
+def test_a_non_ulid_resume_id_has_no_time_to_read() -> None:
+    assert _carried(resumeId="not-a-ulid").occurred_at() is None
 
 
 # ── what a run promises a later resumer ────────────────────────────────────

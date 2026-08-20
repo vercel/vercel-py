@@ -25,8 +25,10 @@ else:
 
 import pydantic
 
-from vercel._internal.core.polyfills import Self
+from vercel._internal.core.polyfills import UTC, Self
 from vercel.queue import SanitizedName
+
+from . import ulid
 
 T = TypeVar("T")
 QueuePrefix: TypeAlias = str
@@ -161,12 +163,21 @@ class HookResumeInput(BaseModel):
         default=None, alias="deploymentId", exclude_if=lambda e: e is None
     )
 
+    def occurred_at(self) -> datetime | None:
+        """When the resume happened, taken from its id.
 
-@dataclasses.dataclass(frozen=True)
-class HookResume:
-    resume_id: str
-    payload_digest: str | None = None
-    occurred_at: datetime | None = None
+        A resume id is a ULID, and a ULID contains the time it was made. Using that
+        time dates the event to when the payload was sent, instead of to whenever this
+        delivery got around to writing it.
+
+        Some ids are not ULIDs -- older producers, and hand-written ones in tests.
+        There is no time to read out of those, so return nothing and let the world
+        date the event.
+        """
+        try:
+            return datetime.fromtimestamp(ulid.decode_time(self.resume_id) / 1000, UTC)
+        except ValueError:
+            return None
 
 
 class WorkflowInvokePayload(BaseModel):
@@ -711,6 +722,8 @@ class HookReceivedEvent(BaseEvent):
     )
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: HookReceivedEventData = pydantic.Field(alias="eventData")
+    # Payload carried-over from the lazy-hook-resume path
+    _queue_input: HookResumeInput | None = pydantic.PrivateAttr(None)
 
     def payloads(self) -> tuple[Any, ...]:
         return (self.event_data.payload,)
@@ -1087,27 +1100,20 @@ class World(metaclass=abc.ABCMeta):
         ...
 
     @overload
-    async def events_create(
-        self, run_id: str, data: CreateEventRequest, *, resume: HookResume | None = None
-    ) -> EventResult:
+    async def events_create(self, run_id: str, data: CreateEventRequest) -> EventResult:
         """
         Create an event for an existing workflow run and atomically update the entity.
         Returns both the event and the affected entity (run/step/hook).
         Args:
             run_id: The workflow run ID (required for all events except run_created)
             data: The event to create
-            resume: For `hook_received` only -- the lazy-resume identity to
-                deduplicate this write against a concurrent writer of the same
-                resume.
         Returns:
             The created event and affected entity
         """
         ...
 
     @abc.abstractmethod
-    async def events_create(
-        self, run_id: str | None, data: Event, *, resume: HookResume | None = None
-    ) -> EventResult: ...
+    async def events_create(self, run_id: str | None, data: Event) -> EventResult: ...
 
     @abc.abstractmethod
     async def events_list(

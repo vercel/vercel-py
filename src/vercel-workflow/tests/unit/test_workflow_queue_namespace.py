@@ -73,9 +73,7 @@ class FakeWorld(NoStreams, w.World):
     async def hooks_get_by_token(self, token: str) -> w.Hook:
         raise NotImplementedError
 
-    async def events_create(
-        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
-    ) -> w.EventResult:
+    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         if data.event_type == "step_started" and self.start_error is not None:
             raise self.start_error
         self.events.append(data)

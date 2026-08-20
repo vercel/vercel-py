@@ -19,11 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
 
 import pytest
 
-from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal import serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 
@@ -43,10 +41,27 @@ async def _world(tmp_path, monkeypatch) -> LocalWorld:
     return world
 
 
-def _received(payload: object = None, *, hook: str = HOOK) -> w.HookReceivedEvent:
-    return w.HookReceivedEventData(
-        payload=ser.dehydrate({"n": 1} if payload is None else payload), token=TOKEN
-    ).into_event(hook)
+def _received(
+    payload: object = None,
+    *,
+    hook: str = HOOK,
+    resume_id: str | None = RESUME_ID,
+    digest: str = DIGEST,
+) -> w.HookReceivedEvent:
+    """A `hook_received`, by default carrying the queue input a lazy resume
+    arrives with. `resume_id=None` is the plain sequential write, which takes
+    none of this file's paths."""
+    dehydrated = ser.dehydrate({"n": 1} if payload is None else payload)
+    event = w.HookReceivedEventData(payload=dehydrated, token=TOKEN).into_event(hook)
+    if resume_id is not None:
+        event._queue_input = w.HookResumeInput(
+            resumeId=resume_id,
+            hookId=hook,
+            token=TOKEN,
+            payload=dehydrated,
+            payloadDigest=digest,
+        )
+    return event
 
 
 async def _hook_received_events(world: LocalWorld) -> list[w.Event]:
@@ -80,10 +95,8 @@ async def test_the_second_writer_of_one_resume_appends_nothing(tmp_path, monkeyp
     """The property the whole claim exists for. Both calls return the same
     event, and the log holds one."""
     world = await _world(tmp_path, monkeypatch)
-    resume = w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-
-    first = await world.events_create(RUN_ID, _received(), resume=resume)
-    second = await world.events_create(RUN_ID, _received(), resume=resume)
+    first = await world.events_create(RUN_ID, _received())
+    second = await world.events_create(RUN_ID, _received())
 
     assert first.event is not None and second.event is not None
     assert first.event.server_props is not None and second.event.server_props is not None
@@ -96,8 +109,8 @@ async def test_distinct_resumes_on_one_hook_each_record_an_event(tmp_path, monke
     takes many payloads, and collapsing them would drop all but the first."""
     world = await _world(tmp_path, monkeypatch)
 
-    await world.events_create(RUN_ID, _received(1), resume=w.HookResume(resume_id=RESUME_ID))
-    await world.events_create(RUN_ID, _received(2), resume=w.HookResume(resume_id=OTHER_RESUME_ID))
+    await world.events_create(RUN_ID, _received(1))
+    await world.events_create(RUN_ID, _received(2, resume_id=OTHER_RESUME_ID))
 
     assert len(await _hook_received_events(world)) == 2
 
@@ -107,7 +120,7 @@ async def test_no_claim_is_written_without_a_resume(tmp_path, monkeypatch) -> No
     with, and must leave the store exactly as it found it."""
     world = await _world(tmp_path, monkeypatch)
 
-    await world.events_create(RUN_ID, _received())
+    await world.events_create(RUN_ID, _received(resume_id=None))
 
     assert not (world.data_dir / "hooks" / "resumes").exists()
     assert len(await _hook_received_events(world)) == 1
@@ -124,9 +137,7 @@ async def test_a_resume_id_reused_for_another_hook_is_a_conflict(tmp_path, monke
     _write_claim(world, hookId="hook_2")
 
     with pytest.raises(w.EntityConflictError, match="different hook"):
-        await world.events_create(
-            RUN_ID, _received(), resume=w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-        )
+        await world.events_create(RUN_ID, _received())
 
 
 async def test_a_resume_id_reused_for_another_payload_is_a_conflict(tmp_path, monkeypatch) -> None:
@@ -136,20 +147,7 @@ async def test_a_resume_id_reused_for_another_payload_is_a_conflict(tmp_path, mo
     _write_claim(world, payloadDigest=OTHER_DIGEST)
 
     with pytest.raises(w.EntityConflictError, match="different payload"):
-        await world.events_create(
-            RUN_ID, _received(), resume=w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-        )
-
-
-async def test_a_producer_without_a_digest_still_dedups_on_the_id(tmp_path, monkeypatch) -> None:
-    """The digest is an extra guard, not the constraint's identity."""
-    world = await _world(tmp_path, monkeypatch)
-    resume = w.HookResume(resume_id=RESUME_ID)
-
-    await world.events_create(RUN_ID, _received(), resume=resume)
-    await world.events_create(RUN_ID, _received(), resume=resume)
-
-    assert len(await _hook_received_events(world)) == 1
+        await world.events_create(RUN_ID, _received())
 
 
 # ── a claim whose event is not where it says ───────────────────────────────
@@ -170,9 +168,7 @@ async def test_a_claim_whose_event_has_not_landed_is_transient(tmp_path, monkeyp
     _write_claim(world)
 
     with pytest.raises(w.EntityConflictError, match="not observable yet"):
-        await world.events_create(
-            RUN_ID, _received(), resume=w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-        )
+        await world.events_create(RUN_ID, _received())
 
     assert await _hook_received_events(world) == []
 
@@ -184,8 +180,7 @@ async def test_a_claim_is_converged_on_by_the_resume_id_not_the_position(
     ids are slot positions, so it can bump off its own claim and leave something
     unrelated there; the authority is the `resumeId` persisted on the event."""
     world = await _world(tmp_path, monkeypatch)
-    resume = w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-    landed = await world.events_create(RUN_ID, _received(), resume=resume)
+    landed = await world.events_create(RUN_ID, _received())
     assert landed.event is not None and landed.event.server_props is not None
 
     # Repoint the claim at an unrelated event, the way a bumped writer would.
@@ -204,7 +199,7 @@ async def test_a_claim_is_converged_on_by_the_resume_id_not_the_position(
     )
     _write_claim(world, eventId=occupied)
 
-    again = await world.events_create(RUN_ID, _received(), resume=resume)
+    again = await world.events_create(RUN_ID, _received())
 
     assert again.event is not None and again.event.server_props is not None
     assert again.event.server_props.event_id == landed.event.server_props.event_id
@@ -221,14 +216,12 @@ async def test_another_payload_at_the_claimed_position_is_not_adopted(
     """
     world = await _world(tmp_path, monkeypatch)
     # A plain sequential resume of the same hook: right hook, no resume id.
-    other = await world.events_create(RUN_ID, _received("unrelated"))
+    other = await world.events_create(RUN_ID, _received("unrelated", resume_id=None))
     assert other.event is not None and other.event.server_props is not None
     _write_claim(world, eventId=other.event.server_props.event_id)
 
     with pytest.raises(w.EntityConflictError, match="not observable yet"):
-        await world.events_create(
-            RUN_ID, _received(), resume=w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-        )
+        await world.events_create(RUN_ID, _received())
 
 
 async def test_convergence_survives_the_hook_being_disposed(tmp_path, monkeypatch) -> None:
@@ -238,20 +231,17 @@ async def test_convergence_survives_the_hook_being_disposed(tmp_path, monkeypatc
     disposal would earn it -- the consumer reads not-found as "nothing left to
     resume" and acks a message that may hold the only copy of the payload."""
     world = await _world(tmp_path, monkeypatch)
-    resume = w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-    first = await world.events_create(RUN_ID, _received(), resume=resume)
+    first = await world.events_create(RUN_ID, _received())
     await world.events_create(RUN_ID, w.HookDisposedEvent(correlationId=HOOK))
 
-    again = await world.events_create(RUN_ID, _received(), resume=resume)
+    again = await world.events_create(RUN_ID, _received())
 
     assert first.event is not None and again.event is not None
     assert first.event.server_props is not None and again.event.server_props is not None
     assert again.event.server_props.event_id == first.event.server_props.event_id
     # A resume with no claim still gets the disposal's answer.
     with pytest.raises(w.HookNotFoundError):
-        await world.events_create(
-            RUN_ID, _received(), resume=w.HookResume(resume_id=OTHER_RESUME_ID)
-        )
+        await world.events_create(RUN_ID, _received(resume_id=OTHER_RESUME_ID))
 
 
 # ── the file, which TypeScript also reads ──────────────────────────────────
@@ -263,9 +253,7 @@ async def test_the_claim_is_shaped_the_way_world_local_writes_one(tmp_path, monk
     a data directory."""
     world = await _world(tmp_path, monkeypatch)
 
-    result = await world.events_create(
-        RUN_ID, _received(), resume=w.HookResume(resume_id=RESUME_ID, payload_digest=DIGEST)
-    )
+    result = await world.events_create(RUN_ID, _received())
 
     assert result.event is not None and result.event.server_props is not None
     assert json.loads(_claim_path(world).read_text()) == {
@@ -277,25 +265,12 @@ async def test_the_claim_is_shaped_the_way_world_local_writes_one(tmp_path, monk
     }
 
 
-async def test_the_claim_omits_a_digest_it_was_not_given(tmp_path, monkeypatch) -> None:
-    """`undefined`, not `null`: the TS schema types it optional and a null would
-    fail its parse."""
-    world = await _world(tmp_path, monkeypatch)
-
-    await world.events_create(RUN_ID, _received(), resume=w.HookResume(resume_id=RESUME_ID))
-
-    assert "payloadDigest" not in json.loads(_claim_path(world).read_text())
-
-
-# ── the resume id on the row ───────────────────────────────────────────────
-
-
 async def test_the_row_records_which_resume_it_came_from(tmp_path, monkeypatch) -> None:
     """This is what a later delivery of the same resume looks for before deciding
     it has an event to write."""
     world = await _world(tmp_path, monkeypatch)
 
-    await world.events_create(RUN_ID, _received(), resume=w.HookResume(resume_id=RESUME_ID))
+    await world.events_create(RUN_ID, _received())
 
     (received,) = await _hook_received_events(world)
     assert received.server_props is not None
@@ -307,23 +282,8 @@ async def test_a_row_written_without_a_resume_has_no_id(tmp_path, monkeypatch) -
     was, or a later delivery would read a resume into it."""
     world = await _world(tmp_path, monkeypatch)
 
-    await world.events_create(RUN_ID, _received())
+    await world.events_create(RUN_ID, _received(resume_id=None))
 
     (received,) = await _hook_received_events(world)
     assert received.server_props is not None
     assert received.server_props.resume_id is None
-
-
-async def test_only_hook_received_rows_get_one(tmp_path, monkeypatch) -> None:
-    """Gated the same way the server gates it: no other event takes part."""
-    world = await _world(tmp_path, monkeypatch)
-
-    await world.events_create(
-        RUN_ID,
-        w.WaitCreatedEventData(resumeAt=datetime(2026, 8, 15, tzinfo=UTC)).into_event("wait_1"),
-        resume=w.HookResume(resume_id=RESUME_ID),
-    )
-
-    (wait,) = [e for e in (await world.events_list(RUN_ID)).data if e.event_type == "wait_created"]
-    assert wait.server_props is not None
-    assert wait.server_props.resume_id is None

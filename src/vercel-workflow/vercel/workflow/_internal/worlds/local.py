@@ -463,7 +463,7 @@ class LocalWorld(w.World):
         self,
         run_id: str,
         data: w.Event,
-        resume: w.HookResume,
+        resume: w.HookResumeInput,
         claim_path: pathlib.Path,
         event_id: str,
     ) -> w.Event | None:
@@ -480,8 +480,7 @@ class LocalWorld(w.World):
                     "for a different hook"
                 )
             if (
-                resume.payload_digest is not None
-                and claim.payload_digest is not None
+                claim.payload_digest is not None
                 and claim.payload_digest != resume.payload_digest
             ):
                 raise w.EntityConflictError(
@@ -686,9 +685,7 @@ class LocalWorld(w.World):
                     return hook
         raise w.HookNotFoundError(token=token)
 
-    async def events_create(
-        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
-    ) -> w.EventResult:
+    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         # run_created has no existing entity to race on — its create is guarded by
         # the atomic write in write_json. Every other event reads-checks-writes an
         # existing run/step, so serialize those per run. The body is synchronous,
@@ -696,7 +693,7 @@ class LocalWorld(w.World):
         if run_id is None:
             return self._events_create_impl(run_id, data)
         with self._run_lock(run_id):
-            return self._events_create_impl(run_id, data, resume=resume)
+            return self._events_create_impl(run_id, data)
 
     def _resilient_create_run(
         self, run_id: str, data: w.Event, now: datetime
@@ -756,9 +753,7 @@ class LocalWorld(w.World):
         )
         return created
 
-    def _events_create_impl(
-        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
-    ) -> w.EventResult:
+    def _events_create_impl(self, run_id: str | None, data: w.Event) -> w.EventResult:
         now = js_now()
 
         if data.event_type == "run_created" and not run_id:
@@ -836,8 +831,10 @@ class LocalWorld(w.World):
                     )
 
         if data.event_type in w.HOOK_EVENTS_REQUIRING_EXISTENCE and data.correlation_id:
+            resume: w.HookResumeInput | None = None
             claim_path: pathlib.Path | None = None
-            if data.event_type == "hook_received" and resume is not None:
+            if isinstance(data, w.HookReceivedEvent) and data._queue_input is not None:
+                resume = data._queue_input
                 claim_path = self._hook_resume_claim_path(effective_run_id, resume.resume_id)
                 claim = read_json(claim_path, HookResumeClaim)
                 if (
@@ -881,8 +878,8 @@ class LocalWorld(w.World):
             "eventId": event_id,
             "createdAt": now,
         }
-        if data.event_type == "hook_received" and resume is not None:
-            server_props["resumeId"] = resume.resume_id
+        if isinstance(data, w.HookReceivedEvent) and data._queue_input is not None:
+            server_props["resumeId"] = data._queue_input.resume_id
         event = w.EventAdaptor.validate_python(stored | server_props)
         run: w.WorkflowRun | None = None
         step: w.WorkflowStep | None = None

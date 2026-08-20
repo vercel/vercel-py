@@ -131,6 +131,17 @@ class Resume:
     resume_id: str
     digest: str
 
+    def as_input(self, deployment_id: str | None = None) -> w.HookResumeInput:
+        """What both of this resume's writes carry."""
+        return w.HookResumeInput(
+            resumeId=self.resume_id,
+            hookId=self.hook.hook_id,
+            token=self.hook.token,
+            payload=self.payload,
+            payloadDigest=self.digest,
+            deploymentId=deployment_id,
+        )
+
     @classmethod
     def of(cls, hook: w.Hook, payload: dict) -> Resume:
         dehydrated = ser.dehydrate(payload)
@@ -149,14 +160,7 @@ async def publish(world: local_mod.LocalWorld, resume: Resume) -> None:
         w.get_queue_name(run.workflow_name, None),
         w.WorkflowInvokePayload(
             runId=resume.hook.run_id,
-            hookInput=w.HookResumeInput(
-                resumeId=resume.resume_id,
-                hookId=resume.hook.hook_id,
-                token=resume.hook.token,
-                payload=resume.payload,
-                payloadDigest=resume.digest,
-                deploymentId=run.deployment_id,
-            ),
+            hookInput=resume.as_input(run.deployment_id),
         ),
     )
 
@@ -164,15 +168,13 @@ async def publish(world: local_mod.LocalWorld, resume: Resume) -> None:
 async def write_event(world: local_mod.LocalWorld, resume: Resume) -> None:
     """The fast path's direct `hook_received` write, carrying the same identity."""
     run = await world.runs_get(resume.hook.run_id)
-    await world.events_create(
-        resume.hook.run_id,
-        w.HookReceivedEvent(
-            correlationId=resume.hook.hook_id,
-            eventData=w.HookReceivedEventData(payload=resume.payload, token=resume.hook.token),
-            specVersion=run.spec_version or w.SPEC_VERSION_CURRENT,
-        ),
-        resume=w.HookResume(resume_id=resume.resume_id, payload_digest=resume.digest),
+    event = w.HookReceivedEvent(
+        correlationId=resume.hook.hook_id,
+        eventData=w.HookReceivedEventData(payload=resume.payload, token=resume.hook.token),
+        specVersion=run.spec_version or w.SPEC_VERSION_CURRENT,
     )
+    event._queue_input = resume.as_input()
+    await world.events_create(resume.hook.run_id, event)
 
 
 async def wait_for_hook(world: local_mod.LocalWorld, token: str) -> w.Hook:

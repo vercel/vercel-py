@@ -760,20 +760,6 @@ def _has_resume_event(events: list[w.Event], hook_input: w.HookResumeInput) -> b
     )
 
 
-def _resume_occurred_at(resume_id: str) -> datetime | None:
-    """When the resume happened, read out of the id the producer minted for it.
-
-    Resume ids are ULIDs, which carry the time they were made. Using it means the
-    event is dated when the payload was sent rather than when this delivery got
-    around to writing it. Ids that are not ULIDs (older producers, hand-written
-    ones in tests) have no time to read, and the world dates the event itself.
-    """
-    try:
-        return datetime.fromtimestamp(ulid.decode_time(resume_id) / 1000, UTC)
-    except ValueError:
-        return None
-
-
 async def _ensure_hook_received(
     world: w.World, run: w.WorkflowRun, hook_input: w.HookResumeInput
 ) -> bool:
@@ -801,16 +787,9 @@ async def _ensure_hook_received(
         eventData=w.HookReceivedEventData(payload=hook_input.payload, token=hook_input.token),
         specVersion=run.spec_version or w.SPEC_VERSION_CURRENT,
     )
+    event._queue_input = hook_input
     try:
-        await world.events_create(
-            run.run_id,
-            event,
-            resume=w.HookResume(
-                resume_id=hook_input.resume_id,
-                payload_digest=hook_input.payload_digest,
-                occurred_at=_resume_occurred_at(hook_input.resume_id),
-            ),
-        )
+        await world.events_create(run.run_id, event)
     except (w.HookNotFoundError, w.RunExpiredError):
         # The hook is gone, or the run has finished, so this payload can never be
         # delivered to anything. Retrying cannot change that, so ack the message

@@ -126,7 +126,7 @@ class FakeWorld(NoStreams, w.World):
     ) -> None:
         self.events: list[w.Event] = list(events or [])
         self.hook_received_error = hook_received_error
-        self.resumes: list[tuple[w.Event, w.HookResume | None]] = []
+        self.resumes: list[w.HookReceivedEvent] = []
         self.queued: list[tuple[str, Any]] = []
 
     async def get_deployment_id(self) -> str:
@@ -153,20 +153,21 @@ class FakeWorld(NoStreams, w.World):
     async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:
         return w.PaginatedResult(data=list(self.events), cursor=None, hasMore=False)
 
-    async def events_create(
-        self, run_id: str | None, data: w.Event, *, resume: w.HookResume | None = None
-    ) -> w.EventResult:
+    async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         if data.event_type == "run_started":
             return w.EventResult(run=_run())
-        if data.event_type == "hook_received":
-            self.resumes.append((data, resume))
+        if isinstance(data, w.HookReceivedEvent):
+            self.resumes.append(data)
             if self.hook_received_error is not None:
                 raise self.hook_received_error
+            # A real world reads the carried input the same way, and stores the
+            # resume id it names on the row.
+            carried = data._queue_input
             self.events.append(
                 _stamp(
                     data,
                     event_id=f"evnt_{len(self.events) + 1}",
-                    resume_id=resume.resume_id if resume else None,
+                    resume_id=carried.resume_id if carried else None,
                 )
             )
             return w.EventResult(event=self.events[-1])
@@ -205,42 +206,17 @@ async def test_a_carried_payload_is_materialized_before_replay() -> None:
     await _invoke(hook_input=_hook_input())
 
     assert len(fake.resumes) == 1
-    event, resume = fake.resumes[0]
-    assert isinstance(event, w.HookReceivedEvent)
+    event = fake.resumes[0]
     assert event.correlation_id == HOOK_ID
     assert event.event_data.payload == PAYLOAD
     # The token the producer would have written, so the two writers of one
     # resume cannot disagree on the event body.
     assert event.event_data.token == TOKEN
-    assert resume is not None
-    assert resume.resume_id == RESUME_ID
-    assert resume.payload_digest == DIGEST
-
-
-async def test_the_event_is_dated_when_the_resume_happened() -> None:
-    """Not when this delivery ran: the queue round trip is not the run's
-    latency. The producer's `resumeId` is a ULID, so it carries the answer."""
-    fake = FakeWorld(events=[_hook_created()])
-    w.set_world(fake)
-
-    await _invoke(hook_input=_hook_input())
-
-    _, resume = fake.resumes[0]
-    assert resume is not None
-    assert resume.occurred_at == datetime(2026, 8, 14, 3, 12, 3, 156000, tzinfo=UTC)
-
-
-async def test_a_non_ulid_resume_id_leaves_the_date_to_the_world() -> None:
-    """Legacy and hand-written ids have no timestamp to read, and guessing one
-    would date the event to the epoch."""
-    fake = FakeWorld(events=[_hook_created()])
-    w.set_world(fake)
-
-    await _invoke(hook_input=_hook_input(resumeId="not-a-ulid"))
-
-    _, resume = fake.resumes[0]
-    assert resume is not None
-    assert resume.occurred_at is None
+    # The whole carried input rides along, which is how the world learns which
+    # resume this write is. What each world does with it is its own test.
+    assert event._queue_input is not None
+    assert event._queue_input.resume_id == RESUME_ID
+    assert event._queue_input.payload_digest == DIGEST
 
 
 async def test_the_event_carries_the_runs_spec_version() -> None:
@@ -251,7 +227,7 @@ async def test_the_event_carries_the_runs_spec_version() -> None:
 
     await _invoke(hook_input=_hook_input())
 
-    event, _ = fake.resumes[0]
+    event = fake.resumes[0]
     assert event.spec_version == 6
 
 
