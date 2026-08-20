@@ -921,7 +921,7 @@ ALL_CLEANUPS: tuple[CleanupHandler, ...] = (
 )
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class SandboxPolicy:
     """Configuration for the workflow sandbox, passed to ``Workflows``.
 
