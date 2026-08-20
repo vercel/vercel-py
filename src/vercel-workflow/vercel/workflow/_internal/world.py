@@ -107,6 +107,11 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 #
 # `CURRENT` is what we stamp on rows we create; `MAX_SUPPORTED` is the highest
 # version we accept when reading, mirroring the same split in TS.
+#
+# Writing `attr_set` does not move `CURRENT` to 4. The claim is cumulative, so 4
+# also claims 3, and a TS runtime reading a run at 3 switches its queue
+# transport to CBOR, which the local world here does not speak. Nothing gates
+# applying an `attr_set` on the run's version, so attributes work at 2.
 SPEC_VERSION_CURRENT: Literal[2] = 2
 SPEC_VERSION_MAX_SUPPORTED = 6
 
@@ -557,6 +562,69 @@ class RunFailedEvent(BaseEvent):
         return (self.event_data.error,)
 
 
+class AttributeChange(BaseModel):
+    """One key of a `set_attributes()` call. ``value=None`` removes the key."""
+
+    key: str
+    value: str | None
+
+    @pydantic.model_serializer(mode="wrap")
+    def _keep_the_null(self, handler: Any) -> dict[str, Any]:
+        """Write ``value: null`` instead of dropping the key.
+
+        `LocalWorld` dumps with `exclude_none`, which is right for a field that
+        is absent but not for this one: the null is what removes the attribute,
+        and TS's `AttributeChangeSchema` requires it.
+        """
+        data: dict[str, Any] = handler(self)
+        data.setdefault("value", None)
+        return data
+
+
+class WorkflowAttributeWriter(BaseModel):
+    type: Literal["workflow"] = "workflow"
+
+
+class StepAttributeWriter(BaseModel):
+    type: Literal["step"] = "step"
+    step_id: str = pydantic.Field(alias="stepId")
+    attempt: int
+
+
+AttributeWriter: TypeAlias = Annotated[
+    WorkflowAttributeWriter | StepAttributeWriter,
+    pydantic.Field(discriminator="type"),
+]
+
+
+class AttrSetEventData(BaseModel):
+    changes: list[AttributeChange]
+    writer: AttributeWriter
+    allow_reserved_attributes: Literal[True] | None = pydantic.Field(
+        default=None, alias="allowReservedAttributes", exclude_if=lambda e: e is None
+    )
+
+    def into_event(self, correlation_id: str | None = None) -> "AttrSetEvent":
+        return AttrSetEvent(correlationId=correlation_id, eventData=self)
+
+
+class AttrSetEvent(BaseEvent):
+    """
+    Event created when workflow or step code changes the run's attributes.
+    The World materializes the changes into `run.attributes`.
+
+    A replay matches one against a workflow-body call by correlation id. A
+    step's write carries none: it is made from host context, with no replay
+    position to correlate with.
+    """
+
+    event_type: Literal["attr_set"] = pydantic.Field(
+        default="attr_set",
+        alias="eventType",
+    )
+    event_data: AttrSetEventData = pydantic.Field(alias="eventData")
+
+
 class StepCreatedEventData(BaseModel):
     step_name: str = pydantic.Field(alias="stepName")
     input: bytes | dict[str, Any]
@@ -787,6 +855,7 @@ CreateEventRequest: TypeAlias = (
     RunStartedEvent
     | RunCompletedEvent
     | RunFailedEvent
+    | AttrSetEvent
     | StepCreatedEvent
     | StepStartedEvent
     | StepRetryingEvent
@@ -804,6 +873,7 @@ Event: TypeAlias = Annotated[
         | RunStartedEvent
         | RunCompletedEvent
         | RunFailedEvent
+        | AttrSetEvent
         | StepCreatedEvent
         | StepStartedEvent
         | StepRetryingEvent
