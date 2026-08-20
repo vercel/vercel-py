@@ -463,12 +463,12 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         return self._payload.cwd
 
     @property
-    def regions(self) -> tuple[str, ...]:
-        return self._payload.regions
-
-    @property
     def region(self) -> str | None:
         return self._payload.region
+
+    @property
+    def failover_regions(self) -> tuple[str, ...]:
+        return self._payload.failover_regions
 
     @property
     def memory(self) -> int | None:

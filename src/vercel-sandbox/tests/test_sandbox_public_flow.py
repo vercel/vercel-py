@@ -398,11 +398,12 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 delete_evicted=False,
             ),
             tags={"env": "test"},
-            regions=("iad1", "sfo1", "cle1"),
+            region="iad1",
+            failover_regions=("sfo1", "cle1"),
         )
         assert handle.image == "vercel/sandbox/universal:latest"
         assert handle.region == "iad1"
-        assert handle.regions == ("iad1", "sfo1", "cle1")
+        assert handle.failover_regions == ("sfo1", "cle1")
         assert not hasattr(handle, "runtime")
         assert handle.current_session is not None
         assert not hasattr(handle.current_session, "runtime")
@@ -418,11 +419,12 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
             execution_time_limit=4.5,
             snapshot_expiration=0,
             snapshot_retention=SnapshotRetention(count=1, expiration=0),
-            regions=("sfo1",),
+            region="sfo1",
+            failover_regions=(),
         )
         assert handle.tags == {"env": "updated"}
         assert handle.region == "sfo1"
-        assert handle.regions == ("sfo1",)
+        assert handle.failover_regions == ()
         assert handle.current_session is retained_session
         assert handle.current_session.region == "cle1"
         assert handle.routes[0].url == "https://preview.sandbox.test"
@@ -508,7 +510,8 @@ async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
             env={},
             tags={},
             snapshot_expiration=0,
-            regions=("iad1", "sfo1"),
+            region="iad1",
+            failover_regions=("sfo1",),
             snapshot_retention=SnapshotRetention(
                 count=2,
                 expiration=timedelta(days=1),

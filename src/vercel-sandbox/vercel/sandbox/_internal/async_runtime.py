@@ -42,9 +42,9 @@ from vercel.sandbox._internal.models import (
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
+    FailoverRegionsInput,
     NetworkPolicy,
     ProcessLog,
-    RegionsInput,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -55,7 +55,7 @@ from vercel.sandbox._internal.models import (
     SnapshotRetentionUpdate,
     _parse_snapshot_expiration,
     _WriteFile,
-    normalize_regions,
+    normalize_failover_regions,
 )
 from vercel.sandbox._internal.pagination import (
     QuerySandboxesPage,
@@ -1288,7 +1288,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        regions: RegionsInput = None,
+        region: str | None = None,
+        failover_regions: FailoverRegionsInput = None,
     ) -> Self:
         """Update mutable sandbox configuration.
 
@@ -1315,7 +1316,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
-            regions=normalize_regions(regions),
+            region=region,
+            failover_regions=normalize_failover_regions(failover_regions),
         )
         self._apply_payload(payload)
         return self
@@ -1423,7 +1425,8 @@ class _CreateSandboxParams:
     tags: Mapping[str, str] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    regions: tuple[str, ...] | None = None
+    region: str | None = None
+    failover_regions: tuple[str, ...] | None = None
 
 
 class CreateSandboxOperation:
@@ -1470,7 +1473,8 @@ class CreateSandboxOperation:
             tags=self._params.tags,
             snapshot_expiration=self._params.snapshot_expiration,
             snapshot_retention=self._params.snapshot_retention,
-            regions=self._params.regions,
+            region=self._params.region,
+            failover_regions=self._params.failover_regions,
         )
 
     def __await__(self) -> Generator[Any, None, Sandbox]:
@@ -1517,7 +1521,8 @@ class _ForkSandboxParams:
     tags: Mapping[str, str] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
-    regions: tuple[str, ...] | None = None
+    region: str | None = None
+    failover_regions: tuple[str, ...] | None = None
 
 
 class ForkSandboxOperation:
@@ -1563,7 +1568,8 @@ class ForkSandboxOperation:
             tags=self._params.tags,
             snapshot_expiration=self._params.snapshot_expiration,
             snapshot_retention=self._params.snapshot_retention,
-            regions=self._params.regions,
+            region=self._params.region,
+            failover_regions=self._params.failover_regions,
         )
 
     def __await__(self) -> Generator[Any, None, Sandbox]:
@@ -1713,7 +1719,8 @@ def create_sandbox_operation(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    regions: RegionsInput = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
 ) -> CreateSandboxOperation:
     return CreateSandboxOperation(
@@ -1732,7 +1739,8 @@ def create_sandbox_operation(
             tags=tags,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            regions=normalize_regions(regions),
+            region=region,
+            failover_regions=normalize_failover_regions(failover_regions),
         ),
         destroy=destroy,
     )
@@ -1754,7 +1762,8 @@ def fork_sandbox_operation(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    regions: RegionsInput = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
 ) -> ForkSandboxOperation:
     return ForkSandboxOperation(
@@ -1773,7 +1782,8 @@ def fork_sandbox_operation(
             tags=tags,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            regions=normalize_regions(regions),
+            region=region,
+            failover_regions=normalize_failover_regions(failover_regions),
         ),
         destroy=destroy,
     )
@@ -1817,7 +1827,8 @@ async def get_or_create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    regions: RegionsInput = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
 ) -> tuple[Sandbox, bool]:
     try:
         state, created = await service.get_or_create_sandbox(
@@ -1836,7 +1847,8 @@ async def get_or_create_sandbox(
             tags=tags,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
-            regions=normalize_regions(regions),
+            region=region,
+            failover_regions=normalize_failover_regions(failover_regions),
         )
         return (
             Sandbox(

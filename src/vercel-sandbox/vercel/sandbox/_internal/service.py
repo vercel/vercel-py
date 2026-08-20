@@ -264,7 +264,8 @@ class SandboxService:
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        regions: tuple[str, ...] | None = None,
+        region: str | None = None,
+        failover_regions: tuple[str, ...] | None = None,
     ) -> SandboxState:
         self._ensure_open()
         sandbox = await self._api_client.create_sandbox(
@@ -281,7 +282,8 @@ class SandboxService:
             tags=tags,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
-            regions=regions,
+            region=region,
+            failover_regions=failover_regions,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
 
@@ -301,7 +303,8 @@ class SandboxService:
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        regions: tuple[str, ...] | None = None,
+        region: str | None = None,
+        failover_regions: tuple[str, ...] | None = None,
     ) -> SandboxState:
         self._ensure_open()
         sandbox = await self._api_client.fork_sandbox(
@@ -318,7 +321,8 @@ class SandboxService:
             tags=tags,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
-            regions=regions,
+            region=region,
+            failover_regions=failover_regions,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
 
@@ -356,7 +360,8 @@ class SandboxService:
         tags: Mapping[str, str] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
-        regions: tuple[str, ...] | None = None,
+        region: str | None = None,
+        failover_regions: tuple[str, ...] | None = None,
     ) -> tuple[SandboxState, bool]:
         """Return a named sandbox and whether it had to be created."""
         try:
@@ -394,7 +399,8 @@ class SandboxService:
             tags=tags,
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
-            regions=regions,
+            region=region,
+            failover_regions=failover_regions,
         )
         return sandbox, True
 
@@ -437,7 +443,8 @@ class SandboxService:
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
-        regions: tuple[str, ...] | None = None,
+        region: str | None = None,
+        failover_regions: tuple[str, ...] | None = None,
     ) -> SandboxState:
         self._ensure_open()
         return await self._api_client.update_sandbox(
@@ -453,7 +460,8 @@ class SandboxService:
             snapshot_expiration=snapshot_expiration,
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
-            regions=regions,
+            region=region,
+            failover_regions=failover_regions,
         )
 
     async def resume_sandbox(

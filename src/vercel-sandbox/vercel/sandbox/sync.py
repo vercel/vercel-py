@@ -24,6 +24,7 @@ from vercel.sandbox._internal.models import (
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
+    FailoverRegionsInput,
     GitSource,
     NetworkPolicy,
     NetworkPolicyKeyValueMatcher,
@@ -33,7 +34,6 @@ from vercel.sandbox._internal.models import (
     NetworkPolicySubnets,
     NetworkPolicyTransform,
     ProcessStatus,
-    RegionsInput,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -102,7 +102,8 @@ def create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    regions: RegionsInput = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
 ) -> _ManagedSyncSandbox:
     """Create a sandbox and wait until it is ready.
@@ -129,7 +130,8 @@ def create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
-        regions: Ordered preferred and failover regions.
+        region: Preferred region for the sandbox.
+        failover_regions: Regions available if creation in ``region`` fails.
         destroy: Whether context-manager exit destroys the sandbox after
             stopping it.
 
@@ -154,7 +156,8 @@ def create_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
-        regions=regions,
+        region=region,
+        failover_regions=failover_regions,
         destroy=destroy,
     )
 
@@ -174,7 +177,8 @@ def fork_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    regions: RegionsInput = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
 ) -> _ManagedSyncSandbox:
     """Fork a sandbox and wait until the fork is ready.
@@ -204,7 +208,8 @@ def fork_sandbox(
         tags: Metadata tag override.
         snapshot_expiration: Default snapshot lifetime override.
         snapshot_retention: Automatic snapshot retention override.
-        regions: Ordered preferred and failover region override.
+        region: Preferred region override.
+        failover_regions: Failover region override.
         destroy: Whether context-manager exit destroys the fork after stopping
             it.
 
@@ -229,7 +234,8 @@ def fork_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
-        regions=regions,
+        region=region,
+        failover_regions=failover_regions,
         destroy=destroy,
     )
 
@@ -251,7 +257,8 @@ def get_or_create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
-    regions: RegionsInput = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
 ) -> tuple[SyncSandbox, bool]:
     """Get a named sandbox or create it when it does not exist.
 
@@ -280,7 +287,8 @@ def get_or_create_sandbox(
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
-        regions: Ordered preferred and failover regions.
+        region: Preferred region for a newly created sandbox.
+        failover_regions: Failover regions for a newly created sandbox.
 
     Returns:
         A ``(sandbox, created)`` tuple. ``created`` is true when this call
@@ -304,7 +312,8 @@ def get_or_create_sandbox(
         tags=tags,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
-        regions=regions,
+        region=region,
+        failover_regions=failover_regions,
     )
 
 

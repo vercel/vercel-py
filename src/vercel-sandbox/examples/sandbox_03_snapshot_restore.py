@@ -27,7 +27,8 @@ async def _main() -> None:
 
     async with sandbox.create_sandbox(
         name=base_name,
-        regions=("iad1", "sfo1"),
+        region="iad1",
+        failover_regions=("sfo1",),
     ) as base:
         try:
             await base.fs.write_text("state/message.txt", "restored from snapshot\n")
