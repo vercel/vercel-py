@@ -50,6 +50,7 @@ class FakeSubscription:
     consumer_group: str
     callback: Any
     raw_topic: object | None = None
+    max_duration: Any = None
 
 
 @dataclass
@@ -131,6 +132,8 @@ class FakeSyncQueueClient:
         self.sent: list[dict[str, Any]] = []
         self.send_headers: list[dict[str, str] | None] = []
         self.message_batches: list[list[FakeMessage]] = []
+        self.topic_batches: dict[str, list[list[FakeMessage]]] = {}
+        self.polls: list[str] = []
         self.acknowledged: list[MessageMetadata] = []
         self.ack_headers: list[dict[str, str] | None] = []
         self.poll_headers: list[dict[str, str] | None] = []
@@ -156,7 +159,15 @@ class FakeSyncQueueClient:
     ) -> Iterator[FakeDelivery]:
         headers = get_headers()
         self.poll_headers.append(dict(headers) if headers is not None else None)
-        batch = self.message_batches.pop(0) if self.message_batches else []
+        # Prefer topic-keyed batches when populated so multi-topic polling
+        # (queue shards) delivers per topic; the plain batch list serves
+        # single-topic tests.
+        if self.topic_batches:
+            topic_queue = self.topic_batches.get(topic_name(topic))
+            batch = topic_queue.pop(0) if topic_queue else []
+        else:
+            batch = self.message_batches.pop(0) if self.message_batches else []
+        self.polls.append(topic_name(topic))
         self.last_topic = topic
         self.last_consumer_group = consumer_group
         self.last_poll_kwargs = kwargs
@@ -224,6 +235,7 @@ def fake_queue_subscribe(monkeypatch: pytest.MonkeyPatch) -> list[FakeSubscripti
         *,
         topic: object | None = None,
         consumer_group: str = "celery",
+        max_duration: Any = None,
         **kwargs: object,
     ) -> Any:
         del kwargs
@@ -235,6 +247,7 @@ def fake_queue_subscribe(monkeypatch: pytest.MonkeyPatch) -> list[FakeSubscripti
                     consumer_group=consumer_group,
                     callback=callback,
                     raw_topic=topic,
+                    max_duration=max_duration,
                 )
             )
             return callback
@@ -314,6 +327,17 @@ def topic_transport(topic: object) -> object | None:
 def configure_push_broker(app: CeleryApp, broker_url: str = "vercel-push://") -> None:
     public_vqs_celery.install_vercel_celery_integration(register_queues=False)
     app.conf.broker_url = broker_url
+
+
+def neutralize_app(app: CeleryApp) -> None:
+    """Point an intentionally misconfigured app away from Vercel transports.
+
+    Celery keeps every app in a process-global registry (and pins the last
+    created one as the current app), so an app whose registration raises
+    would otherwise poison later tests that install with queue registration
+    and scan existing apps.
+    """
+    app.conf.broker_url = "memory://"
 
 
 def message(delivery_tag: str = "tag_1") -> dict[str, Any]:
@@ -952,7 +976,9 @@ def test_install_vercel_celery_integration_registers_existing_apps(
 
     public_vqs_celery.install_vercel_celery_integration()
 
-    assert app.finalized is False
+    # Registration finalizes the app so its task declarations (and their
+    # shard topics) are visible to introspection.
+    assert app.finalized is True
     assert ("celery-existing-app-celery", "celery") in [
         (sub.topic, sub.consumer_group) for sub in fake_queue_subscribe
     ]
@@ -991,6 +1017,680 @@ def test_register_celery_app_queues_can_skip_embedded_worker(
 
     assert [sub.topic for sub in fake_queue_subscribe] == ["celery-push-no-worker-emails"]
     assert fake_embedded_worker_start == []
+
+
+def resolved_max_duration(subscriptions: list[FakeSubscription], topic: str) -> object:
+    for subscription in subscriptions:
+        if subscription.topic == topic:
+            # Default groups defer resolution; shards carry a static limit.
+            value = subscription.max_duration
+            return value() if callable(value) else value
+    raise AssertionError(f"no subscription registered for topic {topic!r}")
+
+
+def test_max_duration_defaults_to_none(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-default")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+    app.conf.task_routes = {"tasks.send_email": {"queue": "emails"}}
+
+    @app.task(name="tasks.send_email")
+    def send_email() -> None:
+        pass
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-default-emails") is None
+
+
+def test_max_duration_scalar_option_applies_to_every_queue(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-scalar")
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"max_duration": 900}
+    app.conf.task_queues = (Queue("emails"), Queue("reports"))
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-scalar-emails") == 900
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-scalar-reports") == 900
+
+
+def test_max_duration_mapping_option_covers_default_groups(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-mapping")
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"max_duration": {"reports": timedelta(minutes=30)}}
+    app.conf.task_queues = (Queue("reports"), Queue("emails"))
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    # The mapping configures the queue's default group in place — no topic
+    # renames. Queues not covered keep the platform default.
+    assert resolved_max_duration(
+        fake_queue_subscribe, "celery-limits-mapping-reports"
+    ) == timedelta(minutes=30)
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-mapping-emails") is None
+
+
+def test_explicit_task_time_limits_shard_queue_topics(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-shard")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_shard.*": {"queue": "reports"}}
+
+    @app.task(name="limits_shard.build_report", time_limit=1500, shared=False)
+    def build_report() -> None:
+        pass
+
+    @app.task(name="limits_shard.rebuild_report", time_limit=1500, shared=False)
+    def rebuild_report() -> None:
+        pass
+
+    @app.task(name="limits_shard.summarize_report", time_limit=90.5, shared=False)
+    def summarize_report() -> None:
+        pass
+
+    @app.task(name="limits_shard.cleanup_report")
+    def cleanup_report() -> None:
+        pass
+
+    app.finalize()
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    # One subscription per (queue, limit group): the base topic serves tasks
+    # without an explicit limit; explicit limits shard into per-limit topics
+    # (rounded up to whole seconds) shared by tasks with equal limits.
+    assert sorted(sub.topic for sub in fake_queue_subscribe if sub.topic is not None) == [
+        "celery-limits-shard-reports",
+        "celery-limits-shard-reports_d1500",
+        "celery-limits-shard-reports_d91",
+    ]
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-shard-reports") is None
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-shard-reports_d1500") == 1500
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-shard-reports_d91") == 91
+
+
+def test_explicit_task_limits_shard_while_task_time_limit_covers_default_group(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-global")
+    configure_push_broker(app)
+    app.conf.task_time_limit = 600
+    app.conf.task_queues = (Queue("emails"),)
+    app.conf.task_routes = {"limits_global.*": {"queue": "emails"}}
+
+    @app.task(name="limits_global.send_email", time_limit=60, shared=False)
+    def send_email() -> None:
+        pass
+
+    @app.task(name="limits_global.send_digest")
+    def send_digest() -> None:
+        pass
+
+    app.finalize()
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    # The explicitly limited task gets its own shard; the task without an
+    # explicit limit stays on the base topic configured by ``task_time_limit``.
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-global-emails_d60") == 60
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-global-emails") == 600
+
+
+def test_tasks_declared_after_shard_map_freeze_publish_to_base_topic(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-late")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_late.*": {"queue": "reports"}}
+
+    @app.task(name="limits_late.build_report", time_limit=1500, shared=False)
+    def build_report() -> None:
+        pass
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    channel = make_poll_channel(queue_name_prefix="celery-limits-late-")
+    channel._put(
+        "reports",
+        {"headers": {"task": "limits_late.build_report"}, "properties": {}},
+    )
+
+    # The first publish froze the queue's shard map to match what build-time
+    # introspection deployed. A task declared afterwards has no deployed
+    # shard function, so it publishes to the always-subscribed base topic.
+    @app.task(name="limits_late.rebuild_report", time_limit=900, shared=False)
+    def rebuild_report() -> None:
+        pass
+
+    channel._put(
+        "reports",
+        {"headers": {"task": "limits_late.rebuild_report"}, "properties": {}},
+    )
+
+    sent_topics = [topic_name(sent["topic"]) for sent in FakeSyncQueueClient.instances[-1].sent]
+    assert sent_topics == [
+        "celery-limits-late-reports_d1500",
+        "celery-limits-late-reports",
+    ]
+    assert sorted({sub.topic for sub in fake_queue_subscribe if sub.topic is not None}) == [
+        "celery-limits-late-reports",
+        "celery-limits-late-reports_d1500",
+    ]
+
+
+def test_put_routes_sharded_tasks_to_their_shard_topics(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-pub")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_pub.build_report": {"queue": "reports"}}
+
+    @app.task(name="limits_pub.build_report", time_limit=1800, shared=False)
+    def build_report() -> None:
+        pass
+
+    app.finalize()
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    channel = make_poll_channel(queue_name_prefix="celery-limits-pub-")
+    channel._put(
+        "reports",
+        {"headers": {"task": "limits_pub.build_report"}, "properties": {}},
+    )
+    channel._put(
+        "reports",
+        {"headers": {"task": "limits_pub.other_task"}, "properties": {}},
+    )
+    channel._put("reports", {"properties": {}})
+
+    sent_topics = [topic_name(sent["topic"]) for sent in FakeSyncQueueClient.instances[-1].sent]
+    assert sent_topics == [
+        "celery-limits-pub-reports_d1800",
+        "celery-limits-pub-reports",
+        "celery-limits-pub-reports",
+    ]
+
+
+def test_poll_covers_queue_shard_topics(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-poll")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_poll.build_report": {"queue": "reports"}}
+
+    @app.task(name="limits_poll.build_report", time_limit=1800, shared=False)
+    def build_report() -> None:
+        pass
+
+    app.finalize()
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    channel = make_poll_channel(queue_name_prefix="celery-limits-poll-")
+    polled = [topic_name(topic) for topic in channel._topics_for_queue("reports")]
+    assert polled == [
+        "celery-limits-poll-reports",
+        "celery-limits-poll-reports_d1800",
+    ]
+
+
+def test_put_routes_shards_without_consumer_registration() -> None:
+    # Producer-only processes (any transport, on or off Vercel) derive shard
+    # routing from their own app configuration; no consumer registration or
+    # push-eligible transport is required.
+    app = CeleryApp("limits-producer")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_producer.*": {"queue": "reports"}}
+
+    @app.task(name="limits_producer.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    app.finalize()
+
+    channel = make_poll_channel(queue_name_prefix="celery-limits-producer-")
+    channel._put(
+        "reports",
+        {"headers": {"task": "limits_producer.build_report"}, "properties": {}},
+    )
+
+    sent = cast("FakeSyncQueueClient", channel._queue_client).sent
+    assert topic_name(sent[0]["topic"]) == "celery-limits-producer-reports_d1200"
+
+
+def test_poll_covers_shards_without_consumer_registration() -> None:
+    # Local poll workers see shard topics published by deployments without
+    # ever registering push subscriptions.
+    app = CeleryApp("limits-pollonly")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_pollonly.*": {"queue": "reports"}}
+
+    @app.task(name="limits_pollonly.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    app.finalize()
+
+    channel = make_poll_channel(queue_name_prefix="celery-limits-pollonly-")
+    polled = [topic_name(topic) for topic in channel._topics_for_queue("reports")]
+    assert polled == [
+        "celery-limits-pollonly-reports",
+        "celery-limits-pollonly-reports_d1200",
+    ]
+
+
+def test_task_time_limit_above_platform_cap_warns_and_clamps(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-cap")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_cap.*": {"queue": "reports"}}
+
+    @app.task(name="limits_cap.build_report", time_limit=3600, shared=False)
+    def build_report() -> None:
+        pass
+
+    with pytest.warns(UserWarning, match="capping max_duration at 1800s"):
+        vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-cap-reports_d1800") == 1800
+
+
+def test_global_task_time_limit_above_platform_cap_warns_and_clamps(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-globalcap")
+    configure_push_broker(app)
+    app.conf.task_time_limit = 4000
+    app.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    with pytest.warns(UserWarning, match="capping max_duration at 1800s"):
+        value = resolved_max_duration(fake_queue_subscribe, "celery-limits-globalcap-emails")
+    assert value == 1800
+
+
+def test_callable_task_routes_are_ignored_for_sharding(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-callable")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    invoked: list[str] = []
+
+    def route_task(name: str, args: Any, kwargs: Any, options: Any, task: Any = None) -> Any:
+        invoked.append(name)
+        return {"queue": "reports"}
+
+    app.conf.task_routes = (route_task,)
+
+    @app.task(name="limits_callable.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    # Static shard derivation never executes user routing code with fabricated
+    # arguments; callable-routed tasks publish to the base topic of whatever
+    # queue their messages actually land on.
+    assert invoked == []
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-limits-callable-reports"]
+
+
+def test_static_route_resolution_does_not_materialize_missing_queues(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-nomutate")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+    app.conf.task_routes = {"limits_nomutate.*": {"queue": "elsewhere"}}
+
+    @app.task(name="limits_nomutate.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    # Resolving routes must not add ``elsewhere`` to the app's queues the way
+    # Celery's own router does through ``task_create_missing_queues``.
+    assert "elsewhere" not in app.amqp.queues
+    assert [sub.topic for sub in fake_queue_subscribe] == ["celery-limits-nomutate-emails"]
+
+
+def test_register_finalizes_unfinalized_app_and_registers_shards(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-unfinal")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_unfinal.*": {"queue": "reports"}}
+
+    @app.task(name="limits_unfinal.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    assert not app.finalized
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    # Manual registration finalizes first; pending task decorators (and their
+    # shards) are never silently skipped.
+    assert app.finalized
+    assert sorted(sub.topic for sub in fake_queue_subscribe if sub.topic is not None) == [
+        "celery-limits-unfinal-reports",
+        "celery-limits-unfinal-reports_d1200",
+    ]
+
+
+def test_auto_registration_defers_shard_discovery_until_after_finalize(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    gc.collect()  # Drop lingering apps from other tests before install scans them.
+    public_vqs_celery.install_vercel_celery_integration()
+    app = CeleryApp("limits-auto")
+    app.conf.broker_url = "vercel-push://"
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_auto.*": {"queue": "reports"}}
+
+    @app.task(name="limits_auto.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    prefix = "celery-limits-auto-"
+    assert not [sub for sub in fake_queue_subscribe if str(sub.topic).startswith(prefix)]
+    app.finalize()
+
+    # The announce-time hook only defers to ``on_after_finalize``; by the time
+    # registration runs, every pending task is bound, so the shard set cannot
+    # depend on hook ordering.
+    assert sorted(
+        sub.topic
+        for sub in fake_queue_subscribe
+        if sub.topic is not None and sub.topic.startswith(prefix)
+    ) == [
+        "celery-limits-auto-reports",
+        "celery-limits-auto-reports_d1200",
+    ]
+
+
+def test_shared_subscription_uses_longest_default_group_limit(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    first = CeleryApp("limits-shared-a")
+    second = CeleryApp("limits-shared-b")
+    configure_push_broker(first)
+    configure_push_broker(second)
+    first.conf.broker_transport_options = {"queue_name_prefix": "limits-shared-"}
+    second.conf.broker_transport_options = {"queue_name_prefix": "limits-shared-"}
+    first.conf.task_time_limit = 600
+    second.conf.task_time_limit = 900
+    first.conf.task_queues = (Queue("emails"),)
+    second.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(first, start_worker=False)
+    vqs_celery.register_celery_app_queues(second, start_worker=False)
+
+    # Both live apps share the subscription; the function must accommodate
+    # the longest requested limit.
+    assert resolved_max_duration(fake_queue_subscribe, "limits-shared-emails") == 900
+
+
+def test_conflicting_queue_names_for_same_topic_raise(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    first = CeleryApp("collide-a")
+    second = CeleryApp("collide-b")
+    configure_push_broker(first)
+    configure_push_broker(second)
+    first.conf.broker_transport_options = {"queue_name_prefix": "collide-e"}
+    second.conf.broker_transport_options = {"queue_name_prefix": "collide-"}
+    first.conf.task_queues = (Queue("mails"),)
+    second.conf.task_queues = (Queue("emails"),)
+
+    try:
+        vqs_celery.register_celery_app_queues(first, start_worker=False)
+
+        # Both apps' prefix+queue concatenations produce the topic
+        # ``collide-emails`` for different Celery queue names.
+        with pytest.raises(RuntimeError, match="multiple Celery queue names"):
+            vqs_celery.register_celery_app_queues(second, start_worker=False)
+    finally:
+        neutralize_app(first)
+        neutralize_app(second)
+
+
+def test_poll_rotates_topics_within_queue() -> None:
+    app = CeleryApp("limits-rotate")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_rotate.*": {"queue": "reports"}}
+
+    @app.task(name="limits_rotate.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    app.finalize()
+    channel = make_poll_channel(queue_name_prefix="celery-limits-rotate-")
+    fake_client = cast("FakeSyncQueueClient", channel._queue_client)
+
+    with pytest.raises(Empty):
+        channel._get("reports")
+    with pytest.raises(Empty):
+        channel._get("reports")
+
+    # The starting topic rotates so a busy base topic cannot starve shards.
+    base = "celery-limits-rotate-reports"
+    shard = "celery-limits-rotate-reports_d1200"
+    assert fake_client.polls == [base, shard, shard, base]
+
+
+def test_get_many_releases_leased_remainder_at_prefetch_capacity() -> None:
+    app = CeleryApp("limits-capacity")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_capacity.*": {"queue": "reports"}}
+
+    @app.task(name="limits_capacity.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    app.finalize()
+    channel = make_poll_channel(
+        queue_name_prefix="celery-limits-capacity-",
+        requeue_delay_seconds=4,
+    )
+    fake_client = cast("FakeSyncQueueClient", channel._queue_client)
+    base = "celery-limits-capacity-reports"
+    queued_messages = [FakeMessage(message(f"tag_{index}"), topic=base) for index in range(3)]
+    fake_client.topic_batches[base] = [queued_messages]
+    channel.qos.prefetch_count = 1
+    received: list[Any] = []
+    channel.basic_consume("reports", no_ack=False, callback=received.append, consumer_tag="ctag")
+
+    channel.drain_events()
+
+    # One message fills the prefetch window; the already-leased remainder of
+    # the batch is released rather than stranded, and no further topic is
+    # polled just to bounce fresh leases.
+    assert len(received) == 1
+    assert [metadata for metadata, _ in fake_client.visibility_changes] == [
+        queued_messages[1].metadata,
+        queued_messages[2].metadata,
+    ]
+    assert fake_client.polls == [base]
+
+
+def test_get_many_does_not_poll_further_topics_after_delivery_failure() -> None:
+    app = CeleryApp("limits-fail")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_fail.*": {"queue": "reports"}}
+
+    @app.task(name="limits_fail.build_report", time_limit=1200, shared=False)
+    def build_report() -> None:
+        pass
+
+    app.finalize()
+    channel = make_poll_channel(
+        queue_name_prefix="celery-limits-fail-",
+        requeue_delay_seconds=6,
+    )
+    fake_client = cast("FakeSyncQueueClient", channel._queue_client)
+    base = "celery-limits-fail-reports"
+    queued_messages = [FakeMessage(message(f"tag_{index}"), topic=base) for index in range(2)]
+    fake_client.topic_batches[base] = [queued_messages]
+
+    def callback(value: Any) -> None:
+        raise RuntimeError("decode failed")
+
+    channel.qos.prefetch_count = 10
+    channel.basic_consume("reports", no_ack=False, callback=callback, consumer_tag="ctag")
+
+    with pytest.raises(RuntimeError, match="decode failed"):
+        channel.drain_events()
+
+    # Only the failing topic's leased remainder is released; the shard topic
+    # is never polled just to bounce brand-new leases.
+    assert fake_client.polls == [base]
+    assert [metadata for metadata, _ in fake_client.visibility_changes] == [
+        queued_messages[1].metadata,
+    ]
+
+
+def test_max_duration_unbounded_task_disables_derivation(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-unbounded")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("reports"),)
+    app.conf.task_routes = {"limits_unbounded.*": {"queue": "reports"}}
+
+    @app.task(name="limits_unbounded.build_report", time_limit=float("inf"), shared=False)
+    def build_report() -> None:
+        pass
+
+    @app.task(name="limits_unbounded.summarize_report", time_limit=1800, shared=False)
+    def summarize_report() -> None:
+        pass
+
+    app.finalize()
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    # The finite limit shards; the unbounded task stays in the default group
+    # and, with no configured limit, leaves it at the platform default.
+    assert sorted(sub.topic for sub in fake_queue_subscribe if sub.topic is not None) == [
+        "celery-limits-unbounded-reports",
+        "celery-limits-unbounded-reports_d1800",
+    ]
+    assert resolved_max_duration(fake_queue_subscribe, "celery-limits-unbounded-reports") is None
+
+
+def test_max_duration_rejects_invalid_transport_option(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-invalid")
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"max_duration": "15 minutes"}
+    app.conf.task_queues = (Queue("emails"),)
+
+    # Registration validates limit configuration up front instead of failing
+    # later inside deployment introspection.
+    try:
+        with pytest.raises(TypeError, match="max_duration"):
+            vqs_celery.register_celery_app_queues(app, start_worker=False)
+    finally:
+        neutralize_app(app)
+    assert not fake_queue_subscribe
+
+
+def test_max_duration_rejects_out_of_range_mapping_value(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-range")
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"max_duration": {"emails": 0}}
+    app.conf.task_queues = (Queue("emails"),)
+
+    try:
+        with pytest.raises(ValueError, match=r"max_duration.*'emails'.*between 1 and 1800"):
+            vqs_celery.register_celery_app_queues(app, start_worker=False)
+    finally:
+        neutralize_app(app)
+    assert not fake_queue_subscribe
+
+
+def test_max_duration_rejects_invalid_mapping_value_type(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-maptype")
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"max_duration": {"emails": "15 minutes"}}
+    app.conf.task_queues = (Queue("emails"),)
+
+    try:
+        with pytest.raises(TypeError, match=r"max_duration.*'emails'"):
+            vqs_celery.register_celery_app_queues(app, start_worker=False)
+    finally:
+        neutralize_app(app)
+    assert not fake_queue_subscribe
+
+
+def test_max_duration_option_mutated_after_registration_fails_at_resolution(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-mutated")
+    configure_push_broker(app)
+    app.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+    options = dict(app.conf.broker_transport_options)
+    options["max_duration"] = "15 minutes"
+    app.conf.broker_transport_options = options
+
+    try:
+        with pytest.raises(TypeError, match="max_duration"):
+            resolved_max_duration(fake_queue_subscribe, "celery-limits-mutated-emails")
+    finally:
+        neutralize_app(app)
+
+
+def test_max_duration_resolver_does_not_keep_app_alive(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    app = CeleryApp("limits-gone", set_as_current=False)
+    app_ref = ref(app)
+    configure_push_broker(app)
+    app.conf.broker_transport_options = {"max_duration": 900}
+    app.conf.task_queues = (Queue("emails"),)
+
+    vqs_celery.register_celery_app_queues(app, start_worker=False)
+
+    resolver = fake_queue_subscribe[0].max_duration
+    assert callable(resolver)
+    assert resolver() == 900
+
+    app.close()
+    del app
+
+    for _ in range(3):
+        gc.collect()
+        if app_ref() is None:
+            break
+
+    assert app_ref() is None
+    assert resolver() is None
 
 
 def test_start_embedded_worker_is_idempotent_per_app(
