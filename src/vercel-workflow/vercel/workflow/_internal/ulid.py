@@ -66,6 +66,26 @@ def _detect_prng() -> Callable[[], float]:
     return crypto_prng
 
 
+def decode_time(ulid: str) -> int:
+    """The milliseconds since the epoch a ULID encodes in its first characters.
+
+    Mirrors ``decodeTime`` from the JavaScript library, rejections included: a
+    string that is not a ULID raises rather than returning a plausible number,
+    since callers use this to date something and a silent 0 would be the epoch.
+    """
+    if len(ulid) != TIME_LEN + RANDOM_LEN:
+        raise ValueError("malformed ulid")
+    timestamp = 0
+    for char in ulid[:TIME_LEN]:
+        index = ENCODING.find(char)
+        if index < 0:
+            raise ValueError(f"invalid character found: {char}")
+        timestamp = timestamp * ENCODING_LEN + index
+    if timestamp > TIME_MAX:
+        raise ValueError("malformed ulid, timestamp too large")
+    return timestamp
+
+
 def _increment_base32(base32_str: str) -> str | None:
     """
     Increment a Base32 string by 1.

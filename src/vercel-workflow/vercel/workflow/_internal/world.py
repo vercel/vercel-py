@@ -25,8 +25,10 @@ else:
 
 import pydantic
 
-from vercel._internal.core.polyfills import Self
+from vercel._internal.core.polyfills import UTC, Self
 from vercel.queue import SanitizedName
+
+from . import ulid
 
 T = TypeVar("T")
 QueuePrefix: TypeAlias = str
@@ -108,6 +110,26 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 SPEC_VERSION_CURRENT: Literal[2] = 2
 SPEC_VERSION_MAX_SUPPORTED = 6
 
+# Which version of "lazy hook resume" this SDK's queue consumer implements.
+#
+# Resuming a hook takes two writes: the `hook_received` event, and the queue
+# message that wakes the run. Doing them one after the other is always safe but
+# slower, so `resumeHook()` can also do both at once and put the payload on the
+# message. That is only safe if whoever consumes the message knows to write the
+# event itself from that payload, because otherwise a failed event write leaves
+# the payload nowhere. So the consumer has to say up front that it does.
+#
+# It says so by number, and a run records the number in its `executionContext`
+# when it is created. `resumeHook()` reads it off the run and only takes the
+# fast path when it is high enough; a run without one gets the safe path.
+#
+# This is not a spec version. Those describe how a run's rows are encoded, which
+# a reader can see in the rows. This describes what *code* will consume the
+# run's queue messages, which nothing in the data reveals.
+#
+# Mirrors `HOOK_RESUME_INPUT_VERSION` in `@workflow/world`'s `hooks.ts`.
+HOOK_RESUME_INPUT_VERSION = 1
+
 
 class BaseModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(serialize_by_alias=True)
@@ -131,6 +153,33 @@ class RunInput(BaseModel):
     environment: str | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
 
+class HookResumeInput(BaseModel):
+    resume_id: str = pydantic.Field(alias="resumeId")
+    hook_id: str = pydantic.Field(alias="hookId")
+    token: str
+    payload: bytes
+    payload_digest: str = pydantic.Field(alias="payloadDigest")
+    deployment_id: str | None = pydantic.Field(
+        default=None, alias="deploymentId", exclude_if=lambda e: e is None
+    )
+
+    def occurred_at(self) -> datetime | None:
+        """When the resume happened, taken from its id.
+
+        A resume id is a ULID, and a ULID contains the time it was made. Using that
+        time dates the event to when the payload was sent, instead of to whenever this
+        delivery got around to writing it.
+
+        Some ids are not ULIDs -- older producers, and hand-written ones in tests.
+        There is no time to read out of those, so return nothing and let the world
+        date the event.
+        """
+        try:
+            return datetime.fromtimestamp(ulid.decode_time(self.resume_id) / 1000, UTC)
+        except ValueError:
+            return None
+
+
 class WorkflowInvokePayload(BaseModel):
     """Payload for invoking a workflow.
 
@@ -143,6 +192,11 @@ class WorkflowInvokePayload(BaseModel):
     # Run creation data for the resilient-start path, on first deliveries only.
     run_input: RunInput | None = pydantic.Field(
         default=None, alias="runInput", exclude_if=lambda e: e is None
+    )
+    # Hook payload for the lazy-hook-resume path, present only when the producer
+    # parallelized its `hook_received` write with this message.
+    hook_input: HookResumeInput | None = pydantic.Field(
+        default=None, alias="hookInput", exclude_if=lambda e: e is None
     )
     # Step ID for step execution on the combined handler. When present, the
     # receiver executes that step instead of replaying the run.
@@ -334,6 +388,9 @@ class ServerProps(BaseModel):
     run_id: str = pydantic.Field(alias="runId")
     event_id: str = pydantic.Field(alias="eventId")
     created_at: datetime = pydantic.Field(alias="createdAt")
+    resume_id: str | None = pydantic.Field(
+        default=None, alias="resumeId", exclude_if=lambda e: e is None
+    )
 
 
 class BaseEvent(BaseModel):
@@ -652,6 +709,7 @@ class HookCreatedEvent(BaseEvent):
 
 class HookReceivedEventData(BaseModel):
     payload: bytes
+    token: str | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
     def into_event(self, correlation_id: str) -> "HookReceivedEvent":
         return HookReceivedEvent(correlationId=correlation_id, eventData=self)
@@ -664,6 +722,8 @@ class HookReceivedEvent(BaseEvent):
     )
     correlation_id: str = pydantic.Field(alias="correlationId")
     event_data: HookReceivedEventData = pydantic.Field(alias="eventData")
+    # Payload carried-over from the lazy-hook-resume path
+    _queue_input: HookResumeInput | None = pydantic.PrivateAttr(None)
 
     def payloads(self) -> tuple[Any, ...]:
         return (self.event_data.payload,)
@@ -898,6 +958,15 @@ class ThrottleError(WorkflowWorldError):
 
 class EntityConflictError(Exception):
     pass
+
+
+class HookResumeConflictError(EntityConflictError):
+    """A resume id that already stands for a different hook, or a different payload.
+
+    Retrying cannot change this, unlike the conflict a resume gets while the other
+    writer's event is still on its way. A subclass, so handlers that catch
+    ``EntityConflictError`` are unaffected. Only ``LocalWorld`` raises it.
+    """
 
 
 class HookNotFoundError(Exception):

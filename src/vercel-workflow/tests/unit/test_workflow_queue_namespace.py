@@ -96,9 +96,14 @@ def _reset_world():
     w.set_world(None)
 
 
-def _run_created_contexts(world: FakeWorld) -> list[dict[str, Any] | None]:
+def _run_created_namespaces(world: FakeWorld) -> list[str | None]:
+    """The `queueNamespace` each `run_created` recorded, or None if it has none.
+
+    Reads that one key rather than the whole execution context, which also
+    carries things that have nothing to do with namespaces.
+    """
     return [
-        event.event_data.execution_context
+        (event.event_data.execution_context or {}).get("queueNamespace")
         for event in world.events
         if isinstance(event, w.RunCreatedEvent)
     ]
@@ -206,7 +211,14 @@ async def test_start_without_namespace_uses_unnamespaced_topic() -> None:
     await runtime.start(example)
 
     assert world.queued[0][0] == f"__wkf_workflow_{example.workflow_id}"
-    assert _run_created_contexts(world) == [None]
+    # The key is left out entirely rather than set to null, which is what the TS
+    # reader expects of a run with no namespace.
+    (context,) = [
+        event.event_data.execution_context
+        for event in world.events
+        if isinstance(event, w.RunCreatedEvent)
+    ]
+    assert "queueNamespace" not in (context or {})
 
 
 async def test_start_routes_each_registry_to_its_namespace() -> None:
@@ -230,10 +242,7 @@ async def test_start_routes_each_registry_to_its_namespace() -> None:
         f"__first_wkf_workflow_{first_workflow.workflow_id}",
         f"__second_wkf_workflow_{second_workflow.workflow_id}",
     ]
-    assert _run_created_contexts(world) == [
-        {"queueNamespace": "first"},
-        {"queueNamespace": "second"},
-    ]
+    assert _run_created_namespaces(world) == ["first", "second"]
 
 
 async def test_resume_hook_uses_stored_namespace() -> None:

@@ -59,6 +59,16 @@ class RunStreams(w.BaseModel):
     streams: list[str]
 
 
+class HookResumeClaim(w.BaseModel):
+    run_id: str = pydantic.Field(alias="runId")
+    resume_id: str = pydantic.Field(alias="resumeId")
+    hook_id: str = pydantic.Field(alias="hookId")
+    event_id: str = pydantic.Field(alias="eventId")
+    payload_digest: str | None = pydantic.Field(
+        default=None, alias="payloadDigest", exclude_if=lambda e: e is None
+    )
+
+
 def _read_chunk(path: pathlib.Path) -> tuple[bool, bytes]:
     """A chunk file's EOF flag and payload.
 
@@ -410,6 +420,95 @@ class LocalWorld(w.World):
         """
         return f"{prefix}_{self.monotonic_ulid(None)}"
 
+    # ── lazy hook resume: the (runId, resumeId) claim ──────────────────────
+
+    def _hook_resume_claim_path(self, run_id: str, resume_id: str) -> pathlib.Path:
+        key = hashlib.sha256(f"{run_id}\x00{resume_id}".encode()).hexdigest()
+        return self.data_dir / "hooks" / "resumes" / f"{key}.json"
+
+    def _read_event(self, run_id: str, event_id: str) -> w.Event | None:
+        return read_json(self.data_dir / "events" / f"{run_id}-{event_id}.json", w.EventAdaptor)
+
+    @staticmethod
+    def _is_resume_event(event: w.Event, claim: HookResumeClaim) -> bool:
+        # Stricter than `world-local`, which also accepts an event with no resume
+        # id at the claimed position. A claim's event id is only where its writer
+        # meant to publish, so whatever sits there may be another payload for the
+        # same hook.
+        return (
+            event.event_type == "hook_received"
+            and event.correlation_id == claim.hook_id
+            and event.server_props is not None
+            and event.server_props.resume_id == claim.resume_id
+        )
+
+    def _committed_resume_event(self, run_id: str, claim: HookResumeClaim) -> w.Event | None:
+        at_claimed = self._read_event(run_id, claim.event_id)
+        if at_claimed is not None and self._is_resume_event(at_claimed, claim):
+            return at_claimed
+        directory = self.data_dir / "events"
+        if not directory.exists():
+            return None
+        for path in sorted(directory.iterdir()):
+            if path.suffix != ".json" or not path.stem.startswith(f"{run_id}-"):
+                continue
+            event = read_json(path, w.EventAdaptor)
+            if event is not None and self._is_resume_event(event, claim):
+                return event
+        return None
+
+    def _claim_hook_resume(
+        self,
+        run_id: str,
+        data: w.Event,
+        resume: w.HookResumeInput,
+        claim_path: pathlib.Path,
+        event_id: str,
+    ) -> w.Event | None:
+        assert data.correlation_id is not None
+
+        def converge(claim: HookResumeClaim) -> w.Event:
+            # Same resume id, different hook. The two writers of one resume always
+            # agree on which hook it is, so this is a caller bug (or an id
+            # collision) rather than the same resume arriving twice. Reusing that
+            # hook's event here would file this payload under the wrong hook.
+            if claim.hook_id != data.correlation_id:
+                raise w.HookResumeConflictError(
+                    f'hook_received resumeId "{resume.resume_id}" already recorded '
+                    "for a different hook"
+                )
+            if claim.payload_digest is not None and claim.payload_digest != resume.payload_digest:
+                raise w.HookResumeConflictError(
+                    f'hook_received resumeId "{resume.resume_id}" already recorded '
+                    "with a different payload"
+                )
+            committed = self._committed_resume_event(run_id, claim)
+            if committed is not None:
+                return committed
+
+            raise w.EntityConflictError(
+                f'hook_received resumeId "{resume.resume_id}" is claimed but its '
+                "event is not observable yet"
+            )
+
+        claim = read_json(claim_path, HookResumeClaim)
+        if claim is None:
+            mine = HookResumeClaim(
+                runId=run_id,
+                resumeId=resume.resume_id,
+                hookId=data.correlation_id,
+                eventId=event_id,
+                payloadDigest=resume.payload_digest,
+            )
+            if write_exclusive(claim_path, dumps_js(mine.model_dump(exclude_none=True)).decode()):
+                return None
+            # Lost the race between the read above and this write. Their claim is
+            # the one on disk now, so go find their event.
+            claim = read_json(claim_path, HookResumeClaim)
+            if claim is None:
+                return None
+        return converge(claim)
+
     def delete_all_hooks_for_run(self, run_id: str) -> None:
         hooks_dir = self.data_dir / "hooks"
         if not hooks_dir.exists():
@@ -727,11 +826,37 @@ class LocalWorld(w.World):
                     )
 
         if data.event_type in w.HOOK_EVENTS_REQUIRING_EXISTENCE and data.correlation_id:
+            resume: w.HookResumeInput | None = None
+            claim_path: pathlib.Path | None = None
+            if isinstance(data, w.HookReceivedEvent) and data._queue_input is not None:
+                resume = data._queue_input
+                claim_path = self._hook_resume_claim_path(effective_run_id, resume.resume_id)
+                claim = read_json(claim_path, HookResumeClaim)
+                if (
+                    claim is not None
+                    and claim.hook_id == data.correlation_id
+                    and (
+                        resume.payload_digest is None
+                        or claim.payload_digest is None
+                        or claim.payload_digest == resume.payload_digest
+                    )
+                ):
+                    committed = self._committed_resume_event(effective_run_id, claim)
+                    if committed is not None:
+                        return w.EventResult(event=committed)
+
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
             existing_hook = read_json(hook_path, w.Hook)
             if existing_hook is None:
                 # Already disposed (or never created). Mirrors the backend's 404.
                 raise w.HookNotFoundError(hook_id=data.correlation_id)
+
+            if claim_path is not None and resume is not None:
+                converged = self._claim_hook_resume(
+                    effective_run_id, data, resume, claim_path, event_id
+                )
+                if converged is not None:
+                    return w.EventResult(event=converged)
 
         # Idempotent for a run already running: the runtime issues `run_started`
         # on every delivery, so appending one per replay would be unbounded.
@@ -743,14 +868,14 @@ class LocalWorld(w.World):
         # the `run_created` that path wrote, not on the row here.
         if data.event_type == "run_started":
             stored.pop("eventData", None)
-        event = w.EventAdaptor.validate_python(
-            stored
-            | {
-                "runId": effective_run_id,
-                "eventId": event_id,
-                "createdAt": now,
-            }
-        )
+        server_props: dict[str, Any] = {
+            "runId": effective_run_id,
+            "eventId": event_id,
+            "createdAt": now,
+        }
+        if isinstance(data, w.HookReceivedEvent) and data._queue_input is not None:
+            server_props["resumeId"] = data._queue_input.resume_id
+        event = w.EventAdaptor.validate_python(stored | server_props)
         run: w.WorkflowRun | None = None
         step: w.WorkflowStep | None = None
 

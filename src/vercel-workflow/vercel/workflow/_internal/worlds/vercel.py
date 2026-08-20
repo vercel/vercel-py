@@ -654,12 +654,20 @@ class VercelWorld(w.World):
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         run_id_path = "null" if run_id is None else run_id
         remote_ref_behavior = "resolve" if data.event_type in _EVENTS_NEEDING_RESOLVE else "lazy"
+        body = data.model_dump() | {"remoteRefBehavior": remote_ref_behavior}
+        if isinstance(data, w.HookReceivedEvent) and data._queue_input is not None:
+            resume = data._queue_input
+            body["resumeId"] = resume.resume_id
+            body["resumePayloadDigest"] = resume.payload_digest
+            occurred_at = resume.occurred_at()
+            if occurred_at is not None:
+                body["occurredAt"] = occurred_at
         try:
             if remote_ref_behavior == "resolve":
                 return await self._cbor_request(
                     "POST",
                     f"/v3/runs/{run_id_path}/events",
-                    data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+                    data=body,
                     schema=w.EventResult,
                 )
             else:
@@ -670,7 +678,7 @@ class VercelWorld(w.World):
                 return await self._cbor_request(
                     "POST",
                     f"/v3/runs/{run_id_path}/events",
-                    data=data.model_dump() | {"remoteRefBehavior": remote_ref_behavior},
+                    data=body,
                     schema=_LazyEventResult,
                 )
         except w.WorkflowWorldError as err:
