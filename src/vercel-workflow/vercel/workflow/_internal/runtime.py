@@ -15,7 +15,7 @@ import traceback
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from datetime import datetime, timedelta
-from typing import Any, Generic, Literal, ParamSpec, TypeVar
+from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
@@ -23,7 +23,17 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, errors, loop, nanoid, serialization as ser, streams, ulid, world as w
+from . import (
+    core,
+    errors,
+    loop,
+    nanoid,
+    serialization as ser,
+    signature_codec,
+    streams,
+    ulid,
+    world as w,
+)
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -474,13 +484,19 @@ class WorkflowOrchestratorContext:
             args, kwargs = ser.call_arguments(
                 ser.hydrate(workflow_run.input, what=what, key=self.run_key), what=what
             )
+            # `obj`, not `wf`: the sandbox re-imported the module, so its codec
+            # resolves annotations against the sandbox's globals and builds
+            # adapters for the classes the body will actually see.
+            args, kwargs = obj.codec.validate_arguments(args, kwargs)
 
             token = self._ctx.set(self)
             try:
                 return ser.dehydrate(
-                    _run_isolated(
-                        obj.func(*args, **kwargs),
-                        loop_factory=lambda: loop.WorkflowLoop(idle_hook=self.resume),
+                    obj.codec.dump_return(
+                        _run_isolated(
+                            obj.func(*args, **kwargs),
+                            loop_factory=lambda: loop.WorkflowLoop(idle_hook=self.resume),
+                        )
                     )
                 )
             finally:
@@ -491,7 +507,8 @@ class WorkflowOrchestratorContext:
         # rather than on how the body spelled the call -- see
         # `core._bind_arguments`, which the determinism check relies on.
         bound_args, bound_kwargs = step.bind_arguments(args, kwargs)
-        input_data = ser.dehydrate(ser.step_arguments(bound_args, bound_kwargs))
+        dumped_args, dumped_kwargs = step.codec.dump_arguments(bound_args, bound_kwargs)
+        input_data = ser.dehydrate(ser.step_arguments(dumped_args, dumped_kwargs))
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
         return await sus.future
@@ -693,7 +710,12 @@ class WorkflowOrchestratorContext:
                         key=self.run_key,
                     )
                     if not sus.future.cancelled():
-                        sus.future.set_result(result)
+                        try:
+                            validated = sus.step.codec.validate_return(result)
+                        except signature_codec.TypeValidationError as error:
+                            sus.future.set_exception(error)
+                        else:
+                            sus.future.set_result(validated)
 
                 case w.WaitCompletedEvent():
                     wait = self.suspensions.pop(event.correlation_id)
@@ -1318,6 +1340,7 @@ async def _execute_step(
             args, kwargs = ser.step_call_arguments(
                 ser.hydrate(step_run.input, what=what, key=run_key), what=what
             )
+            args, kwargs = step.codec.validate_arguments(args, kwargs)
 
             logger.debug(
                 "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
@@ -1358,7 +1381,7 @@ async def _execute_step(
             await step_streams.drain()
 
         # Serialize the result
-        output = ser.dehydrate(result)
+        output = ser.dehydrate(step.codec.dump_return(result))
 
         # Complete the step via event
         await world.events_create(
@@ -1647,10 +1670,18 @@ def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
         raise RuntimeError(f"Invalid duration parameter: {param}")
 
 
-class Run:
-    def __init__(self, run_id: str) -> None:
+class Run(Generic[T]):
+    def __init__(
+        self,
+        run_id: str,
+        *,
+        output_codec: signature_codec.SignatureCodec | None = None,
+    ) -> None:
         self._run_id = run_id
         self._world = w.get_world()
+        # Only `start` has the workflow in hand; a `Run` built from a run id
+        # picked up elsewhere reads its output as whatever the wire carried.
+        self._codec = output_codec
 
     @property
     def run_id(self) -> str:
@@ -1660,7 +1691,7 @@ class Run:
         run = await self._world.runs_get(self._run_id)
         return run.status
 
-    async def return_value(self) -> Any:
+    async def return_value(self) -> T:
         while True:
             run = await self._world.runs_get(self._run_id)
             if run.status == "completed":
@@ -1669,7 +1700,10 @@ class Run:
                 key = None
                 if ser.is_encrypted(run.output):
                     key = await self._world.run_key(run.run_id, deployment_id=run.deployment_id)
-                return ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
+                output = ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
+                if self._codec is None:
+                    return cast("T", output)
+                return cast("T", self._codec.validate_return(output))
 
             elif run.status == "cancelled":
                 raise RuntimeError("workflow cancelled")
@@ -1772,14 +1806,15 @@ def read_stream(
     return values()
 
 
-async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
+async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
     # Bound before anything is written, so an arity mistake raises here instead
     # of leaving a run behind that fails when its body is invoked.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
+    dumped_args, dumped_kwargs = wf.codec.dump_arguments(bound_args, bound_kwargs)
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = ser.dehydrate(ser.argument_array(bound_args, bound_kwargs))
+    input_data = ser.dehydrate(ser.argument_array(dumped_args, dumped_kwargs))
     execution_context: dict[str, Any] = {"hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION}
     if namespace is not None:
         execution_context["queueNamespace"] = namespace
@@ -1802,7 +1837,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
         deployment_id=deployment_id,
     )
 
-    return Run(run_id)
+    return Run(run_id, output_codec=wf.codec)
 
 
 async def _public_hook(
