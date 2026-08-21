@@ -259,6 +259,10 @@ class SnapshotHandleBase:
         return self._payload.source_session_id
 
     @property
+    def regions(self) -> tuple[str, ...]:
+        return self._payload.regions
+
+    @property
     def region(self) -> str:
         return self._payload.region
 
@@ -461,6 +465,10 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     @property
     def region(self) -> str | None:
         return self._payload.region
+
+    @property
+    def failover_regions(self) -> tuple[str, ...]:
+        return self._payload.failover_regions
 
     @property
     def memory(self) -> int | None:

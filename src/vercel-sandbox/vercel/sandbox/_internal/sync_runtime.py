@@ -36,6 +36,7 @@ from vercel.sandbox._internal.models import (
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
+    FailoverRegionsInput,
     NetworkPolicy,
     ProcessLog,
     SandboxQuery,
@@ -47,6 +48,7 @@ from vercel.sandbox._internal.models import (
     SnapshotRetentionUpdate,
     _parse_snapshot_expiration,
     _WriteFile,
+    normalize_failover_regions,
 )
 from vercel.sandbox._internal.pagination import (
     QuerySandboxesPage,
@@ -1405,6 +1407,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
+        region: str | None = None,
+        failover_regions: FailoverRegionsInput = None,
     ) -> Self:
         """Update mutable sandbox configuration.
 
@@ -1431,6 +1435,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 tags=tags,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
+                region=region,
+                failover_regions=normalize_failover_regions(failover_regions),
                 current_snapshot_id=current_snapshot_id,
             )
         )
@@ -1507,6 +1513,8 @@ def create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
 ) -> _ManagedSyncSandbox:
     try:
@@ -1525,6 +1533,8 @@ def create_sandbox(
                 tags=tags,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
+                region=region,
+                failover_regions=normalize_failover_regions(failover_regions),
             )
         )
         return _ManagedSyncSandbox(
@@ -1552,6 +1562,8 @@ def fork_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
 ) -> _ManagedSyncSandbox:
     try:
@@ -1570,6 +1582,8 @@ def fork_sandbox(
                 tags=tags,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
+                region=region,
+                failover_regions=normalize_failover_regions(failover_regions),
             )
         )
         return _ManagedSyncSandbox(
@@ -1621,6 +1635,8 @@ def get_or_create_sandbox(
     tags: Mapping[str, str] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
+    region: str | None = None,
+    failover_regions: FailoverRegionsInput = None,
 ) -> tuple[SyncSandbox, bool]:
     try:
         state, created = iter_coroutine(
@@ -1640,6 +1656,8 @@ def get_or_create_sandbox(
                 tags=tags,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
+                region=region,
+                failover_regions=normalize_failover_regions(failover_regions),
             )
         )
         return (
