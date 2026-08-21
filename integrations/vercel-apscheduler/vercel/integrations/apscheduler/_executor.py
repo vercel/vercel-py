@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
-import asyncio
+import atexit
 import logging
 import sys
+import threading
 from collections.abc import Awaitable
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from inspect import isawaitable
 from traceback import format_tb
+
+from anyio.from_thread import BlockingPortal, start_blocking_portal
 
 from ._imports import (
     EVENT_JOB_ERROR,
@@ -25,20 +29,40 @@ UTC = timezone.utc
 __all__ = ["VercelInlineExecutor"]
 
 
+class _JobPortal:
+    """The process's dedicated event loop thread for coroutine jobs.
+
+    Every coroutine job runs on this one loop regardless of where the
+    scheduler was woken from: the queue worker delivers on its own event
+    loop thread, where a job cannot be awaited inline, and a fresh loop
+    per run would invalidate loop-bound resources (async clients, locks)
+    between runs. A single persistent loop preserves the contract a stock
+    AsyncIOScheduler gives jobs by running them all on its loop.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._portal: BlockingPortal | None = None
+
+    def get(self) -> BlockingPortal:
+        """Return the portal, starting its loop thread on first use."""
+        with self._lock:
+            if self._portal is None:
+                stack = ExitStack()
+                self._portal = stack.enter_context(start_blocking_portal())
+                atexit.register(stack.close)
+            return self._portal
+
+
+_JOB_PORTAL = _JobPortal()
+
+
 async def _await_result(value: Awaitable[object]) -> object:
     return await value
 
 
 def _run_awaitable(value: Awaitable[object]) -> object:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_await_result(value))
-
-    raise RuntimeError(
-        "cannot run APScheduler async jobs from a running event loop; "
-        "call this scheduler from a synchronous queue worker context instead"
-    )
+    return _JOB_PORTAL.get().call(_await_result, value)
 
 
 def _run_job_at_reference_time(
