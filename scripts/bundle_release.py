@@ -62,6 +62,7 @@ SHARED_VENDORED_CONSUMERS = {
     "vercel-cache",
     "vercel-celery",
     "vercel-connect",
+    "vercel-django-tasks",
     "vercel-dramatiq",
     "vercel-internal-core",
     "vercel-internal-telemetry",
@@ -72,6 +73,7 @@ SHARED_VENDORED_CONSUMERS = {
 PEER_DEPENDENCIES = {
     "vercel-apscheduler": {"apscheduler"},
     "vercel-celery": {"celery"},
+    "vercel-django-tasks": {"django"},
     "vercel-dramatiq": {"dramatiq"},
 }
 EXTERNAL_DEPENDENCIES = {
