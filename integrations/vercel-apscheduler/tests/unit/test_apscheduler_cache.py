@@ -398,41 +398,6 @@ def test_cache_driver_foreign_owner_is_fenced_without_takeover() -> None:
     assert theirs.owner_deployment() == "dpl_b"
 
 
-def test_cache_driver_mark_reconciled_is_owner_fenced() -> None:
-    ours = cache_driver("dpl_a")
-    theirs = cache_driver("dpl_b")
-    store = CacheJobStore()
-    store.bind_namespace(scope="prj_test:production", scheduler_id="conformance")
-    ours.attach_store(store)
-    theirs.attach_store(store)
-    now = datetime.now(UTC)
-
-    ours.start(now)
-    assert not theirs.mark_reconciled("dpl_b", now)
-    assert ours.reconciled_deployment() is None
-
-    assert ours.mark_reconciled("dpl_a", now)
-    assert ours.reconciled_deployment() == "dpl_a"
-
-
-def test_cache_reconcile_marker_shares_the_jobs_document_fate() -> None:
-    driver = cache_driver("dpl_a")
-    store = CacheJobStore()
-    store.bind_namespace(scope="prj_test:production", scheduler_id="conformance")
-    driver.attach_store(store)
-    now = datetime.now(UTC)
-
-    driver.start(now)
-    assert driver.mark_reconciled("dpl_a", now)
-    assert driver.reconciled_deployment() == "dpl_a"
-
-    # Evicting the jobs document must clear the marker with it, so a driver
-    # document kept fresh by bridge hops cannot vouch for a reaped store.
-    assert store.doc_key is not None
-    get_cache().delete(store.doc_key)
-    assert driver.reconciled_deployment() is None
-
-
 def test_cache_paused_document_is_touched_by_the_activation_hook() -> None:
     driver = cache_driver()
     now = datetime.now(UTC)
@@ -504,8 +469,7 @@ def test_cache_end_to_end_start_activates_and_reserves_first_wake() -> None:
     assert snapshot.state == "running"
     assert snapshot.start_status == "active"
 
-    jobs, undecodable = adapter.coordinator.get_all_jobs_with_revisions()
-    assert undecodable == []
+    jobs = adapter.coordinator.get_all_jobs_with_revisions()
     assert [job.id for job, _revision in jobs] == ["tick"]
 
 
@@ -643,9 +607,9 @@ def test_cache_eviction_self_heals_from_the_next_wake() -> None:
         )
     first_wake = WakeupPayload.from_payload(send.call_args.args[1])
 
-    # Total eviction: both documents disappear.
+    # Total eviction: the driver document and the job record disappear.
     get_cache().delete(adapter.driver.key)
-    get_cache().delete(adapter.coordinator.store.doc_key)
+    get_cache().delete(adapter.coordinator.store._record_key("tick"))
 
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
@@ -667,11 +631,11 @@ def test_cache_eviction_self_heals_from_the_next_wake() -> None:
     successor = WakeupPayload.from_payload(send.call_args.args[1])
     assert successor.sequence == first_wake.sequence + 1
 
-    jobs, _ = adapter.coordinator.get_all_jobs_with_revisions()
+    jobs = adapter.coordinator.get_all_jobs_with_revisions()
     assert [job.id for job, _revision in jobs] == ["tick"]
 
 
-def test_cache_coordinator_cas_and_quarantine() -> None:
+def test_cache_coordinator_cas_and_read_repair() -> None:
     _scheduler, adapter, start_payload = started_cache_scheduler()
     start_subscription = get_subscriptions()[0]
     with patch(
@@ -688,29 +652,28 @@ def test_cache_coordinator_cas_and_quarantine() -> None:
         )
 
     coordinator = adapter.coordinator
-    jobs, _ = coordinator.get_all_jobs_with_revisions()
+    jobs = coordinator.get_all_jobs_with_revisions()
     (job, revision) = jobs[0]
 
     assert not coordinator.cas_update_job(job, revision + 41)
     assert coordinator.cas_update_job(job, revision)
 
-    # Corrupt the persisted record: it must be reported undecodable, and due
-    # planning must quarantine rather than crash the chain.
+    # Corrupt the persisted record: the next read rebuilds it from its
+    # declaration instead of crashing or sidelining the chain.
     store = coordinator.store
-    doc = store._load()
-    doc["jobs"]["tick"]["state"] = "bm90LXBpY2tsZQ=="  # b"not-pickle"
-    store._store(doc)
+    record = store._load_record("tick")
+    assert record is not None
+    record["state"] = "bm90LXBpY2tsZQ=="  # b"not-pickle"
+    store._store_record("tick", record)
 
-    jobs, undecodable = coordinator.get_all_jobs_with_revisions()
-    assert jobs == []
-    assert [record[0] for record in undecodable] == ["tick"]
-
-    due = coordinator.get_due_jobs_with_revisions(datetime.now(UTC) + timedelta(days=1))
-    assert due == []
-    assert store._load()["jobs"]["tick"]["quarantined"] is True
+    jobs = coordinator.get_all_jobs_with_revisions()
+    assert [job.id for job, _revision in jobs] == ["tick"]
+    repaired = store._load_record("tick")
+    assert repaired is not None
+    assert repaired["state"] != "bm90LXBpY2tsZQ=="
 
 
-def test_cache_jobs_document_eviction_alone_triggers_reconcile() -> None:
+def test_cache_job_record_eviction_alone_is_read_repaired() -> None:
     _scheduler, adapter, start_payload = started_cache_scheduler()
     start_subscription, wake_subscription = get_subscriptions()[:2]
 
@@ -728,11 +691,10 @@ def test_cache_jobs_document_eviction_alone_triggers_reconcile() -> None:
         )
     first_wake = WakeupPayload.from_payload(send.call_args.args[1])
 
-    # Only the jobs document is reaped; the driver document stays fresh
-    # (e.g. kept alive by bridge hops on a sparse schedule). The marker
-    # lives in the jobs document, so reconciliation must re-run.
-    get_cache().delete(adapter.coordinator.store.doc_key)
-    assert adapter.driver.reconciled_deployment() is None
+    # Only the job record is reaped; the driver document stays fresh
+    # (e.g. kept alive by bridge hops on a sparse schedule). The next read
+    # must rebuild the record from its declaration.
+    get_cache().delete(adapter.coordinator.store._record_key("tick"))
 
     with patch(
         "vercel.integrations.apscheduler._adapter.vqs_sync.send",
@@ -748,7 +710,7 @@ def test_cache_jobs_document_eviction_alone_triggers_reconcile() -> None:
         )
 
     assert _EXECUTIONS == ["ran"]
-    jobs, _ = adapter.coordinator.get_all_jobs_with_revisions()
+    jobs = adapter.coordinator.get_all_jobs_with_revisions()
     assert [job.id for job, _revision in jobs] == ["tick"]
 
 
@@ -796,14 +758,13 @@ def test_cache_declared_add_rearms_a_dormant_chain() -> None:
         )
 
     # Force dormancy (active generation, consumed watermark, no token) and
-    # evict the jobs document — a declaration restored by reconciliation
+    # evict the job record — a declaration restored onto a dormant chain
     # must mint the wake nothing else will.
     doc = adapter.driver._read()
     doc["current"] = None
     doc["last_sequence"] = 4
     adapter.driver._write(doc, datetime.now(UTC))
-    assert adapter.coordinator.store.doc_key is not None
-    get_cache().delete(adapter.coordinator.store.doc_key)
+    get_cache().delete(adapter.coordinator.store._record_key("tick"))
 
     declared = adapter._declared_jobs["tick"]
     adapter.coordinator.add_job(declared)
