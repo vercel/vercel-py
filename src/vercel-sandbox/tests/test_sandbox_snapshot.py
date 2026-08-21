@@ -4,6 +4,7 @@ import pytest
 
 from vercel.sandbox._internal.models import (
     SnapshotExpiration,
+    SnapshotRetention,
     _parse_snapshot_expiration,
 )
 
@@ -28,6 +29,17 @@ def test_snapshot_expiration_parser_preserves_wrapper() -> None:
     expiration = SnapshotExpiration(timedelta(days=1))
 
     assert _parse_snapshot_expiration(expiration) is expiration
+
+
+@pytest.mark.parametrize("count", [1, 10])
+def test_snapshot_retention_accepts_boundary_counts(count: int) -> None:
+    assert SnapshotRetention(count=count).count == count
+
+
+@pytest.mark.parametrize("count", [0, 11])
+def test_snapshot_retention_rejects_out_of_range_counts(count: int) -> None:
+    with pytest.raises(ValueError):
+        SnapshotRetention(count=count)
 
 
 @pytest.mark.parametrize(
