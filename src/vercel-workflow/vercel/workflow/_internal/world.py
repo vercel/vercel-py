@@ -240,12 +240,6 @@ QueuePayload: TypeAlias = WorkflowInvokePayload | HealthCheckPayload
 QueuePayloadAdaptor: pydantic.TypeAdapter[QueuePayload] = pydantic.TypeAdapter(QueuePayload)
 
 
-class StructuredError(BaseModel):
-    message: str
-    stack: str | None = None
-    code: str | None = None
-
-
 WorkflowRunStatus: TypeAlias = Literal["pending", "running", "completed", "failed", "cancelled"]
 StepStatus: TypeAlias = Literal["pending", "running", "completed", "failed", "cancelled"]
 
@@ -277,7 +271,16 @@ class BaseWorkflowRun(BaseModel):
     # while run_completed returns input_ref
     input: bytes | str | None = None
     output: bytes | None = None
-    error: StructuredError | None = None
+    # The thrown value from `run_failed`, serialized -- read it with
+    # `serialization.hydrate_error`. Loose like every other payload field, which
+    # is what `SerializedDataSchema` is on the TS side: normally the `bytes` this
+    # SDK writes, but a row written before #1851 holds the old
+    # `{message, stack, code}` object and still has to parse.
+    error: Any = None
+    # The plaintext category of that error (`USER_ERROR`, ...). Deliberately not
+    # inside the payload: observability filters on it without holding the run's
+    # key.
+    error_code: str | None = pydantic.Field(default=None, alias="errorCode")
     # Plaintext string-string metadata. Always materialized (as `{}` when
     # unset) so a run row carries the same field set the TS SDK writes.
     attributes: dict[str, str] = pydantic.Field(default_factory=dict)
@@ -313,7 +316,6 @@ class CompletedWorkflowRun(BaseWorkflowRun):
 class FailedWorkflowRun(BaseWorkflowRun):
     status: Literal["failed"]
     output: None = None
-    error: StructuredError | None = None
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
 
@@ -334,11 +336,12 @@ class BaseWorkflowStep(BaseModel):
     input: bytes | None = None
     output: bytes | None = None
     """
-    The error from a step_retrying or step_failed event.
+    The error from a step_retrying or step_failed event, serialized the way
+    every other payload is -- read it with `serialization.hydrate_error`.
     This tracks the most recent error the step encountered, which may
     be from a retry attempt (step_retrying) or the final failure (step_failed).
     """
-    error: StructuredError | None = None
+    error: Any = None
     attempt: int
     """
     When the step first started executing. Set by the first step_started event
@@ -373,7 +376,6 @@ class CompletedWorkflowStep(BaseWorkflowStep):
 class FailedWorkflowStep(BaseWorkflowStep):
     status: Literal["failed"]
     output: None = None
-    error: StructuredError
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
 
@@ -534,8 +536,12 @@ class RunCompletedEvent(BaseEvent):
 
 
 class RunFailedEventData(BaseModel):
+    # The thrown value, through the serialization pipeline; `errorCode` is its
+    # category, in plaintext beside it.
     error: Any
-    code: str | None = None
+    error_code: str | None = pydantic.Field(
+        default=None, alias="errorCode", exclude_if=lambda e: e is None
+    )
 
     def into_event(self) -> "RunFailedEvent":
         return RunFailedEvent(eventData=self)
@@ -601,8 +607,10 @@ class StepStartedEvent(BaseEvent):
 
 
 class StepRetryingEventData(BaseModel):
+    # The thrown value, serialized. No `stack` field beside it: the stack is
+    # part of the serialized error, which is also the only place it can be
+    # without escaping the encryption envelope the payload rides in.
     error: Any
-    stack: str | None = None
     retry_after: datetime | None = pydantic.Field(
         default=None, alias="retryAfter", exclude_if=lambda e: e is None
     )
@@ -649,8 +657,9 @@ class StepCompletedEvent(BaseEvent):
 
 
 class StepFailedEventData(BaseModel):
+    # The thrown value, serialized. See `StepRetryingEventData` on the missing
+    # `stack`.
     error: Any
-    stack: str | None = None
 
     def into_event(self, correlation_id: str) -> "StepFailedEvent":
         return StepFailedEvent(correlationId=correlation_id, eventData=self)

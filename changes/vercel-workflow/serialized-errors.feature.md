@@ -1,0 +1,1 @@
+A failed run or step records the thrown value through the serialization pipeline, so an error keeps its class, message and cause chain across the event log, and a run carries a plaintext `errorCode` beside it.

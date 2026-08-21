@@ -946,20 +946,6 @@ class LocalWorld(w.World):
 
         elif data.event_type == "run_failed" and hasattr(data, "event_data"):
             failed_data = data.event_data
-            if isinstance(failed_data.error, str):
-                error_msg = failed_data.error
-            elif isinstance(failed_data.error, dict) and "message" in failed_data.error:
-                error_msg = failed_data.error["message"]
-            elif hasattr(failed_data.error, "message"):
-                error_msg = failed_data.error.message
-            else:
-                error_msg = "Unknown error"
-            if isinstance(failed_data.error, dict) and "stack" in failed_data.error:
-                error_stack = failed_data.error["stack"]
-            elif hasattr(failed_data.error, "stack"):
-                error_stack = failed_data.error.stack
-            else:
-                error_stack = None
             if current_run:
                 run = w.FailedWorkflowRun(
                     runId=current_run.run_id,
@@ -974,11 +960,12 @@ class LocalWorld(w.World):
                     expiredAt=current_run.expired_at,
                     startedAt=current_run.started_at,
                     status="failed",
-                    error=w.StructuredError(
-                        message=error_msg,
-                        stack=error_stack,
-                        code=failed_data.code,
-                    ),
+                    # Stored exactly as the event carried it -- a serialized
+                    # thrown value this world has no key for and no business
+                    # reading. `errorCode` is the plaintext half, and the only
+                    # part a reader gets for free.
+                    error=failed_data.error,
+                    errorCode=failed_data.error_code,
                     completedAt=now,
                     updatedAt=now,
                 )
@@ -1069,31 +1056,12 @@ class LocalWorld(w.World):
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
-                if isinstance(step_failed_data.error, str):
-                    error_msg = step_failed_data.error
-                elif (
-                    isinstance(step_failed_data.error, dict) and "message" in step_failed_data.error
-                ):
-                    error_msg = step_failed_data.error["message"]
-                elif hasattr(step_failed_data.error, "message"):
-                    error_msg = step_failed_data.error.message
-                else:
-                    error_msg = "Unknown error"
-                if isinstance(step_failed_data.error, dict) and "stack" in step_failed_data.error:
-                    error_stack = step_failed_data.error["stack"]
-                elif hasattr(step_failed_data.error, "stack"):
-                    error_stack = step_failed_data.error.stack
-                else:
-                    error_stack = None
-                error = w.StructuredError(
-                    message=error_msg,
-                    stack=error_stack,
-                )
                 step = w.FailedWorkflowStep.model_validate(
                     validated_step.model_dump()
                     | {
                         "status": "failed",
-                        "error": error,
+                        # Verbatim, like the run row above.
+                        "error": step_failed_data.error,
                         "completedAt": now,
                         "updatedAt": now,
                     }

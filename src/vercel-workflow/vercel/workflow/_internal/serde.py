@@ -1,5 +1,8 @@
 """Custom value types on the wire, on `@workflow/core`'s ``Instance`` rail.
 
+Errors are the other half of this module and sit on their own tags; see the
+"errors" section below.
+
 devalue encodes a value it has no built-in form for as a tagged pair,
 ``["<tag>", payload]``, and both ends have to agree on the tag. That tag set
 belongs to `@workflow/core`, which composes it internally — so adding a tag is
@@ -28,13 +31,17 @@ TypeScript compiler plugin generates.
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import contextvars
 import dataclasses
 import enum
 import operator
+import traceback
 from collections.abc import Callable, Iterator
 from typing import Any, TypeVar
+
+from .errors import FatalError, RemoteError
 
 CLASS_ID_PREFIX = "class//"
 
@@ -293,8 +300,237 @@ def registration_hint(value: Any) -> str:
     return ""
 
 
-REDUCERS: dict[str, Callable[[Any], Any]] = {"Instance": reduce_instance}
-REVIVERS: dict[str, Callable[[Any], Any]] = {"Instance": revive_instance}
+# ═══════════════════════════════════════════════════════════════════════════
+# errors
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# A thrown value crosses the event log the same way any other payload does --
+# `run_failed`, `step_failed` and `step_retrying` carry it through this codec --
+# so an error needs a wire form. `@workflow/core` already defines one, in
+# `serialization/reducers/common.ts`: a tag per error class it knows
+# (``FatalError``, ``TypeError``, ...) carrying ``{message, stack?, cause?}``,
+# and a catch-all ``Error`` tag that adds ``name`` for everything else. Riding
+# those tags rather than the ``Instance`` rail is what makes a `FatalError`
+# raised in Python still fatal to a JavaScript reader, and a `TypeError` it
+# raised still a `TypeError` here.
+#
+# Two rules from that module carry over.
+#
+# The specific tags are offered before the catch-all, because devalue takes the
+# first reducer that claims a value -- and `Instance` before all of them, so an
+# exception class registered with `@serializable` keeps its own form (upstream
+# orders `WORKFLOW_SERIALIZE` classes ahead of its error tags for the same
+# reason). Registering an exception is therefore the way to keep a subclass
+# identity these tags would flatten.
+#
+# And a tag is claimed by the class it names, not by its subclasses: a
+# `UnicodeDecodeError` is not written as JavaScript's ``RangeError`` just
+# because `ValueError` is, it goes out under the catch-all with its own name.
+# `FatalError` is the exception, and deliberately: fatality is what the far side
+# acts on, so any subclass of it is written as one. Upstream's own check ends up
+# in the same place -- it matches on ``value.name``, which its constructor pins
+# to ``FatalError`` for every subclass.
+
+# The classes both sides define, paired by tag. Everything else -- a Python
+# `KeyError`, a JavaScript `URIError`, an app's own exception class -- travels
+# on the catch-all tag, which carries the name instead of a class.
+_ERROR_CLASS_BY_TAG: dict[str, type[BaseException]] = {
+    "FatalError": FatalError,
+    # Same name and same meaning on both sides.
+    "TypeError": TypeError,
+    "SyntaxError": SyntaxError,
+    # JavaScript's error for a name that is not bound.
+    "ReferenceError": NameError,
+    # The nearest built-in in either direction: a value of the right type that
+    # the callee will not accept.
+    "RangeError": ValueError,
+}
+
+ERROR_TAG = "Error"
+"""The catch-all tag, offered after every specific one."""
+
+# Tags `@workflow/core` writes for classes this SDK has no counterpart for.
+# Read-only: nothing here can produce one, but a payload that carries one has to
+# stay readable, because `devalue.parse` refuses a tag it was given no reviver
+# for and one unreadable value would cost the whole payload. Each arrives as a
+# `RemoteError` under its own name and goes back out under it.
+#
+# `RetryableError` is here because this SDK does not export one yet; the day it
+# does, its entry belongs in the table above instead, and the fields these
+# revivers drop -- `retryAfter`, a conflict's `token` -- come with it.
+_FOREIGN_ERROR_TAGS = (
+    "EvalError",
+    "URIError",
+    "DOMException",
+    "AggregateError",
+    "RetryableError",
+    "HookConflictError",
+    "RuntimeDecryptionError",
+)
+
+
+def _error_stack(value: BaseException) -> str | None:
+    """*value*'s traceback, formatted the way an unhandled exception prints.
+
+    The cause is left out (``chain=False``) because it travels structurally, in
+    the payload's own ``cause`` field, where the far side can read it as a
+    value. A freshly constructed exception has no traceback and so no stack,
+    which is the same "field absent" a JavaScript reader already handles.
+    """
+    if value.__traceback__ is None:
+        return None
+    formatted = traceback.format_exception(type(value), value, value.__traceback__, chain=False)
+    return "".join(formatted).rstrip("\n")
+
+
+def _error_message(value: BaseException) -> str:
+    if isinstance(value, RemoteError):
+        # Its `str()` prefixes the class name it is standing in for, and that
+        # name has a field of its own.
+        return value.message
+    return str(value)
+
+
+def _error_payload(value: BaseException) -> dict[str, Any]:
+    payload: dict[str, Any] = {"message": _error_message(value)}
+    stack = _error_stack(value)
+    if stack is not None:
+        payload["stack"] = stack
+    # `__cause__` only -- it is `raise X from Y`, the explicit attribution that
+    # JavaScript's `cause` also means. `__context__` is what happened to be in
+    # flight when this was raised, which has no counterpart to be read as one.
+    if value.__cause__ is not None:
+        payload["cause"] = value.__cause__
+    return payload
+
+
+def _reduce_error_class(cls: type[BaseException], *, subclasses: bool) -> Callable[[Any], Any]:
+    def reduce(value: Any) -> Any:
+        if not isinstance(value, cls):
+            return False
+        if not subclasses and type(value) is not cls:
+            return False
+        return _error_payload(value)
+
+    return reduce
+
+
+def reduce_error(value: Any) -> Any:
+    """devalue reducer for the catch-all ``Error`` tag. Falsy declines.
+
+    Carries ``name`` so an error whose class the reader does not have is still
+    recognizable -- and, for a :class:`RemoteError`, so the name a previous
+    writer used is the one that goes back out.
+    """
+    if not isinstance(value, BaseException):
+        return False
+    name = value.name if isinstance(value, RemoteError) else type(value).__name__
+    return {"name": name, **_error_payload(value)}
+
+
+def as_exception(value: Any) -> BaseException:
+    """*value* as something Python can raise.
+
+    JavaScript throws any value it likes and a rejection carries it verbatim;
+    Python has to raise an exception. A value that is not one is wrapped with
+    itself as the single argument, so a body expecting it can read it back off
+    ``.args[0]``.
+    """
+    if isinstance(value, BaseException):
+        return value
+    return RuntimeError(value)
+
+
+def _build_error(cls: type[BaseException], message: str) -> BaseException:
+    """*cls* holding *message*, or a :class:`RemoteError` if it will not.
+
+    Not every exception takes a message and nothing else -- reading a
+    ``UnicodeDecodeError``'s five constructor arguments back out of a payload
+    that carries one string is not possible, and guessing at the rest would
+    produce an exception that lies about where it came from.
+    """
+    try:
+        return cls(message)
+    except Exception:
+        return RemoteError(message, name=cls.__name__)
+
+
+def _error_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"malformed error payload: {value!r}")
+    return value
+
+
+def _apply_error_payload(exc: BaseException, payload: dict[str, Any]) -> BaseException:
+    stack = payload.get("stack")
+    if isinstance(stack, str):
+        # The writer's stack, kept where TypeScript keeps it. Python's own
+        # traceback for this exception starts wherever it is raised next, so the
+        # two do not compete.
+        exc.stack = stack  # type: ignore[attr-defined]
+    if "cause" in payload:
+        exc.__cause__ = as_exception(payload["cause"])
+    return exc
+
+
+def _revive_error_class(cls: type[BaseException]) -> Callable[[Any], Any]:
+    def revive(value: Any) -> Any:
+        payload = _error_dict(value)
+        return _apply_error_payload(_build_error(cls, str(payload.get("message", ""))), payload)
+
+    return revive
+
+
+def _revive_foreign_error(tag: str) -> Callable[[Any], Any]:
+    def revive(value: Any) -> Any:
+        payload = _error_dict(value)
+        # `DOMException` carries the specific name inside its payload; the
+        # others are named by their tag.
+        name = payload.get("name")
+        exc = RemoteError(
+            str(payload.get("message", "")), name=name if isinstance(name, str) else tag
+        )
+        return _apply_error_payload(exc, payload)
+
+    return revive
+
+
+def revive_error(value: Any) -> Any:
+    """devalue reviver for the catch-all ``Error`` tag.
+
+    Resolves ``name`` against the built-ins, so an exception a Python peer
+    raised comes back as itself, and falls back to a :class:`RemoteError`
+    holding the name for a class this side does not have.
+    """
+    payload = _error_dict(value)
+    name = payload.get("name")
+    message = str(payload.get("message", ""))
+    cls = getattr(builtins, name, None) if isinstance(name, str) else None
+    if isinstance(cls, type) and issubclass(cls, Exception):
+        exc = _build_error(cls, message)
+    else:
+        exc = RemoteError(message, name=name if isinstance(name, str) else ERROR_TAG)
+    return _apply_error_payload(exc, payload)
+
+
+ERROR_REDUCERS: dict[str, Callable[[Any], Any]] = {
+    **{
+        tag: _reduce_error_class(cls, subclasses=cls is FatalError)
+        for tag, cls in _ERROR_CLASS_BY_TAG.items()
+    },
+    ERROR_TAG: reduce_error,
+}
+ERROR_REVIVERS: dict[str, Callable[[Any], Any]] = {
+    **{tag: _revive_error_class(cls) for tag, cls in _ERROR_CLASS_BY_TAG.items()},
+    **{tag: _revive_foreign_error(tag) for tag in _FOREIGN_ERROR_TAGS},
+    ERROR_TAG: revive_error,
+}
+
+# `Instance` first: a registered class outranks the error tags, and the
+# catch-all `Error` is last within them. A stream is neither, so where
+# `serialization` inserts its own tag among these does not matter.
+REDUCERS: dict[str, Callable[[Any], Any]] = {"Instance": reduce_instance, **ERROR_REDUCERS}
+REVIVERS: dict[str, Callable[[Any], Any]] = {"Instance": revive_instance, **ERROR_REVIVERS}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
