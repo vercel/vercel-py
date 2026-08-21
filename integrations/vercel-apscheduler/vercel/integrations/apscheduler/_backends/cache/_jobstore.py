@@ -1,4 +1,4 @@
-"""Cache job store and coordinator: best-effort, provenance-tagged."""
+"""Cache job store and coordinator: declared-only, best-effort."""
 
 from __future__ import annotations
 
@@ -25,8 +25,6 @@ from apscheduler.util import (  # type: ignore[import-untyped]
 from vercel.cache import get_cache
 
 from ..._types import (
-    PROVENANCE_DECLARED,
-    PROVENANCE_RUNTIME,
     APSchedulerConfigurationError,
     NamespaceFencedError,
 )
@@ -167,10 +165,11 @@ class CacheJobStore(BaseJobStore):  # type: ignore[misc]
 class CacheJobCoordinator:
     """Couples the cache job store to its driver, best-effort.
 
-    The revision counter and CAS checks are read-merge-write rather than
-    atomic, which shrinks but cannot eliminate lost updates under
-    concurrency. Declared jobs are protected by reconciliation-from-code;
-    runtime jobs accept the documented risk.
+    The store is immutable at runtime: every record is a code declaration
+    plus execution progress, so eviction can never lose state that code and
+    the in-flight messages cannot restate. The revision counter and CAS
+    checks are read-merge-write rather than atomic, which shrinks but cannot
+    eliminate lost updates under concurrency.
     """
 
     def __init__(self, store: CacheJobStore, driver: CacheDriver, adapter: Any) -> None:
@@ -185,7 +184,7 @@ class CacheJobCoordinator:
         self.store.remove_all_jobs = self.remove_all_jobs  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
         self.store.__dict__["_vercel_apscheduler_coordinator"] = self
 
-    def _record(self, job: Any, revision: int, provenance: str) -> dict[str, Any]:
+    def _record(self, job: Any, revision: int) -> dict[str, Any]:
         state = pickle.dumps(job.__getstate__(), self.store.pickle_protocol)
         next_run_time = getattr(job, "next_run_time", None)
         return {
@@ -194,14 +193,8 @@ class CacheJobCoordinator:
                 datetime_to_utc_timestamp(next_run_time) if next_run_time is not None else None
             ),
             "revision": revision,
-            "provenance": provenance,
             "quarantined": False,
         }
-
-    def _provenance(self) -> str:
-        if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation:
-            return PROVENANCE_RUNTIME
-        return PROVENANCE_DECLARED
 
     def _mutate(self, apply: Any, *, fenced: bool = True) -> Any:
         """Read-merge-write with bounded retries against transient failures.
@@ -234,6 +227,22 @@ class CacheJobCoordinator:
                 return result
         raise RuntimeError("cache job store write failed") from last_error
 
+    def _reject_runtime_mutation(self, subject: str) -> None:
+        """Refuse a runtime write: durable inputs are code and time.
+
+        Every record must stay reconstructable from the declarations, so
+        runtime state changes have nowhere durable to live. A job is changed
+        by shipping its changed declaration; a job that must not run is
+        stopped by removing or gating its declaration in code, or by a flag
+        in application-owned storage that the job checks.
+        """
+        if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation:
+            raise APSchedulerConfigurationError(
+                f"cannot {subject} at runtime: the managed job store is "
+                "immutable at runtime; change the declaration and deploy, or "
+                "gate the job's work with state your application owns"
+            )
+
     def _rearm(self, job: Any, *, always: bool = False) -> None:
         # Adds rearm unconditionally: a declaration restored onto a dormant
         # chain (reconcile after jobs-doc eviction) must mint the wake
@@ -248,31 +257,46 @@ class CacheJobCoordinator:
         self.driver.rearm_wake(candidate, datetime.now(UTC))
 
     def add_job(self, job: Any) -> None:
-        provenance = self._provenance()
+        runtime = self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation
 
         def apply(doc: dict[str, Any]) -> Any:
             if str(job.id) in doc["jobs"]:
                 return "conflict"
+            if runtime:
+                return "declared-only"
             doc["revision_counter"] += 1
-            doc["jobs"][str(job.id)] = self._record(job, doc["revision_counter"], provenance)
+            doc["jobs"][str(job.id)] = self._record(job, doc["revision_counter"])
             return None
 
-        if self._mutate(apply) == "conflict":
-            # Declarations are insert-if-absent; runtime adds surface the
-            # conflict so replace_existing can route through update_job.
-            if self.adapter.is_runtime_mutation or self.adapter.is_wake_mutation:
+        result = self._mutate(apply)
+        if result == "declared-only":
+            # The store's contents must be reconstructable from code: an
+            # evictable, per-region cache cannot durably hold the only copy
+            # of a job nothing declares.
+            raise APSchedulerConfigurationError(
+                f'cannot create job "{job.id}" at runtime: the managed job '
+                "store holds only code-declared jobs; keep dynamic schedules "
+                "in your own database, or publish a delayed queue message "
+                "for one-shot work"
+            )
+        if result == "conflict":
+            # Declarations are insert-if-absent; a runtime add of an existing
+            # id surfaces the conflict so replace_existing can route through
+            # update_job, which mutates the declared job in place.
+            if runtime:
                 raise ConflictingIdError(job.id)
             return
         self._rearm(job, always=True)
 
     def update_job(self, job: Any) -> None:
+        self._reject_runtime_mutation(f'update job "{job.id}"')
+
         def apply(doc: dict[str, Any]) -> Any:
             record = doc["jobs"].get(str(job.id))
             if record is None:
                 return "missing"
             doc["revision_counter"] += 1
-            updated = self._record(job, doc["revision_counter"], record.get("provenance") or "")
-            doc["jobs"][str(job.id)] = updated
+            doc["jobs"][str(job.id)] = self._record(job, doc["revision_counter"])
             return None
 
         if self._mutate(apply) == "missing":
@@ -280,6 +304,8 @@ class CacheJobCoordinator:
         self._rearm(job)
 
     def remove_job(self, job_id: str) -> None:
+        self._reject_runtime_mutation(f'remove job "{job_id}"')
+
         def apply(doc: dict[str, Any]) -> Any:
             if doc["jobs"].pop(str(job_id), None) is None:
                 return "missing"
@@ -290,6 +316,8 @@ class CacheJobCoordinator:
             raise JobLookupError(job_id)
 
     def remove_all_jobs(self) -> None:
+        self._reject_runtime_mutation("remove jobs")
+
         def apply(doc: dict[str, Any]) -> Any:
             doc["jobs"].clear()
             doc["revision_counter"] += 1
@@ -314,17 +342,16 @@ class CacheJobCoordinator:
 
     def get_all_jobs_with_revisions(
         self,
-    ) -> tuple[list[tuple[Any, int, str]], list[tuple[str, int, str]]]:
-        jobs: list[tuple[Any, int, str]] = []
-        undecodable: list[tuple[str, int, str]] = []
+    ) -> tuple[list[tuple[Any, int]], list[tuple[str, int]]]:
+        jobs: list[tuple[Any, int]] = []
+        undecodable: list[tuple[str, int]] = []
         for job_id, record in self.store._load()["jobs"].items():
             revision = int(record.get("revision") or 0)
-            provenance = str(record.get("provenance") or "")
             job = self.store._decode(record)
             if job is None:
-                undecodable.append((job_id, revision, provenance))
+                undecodable.append((job_id, revision))
                 continue
-            jobs.append((job, revision, provenance))
+            jobs.append((job, revision))
         jobs.sort(
             key=lambda item: (
                 item[0].next_run_time is None,
@@ -339,11 +366,7 @@ class CacheJobCoordinator:
             if record is None or int(record.get("revision") or 0) != expected_revision:
                 return False
             doc["revision_counter"] += 1
-            doc["jobs"][str(job.id)] = self._record(
-                job,
-                doc["revision_counter"],
-                record.get("provenance") or "",
-            )
+            doc["jobs"][str(job.id)] = self._record(job, doc["revision_counter"])
             return True
 
         return bool(self._mutate(apply) is True)
