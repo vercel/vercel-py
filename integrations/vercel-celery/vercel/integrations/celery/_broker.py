@@ -5,11 +5,14 @@ from typing_extensions import override
 
 import json
 import logging
+import math
 import os
 import threading
 import time
+import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import wraps
 from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
@@ -22,6 +25,7 @@ from kombu.utils import json as kombu_json
 import vercel.queue as vqs
 import vercel.queue.sync as vqs_sync
 from celery import Celery, _state as celery_state
+from celery.app.routes import MapRoute, prepare as prepare_task_routes
 
 from .version import __version__
 
@@ -70,6 +74,10 @@ LEASE_TRANSPORT_OPTIONS = (
 )
 CONSUMER_TRANSPORT_OPTIONS = ("consumer_group",)
 QUEUE_TRANSPORT_OPTIONS = ("queue_name_prefix",)
+# The current platform ceiling for function execution time.
+_MAX_DURATION_MINIMUM_SECONDS = 1
+_MAX_DURATION_MAXIMUM_SECONDS = 1800
+
 # Celery apps can be short-lived in tests and app factories, so registration
 # idempotency is keyed weakly by app object rather than by id(app). The values
 # record only VQS-facing queue identity; when the Celery app is collected, its
@@ -79,6 +87,20 @@ _registered_queue_subscriptions: WeakKeyDictionary[Celery, dict[tuple[str, str],
     WeakKeyDictionary()
 )
 _registered_callbacks: WeakKeyDictionary[Celery, dict[tuple[str, str], Any]] = WeakKeyDictionary()
+_registration_lock = threading.RLock()
+
+
+def _capped_limit_seconds(limit_seconds: int, source: str) -> int:
+    if limit_seconds <= _MAX_DURATION_MAXIMUM_SECONDS:
+        return limit_seconds
+    warnings.warn(
+        f"{source} exceeds the {_MAX_DURATION_MAXIMUM_SECONDS}s maximum "
+        f"function execution time; capping max_duration at "
+        f"{_MAX_DURATION_MAXIMUM_SECONDS}s",
+        UserWarning,
+        stacklevel=2,
+    )
+    return _MAX_DURATION_MAXIMUM_SECONDS
 
 
 @dataclass
@@ -212,6 +234,11 @@ class _BaseChannel(virtual.Channel):
         self._messages_by_tag: dict[str, _TrackedDelivery] = {}
         self._consumed_queues_by_tag: dict[str, str] = {}
         self._poll_queue_offset = 0
+        self._poll_topic_offsets: dict[str, int] = {}
+        # Per-queue task to explicit-limit map for shard routing and polling,
+        # frozen at first use to stay consistent with what build-time
+        # introspection deployed.
+        self._queue_shard_limits_by_queue: dict[str, dict[str, int]] = {}
         # VQS push callbacks can enter this channel concurrently on SDK
         # threads. Serialize handoff into Kombu so the prefetch gate, tracked
         # lease state, and private QoS bookkeeping move together.
@@ -223,12 +250,51 @@ class _BaseChannel(virtual.Channel):
             transport=self._message_transport,
         )
 
+    def _delivery_topic(
+        self,
+        queue: str,
+        message: dict[str, Any],
+    ) -> vqs.Topic[dict[str, Any]]:
+        base = self._topic(queue)
+        headers = message.get("headers")
+        task_name = headers.get("task") if isinstance(headers, Mapping) else None
+        if isinstance(task_name, str):
+            limit = self._queue_shard_limits(queue).get(task_name)
+            if limit is not None:
+                return self._shard_topic(base, limit)
+        return base
+
+    def _shard_topic(
+        self,
+        base: vqs.Topic[dict[str, Any]],
+        limit_seconds: int,
+    ) -> vqs.Topic[dict[str, Any]]:
+        return vqs.Topic[dict[str, Any]](
+            vqs.SanitizedName(f"{base.name}_d{limit_seconds}"),
+            transport=self._message_transport,
+        )
+
+    def _queue_shard_limits(self, queue: str) -> Mapping[str, int]:
+        cached = self._queue_shard_limits_by_queue.get(queue)
+        if cached is not None:
+            return cached
+        limits: dict[str, int] = {}
+        for app in _active_apps_with_queue_name_prefix(self.queue_name_prefix):
+            for task_name, limit in _queue_task_shard_limits(app, queue).items():
+                previous = limits.get(task_name)
+                # Apps sharing a topic namespace can disagree on a task's
+                # limit, so route to the largest shard so the serving function
+                # accommodates the longest requested limit.
+                limits[task_name] = limit if previous is None else max(previous, limit)
+        self._queue_shard_limits_by_queue[queue] = limits
+        return limits
+
     def _put(self, queue: str, message: dict[str, Any], **kwargs: Any) -> None:
         # Kombu gives transports its already-normalized message envelope. Store
         # that envelope directly in VQS so receive paths can hand it back to
         # Kombu without reconstructing Celery protocol fields.
         self._queue_client.send(
-            self._topic(queue),
+            self._delivery_topic(queue, message),
             message,
             idempotency_key=self._idempotency_key(message),
             retention=self.retention,
@@ -444,23 +510,37 @@ class _BaseChannel(virtual.Channel):
 
     def _poll_get(self, queue: str, timeout: vqs.Duration | None = None) -> dict[str, Any]:
         del timeout
-        messages = self._poll_messages(
-            queue,
-            limit=1,
-        )
-        try:
-            delivery = next(messages)
-        except StopIteration as exc:
-            raise Empty from exc
-        return self._track_message(delivery.accept())
+        for topic in self._poll_topic_order(queue):
+            messages = self._queue_client.poll(
+                topic,
+                self.consumer_group,
+                limit=1,
+                lease_duration=self.lease_duration,
+            )
+            try:
+                delivery = next(messages)
+            except StopIteration:
+                continue
+            return self._track_message(delivery.accept())
+        raise Empty
 
-    def _poll_messages(self, queue: str, *, limit: int) -> Iterator[Any]:
-        return self._queue_client.poll(
-            self._topic(queue),
-            self.consumer_group,
-            limit=limit,
-            lease_duration=self.lease_duration,
-        )
+    def _topics_for_queue(self, queue: str) -> list[vqs.Topic[dict[str, Any]]]:
+        base = self._topic(queue)
+        shards = [
+            self._shard_topic(base, limit)
+            for limit in sorted(set(self._queue_shard_limits(queue).values()))
+        ]
+        return [base, *shards]
+
+    def _poll_topic_order(self, queue: str) -> list[vqs.Topic[dict[str, Any]]]:
+        # Rotate the starting topic so a busy base topic cannot starve shard
+        # topics.
+        topics = self._topics_for_queue(queue)
+        if len(topics) <= 1:
+            return topics
+        offset = self._poll_topic_offsets.get(queue, 0) % len(topics)
+        self._poll_topic_offsets[queue] = offset + 1
+        return [*topics[offset:], *topics[:offset]]
 
     def _poll_queue_order(self, queues: list[str]) -> tuple[str, ...]:
         if not queues:
@@ -646,26 +726,48 @@ class PollChannel(_BaseChannel):
     ) -> None:
         del timeout
         delivered = 0
+        capacity_exhausted = False
         for queue in self._poll_queue_order(queues):
-            remaining = self.qos.can_consume_max_estimate()
-            limit = 10 if remaining is None else min(remaining, 10)
-            if limit < 1:
+            if capacity_exhausted:
                 break
-            deliveries = self._poll_messages(queue, limit=limit)
-            try:
-                for delivery in deliveries:
-                    payload = self._track_message(delivery.accept())
-                    self.connection._deliver(payload, queue)
-                    delivered += 1
-                    if not self.qos.can_consume():
-                        break
-            except Exception:
-                self._release_unhandled_poll_deliveries(deliveries)
-                raise
-            if not self.qos.can_consume():
-                break
+            for topic in self._poll_topic_order(queue):
+                # Recompute the budget per poll.
+                remaining = self.qos.can_consume_max_estimate()
+                limit = 10 if remaining is None else min(remaining, 10)
+                if limit < 1:
+                    capacity_exhausted = True
+                    break
+                deliveries = self._queue_client.poll(
+                    topic,
+                    self.consumer_group,
+                    limit=limit,
+                    lease_duration=self.lease_duration,
+                )
+                batch_delivered, capacity_exhausted = self._deliver_polled_batch(queue, deliveries)
+                delivered += batch_delivered
+                if capacity_exhausted:
+                    break
         if delivered == 0:
             raise Empty
+
+    def _deliver_polled_batch(
+        self,
+        queue: str,
+        deliveries: Iterator[Any],
+    ) -> tuple[int, bool]:
+        delivered = 0
+        try:
+            for delivery in deliveries:
+                payload = self._track_message(delivery.accept())
+                self.connection._deliver(payload, queue)
+                delivered += 1
+                if not self.qos.can_consume():
+                    self._release_unhandled_poll_deliveries(deliveries)
+                    return delivered, True
+        except Exception:
+            self._release_unhandled_poll_deliveries(deliveries)
+            raise
+        return delivered, False
 
 
 class PushChannel(_BaseChannel):
@@ -897,11 +999,47 @@ def _register_app_queue(
     queue: str,
     consumer_group: vqs.SanitizedName,
     queue_name_prefix: str,
+) -> set[tuple[str, str]]:
+    base_topic = vqs.sanitize_name(f"{queue_name_prefix}{queue}")
+    base_key = (str(base_topic), str(consumer_group))
+
+    def resolve_max_duration(
+        *,
+        key: tuple[str, str] = base_key,
+    ) -> vqs.Duration | None:
+        return _max_duration_for_subscription(key)
+
+    # The base topic is always registered, because Celery routing is open-world
+    # (callable routes and apply_async(queue=...) are invisible statically),
+    # so the base topic must always have a consumer.
+    _register_queue_subscription(
+        app,
+        queue,
+        consumer_group,
+        base_topic,
+        resolve_max_duration,
+    )
+    desired_keys = {(str(base_topic), str(consumer_group))}
+
+    # Tasks with an explicit hard time limit shard the queue into per-limit
+    # topics served by their own functions.
+    for limit in sorted(set(_queue_task_shard_limits(app, queue).values())):
+        shard_topic = vqs.SanitizedName(f"{base_topic}_d{limit}")
+        _register_queue_subscription(app, queue, consumer_group, shard_topic, limit)
+        desired_keys.add((str(shard_topic), str(consumer_group)))
+    return desired_keys
+
+
+def _register_queue_subscription(
+    app: Celery,
+    queue: str,
+    consumer_group: vqs.SanitizedName,
+    topic: vqs.SanitizedName,
+    max_duration: vqs.MaxDuration | None,
 ) -> None:
     app_queues = _registered_app_queues.setdefault(app, set())
     app_subscriptions = _registered_queue_subscriptions.setdefault(app, {})
     app_callbacks = _registered_callbacks.setdefault(app, {})
-    topic = vqs.sanitize_name(f"{queue_name_prefix}{queue}")
     key = (str(topic), str(consumer_group))
     if key in app_queues:
         return
@@ -922,6 +1060,7 @@ def _register_app_queue(
     vqs.subscribe(
         topic=vqs.Topic(topic, transport=_KombuMessageTransport()),
         consumer_group=consumer_group,
+        max_duration=max_duration,
     )(callback)
     app_callbacks[key] = callback
     app_subscriptions[key] = queue
@@ -942,6 +1081,181 @@ def _registered_queue_callback(key: tuple[str, str]) -> Any | None:
         if callback is not None:
             return callback
     return None
+
+
+def _active_apps_with_queue_name_prefix(queue_name_prefix: str) -> list[Celery]:
+    return [
+        app
+        for app in list(celery_state._get_active_apps())
+        if _app_queue_name_prefix(app) == queue_name_prefix
+    ]
+
+
+def _duration_seconds(value: vqs.Duration) -> float:
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    return float(value)
+
+
+def _max_duration_for_subscription(key: tuple[str, str]) -> vqs.Duration | None:
+    values: list[vqs.Duration] = []
+    with _registration_lock:
+        subscribed_queues = [
+            (app, app_subscriptions.get(key))
+            for app, app_subscriptions in tuple(_registered_queue_subscriptions.items())
+        ]
+    for app, queue in subscribed_queues:
+        if queue is None:
+            continue
+        value = _max_duration_for_app_queue(app, queue)
+        if value is not None:
+            values.append(value)
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    # Multiple live apps share this subscription; the function must
+    # accommodate the longest requested limit.
+    return max(values, key=_duration_seconds)
+
+
+def _max_duration_for_app_queue(app: Celery, queue: str) -> vqs.Duration | None:
+    option = _app_max_duration_option(app)
+    if option is not None:
+        if isinstance(option, (int, float, timedelta)):
+            return option
+        value = option.get(queue)
+        if value is not None:
+            return value
+    global_limit = app.conf.task_time_limit
+    if (
+        global_limit is None
+        or isinstance(global_limit, bool)
+        or not isinstance(global_limit, (int, float))
+        or not math.isfinite(global_limit)
+        or global_limit <= 0
+    ):
+        return None
+    limit_seconds = math.ceil(global_limit)
+    return _capped_limit_seconds(
+        limit_seconds,
+        f"Celery task_time_limit of {limit_seconds}s",
+    )
+
+
+def _app_max_duration_option(
+    app: Celery,
+) -> vqs.Duration | Mapping[str, vqs.Duration] | None:
+    options = getattr(app.conf, "broker_transport_options", None)
+    if not isinstance(options, Mapping):
+        return None
+    value = options.get("max_duration")
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        for queue_name, entry in value.items():
+            # Keys are raw Celery queue names, before prefixing/sanitization.
+            _validate_max_duration_value(
+                entry,
+                f"broker_transport_options['max_duration'][{queue_name!r}]",
+            )
+        return cast("Mapping[str, vqs.Duration]", value)
+    _validate_max_duration_value(value, "broker_transport_options['max_duration']")
+    return cast("vqs.Duration", value)
+
+
+def _validate_max_duration_value(value: object, source: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, timedelta)):
+        raise TypeError(
+            f"{source} must be a duration in seconds, a datetime.timedelta, "
+            "or a mapping of Celery queue names to durations; "
+            f"got {value!r}"
+        )
+    seconds = value.total_seconds() if isinstance(value, timedelta) else float(value)
+    if (
+        not math.isfinite(seconds)
+        or seconds < _MAX_DURATION_MINIMUM_SECONDS
+        or seconds > _MAX_DURATION_MAXIMUM_SECONDS
+    ):
+        raise ValueError(
+            f"{source} must be between {_MAX_DURATION_MINIMUM_SECONDS} and "
+            f"{_MAX_DURATION_MAXIMUM_SECONDS} seconds, got {value!r}"
+        )
+
+
+def _explicit_task_limit_seconds(task: Any) -> int | None:
+    limit = getattr(task, "time_limit", None)
+    if (
+        limit is None
+        or isinstance(limit, bool)
+        or not isinstance(limit, (int, float))
+        or not math.isfinite(limit)
+        or limit <= 0
+    ):
+        # An explicitly unlimited (or nonsensical) task stays in the queue's
+        # default group; there is no bound to shard on.
+        return None
+    return math.ceil(limit)
+
+
+def _queue_task_shard_limits(app: Celery, queue: str) -> dict[str, int]:
+    limits: dict[str, int] = {}
+    # Read the raw task registry, because ``app.tasks`` would auto-finalize the app,
+    # and this derivation must be side-effect free, so that callers that need the
+    # complete task set run after finalize.
+    tasks = getattr(app, "_tasks", None)
+    if tasks is None:
+        return limits
+    routers = _static_task_routers(app)
+    default_queue = _app_default_queue(app)
+    for name, task in tuple(tasks.items()):
+        if _static_task_queue(task, routers, default_queue) != queue:
+            continue
+        limit = _explicit_task_limit_seconds(task)
+        if limit is not None:
+            limits[str(name)] = _capped_limit_seconds(
+                limit,
+                f"Celery task {name!r} time_limit of {limit}s",
+            )
+    return limits
+
+
+def _static_task_routers(app: Celery) -> tuple[MapRoute, ...]:
+    try:
+        routes = prepare_task_routes(getattr(app.conf, "task_routes", None))
+    except Exception as exc:  # noqa: BLE001
+        debug_log("celery.task_routes_prepare_failed", error=repr(exc))
+        return ()
+    return tuple(router for router in routes if isinstance(router, MapRoute))
+
+
+def _app_default_queue(app: Celery) -> str | None:
+    default_queue = getattr(app.conf, "task_default_queue", None)
+    return str(default_queue) if default_queue else None
+
+
+def _static_task_queue(
+    task: Any,
+    routers: tuple[MapRoute, ...],
+    default_queue: str | None,
+) -> str | None:
+    task_queue = getattr(task, "queue", None)
+    if task_queue is not None:
+        return str(getattr(task_queue, "name", task_queue))
+    task_name = getattr(task, "name", None)
+    if task_name is None:
+        return None
+    for router in routers:
+        route = router(str(task_name))
+        if not route:
+            continue
+        route_queue = route.get("queue")
+        if route_queue is None:
+            # Routed by exchange/routing key only; the destination queue is
+            # not statically known.
+            return None
+        return str(getattr(route_queue, "name", route_queue))
+    return default_queue
 
 
 def _app_queue_names(app: Celery) -> list[str]:
@@ -974,13 +1288,34 @@ def register_celery_app_queues(app: Celery, *, start_worker: bool = True) -> Non
             "a vercel broker transport running on Vercel, or a Vercel push "
             "transport subclass"
         )
+    # Registration reads the app's task registry, so tasks on an unfinalized app
+    # are still pending decorators, so finalize first rather than silently
+    # registering no shards.
+    if not app.finalized:
+        app.finalize()
     _configure_app_transport_defaults(app)
+    _app_max_duration_option(app)
     consumer_group = _app_consumer_group(app)
     queue_name_prefix = _app_queue_name_prefix(app)
-    for queue_name in _app_queue_names(app):
-        _register_app_queue(app, queue_name, consumer_group, queue_name_prefix)
+    with _registration_lock:
+        desired_keys: set[tuple[str, str]] = set()
+        for queue_name in _app_queue_names(app):
+            desired_keys |= _register_app_queue(app, queue_name, consumer_group, queue_name_prefix)
+        _prune_stale_app_registrations(app, desired_keys)
     if start_worker:
         _start_embedded_worker(app)
+
+
+def _prune_stale_app_registrations(app: Celery, desired_keys: set[tuple[str, str]]) -> None:
+    app_queues = _registered_app_queues.get(app)
+    if app_queues is not None:
+        app_queues &= desired_keys
+    for registry in (_registered_queue_subscriptions, _registered_callbacks):
+        entries = registry.get(app)
+        if entries is None:
+            continue
+        for key in [key for key in entries if key not in desired_keys]:
+            del entries[key]
 
 
 def _register_finalized_app_queues(app: Celery) -> None:
@@ -988,7 +1323,17 @@ def _register_finalized_app_queues(app: Celery) -> None:
         return
     _configure_app_transport_defaults(app)
     if _finalize_hook_state.register_queues and _app_uses_queue_registration_transport(app):
-        register_celery_app_queues(app)
+        # This hook fires from an unordered set that races the shared-task
+        # constructors populating ``app._tasks``, so we need to defer registration
+        # to ``on_after_finalize``, sent after every task is evaluated and bound.
+        signal = getattr(app, "on_after_finalize", None)
+        if signal is not None:
+            signal.connect(_register_app_queues_on_after_finalize, weak=False)
+
+
+def _register_app_queues_on_after_finalize(sender: Celery, **kwargs: Any) -> None:
+    del kwargs
+    _register_app_queues_if_eligible(sender)
 
 
 def _register_app_queues_if_eligible(app: Celery) -> None:
