@@ -1570,6 +1570,29 @@ class _LoadedEvents:
 async def get_all_workflow_run_events(
     run_id: str, *, after_cursor: str | None = None
 ) -> _LoadedEvents:
+    """The run's log, as the replay sees it: every row except the sealed-log noops.
+
+    A `noop` (``specVersion`` >= 7) is a real row -- the World's backend wrote
+    it to occupy a position whose writer allocated it and died -- but nothing
+    on this side of the log is walking positions. Everything downstream of here
+    is reconstructing what the run did: matching correlation IDs to
+    suspensions, looking for a terminal event, deciding which waits have
+    elapsed, and reading `createdAt` for the deterministic clock. A noop
+    answers none of those questions, so dropping it here is the whole of the
+    reader contract spec 7 asks for, and it makes the equivalence the contract
+    is about hold by construction: a log with holes sealed replays exactly like
+    the same log whose holes their own writers filled.
+
+    Dropping it *here*, rather than at each use, is what keeps the clock right.
+    ``WorkflowOrchestratorContext.now()`` dates the run from the last event the
+    replay consumed, and a noop's `createdAt` is the sealer's wall clock, which
+    can postdate every real event around it -- so a noop left in the list would
+    hand the workflow a time no event of the run ever happened at, and, because
+    the clock only moves forward, every `now()` after it too.
+
+    The cursor is unaffected: it is the World's, and it still points past every
+    row that was read, sealed positions included.
+    """
     all_events: list[w.Event] = []
     cursor: str | None = after_cursor
     has_more = True
@@ -1583,7 +1606,7 @@ async def get_all_workflow_run_events(
                 sort_order="asc",  # Required: events must be in chronological order for replay
             ),
         )
-        all_events.extend(response.data)
+        all_events.extend(event for event in response.data if not w.is_sealed_noop_event(event))
         has_more = response.has_more
         cursor = response.cursor
     return _LoadedEvents(all_events, cursor)

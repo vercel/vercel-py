@@ -104,11 +104,25 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 #   4  native attributes (`attr_set`)
 #   5  payloads may be zstd- or gzip-compressed
 #   6  slot-numbered event ids
+#   7  sealed log: positions are handed out before the write that fills them,
+#      so a writer that dies leaves a hole, and the World's backend fills it
+#      with a `noop` event
 #
 # `CURRENT` is what we stamp on rows we create; `MAX_SUPPORTED` is the highest
 # version we accept when reading, mirroring the same split in TS.
 SPEC_VERSION_CURRENT: Literal[2] = 2
-SPEC_VERSION_MAX_SUPPORTED = 6
+
+# What spec 7 gates is a READER contract, which is the whole of our side of it:
+# a reader at this version knows a `noop` occupies a real slot and carries no
+# workflow meaning, and steps over it during replay without letting its
+# `createdAt` reach the deterministic clock (see `get_all_workflow_run_events`).
+#
+# There is no writer half to implement here. A World only owes the sealing half
+# if it pre-assigns positions ahead of the commit that occupies them; the local
+# world allocates each id at the commit itself, so it has no holes to seal and
+# will never emit one. Mirrors `SPEC_VERSION_SUPPORTS_SEALED_LOG` in TS.
+SPEC_VERSION_SUPPORTS_SEALED_LOG = 7
+SPEC_VERSION_MAX_SUPPORTED = SPEC_VERSION_SUPPORTS_SEALED_LOG
 
 # Which version of "lazy hook resume" this SDK's queue consumer implements.
 #
@@ -783,6 +797,54 @@ class WaitCompletedEvent(BaseEvent):
     correlation_id: str = pydantic.Field(alias="correlationId")
 
 
+class NoopEventData(BaseModel):
+    # Open, like the `.passthrough()` on the TS schema: the shape belongs to
+    # whichever backend sealed the slot, and a reader whose only interest is
+    # skipping the row has no reason to reject a field it has not heard of.
+    model_config = pydantic.ConfigDict(serialize_by_alias=True, extra="allow")
+
+    sealed: bool | None = None
+
+
+class NoopEvent(BaseEvent):
+    """Sealed-log filler (``specVersion`` >= 7).
+
+    Written ONLY by the World's backend, to occupy a slot whose writer
+    allocated the position and then died before committing. It is a real row
+    of the log -- it holds its slot, so lengths, cursors and pagination all
+    count it -- but it carries no workflow meaning: replay steps over it
+    without offering it to anything and without advancing the deterministic
+    clock.
+
+    That last part is the reason it needs its own handling rather than falling
+    through as an unrecognized type. ``createdAt`` here is the *sealer's* wall
+    clock, which can postdate the events at higher positions, so a log whose
+    hole was sealed has to replay exactly like the same log whose hole its own
+    writer filled.
+
+    Absent from :data:`CreateEventRequest`, and never POSTed: the backend
+    rejects an attempt to create one.
+    """
+
+    event_type: Literal["noop"] = pydantic.Field(default="noop", alias="eventType")
+    # Optional because it is not load-bearing. It is `{"sealed": true}` today;
+    # nothing reads it, and a backend that omits it still means the same thing.
+    event_data: NoopEventData | None = pydantic.Field(
+        default=None, alias="eventData", exclude_if=lambda e: e is None
+    )
+
+
+def is_sealed_noop_event(event: BaseEvent) -> bool:
+    """Whether ``event`` is a sealed-log filler occupying an abandoned slot.
+
+    The single home for this test, deliberately: a noop is invisible to the run
+    but it is a real row of the log, so every pass over a log has to decide
+    whether it is walking positions (count it) or reconstructing what happened
+    (skip it). Mirrors `isSealedNoopEvent` in `@workflow/world`.
+    """
+    return event.event_type == "noop"
+
+
 CreateEventRequest: TypeAlias = (
     RunStartedEvent
     | RunCompletedEvent
@@ -815,6 +877,9 @@ Event: TypeAlias = Annotated[
         | HookConflictEvent
         | WaitCreatedEvent
         | WaitCompletedEvent
+        # World-only, and so read-side only: the backend's filler for a slot
+        # whose writer died. Deliberately not in `CreateEventRequest`.
+        | NoopEvent
     ),
     pydantic.Field(discriminator="event_type"),
 ]
