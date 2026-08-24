@@ -76,14 +76,14 @@ def test_retry_after_rejects_a_naive_datetime() -> None:
 
 def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
     return w.NonFinalWorkflowStep(
-        runId=RUN_ID,
-        stepId=STEP_ID,
-        stepName=step_name,
+        run_id=RUN_ID,
+        step_id=STEP_ID,
+        step_name=step_name,
         status="running",
         attempt=attempt,
-        createdAt=NOW,
-        updatedAt=NOW,
-        startedAt=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+        started_at=NOW,
         input=ser.dehydrate(ser.step_arguments((), {})),
     )
 
@@ -139,7 +139,7 @@ def registry() -> core.Workflows:
 
 
 async def _invoke(registry: core.Workflows, step_name: str) -> w.QueueContinuation | None:
-    payload = w.WorkflowInvokePayload(runId=RUN_ID, stepId=STEP_ID, stepName=step_name)
+    payload = w.WorkflowInvokePayload(run_id=RUN_ID, step_id=STEP_ID, step_name=step_name)
     return await runtime.workflow_handler(
         payload.model_dump(by_alias=True),
         attempt=1,
@@ -237,8 +237,8 @@ async def _run_with_started_step(world: local_mod.LocalWorld) -> str:
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_1",
-            workflowName=WORKFLOW_NAME,
+            deployment_id="dpl_1",
+            workflow_name=WORKFLOW_NAME,
             input=ser.dehydrate(ser.argument_array((), {})),
         ).into_event(),
     )
@@ -247,10 +247,10 @@ async def _run_with_started_step(world: local_mod.LocalWorld) -> str:
     await world.events_create(
         run_id,
         w.StepCreatedEventData(
-            stepName="my_step", input=ser.dehydrate(ser.step_arguments((), {}))
+            step_name="my_step", input=ser.dehydrate(ser.step_arguments((), {}))
         ).into_event(STEP_ID),
     )
-    await world.events_create(run_id, w.StepStartedEvent(correlationId=STEP_ID))
+    await world.events_create(run_id, w.StepStartedEvent(correlation_id=STEP_ID))
     return run_id
 
 
@@ -265,7 +265,7 @@ async def test_local_world_parks_the_step_until_its_deadline(tmp_path, monkeypat
     await world.events_create(
         run_id,
         w.StepRetryingEventData(
-            error="boom", stack="Traceback...", retryAfter=retry_after
+            error="boom", stack="Traceback...", retry_after=retry_after
         ).into_event(STEP_ID),
     )
 
@@ -278,7 +278,7 @@ async def test_local_world_parks_the_step_until_its_deadline(tmp_path, monkeypat
     assert step.started_at is not None
 
     with pytest.raises(w.TooEarlyError) as excinfo:
-        await world.events_create(run_id, w.StepStartedEvent(correlationId=STEP_ID))
+        await world.events_create(run_id, w.StepStartedEvent(correlation_id=STEP_ID))
     # Seconds left until the deadline, rounded up, for the caller to defer by.
     assert excinfo.value.retry_after is not None
     assert 29 <= excinfo.value.retry_after <= 30
@@ -299,12 +299,12 @@ async def test_a_deadline_past_the_queues_limit_reports_all_of_it(tmp_path, monk
     await world.events_create(
         run_id,
         w.StepRetryingEventData(
-            error="rate limited", retryAfter=datetime.now(UTC) + thirty_days
+            error="rate limited", retry_after=datetime.now(UTC) + thirty_days
         ).into_event(STEP_ID),
     )
 
     with pytest.raises(w.TooEarlyError) as excinfo:
-        await world.events_create(run_id, w.StepStartedEvent(correlationId=STEP_ID))
+        await world.events_create(run_id, w.StepStartedEvent(correlation_id=STEP_ID))
     assert excinfo.value.retry_after == pytest.approx(thirty_days.total_seconds(), abs=2)
 
 
@@ -315,10 +315,10 @@ async def test_local_world_starts_the_step_once_the_deadline_passed(tmp_path, mo
     await world.events_create(
         run_id,
         w.StepRetryingEventData(
-            error="boom", retryAfter=datetime.now(UTC) - timedelta(seconds=1)
+            error="boom", retry_after=datetime.now(UTC) - timedelta(seconds=1)
         ).into_event(STEP_ID),
     )
-    result = await world.events_create(run_id, w.StepStartedEvent(correlationId=STEP_ID))
+    result = await world.events_create(run_id, w.StepStartedEvent(correlation_id=STEP_ID))
 
     assert result.step is not None
     assert result.step.status == "running"

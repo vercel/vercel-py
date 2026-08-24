@@ -18,13 +18,13 @@ WORKFLOW_NAME = "workflow//tests.example"
 
 def _run(execution_context: dict[str, Any] | None = None) -> w.WorkflowRun:
     return w.NonFinalWorkflowRun(
-        runId=RUN_ID,
+        run_id=RUN_ID,
         status="running",
-        deploymentId="dpl_test",
-        workflowName=WORKFLOW_NAME,
-        executionContext=execution_context,
-        createdAt=NOW,
-        updatedAt=NOW,
+        deployment_id="dpl_test",
+        workflow_name=WORKFLOW_NAME,
+        execution_context=execution_context,
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 
@@ -183,9 +183,9 @@ async def test_step_requeues_on_the_topic_it_arrived_on() -> None:
     queue_name = f"__python_wkf_workflow_{WORKFLOW_NAME}"
     await runtime.workflow_handler(
         w.WorkflowInvokePayload(
-            runId=RUN_ID,
-            stepId="step_test",
-            stepName=add.name,
+            run_id=RUN_ID,
+            step_id="step_test",
+            step_name=add.name,
         ).model_dump(by_alias=True),
         attempt=1,
         queue_name=queue_name,

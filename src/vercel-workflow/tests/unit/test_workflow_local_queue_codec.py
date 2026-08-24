@@ -28,8 +28,8 @@ INPUT = ser.dehydrate([[1], 123])
 
 def _payload() -> w.WorkflowInvokePayload:
     return w.WorkflowInvokePayload(
-        runId=RUN_ID,
-        runInput=w.RunInput.from_wire(
+        run_id=RUN_ID,
+        run_input=w.RunInput.from_wire(
             {
                 "input": INPUT,
                 "deploymentId": "dpl_local",
@@ -88,14 +88,14 @@ def test_a_ts_written_envelope_is_accepted() -> None:
     assert parsed.run_input is not None and parsed.run_input.input == INPUT
     # The whole point: this is what `_resilient_create_run` feeds the run row.
     run = w.NonFinalWorkflowRun(
-        runId=RUN_ID,
-        deploymentId="dpl_local",
+        run_id=RUN_ID,
+        deployment_id="dpl_local",
         status="pending",
-        workflowName=WORKFLOW,
-        specVersion=6,
+        workflow_name=WORKFLOW,
+        spec_version=6,
         input=parsed.run_input.input,
-        createdAt=local_mod.js_now(),
-        updatedAt=local_mod.js_now(),
+        created_at=local_mod.js_now(),
+        updated_at=local_mod.js_now(),
     )
     assert run.input == INPUT
 
@@ -112,7 +112,7 @@ def test_re_enqueue_round_trips() -> None:
 
 def test_a_payload_without_bytes_is_unchanged() -> None:
     """A re-enqueue carries no `runInput`, and must not grow anything."""
-    bare = w.WorkflowInvokePayload(runId=RUN_ID)
+    bare = w.WorkflowInvokePayload(run_id=RUN_ID)
 
     wire = _on_the_wire(bare)
 

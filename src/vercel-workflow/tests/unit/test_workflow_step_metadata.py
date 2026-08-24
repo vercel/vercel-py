@@ -56,8 +56,8 @@ async def test_step_metadata_available_inside_step(tmp_path, monkeypatch) -> Non
     run_result = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="",
-            workflowName="test-wf",
+            deployment_id="",
+            workflow_name="test-wf",
             input=_run_input(name="world"),
         ).into_event(),
     )
@@ -68,15 +68,15 @@ async def test_step_metadata_available_inside_step(tmp_path, monkeypatch) -> Non
     step_id = "step_testid"
     await world.events_create(
         run_id,
-        w.StepCreatedEventData(stepName=greet.name, input=_step_input(name="world")).into_event(
+        w.StepCreatedEventData(step_name=greet.name, input=_step_input(name="world")).into_event(
             step_id
         ),
     )
 
     payload = w.WorkflowInvokePayload(
-        runId=run_id,
-        stepId=step_id,
-        stepName=greet.name,
+        run_id=run_id,
+        step_id=step_id,
+        step_name=greet.name,
     )
     await runtime.workflow_handler(
         payload.model_dump(by_alias=True),

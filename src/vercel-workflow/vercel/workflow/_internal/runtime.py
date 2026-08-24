@@ -816,9 +816,9 @@ async def _ensure_hook_received(
     # another writer's event and its payload is encoded to that version. Same
     # reason `run_started` carries the version of whoever created the run.
     event = w.HookReceivedEvent(
-        correlationId=hook_input.hook_id,
-        eventData=w.HookReceivedEventData(payload=hook_input.payload, token=hook_input.token),
-        specVersion=run.spec_version or w.SPEC_VERSION_CURRENT,
+        correlation_id=hook_input.hook_id,
+        event_data=w.HookReceivedEventData(payload=hook_input.payload, token=hook_input.token),
+        spec_version=run.spec_version or w.SPEC_VERSION_CURRENT,
     )
     event._queue_input = hook_input
     try:
@@ -988,11 +988,11 @@ async def workflow_handler(
     # already running.
     run_input = req.run_input
     started = w.RunStartedEvent(
-        eventData=(
+        event_data=(
             w.RunStartedEventData.from_run_input(run_input) if run_input is not None else None
         ),
         # The creating client's version, so a run created here is not relabelled.
-        specVersion=(run_input.spec_version if run_input is not None else w.SPEC_VERSION_CURRENT),
+        spec_version=(run_input.spec_version if run_input is not None else w.SPEC_VERSION_CURRENT),
     )
     try:
         result = await world.events_create(run_id, started)
@@ -1057,7 +1057,7 @@ async def workflow_handler(
     for wait_event in waits_to_complete:
         try:
             await world.events_create(
-                run_id, w.WaitCompletedEvent(correlationId=wait_event.correlation_id)
+                run_id, w.WaitCompletedEvent(correlation_id=wait_event.correlation_id)
             )
         except w.EntityConflictError:
             # Another concurrent invocation already completed this wait
@@ -1145,7 +1145,7 @@ async def workflow_handler(
             elif isinstance(sus, Suspension):
 
                 async def create_step(s=sus):
-                    step_data = w.StepCreatedEventData(stepName=s.step.name, input=s.input)
+                    step_data = w.StepCreatedEventData(step_name=s.step.name, input=s.input)
                     try:
                         await world.events_create(run_id, step_data.into_event(s.correlation_id))
                     except w.EntityConflictError:
@@ -1160,10 +1160,10 @@ async def workflow_handler(
                     await world.queue(
                         w.get_queue_name(workflow_run.workflow_name, namespace),
                         w.WorkflowInvokePayload(
-                            runId=run_id,
-                            stepId=s.correlation_id,
-                            stepName=s.step.name,
-                            requestedAt=datetime.now(UTC),
+                            run_id=run_id,
+                            step_id=s.correlation_id,
+                            step_name=s.step.name,
+                            requested_at=datetime.now(UTC),
                         ),
                         idempotency_key=s.correlation_id,
                     )
@@ -1174,7 +1174,7 @@ async def workflow_handler(
             elif isinstance(sus, Wait):
 
                 async def create_wait(s=sus):
-                    wait_data = w.WaitCreatedEventData(resumeAt=s.resume_at)
+                    wait_data = w.WaitCreatedEventData(resume_at=s.resume_at)
                     try:
                         await world.events_create(run_id, wait_data.into_event(s.correlation_id))
                     except w.EntityConflictError:
@@ -1202,7 +1202,7 @@ async def workflow_handler(
                     try:
                         await world.events_create(
                             run_id,
-                            w.HookDisposedEvent(correlationId=h.correlation_id),
+                            w.HookDisposedEvent(correlation_id=h.correlation_id),
                         )
                     except (w.EntityConflictError, w.HookNotFoundError):
                         logger.debug(
@@ -1262,7 +1262,7 @@ async def _execute_step(
     try:
         start_result = await world.events_create(
             req.run_id,
-            w.StepStartedEvent(correlationId=req.step_id),
+            w.StepStartedEvent(correlation_id=req.step_id),
         )
     except w.TooEarlyError as e:
         # retryAfter not reached yet — keep the message visible and retry later.
@@ -1283,8 +1283,8 @@ async def _execute_step(
         await world.queue(
             queue_name,
             w.WorkflowInvokePayload(
-                runId=req.run_id,
-                requestedAt=datetime.now(UTC),
+                run_id=req.run_id,
+                requested_at=datetime.now(UTC),
             ),
         )
         return None
@@ -1317,8 +1317,8 @@ async def _execute_step(
         await world.queue(
             queue_name,
             w.WorkflowInvokePayload(
-                runId=req.run_id,
-                requestedAt=datetime.now(UTC),
+                run_id=req.run_id,
+                requested_at=datetime.now(UTC),
             ),
         )
         return None
@@ -1461,7 +1461,7 @@ async def _execute_step(
             await world.events_create(
                 req.run_id,
                 w.StepRetryingEventData(
-                    error=error_text, stack=error_stack, retryAfter=retry_at
+                    error=error_text, stack=error_stack, retry_after=retry_at
                 ).into_event(req.step_id),
             )
 
@@ -1479,8 +1479,8 @@ async def _execute_step(
     await world.queue(
         queue_name,
         w.WorkflowInvokePayload(
-            runId=req.run_id,
-            requestedAt=datetime.now(UTC),
+            run_id=req.run_id,
+            requested_at=datetime.now(UTC),
         ),
     )
     return None
@@ -1787,10 +1787,10 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     if namespace is not None:
         execution_context["queueNamespace"] = namespace
     data = w.RunCreatedEventData(
-        deploymentId=deployment_id,
-        workflowName=wf.workflow_id,
+        deployment_id=deployment_id,
+        workflow_name=wf.workflow_id,
         input=input_data,
-        executionContext=execution_context,
+        execution_context=execution_context,
     )
     result = await world.events_create(None, data.into_event())
 
@@ -1801,7 +1801,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     run_id = result.run.run_id
     await world.queue(
         w.get_queue_name(wf.workflow_id, namespace),
-        w.WorkflowInvokePayload(runId=run_id),
+        w.WorkflowInvokePayload(run_id=run_id),
         deployment_id=deployment_id,
     )
 
@@ -1850,6 +1850,6 @@ async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook
         raise RuntimeError("Workflow run has an invalid queue namespace")
     await world.queue(
         w.get_queue_name(run.workflow_name, namespace),
-        w.WorkflowInvokePayload(runId=hook.run_id),
+        w.WorkflowInvokePayload(run_id=hook.run_id),
     )
     return hook

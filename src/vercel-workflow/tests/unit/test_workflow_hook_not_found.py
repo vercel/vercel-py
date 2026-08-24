@@ -31,7 +31,7 @@ async def test_hook_disposed_404_maps_to_hook_not_found() -> None:
     )
 
     with pytest.raises(w.HookNotFoundError):
-        await world.events_create(RUN_ID, w.HookDisposedEvent(correlationId="hook_1"))
+        await world.events_create(RUN_ID, w.HookDisposedEvent(correlation_id="hook_1"))
 
 
 @respx.mock

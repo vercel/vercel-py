@@ -58,9 +58,9 @@ async def test_step_retry_timeout_reschedules_step(isolated_subscriptions: None)
     assert async_handler is not None
 
     step_payload = w.WorkflowInvokePayload(
-        runId="wrun_1",
-        stepId="step_1",
-        stepName="step//tests.add",
+        run_id="wrun_1",
+        step_id="step_1",
+        step_name="step//tests.add",
     ).model_dump()
     body = {
         "payload": step_payload,
@@ -108,7 +108,7 @@ async def test_wait_continuation_forwards_idempotency_key(isolated_subscriptions
     async_handler = subscriptions[0].func
     assert async_handler is not None
 
-    wf_payload = w.WorkflowInvokePayload(runId="wrun_1").model_dump()
+    wf_payload = w.WorkflowInvokePayload(run_id="wrun_1").model_dump()
     body = {
         "payload": wf_payload,
         "queueName": "__wkf_workflow_wf",

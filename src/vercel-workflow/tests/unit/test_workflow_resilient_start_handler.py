@@ -108,7 +108,7 @@ class FakeWorld(NoStreams, w.World):
 
     async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:
         self.events_list_calls.append(run_id)
-        return w.PaginatedResult(data=list(self.events), cursor=None, hasMore=False)
+        return w.PaginatedResult(data=list(self.events), cursor=None, has_more=False)
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         if data.event_type == "run_started":
@@ -221,7 +221,7 @@ async def test_setup_takes_the_run_entity_from_the_response(registry: core.Workf
     module by name, and a test module is not importable that way. Running the
     body end to end is the e2e suite's job.
     """
-    fake = FakeWorld(started_run=_run(status="running", deploymentId="dpl_from_response"))
+    fake = FakeWorld(started_run=_run(status="running", deployment_id="dpl_from_response"))
     w.set_world(fake)
 
     await _invoke(registry, run_input=_run_input())

@@ -279,7 +279,7 @@ class TestRunApi:
     async def test_stream_info_and_list_reach_the_world(self) -> None:
         class Meta(ReplayWorld):
             async def streams_get_info(self, run_id: str, name: str) -> w.StreamInfo:
-                return w.StreamInfo(tailIndex=4, done=True)
+                return w.StreamInfo(tail_index=4, done=True)
 
             async def streams_list(self, run_id: str) -> list[str]:
                 return [NAME]
@@ -287,7 +287,7 @@ class TestRunApi:
         w.set_world(Meta([]))
         run = runtime.Run[Any](RUN_ID)
 
-        assert await run.stream_info() == w.StreamInfo(tailIndex=4, done=True)
+        assert await run.stream_info() == w.StreamInfo(tail_index=4, done=True)
         assert await run.list_streams() == [NAME]
 
     async def test_read_stream_takes_a_name_run_cannot_derive(self) -> None:

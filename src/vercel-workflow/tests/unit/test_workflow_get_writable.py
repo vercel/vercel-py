@@ -67,14 +67,14 @@ class FakeWorld(NoStreams, w.World):
         if data.event_type == "step_started":
             return w.EventResult(
                 step=w.NonFinalWorkflowStep(
-                    runId=RUN_ID,
-                    stepId=STEP_ID,
-                    stepName=data.correlation_id or "",
+                    run_id=RUN_ID,
+                    step_id=STEP_ID,
+                    step_name=data.correlation_id or "",
                     status="running",
                     attempt=1,
-                    createdAt=NOW,
-                    updatedAt=NOW,
-                    startedAt=NOW,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    started_at=NOW,
                     input=self.step_input,
                 )
             )
@@ -107,9 +107,9 @@ def registry() -> core.Workflows:
 
 async def _invoke(registry: core.Workflows, step_name: str) -> w.QueueContinuation | None:
     payload = w.WorkflowInvokePayload(
-        runId=RUN_ID,
-        stepId=STEP_ID,
-        stepName=step_name,
+        run_id=RUN_ID,
+        step_id=STEP_ID,
+        step_name=step_name,
     )
     return await runtime.workflow_handler(
         payload.model_dump(by_alias=True),

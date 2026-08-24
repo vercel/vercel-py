@@ -186,7 +186,7 @@ async def test_a_probe_naming_a_run_is_still_a_probe(registry) -> None:
     world = StreamsWorld()
     w.set_world(world)
 
-    assert await _probe(registry, runId="wrun_not_created_yet") is None
+    assert await _probe(registry, run_id="wrun_not_created_yet") is None
 
     assert world.closes == [(RUN_ID, STREAM)]
 

@@ -66,7 +66,7 @@ async def _run_with_hook(world: _RecordingLocalWorld) -> str:
     result = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_1", workflowName="test-wf", input=ser.dehydrate([])
+            deployment_id="dpl_1", workflow_name="test-wf", input=ser.dehydrate([])
         ).into_event(),
     )
     assert result.run is not None
