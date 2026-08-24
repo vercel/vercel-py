@@ -25,12 +25,12 @@ from __future__ import annotations
 import abc
 import base64
 import contextlib
-import dataclasses
 import os
 from collections.abc import AsyncGenerator, AsyncIterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import anyio
+import pydantic
 
 from . import serialization as ser
 
@@ -312,7 +312,7 @@ class WorkflowWritable(abc.ABC):
         """Mark the stream complete, ending its readers."""
 
 
-@dataclasses.dataclass(frozen=True)
+@pydantic.dataclasses.dataclass(frozen=True)
 class WorkflowStreamHandle(WorkflowWritable):
     """A reference to a stream, writable only once it reaches a step.
 
@@ -334,6 +334,11 @@ class WorkflowStreamHandle(WorkflowWritable):
     # positionally, so the names stay out of the way.
     _run_id: str
     _name: str
+
+    @pydantic.model_serializer(mode="plain")
+    def _identity(self) -> Any:
+        """Leave the handle for the lower layer's ``WritableStream`` reducer."""
+        return self
 
     @property
     def run_id(self) -> str:

@@ -331,6 +331,22 @@ class TestHandOff:
         assert ctx.stream_handle(None) == again.stream_handle(None)
         assert ctx.stream_handle("logs") != ctx.stream_handle(None)
 
+    async def test_typed_handles_reach_the_stream_serializer(self, registry) -> None:
+        """The Pydantic serializer leaves stream references for their reducer."""
+
+        @registry.step
+        async def one(out: streams.WorkflowWritable | None) -> None: ...
+
+        @registry.step
+        async def many(out: list[streams.WorkflowWritable]) -> None: ...
+
+        handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
+        assert one.codec.dump("out", handle) is handle
+
+        dumped = many.codec.dump("out", [handle])
+        assert dumped[0] is handle
+        assert b'"WritableStream"' in ser.dehydrate(dumped)
+
     async def test_a_handle_survives_the_trip_into_a_step(self, registry) -> None:
         """The round trip that makes the feature work.
 

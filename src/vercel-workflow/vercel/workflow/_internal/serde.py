@@ -36,6 +36,8 @@ import operator
 from collections.abc import Callable, Iterator
 from typing import Any, TypeVar
 
+import pydantic
+
 CLASS_ID_PREFIX = "class//"
 
 T = TypeVar("T")
@@ -118,7 +120,16 @@ def register_serializable(
     guard against collisions but a requirement: the sandbox re-imports the
     workflow's module, so a decorated class is registered once per import with
     a fresh class object each time.
+
+    Pydantic models and dataclasses are serialized from workflow and step type
+    annotations instead, and cannot be registered here.
     """
+    if issubclass(cls, pydantic.BaseModel) or dataclasses.is_dataclass(cls):
+        raise TypeError(
+            f"{cls.__qualname__} is a Pydantic model or dataclass; "
+            "serialize it from a workflow or step type annotation instead"
+        )
+
     if serialize is None:
         if hasattr(cls, "_workflow_serialize"):
             serialize = operator.methodcaller("_workflow_serialize")
