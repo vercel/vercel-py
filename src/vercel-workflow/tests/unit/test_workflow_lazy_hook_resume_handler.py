@@ -82,7 +82,7 @@ def _run(status: str = "running", **overrides: Any) -> w.WorkflowRun:
         "updatedAt": NOW,
         "startedAt": NOW,
     }
-    return w.WorkflowRunAdaptor.validate_python(fields | overrides)
+    return w.WorkflowRunAdaptor.from_wire(fields | overrides)
 
 
 def _hook_input(**overrides: Any) -> dict[str, Any]:
@@ -100,7 +100,7 @@ def _stamp(event: w.Event, *, event_id: str, resume_id: str | None = None) -> w.
     props: dict[str, Any] = {"runId": RUN_ID, "eventId": event_id, "createdAt": NOW}
     if resume_id is not None:
         props["resumeId"] = resume_id
-    return event.model_copy(update={"server_props": w.ServerProps.model_validate(props)})
+    return event.model_copy(update={"server_props": w.ServerProps.from_wire(props)})
 
 
 def _hook_created() -> w.Event:

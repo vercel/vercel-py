@@ -29,7 +29,7 @@ INPUT = ser.dehydrate([[1], 123])
 def _payload() -> w.WorkflowInvokePayload:
     return w.WorkflowInvokePayload(
         runId=RUN_ID,
-        runInput=w.RunInput.model_validate(
+        runInput=w.RunInput.from_wire(
             {
                 "input": INPUT,
                 "deploymentId": "dpl_local",
@@ -48,7 +48,7 @@ def _on_the_wire(payload: w.WorkflowInvokePayload) -> dict:
 
 def _parse(wire: dict) -> w.WorkflowInvokePayload:
     """Decode a wire dict the way the receive handler does."""
-    parsed = w.QueuePayloadAdaptor.validate_python(local_mod._decode_js(wire))
+    parsed = w.QueuePayloadAdaptor.from_wire(local_mod._decode_js(wire))
     assert isinstance(parsed, w.WorkflowInvokePayload)
     assert parsed.run_input is not None
     return parsed
@@ -143,6 +143,6 @@ async def test_bytes_survive_a_real_local_queue_delivery(tmp_path, monkeypatch) 
         await world.aclose()
 
     assert delivered, "the message was never delivered"
-    parsed = w.QueuePayloadAdaptor.validate_python(delivered[0])
+    parsed = w.QueuePayloadAdaptor.from_wire(delivered[0])
     assert isinstance(parsed, w.WorkflowInvokePayload)
     assert parsed.run_input is not None and parsed.run_input.input == INPUT

@@ -69,7 +69,7 @@ def _seal_row(position: int, **overrides: Any) -> dict[str, Any]:
 
 
 def _seal(position: int, **overrides: Any) -> w.Event:
-    return w.EventAdaptor.validate_python(_seal_row(position, **overrides))
+    return w.EventAdaptor.from_wire(_seal_row(position, **overrides))
 
 
 # ── the row ────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ def test_a_seal_parses_without_event_data() -> None:
     row = _seal_row(6)
     del row["eventData"]
 
-    event = w.EventAdaptor.validate_python(row)
+    event = w.EventAdaptor.from_wire(row)
 
     assert isinstance(event, w.NoopEvent)
     assert event.event_data is None
@@ -311,7 +311,7 @@ def _wait_ids() -> list[str]:
 
 
 def _run() -> w.WorkflowRun:
-    return w.WorkflowRunAdaptor.validate_python(
+    return w.WorkflowRunAdaptor.from_wire(
         {
             "runId": RUN_ID,
             "deploymentId": "dpl_1",

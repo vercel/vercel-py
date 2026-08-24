@@ -773,7 +773,7 @@ async def test_a_world_that_does_not_encrypt_resolves_no_key() -> None:
 
 
 def _run(**overrides) -> w.WorkflowRun:
-    return w.WorkflowRunAdaptor.validate_python(
+    return w.WorkflowRunAdaptor.from_wire(
         {
             "runId": RUN_ID,
             "status": "running",

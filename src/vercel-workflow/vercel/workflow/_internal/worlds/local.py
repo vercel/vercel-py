@@ -236,15 +236,10 @@ def dumps_js(data: Any) -> bytes:
     return text.encode()
 
 
-def read_json(path: pathlib.Path, schema: type[T] | pydantic.TypeAdapter[T]) -> T | None:
-    if path.exists():
-        data = _decode_js(json.loads(path.read_text(encoding="utf-8")))
-        if isinstance(schema, pydantic.TypeAdapter):
-            return schema.validate_python(data)
-        else:
-            return schema.model_validate(data)
-    else:
+def read_json(path: pathlib.Path, schema: type[T] | w.WireAdaptor[T]) -> T | None:
+    if not path.exists():
         return None
+    return schema.from_wire(_decode_js(json.loads(path.read_text(encoding="utf-8"))))
 
 
 def atomic_write(path: str | os.PathLike[str], data: bytes, *, overwrite: bool = True) -> None:
@@ -614,7 +609,7 @@ class LocalWorld(w.World):
                     # we may get a duplicate invocation but won't lose the scheduled wakeup
                     await self.queue(
                         queue_name,
-                        w.QueuePayloadAdaptor.validate_python(payload),
+                        w.QueuePayloadAdaptor.from_wire(payload),
                         deployment_id=body.get("deploymentId"),
                         delay_seconds=delay_seconds,
                         idempotency_key=result.idempotency_key,
@@ -749,7 +744,7 @@ class LocalWorld(w.World):
             specVersion=data.spec_version,
         )
         run_created_id = self._new_id("evnt")
-        event = w.EventAdaptor.validate_python(
+        event = w.EventAdaptor.from_wire(
             run_created.model_dump()
             | {"runId": run_id, "eventId": run_created_id, "createdAt": now}
         )
@@ -790,7 +785,7 @@ class LocalWorld(w.World):
             run_terminal_events = ["run_started", "run_completed", "run_failed"]
 
             if data.event_type == "run_cancelled" and current_run.status == "cancelled":
-                event = w.EventAdaptor.validate_python(
+                event = w.EventAdaptor.from_wire(
                     data.model_dump()
                     | {
                         "runId": effective_run_id,
@@ -885,7 +880,7 @@ class LocalWorld(w.World):
         }
         if isinstance(data, w.HookReceivedEvent) and data._queue_input is not None:
             server_props["resumeId"] = data._queue_input.resume_id
-        event = w.EventAdaptor.validate_python(stored | server_props)
+        event = w.EventAdaptor.from_wire(stored | server_props)
         run: w.WorkflowRun | None = None
         step: w.WorkflowStep | None = None
 
@@ -1047,7 +1042,7 @@ class LocalWorld(w.World):
 
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
-                step = w.NonFinalWorkflowStep.model_validate(
+                step = w.NonFinalWorkflowStep.from_wire(
                     validated_step.model_dump()
                     | {
                         "status": "running",
@@ -1063,7 +1058,7 @@ class LocalWorld(w.World):
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
-                step = w.CompletedWorkflowStep.model_validate(
+                step = w.CompletedWorkflowStep.from_wire(
                     validated_step.model_dump()
                     | {
                         "status": "completed",
@@ -1079,7 +1074,7 @@ class LocalWorld(w.World):
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
-                step = w.NonFinalWorkflowStep.model_validate(
+                step = w.NonFinalWorkflowStep.from_wire(
                     validated_step.model_dump()
                     | {
                         "status": "pending",
@@ -1109,7 +1104,7 @@ class LocalWorld(w.World):
                     message=error_msg,
                     stack=error_stack,
                 )
-                step = w.FailedWorkflowStep.model_validate(
+                step = w.FailedWorkflowStep.from_wire(
                     validated_step.model_dump()
                     | {
                         "status": "failed",
