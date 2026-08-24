@@ -889,7 +889,7 @@ class LocalWorld(w.World):
         run: w.WorkflowRun | None = None
         step: w.WorkflowStep | None = None
 
-        if data.event_type == "run_created" and hasattr(data, "event_data"):
+        if data.event_type == "run_created":
             run_data = data.event_data
             run = w.NonFinalWorkflowRun(
                 runId=effective_run_id,
@@ -930,7 +930,7 @@ class LocalWorld(w.World):
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
 
-        elif data.event_type == "run_completed" and hasattr(data, "event_data"):
+        elif data.event_type == "run_completed":
             completed_data = data.event_data
             if current_run:
                 run = w.CompletedWorkflowRun(
@@ -954,7 +954,7 @@ class LocalWorld(w.World):
                 write_json(run_path, run, overwrite=True)
                 self.delete_all_hooks_for_run(effective_run_id)
 
-        elif data.event_type == "run_failed" and hasattr(data, "event_data"):
+        elif data.event_type == "run_failed":
             failed_data = data.event_data
             if isinstance(failed_data.error, str):
                 error_msg = failed_data.error
@@ -1018,7 +1018,7 @@ class LocalWorld(w.World):
                 write_json(run_path, run, overwrite=True)
                 self.delete_all_hooks_for_run(effective_run_id)
 
-        elif data.event_type == "step_created" and hasattr(data, "event_data"):
+        elif data.event_type == "step_created":
             step_data = data.event_data
             assert isinstance(step_data.input, bytes)
             step = w.NonFinalWorkflowStep(
@@ -1059,7 +1059,7 @@ class LocalWorld(w.World):
                 )
                 write_json(step_path, step, overwrite=True)
 
-        elif data.event_type == "step_completed" and hasattr(data, "event_data"):
+        elif data.event_type == "step_completed":
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
@@ -1074,7 +1074,7 @@ class LocalWorld(w.World):
                 )
                 write_json(step_path, step, overwrite=True)
 
-        elif data.event_type == "step_retrying" and hasattr(data, "event_data"):
+        elif data.event_type == "step_retrying":
             retrying_data = data.event_data
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
@@ -1093,7 +1093,7 @@ class LocalWorld(w.World):
                 )
                 write_json(step_path, step, overwrite=True)
 
-        elif data.event_type == "step_failed" and hasattr(data, "event_data"):
+        elif data.event_type == "step_failed":
             step_failed_data = data.event_data
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
@@ -1120,7 +1120,7 @@ class LocalWorld(w.World):
                 )
                 write_json(step_path, step, overwrite=True)
 
-        elif data.event_type == "hook_created" and hasattr(data, "event_data"):
+        elif data.event_type == "hook_created":
             hook_data = data.event_data
             hashed_token = hashlib.sha256(hook_data.token.encode()).hexdigest()
             constraint_path = self.data_dir / "hooks" / "tokens" / f"{hashed_token}.json"
