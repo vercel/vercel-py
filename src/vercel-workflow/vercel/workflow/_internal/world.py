@@ -133,6 +133,13 @@ HOOK_RESUME_INPUT_VERSION = 1
 
 
 class BaseModel(pydantic.BaseModel):
+    # We use `snake_case = Field(alias="camelCase")` everywhere to support both
+    # the JS-style wire format and Pythonic identifiers in code.  So naturally,
+    # we turned on `serialize_by_alias` globally to `model_dump()` to wire format.
+    # But Pydantic doesn't differentiate model instantiation from validation,
+    # therefore, we validate by Python name here, so that all model constructors
+    # take snake case parameters; while, flip to validate by alias in `from_wire`
+    # below in order to read camel cases from the wire.
     model_config = pydantic.ConfigDict(
         serialize_by_alias=True, validate_by_alias=False, validate_by_name=True
     )
