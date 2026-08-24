@@ -1620,7 +1620,8 @@ async def get_all_workflow_run_events(
                 sort_order="asc",  # Required: events must be in chronological order for replay
             ),
         )
-        all_events.extend(response.data)
+        # A seal marks a slot whose write never landed -- nothing happened there to replay.
+        all_events.extend(event for event in response.data if event.event_type != "noop")
         has_more = response.has_more
         cursor = response.cursor
     return _LoadedEvents(all_events, cursor)

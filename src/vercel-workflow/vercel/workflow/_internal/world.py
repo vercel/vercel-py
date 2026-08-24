@@ -104,11 +104,12 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 #   4  native attributes (`attr_set`)
 #   5  payloads may be zstd- or gzip-compressed
 #   6  slot-numbered event ids
+#   7  sealed log: `noop` rows fill slots whose writer died before committing
 #
 # `CURRENT` is what we stamp on rows we create; `MAX_SUPPORTED` is the highest
 # version we accept when reading, mirroring the same split in TS.
 SPEC_VERSION_CURRENT: Literal[2] = 2
-SPEC_VERSION_MAX_SUPPORTED = 6
+SPEC_VERSION_MAX_SUPPORTED = 7
 
 # Which version of "lazy hook resume" this SDK's queue consumer implements.
 #
@@ -783,6 +784,24 @@ class WaitCompletedEvent(BaseEvent):
     correlation_id: str = pydantic.Field(alias="correlationId")
 
 
+class NoopEventData(BaseModel):
+    # Open, like the `.passthrough()` on the TS schema: the shape belongs to
+    # whichever backend sealed the slot, and a reader whose only interest is
+    # skipping the row has no reason to reject a field it has not heard of.
+    model_config = pydantic.ConfigDict(serialize_by_alias=True, extra="allow")
+
+    sealed: bool | None = None
+
+
+class NoopEvent(BaseEvent):
+    event_type: Literal["noop"] = pydantic.Field(default="noop", alias="eventType")
+    # Optional because it is not load-bearing. It is `{"sealed": true}` today;
+    # nothing reads it, and a backend that omits it still means the same thing.
+    event_data: NoopEventData | None = pydantic.Field(
+        default=None, alias="eventData", exclude_if=lambda e: e is None
+    )
+
+
 CreateEventRequest: TypeAlias = (
     RunStartedEvent
     | RunCompletedEvent
@@ -815,6 +834,7 @@ Event: TypeAlias = Annotated[
         | HookConflictEvent
         | WaitCreatedEvent
         | WaitCompletedEvent
+        | NoopEvent
     ),
     pydantic.Field(discriminator="event_type"),
 ]
