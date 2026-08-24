@@ -3,6 +3,7 @@
 
 from .. import version as _version
 from . import (
+    asgi as _asgi,
     config as _config,
     names as _names,
     transports as _transports,
@@ -24,6 +25,7 @@ Handoff = _types.Handoff
 Message = _types.Message
 MessageID = _types.MessageID
 MessageMetadata = _types.MessageMetadata
+QueueClientAsgiApp = _asgi.QueueClientAsgiApp
 QueueDirective = _types.QueueDirective
 RawJsonTransport = _transports.RawJsonTransport
 ReceiptHandle = _types.ReceiptHandle
@@ -36,6 +38,7 @@ Topic = _types.Topic
 TopicPattern = _types.TopicPattern
 TypedJsonTransport = _transports.TypedJsonTransport
 __version__ = _version.__version__
+asgi_app = _asgi.asgi_app
 sanitize_name = _names.sanitize_name
 
 # Only add public symbols to __all__; internal helpers must stay unexported.
@@ -72,6 +75,7 @@ __all__ = (
     "MessageUnavailableError",
     "PayloadValidationError",
     "ProtocolError",
+    "QueueClientAsgiApp",
     "QueueDirective",
     "QueueError",
     "QueueSubscriber",
@@ -95,6 +99,7 @@ __all__ = (
     "UnauthorizedError",
     "UnhandledMessageError",
     "__version__",
+    "asgi_app",
     "get_subscriptions",
     "sanitize_name",
     "subscribe",

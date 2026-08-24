@@ -1175,7 +1175,7 @@ def test_topic_transport_decodes_a_push_delivery(
     delivery = sync_delivery(eqs, {"ok": True}, transport=_HalfJsonTransport())
     assert delivery.body == b'half:{"ok": true}'
 
-    # A client that was told nothing, as the generated subscriber entrypoint builds it.
+    # A client that was told nothing, as a generated asgi_app() entrypoint builds it.
     receiver = SyncQueueClient(token="token", base_url=eqs.base_url, deployment=ALL_DEPLOYMENTS)
     receiver.accept_and_handle(delivery.body, delivery.headers, lease_duration=30)
 
