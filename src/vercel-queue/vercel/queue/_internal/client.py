@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 import warnings
 from collections.abc import (
@@ -110,6 +110,10 @@ from .types import (
 
 T = TypeVar("T")
 QUEUE_API_PATH = "/api/v3/topic"
+
+
+if TYPE_CHECKING:
+    from .asgi import QueueClientAsgiApp
 
 
 class _DuplicateMessageRedirect(Exception):  # noqa: N818
@@ -994,6 +998,12 @@ class QueueClient(BaseQueueClient):
 
         """
         await retry_message_after_async(message, delay, self._extend_lease)
+
+    def asgi_app(self) -> QueueClientAsgiApp:
+        """Return an ASGI push-callback app backed by this client."""
+        from .asgi import QueueClientAsgiApp  # noqa: PLC0415
+
+        return QueueClientAsgiApp(self)
 
 
 @dataclass(frozen=True, kw_only=True)
