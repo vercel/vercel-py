@@ -9,13 +9,12 @@ import logging
 import math
 import os
 import random
-import re
 import sys
 import traceback
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
-from datetime import datetime, timedelta
-from typing import Any, Generic, Literal, ParamSpec, TypeVar
+from datetime import datetime
+from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
@@ -23,7 +22,18 @@ import pydantic
 
 from vercel._internal.core.polyfills import UTC, Self
 
-from . import core, errors, loop, nanoid, serialization as ser, streams, ulid, world as w
+from . import (
+    core,
+    errors,
+    loop,
+    nanoid,
+    serialization as ser,
+    signature_codec,
+    streams,
+    ulid,
+    world as w,
+)
+from .duration import parse_duration_to_date
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -134,12 +144,18 @@ class StepInfo:
     across retries and unique per logical step call, which makes it a good
     idempotency key for non-idempotent side effects (payments, emails, queue
     sends) performed inside a step body.
+
+    ``step_started_at`` is when the *first* attempt began, not this one. The
+    World keeps the timestamp the first ``step_started`` event set and does not
+    move it on a retry, so a body can measure how long the step has been going
+    in total, including the waits between attempts.
     """
 
     run_id: str
     step_id: str
     step_name: str
     attempt: int
+    step_started_at: datetime
 
 
 _step_ctx: contextvars.ContextVar[StepInfo] = contextvars.ContextVar("WorkflowStepContext")
@@ -474,13 +490,19 @@ class WorkflowOrchestratorContext:
             args, kwargs = ser.call_arguments(
                 ser.hydrate(workflow_run.input, what=what, key=self.run_key), what=what
             )
+            # `obj`, not `wf`: the sandbox re-imported the module, so its codec
+            # resolves annotations against the sandbox's globals and builds
+            # adapters for the classes the body will actually see.
+            args, kwargs = obj.codec.validate_arguments(args, kwargs)
 
             token = self._ctx.set(self)
             try:
                 return ser.dehydrate(
-                    _run_isolated(
-                        obj.func(*args, **kwargs),
-                        loop_factory=lambda: loop.WorkflowLoop(idle_hook=self.resume),
+                    obj.codec.dump_return(
+                        _run_isolated(
+                            obj.func(*args, **kwargs),
+                            loop_factory=lambda: loop.WorkflowLoop(idle_hook=self.resume),
+                        )
                     )
                 )
             finally:
@@ -491,7 +513,8 @@ class WorkflowOrchestratorContext:
         # rather than on how the body spelled the call -- see
         # `core._bind_arguments`, which the determinism check relies on.
         bound_args, bound_kwargs = step.bind_arguments(args, kwargs)
-        input_data = ser.dehydrate(ser.step_arguments(bound_args, bound_kwargs))
+        dumped_args, dumped_kwargs = step.codec.dump_arguments(bound_args, bound_kwargs)
+        input_data = ser.dehydrate(ser.step_arguments(dumped_args, dumped_kwargs))
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
         return await sus.future
@@ -693,7 +716,12 @@ class WorkflowOrchestratorContext:
                         key=self.run_key,
                     )
                     if not sus.future.cancelled():
-                        sus.future.set_result(result)
+                        try:
+                            validated = sus.step.codec.validate_return(result)
+                        except signature_codec.TypeValidationError as error:
+                            sus.future.set_exception(error)
+                        else:
+                            sus.future.set_result(validated)
 
                 case w.WaitCompletedEvent():
                     wait = self.suspensions.pop(event.correlation_id)
@@ -1318,6 +1346,7 @@ async def _execute_step(
             args, kwargs = ser.step_call_arguments(
                 ser.hydrate(step_run.input, what=what, key=run_key), what=what
             )
+            args, kwargs = step.codec.validate_arguments(args, kwargs)
 
             logger.debug(
                 "[Workflows] '%s' - invoking step '%s' (step_id=%s, attempt=%d)",
@@ -1332,6 +1361,7 @@ async def _execute_step(
                     step_id=req.step_id,
                     step_name=step.name,
                     attempt=current_attempt,
+                    step_started_at=step_run.started_at,
                 )
             )
             # Execute the step function
@@ -1358,7 +1388,7 @@ async def _execute_step(
             await step_streams.drain()
 
         # Serialize the result
-        output = ser.dehydrate(result)
+        output = ser.dehydrate(step.codec.dump_return(result))
 
         # Complete the step via event
         await world.events_create(
@@ -1413,26 +1443,33 @@ async def _execute_step(
         else:
             # Not at max retries yet - retry the step
             logger.warning(
-                "[Workflows] '%s' - Encountered Error "
+                "[Workflows] '%s' - Encountered %s "
                 "while executing step '%s' (attempt %d): "
                 "%s\n\n  This step has failed but will be retried",
                 req.run_id,
+                "RetryableError" if isinstance(e, errors.RetryableError) else "Error",
                 step.name,
                 current_attempt,
                 e,
             )
 
+            retry_at = e.retry_at if isinstance(e, errors.RetryableError) else None
+
             # Set step to pending for retry
             error_stack = traceback.format_exc()
             await world.events_create(
                 req.run_id,
-                w.StepRetryingEventData(error=error_text, stack=error_stack).into_event(
-                    req.step_id
-                ),
+                w.StepRetryingEventData(
+                    error=error_text, stack=error_stack, retryAfter=retry_at
+                ).into_event(req.step_id),
             )
 
             # Return timeout to keep message visible for retry
-            return w.QueueContinuation(delay_seconds=1.0)
+            delay_seconds = 1.0
+            if retry_at is not None:
+                remaining = (retry_at - datetime.now(UTC)).total_seconds()
+                delay_seconds = float(max(1, math.ceil(remaining)))
+            return w.QueueContinuation(delay_seconds=delay_seconds)
 
     finally:
         _step_streams_ctx.reset(streams_token)
@@ -1600,58 +1637,18 @@ def _has_terminal_run_event(events: list[w.Event], run_id: str) -> bool:
     )
 
 
-duration_re = re.compile(
-    r"(-?\d+(?:\.\d+)?)\s*(ms|s|seconds?|m|minutes?|h|hours?|d|days?|w|weeks?)",
-    re.IGNORECASE,
-)
-duration_units = {
-    "ms": 1,
-    "s": 1_000,
-    "second": 1_000,
-    "seconds": 1_000,
-    "m": 60 * 1_000,
-    "minute": 60 * 1_000,
-    "minutes": 60 * 1_000,
-    "h": 60 * 60 * 1_000,
-    "hour": 60 * 60 * 1_000,
-    "hours": 60 * 60 * 1_000,
-    "d": 24 * 60 * 60 * 1_000,
-    "day": 24 * 60 * 60 * 1_000,
-    "days": 24 * 60 * 60 * 1_000,
-    "w": 7 * 24 * 60 * 60 * 1_000,
-    "week": 7 * 24 * 60 * 60 * 1_000,
-    "weeks": 7 * 24 * 60 * 60 * 1_000,
-}
-
-
-def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
-    if isinstance(param, str):
-        items = [float(v) * duration_units[u] for v, u in duration_re.findall(param)]
-        if not items:
-            raise RuntimeError(f"Invalid duration parameter: {param}")
-        ms = sum(items)
-        if ms < 0:
-            raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=ms)
-
-    elif isinstance(param, (int, float)):
-        if param < 0:
-            raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=param)
-
-    elif isinstance(param, datetime):
-        if param.tzinfo is None:
-            raise RuntimeError("Duration parameter must have tzinfo")
-        return param
-
-    else:
-        raise RuntimeError(f"Invalid duration parameter: {param}")
-
-
-class Run:
-    def __init__(self, run_id: str) -> None:
+class Run(Generic[T]):
+    def __init__(
+        self,
+        run_id: str,
+        *,
+        output_codec: signature_codec.SignatureCodec | None = None,
+    ) -> None:
         self._run_id = run_id
         self._world = w.get_world()
+        # Only `start` has the workflow in hand; a `Run` built from a run id
+        # picked up elsewhere reads its output as whatever the wire carried.
+        self._codec = output_codec
 
     @property
     def run_id(self) -> str:
@@ -1661,7 +1658,7 @@ class Run:
         run = await self._world.runs_get(self._run_id)
         return run.status
 
-    async def return_value(self) -> Any:
+    async def return_value(self) -> T:
         while True:
             run = await self._world.runs_get(self._run_id)
             if run.status == "completed":
@@ -1670,7 +1667,10 @@ class Run:
                 key = None
                 if ser.is_encrypted(run.output):
                     key = await self._world.run_key(run.run_id, deployment_id=run.deployment_id)
-                return ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
+                output = ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
+                if self._codec is None:
+                    return cast("T", output)
+                return cast("T", self._codec.validate_return(output))
 
             elif run.status == "cancelled":
                 raise RuntimeError("workflow cancelled")
@@ -1773,14 +1773,15 @@ def read_stream(
     return values()
 
 
-async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run:
+async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
     # Bound before anything is written, so an arity mistake raises here instead
     # of leaving a run behind that fails when its body is invoked.
     bound_args, bound_kwargs = wf.bind_arguments(args, kwargs)
+    dumped_args, dumped_kwargs = wf.codec.dump_arguments(bound_args, bound_kwargs)
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = ser.dehydrate(ser.argument_array(bound_args, bound_kwargs))
+    input_data = ser.dehydrate(ser.argument_array(dumped_args, dumped_kwargs))
     execution_context: dict[str, Any] = {"hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION}
     if namespace is not None:
         execution_context["queueNamespace"] = namespace
@@ -1803,7 +1804,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
         deployment_id=deployment_id,
     )
 
-    return Run(run_id)
+    return Run(run_id, output_codec=wf.codec)
 
 
 async def _public_hook(

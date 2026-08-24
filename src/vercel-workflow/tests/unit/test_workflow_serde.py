@@ -9,6 +9,7 @@ wire form is asserted here literally, not just round-tripped.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import decimal
 import enum
@@ -16,6 +17,7 @@ import gc
 import pathlib
 import uuid
 
+import pydantic
 import pytest
 
 from vercel.workflow._internal import devalue, py_sandbox, serde, serialization as ser
@@ -168,6 +170,30 @@ def test_the_decorator_registers_the_class_it_wraps() -> None:
             return cls()
 
     assert isinstance(_round_trip(Tagged()), Tagged)
+
+
+class Model(pydantic.BaseModel):
+    value: int
+
+
+@dataclasses.dataclass
+class Data:
+    value: int
+
+
+@pytest.mark.parametrize("cls", [Model, Data])
+def test_models_and_dataclasses_cannot_be_registered(cls: type) -> None:
+    with pytest.raises(TypeError, match="serialize it from a workflow or step type annotation"):
+        serde.register_serializable(
+            cls,
+            serialize=lambda value: value.value,
+            deserialize=cls,
+        )
+
+
+def test_the_decorator_rejects_models_too() -> None:
+    with pytest.raises(TypeError, match="Pydantic model or dataclass"):
+        serde.serializable(Model)
 
 
 def test_an_enum_needs_no_methods() -> None:
