@@ -20,6 +20,7 @@ lograil = "2026-08-10T21:20:07.442Z"
 members = [
     "vercel",
     "vercel-apscheduler",
+    "vercel-blob",
     "vercel-cache",
     "vercel-celery",
     "vercel-connect",
@@ -2485,6 +2486,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "vercel-blob" },
     { name = "vercel-cache" },
     { name = "vercel-headers" },
     { name = "vercel-internal-core" },
@@ -2503,6 +2505,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
+    { name = "vercel-blob", editable = "src/vercel-blob" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
@@ -2529,6 +2532,10 @@ requires-dist = [
     { name = "vercel-cache", editable = "src/vercel-cache" },
     { name = "vercel-queue", editable = "src/vercel-queue" },
 ]
+
+[[package]]
+name = "vercel-blob"
+source = { editable = "src/vercel-blob" }
 
 [[package]]
 name = "vercel-cache"

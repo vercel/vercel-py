@@ -22,6 +22,7 @@ dependencies = [
     "typing-extensions>=4.0.0,<5 ; python_version < '3.11'",
     "python-dotenv>=1.0.0,<2",
     "websockets>=12.0,<17",
+    "vercel-blob>=0.1.0,<0.2.0",
     "vercel-cache>=0.6.0",
     "vercel-headers>=0.6.0",
     "vercel-internal-core>=0.1.0,<0.2.0",
@@ -36,6 +37,7 @@ dependencies = [
 vercel = "vercel.__main__:main"
 
 [tool.uv.sources]
+vercel-blob = { workspace = true }
 vercel-cache = { workspace = true }
 vercel-headers = { workspace = true }
 vercel-internal-core = { workspace = true }
@@ -53,7 +55,6 @@ force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
 include = [
     "/**/*.py",
     "/**/*.md",
-    "/blob/py.typed",
     "/cron/py.typed",
     "/deployments/py.typed",
     "/functions/py.typed",
@@ -71,11 +72,9 @@ exclude = [
 dev-mode-dirs = [".."]
 only-include = [
     "/_internal/auth.py",
-    "/_internal/blob",
     "/_internal/fs.py",
     "/_internal/pagination.py",
     "/_internal/project_routes",
-    "/blob",
     "/cron",
     "/deployments",
     "/functions",

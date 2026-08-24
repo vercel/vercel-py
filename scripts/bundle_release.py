@@ -59,6 +59,7 @@ SHARED_VENDORED_LIBS = {
 SHARED_VENDORED_REQUIREMENTS = tuple(SHARED_VENDORED_LIBS.values())
 SHARED_VENDORED_CONSUMERS = {
     "vercel-apscheduler",
+    "vercel-blob",
     "vercel-cache",
     "vercel-celery",
     "vercel-connect",

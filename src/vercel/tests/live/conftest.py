@@ -113,30 +113,13 @@ def cleanup_registry() -> Generator[CleanupRegistry, None, None]:
     """Fixture providing a cleanup registry for tracking test resources.
 
     Usage:
-        def test_create_resource(cleanup_registry, blob_token):
-            result = put("test.txt", b"data", token=blob_token)
-            cleanup_registry.register("blob", result.url)
+        def test_create_resource(cleanup_registry):
+            cleanup_registry.register("project", "project-id")
             # Test continues...
             # Cleanup happens automatically after test
     """
     registry = CleanupRegistry()
     yield registry
-
-    # Cleanup blob resources
-    blob_urls = registry.get_resources("blob")
-    if blob_urls:
-        try:
-            from vercel.blob import delete
-
-            blob_token = os.getenv("BLOB_READ_WRITE_TOKEN")
-            if blob_token:
-                for url in blob_urls:
-                    try:
-                        delete(url, token=blob_token)
-                    except Exception:
-                        pass  # Best effort cleanup
-        except ImportError:
-            pass
 
     # Cleanup project resources
     project_ids = registry.get_resources("project")

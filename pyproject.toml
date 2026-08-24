@@ -70,6 +70,7 @@ ignore_missing_imports = true
 explicit_package_bases = true
 mypy_path = [
     "src",
+    "src/vercel-blob",
     "src/vercel-cache",
     "src/vercel-connect",
     "src/vercel-headers",

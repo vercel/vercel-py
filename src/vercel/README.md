@@ -5,7 +5,6 @@ helpers.
 
 ## Public Modules
 
-- `vercel.blob` - Vercel Blob uploads, downloads, metadata, listing, copy, and delete
 - `vercel.cache` - Runtime Cache clients and invalidation helpers
 - `vercel.cron` - cron decorators and schedule helpers
 - `vercel.deployments` - deployment creation and deployment file upload helpers
