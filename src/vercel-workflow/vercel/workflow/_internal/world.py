@@ -133,11 +133,13 @@ HOOK_RESUME_INPUT_VERSION = 1
 
 
 class BaseModel(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(serialize_by_alias=True)
+    model_config = pydantic.ConfigDict(
+        serialize_by_alias=True, validate_by_alias=False, validate_by_name=True
+    )
 
     @classmethod
     def from_wire(cls, data: Any) -> Self:
-        return cls.model_validate(data)
+        return cls.model_validate(data, by_alias=True, by_name=False)
 
 
 class WireAdaptor(Generic[T]):
@@ -145,7 +147,7 @@ class WireAdaptor(Generic[T]):
         self._adaptor: pydantic.TypeAdapter[T] = pydantic.TypeAdapter(tp)
 
     def from_wire(self, data: Any) -> T:
-        return self._adaptor.validate_python(data)
+        return self._adaptor.validate_python(data, by_alias=True, by_name=False)
 
 
 class RunInput(BaseModel):
