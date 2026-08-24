@@ -127,8 +127,8 @@ async def test_existing_run_is_untouched_by_event_data(tmp_path, monkeypatch) ->
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_real",
-            workflowName="add_ten",
+            deployment_id="dpl_real",
+            workflow_name="add_ten",
             input=ser.dehydrate([1]),
         ).into_event(),
     )
@@ -159,14 +159,14 @@ async def test_concurrent_run_created_wins_the_row(tmp_path, monkeypatch) -> Non
     real_input = ser.dehydrate([1])
     real_row = local_mod.dumps_js(
         w.NonFinalWorkflowRun(
-            runId=RUN_ID,
-            deploymentId="dpl_real",
+            run_id=RUN_ID,
+            deployment_id="dpl_real",
             status="pending",
-            workflowName="add_ten",
-            specVersion=6,
+            workflow_name="add_ten",
+            spec_version=6,
             input=real_input,
-            createdAt=local_mod.js_now(),
-            updatedAt=local_mod.js_now(),
+            created_at=local_mod.js_now(),
+            updated_at=local_mod.js_now(),
         ).model_dump(exclude_none=True)
     ).decode()
     real = local_mod.write_exclusive
@@ -234,7 +234,8 @@ async def test_incomplete_event_data_creates_nothing(tmp_path, monkeypatch, fiel
 
     with pytest.raises(RuntimeError, match="not found"):
         await world.events_create(
-            RUN_ID, w.RunStartedEvent(eventData=w.RunStartedEventData.from_wire(data))
+            RUN_ID,
+            w.RunStartedEvent(event_data=w.RunStartedEventData.from_wire(data)),
         )
 
     with pytest.raises(RuntimeError, match="not found"):
@@ -247,7 +248,7 @@ async def test_terminal_run_still_conflicts(tmp_path, monkeypatch) -> None:
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_1", workflowName="add_ten", input=ser.dehydrate([1])
+            deployment_id="dpl_1", workflow_name="add_ten", input=ser.dehydrate([1])
         ).into_event(),
     )
     assert created.run is not None
@@ -285,7 +286,7 @@ async def test_bare_run_started_on_a_running_run_appends_no_event(tmp_path, monk
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_1", workflowName="add_ten", input=ser.dehydrate([1])
+            deployment_id="dpl_1", workflow_name="add_ten", input=ser.dehydrate([1])
         ).into_event(),
     )
     assert created.run is not None

@@ -41,10 +41,10 @@ async def _populate(world) -> str:
     result = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_1",
-            workflowName="workflow//./src/wf//main",
+            deployment_id="dpl_1",
+            workflow_name="workflow//./src/wf//main",
             input=ser.dehydrate([]),
-            executionContext={"workflowCoreVersion": "5.0.0"},
+            execution_context={"workflowCoreVersion": "5.0.0"},
         ).into_event(),
     )
     assert result.run is not None
@@ -53,7 +53,7 @@ async def _populate(world) -> str:
     await world.events_create(
         run_id,
         w.StepCreatedEventData(
-            stepName="step//./src/wf//pay", input=ser.dehydrate(ser.step_arguments((), {}))
+            step_name="step//./src/wf//pay", input=ser.dehydrate(ser.step_arguments((), {}))
         ).into_event("step_0"),
     )
     await world.events_create(run_id, w.StepStartedEventData().into_event("step_0"))
@@ -187,8 +187,8 @@ async def test_timestamps_survive_the_round_trip(tmp_path, monkeypatch) -> None:
     result = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_1",
-            workflowName="workflow//./src/wf//main",
+            deployment_id="dpl_1",
+            workflow_name="workflow//./src/wf//main",
             input=ser.dehydrate([]),
         ).into_event(),
     )
@@ -232,12 +232,12 @@ async def test_reads_a_log_written_at_a_newer_spec_version(tmp_path, monkeypatch
     result = await world.events_create(
         None,
         w.RunCreatedEvent(
-            eventData=w.RunCreatedEventData(
-                deploymentId="dpl_1",
-                workflowName="workflow//./src/wf//main",
+            event_data=w.RunCreatedEventData(
+                deployment_id="dpl_1",
+                workflow_name="workflow//./src/wf//main",
                 input=ser.dehydrate([]),
             ),
-            specVersion=7,
+            spec_version=7,
         ),
     )
     assert result.run is not None
@@ -256,4 +256,4 @@ def test_rejects_a_spec_version_above_the_supported_ceiling() -> None:
         pydantic.ValidationError,
         match=f"less than or equal to {w.SPEC_VERSION_MAX_SUPPORTED}",
     ):
-        w.RunStartedEvent(specVersion=w.SPEC_VERSION_MAX_SUPPORTED + 1)
+        w.RunStartedEvent(spec_version=w.SPEC_VERSION_MAX_SUPPORTED + 1)

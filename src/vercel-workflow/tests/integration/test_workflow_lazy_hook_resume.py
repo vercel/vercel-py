@@ -134,12 +134,12 @@ class Resume:
     def as_input(self, deployment_id: str | None = None) -> w.HookResumeInput:
         """What both of this resume's writes carry."""
         return w.HookResumeInput(
-            resumeId=self.resume_id,
-            hookId=self.hook.hook_id,
+            resume_id=self.resume_id,
+            hook_id=self.hook.hook_id,
             token=self.hook.token,
             payload=self.payload,
-            payloadDigest=self.digest,
-            deploymentId=deployment_id,
+            payload_digest=self.digest,
+            deployment_id=deployment_id,
         )
 
     @classmethod
@@ -159,8 +159,8 @@ async def publish(world: local_mod.LocalWorld, resume: Resume) -> None:
     await world.queue(
         w.get_queue_name(run.workflow_name, None),
         w.WorkflowInvokePayload(
-            runId=resume.hook.run_id,
-            hookInput=resume.as_input(run.deployment_id),
+            run_id=resume.hook.run_id,
+            hook_input=resume.as_input(run.deployment_id),
         ),
     )
 
@@ -169,9 +169,9 @@ async def write_event(world: local_mod.LocalWorld, resume: Resume) -> None:
     """The fast path's direct `hook_received` write, carrying the same identity."""
     run = await world.runs_get(resume.hook.run_id)
     event = w.HookReceivedEvent(
-        correlationId=resume.hook.hook_id,
-        eventData=w.HookReceivedEventData(payload=resume.payload, token=resume.hook.token),
-        specVersion=run.spec_version or w.SPEC_VERSION_CURRENT,
+        correlation_id=resume.hook.hook_id,
+        event_data=w.HookReceivedEventData(payload=resume.payload, token=resume.hook.token),
+        spec_version=run.spec_version or w.SPEC_VERSION_CURRENT,
     )
     event._queue_input = resume.as_input()
     await world.events_create(resume.hook.run_id, event)

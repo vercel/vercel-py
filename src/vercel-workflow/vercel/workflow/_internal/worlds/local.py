@@ -499,11 +499,11 @@ class LocalWorld(w.World):
         claim = read_json(claim_path, HookResumeClaim)
         if claim is None:
             mine = HookResumeClaim(
-                runId=run_id,
-                resumeId=resume.resume_id,
-                hookId=data.correlation_id,
-                eventId=event_id,
-                payloadDigest=resume.payload_digest,
+                run_id=run_id,
+                resume_id=resume.resume_id,
+                hook_id=data.correlation_id,
+                event_id=event_id,
+                payload_digest=resume.payload_digest,
             )
             if write_exclusive(claim_path, dumps_js(mine.model_dump(exclude_none=True)).decode()):
                 return None
@@ -714,17 +714,17 @@ class LocalWorld(w.World):
             return None
 
         created = w.NonFinalWorkflowRun(
-            runId=run_id,
-            deploymentId=run_data.deployment_id,
+            run_id=run_id,
+            deployment_id=run_data.deployment_id,
             status="pending",
-            workflowName=run_data.workflow_name,
-            specVersion=data.spec_version,
-            executionContext=run_data.execution_context,
+            workflow_name=run_data.workflow_name,
+            spec_version=data.spec_version,
+            execution_context=run_data.execution_context,
             input=run_data.input,
             attributes=run_data.attributes or {},
-            encryptionPublicKey=run_data.encryption_public_key,
-            createdAt=now,
-            updatedAt=now,
+            encryption_public_key=run_data.encryption_public_key,
+            created_at=now,
+            updated_at=now,
         )
         run_path = self.data_dir / "runs" / f"{run_id}.json"
         # Exclusive so a concurrent `run_created` cannot be overwritten — it may
@@ -735,13 +735,13 @@ class LocalWorld(w.World):
         # The log needs the `run_created` it never got, in an earlier slot than
         # the caller's event so replay reads it first.
         run_created = w.RunCreatedEvent(
-            eventData=w.RunCreatedEventData(
-                deploymentId=run_data.deployment_id,
-                workflowName=run_data.workflow_name,
+            event_data=w.RunCreatedEventData(
+                deployment_id=run_data.deployment_id,
+                workflow_name=run_data.workflow_name,
                 input=run_data.input,
-                executionContext=run_data.execution_context,
+                execution_context=run_data.execution_context,
             ),
-            specVersion=data.spec_version,
+            spec_version=data.spec_version,
         )
         run_created_id = self._new_id("evnt")
         event = w.EventAdaptor.from_wire(
@@ -887,20 +887,20 @@ class LocalWorld(w.World):
         if data.event_type == "run_created":
             run_data = data.event_data
             run = w.NonFinalWorkflowRun(
-                runId=effective_run_id,
-                deploymentId=run_data.deployment_id,
+                run_id=effective_run_id,
+                deployment_id=run_data.deployment_id,
                 status="pending",
-                workflowName=run_data.workflow_name,
+                workflow_name=run_data.workflow_name,
                 # The event carries the version, and the row it opens inherits
                 # it — `@workflow/world-local` propagates it the same way
                 # (`storage/events-storage.ts` `effectiveSpecVersion`), so a run
                 # this world creates is labelled by whoever wrote the event
                 # rather than by which SDK happens to be storing it.
-                specVersion=data.spec_version,
-                executionContext=run_data.execution_context,
+                spec_version=data.spec_version,
+                execution_context=run_data.execution_context,
                 input=run_data.input,
-                createdAt=now,
-                updatedAt=now,
+                created_at=now,
+                updated_at=now,
             )
             run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
             write_json(run_path, run)
@@ -908,19 +908,19 @@ class LocalWorld(w.World):
         elif data.event_type == "run_started":
             if current_run:
                 run = w.NonFinalWorkflowRun(
-                    runId=current_run.run_id,
-                    deploymentId=current_run.deployment_id,
-                    workflowName=current_run.workflow_name,
-                    specVersion=current_run.spec_version,
-                    executionContext=current_run.execution_context,
+                    run_id=current_run.run_id,
+                    deployment_id=current_run.deployment_id,
+                    workflow_name=current_run.workflow_name,
+                    spec_version=current_run.spec_version,
+                    execution_context=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
-                    encryptionPublicKey=current_run.encryption_public_key,
-                    createdAt=current_run.created_at,
-                    expiredAt=current_run.expired_at,
+                    encryption_public_key=current_run.encryption_public_key,
+                    created_at=current_run.created_at,
+                    expired_at=current_run.expired_at,
                     status="running",
-                    startedAt=current_run.started_at or now,
-                    updatedAt=now,
+                    started_at=current_run.started_at or now,
+                    updated_at=now,
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
@@ -929,21 +929,21 @@ class LocalWorld(w.World):
             completed_data = data.event_data
             if current_run:
                 run = w.CompletedWorkflowRun(
-                    runId=current_run.run_id,
-                    deploymentId=current_run.deployment_id,
-                    workflowName=current_run.workflow_name,
-                    specVersion=current_run.spec_version,
-                    executionContext=current_run.execution_context,
+                    run_id=current_run.run_id,
+                    deployment_id=current_run.deployment_id,
+                    workflow_name=current_run.workflow_name,
+                    spec_version=current_run.spec_version,
+                    execution_context=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
-                    encryptionPublicKey=current_run.encryption_public_key,
-                    createdAt=current_run.created_at,
-                    expiredAt=current_run.expired_at,
-                    startedAt=current_run.started_at,
+                    encryption_public_key=current_run.encryption_public_key,
+                    created_at=current_run.created_at,
+                    expired_at=current_run.expired_at,
+                    started_at=current_run.started_at,
                     status="completed",
                     output=completed_data.output,
-                    completedAt=now,
-                    updatedAt=now,
+                    completed_at=now,
+                    updated_at=now,
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
@@ -967,25 +967,25 @@ class LocalWorld(w.World):
                 error_stack = None
             if current_run:
                 run = w.FailedWorkflowRun(
-                    runId=current_run.run_id,
-                    deploymentId=current_run.deployment_id,
-                    workflowName=current_run.workflow_name,
-                    specVersion=current_run.spec_version,
-                    executionContext=current_run.execution_context,
+                    run_id=current_run.run_id,
+                    deployment_id=current_run.deployment_id,
+                    workflow_name=current_run.workflow_name,
+                    spec_version=current_run.spec_version,
+                    execution_context=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
-                    encryptionPublicKey=current_run.encryption_public_key,
-                    createdAt=current_run.created_at,
-                    expiredAt=current_run.expired_at,
-                    startedAt=current_run.started_at,
+                    encryption_public_key=current_run.encryption_public_key,
+                    created_at=current_run.created_at,
+                    expired_at=current_run.expired_at,
+                    started_at=current_run.started_at,
                     status="failed",
                     error=w.StructuredError(
                         message=error_msg,
                         stack=error_stack,
                         code=failed_data.code,
                     ),
-                    completedAt=now,
-                    updatedAt=now,
+                    completed_at=now,
+                    updated_at=now,
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
@@ -994,20 +994,20 @@ class LocalWorld(w.World):
         elif data.event_type == "run_cancelled":
             if current_run:
                 run = w.CancelledWorkflowRun(
-                    runId=current_run.run_id,
-                    deploymentId=current_run.deployment_id,
-                    workflowName=current_run.workflow_name,
-                    specVersion=current_run.spec_version,
-                    executionContext=current_run.execution_context,
+                    run_id=current_run.run_id,
+                    deployment_id=current_run.deployment_id,
+                    workflow_name=current_run.workflow_name,
+                    spec_version=current_run.spec_version,
+                    execution_context=current_run.execution_context,
                     input=current_run.input,
                     attributes=current_run.attributes,
-                    encryptionPublicKey=current_run.encryption_public_key,
-                    createdAt=current_run.created_at,
-                    expiredAt=current_run.expired_at,
-                    startedAt=current_run.started_at,
+                    encryption_public_key=current_run.encryption_public_key,
+                    created_at=current_run.created_at,
+                    expired_at=current_run.expired_at,
+                    started_at=current_run.started_at,
                     status="cancelled",
-                    completedAt=now,
-                    updatedAt=now,
+                    completed_at=now,
+                    updated_at=now,
                 )
                 run_path = self.data_dir / "runs" / f"{effective_run_id}.json"
                 write_json(run_path, run, overwrite=True)
@@ -1017,15 +1017,15 @@ class LocalWorld(w.World):
             step_data = data.event_data
             assert isinstance(step_data.input, bytes)
             step = w.NonFinalWorkflowStep(
-                runId=effective_run_id,
-                stepId=data.correlation_id,
-                stepName=step_data.step_name,
+                run_id=effective_run_id,
+                step_id=data.correlation_id,
+                step_name=step_data.step_name,
                 status="pending",
                 input=step_data.input,
                 attempt=0,
-                createdAt=now,
-                updatedAt=now,
-                specVersion=data.spec_version,
+                created_at=now,
+                updated_at=now,
+                spec_version=data.spec_version,
             )
             step_composite_key = f"{effective_run_id}-{data.correlation_id}"
             step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
@@ -1146,12 +1146,12 @@ class LocalWorld(w.World):
                         f'Hook "{data.correlation_id}" has already been created'
                     )
                 conflict_event = w.HookConflictEvent(
-                    correlationId=data.correlation_id,
-                    eventData=w.HookConflictEventData(token=hook_data.token),
+                    correlation_id=data.correlation_id,
+                    event_data=w.HookConflictEventData(token=hook_data.token),
                     server_props=w.ServerProps(
-                        runId=effective_run_id,
-                        eventId=event_id,
-                        createdAt=now,
+                        run_id=effective_run_id,
+                        event_id=event_id,
+                        created_at=now,
                     ),
                 )
                 assert conflict_event.server_props is not None
@@ -1165,17 +1165,17 @@ class LocalWorld(w.World):
                     hook=None,
                 )
             hook = w.Hook(
-                runId=effective_run_id,
-                hookId=data.correlation_id,
+                run_id=effective_run_id,
+                hook_id=data.correlation_id,
                 token=hook_data.token,
                 metadata=hook_data.metadata,
-                ownerId="local-owner",
-                projectId="local-project",
+                owner_id="local-owner",
+                project_id="local-project",
                 environment="local",
-                createdAt=now,
-                specVersion=data.spec_version,
-                isWebhook=False,
-                isSystem=False,
+                created_at=now,
+                spec_version=data.spec_version,
+                is_webhook=False,
+                is_system=False,
             )
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
             write_json(hook_path, hook)
@@ -1373,7 +1373,7 @@ class LocalWorld(w.World):
                 for offset, (_, payload) in enumerate(found)
             ],
             cursor=_encode_chunks_cursor(start + len(found)) if has_more else None,
-            hasMore=has_more,
+            has_more=has_more,
             done=done,
         )
 
@@ -1383,7 +1383,7 @@ class LocalWorld(w.World):
         # the whole of this answer.
         files = self._chunk_files(name)
         _, data_count, done = _scan_chunks(files, len(files))
-        return w.StreamInfo(tailIndex=data_count - 1, done=done)
+        return w.StreamInfo(tail_index=data_count - 1, done=done)
 
     async def events_list(
         self,
@@ -1413,5 +1413,5 @@ class LocalWorld(w.World):
         return w.PaginatedResult(
             data=valid_items,
             cursor=None,
-            hasMore=False,
+            has_more=False,
         )

@@ -123,10 +123,10 @@ def test_the_read_ceiling_is_the_sealed_log_version() -> None:
     `@workflow/world-vercel` both stamp it now, so a run created by a
     TypeScript driver arrives labelled 7 whether or not it contains a seal."""
     assert w.SPEC_VERSION_MAX_SUPPORTED == 7
-    assert w.RunStartedEvent(specVersion=7).spec_version == 7
+    assert w.RunStartedEvent(spec_version=7).spec_version == 7
 
     with pytest.raises(pydantic.ValidationError, match="less than or equal to 7"):
-        w.RunStartedEvent(specVersion=8)
+        w.RunStartedEvent(spec_version=8)
 
 
 # ── storage: a seal is a row like any other ────────────────────────────────
@@ -143,18 +143,18 @@ async def test_a_sealed_slot_round_trips_through_the_local_world(tmp_path, monke
     result = await world.events_create(
         None,
         w.RunCreatedEvent(
-            eventData=w.RunCreatedEventData(
-                deploymentId="dpl_1",
-                workflowName="workflow//./src/wf//main",
+            event_data=w.RunCreatedEventData(
+                deployment_id="dpl_1",
+                workflow_name="workflow//./src/wf//main",
                 input=ser.dehydrate([]),
             ),
-            specVersion=7,
+            spec_version=7,
         ),
     )
     assert result.run is not None
     run_id = result.run.run_id
     await world.events_create(run_id, _seal(2))
-    await world.events_create(run_id, w.RunStartedEvent(specVersion=7))
+    await world.events_create(run_id, w.RunStartedEvent(spec_version=7))
 
     stored = (await world.events_list(run_id)).data
 
@@ -202,7 +202,7 @@ class _PagedEventsWorld(NoStreams, w.World):
         return w.PaginatedResult(
             data=list(self.pages[index]),
             cursor=self.cursors[index],
-            hasMore=index + 1 < len(self.pages),
+            has_more=index + 1 < len(self.pages),
         )
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
@@ -219,7 +219,7 @@ def _stamp(event: w.Event, position: int, *, created_at: datetime = NOW) -> w.Ev
     return event.model_copy(
         update={
             "server_props": w.ServerProps(
-                runId=RUN_ID, eventId=f"evnt_{_slot(position)}", createdAt=created_at
+                run_id=RUN_ID, event_id=f"evnt_{_slot(position)}", created_at=created_at
             )
         }
     )
@@ -230,8 +230,8 @@ async def test_the_loader_drops_seals_and_keeps_everything_else_in_order() -> No
     them reaches the replay, and the events around them keep their order."""
     real = [
         _stamp(w.RunStartedEvent(), 2),
-        _stamp(w.WaitCreatedEventData(resumeAt=NOW).into_event("wait_1"), 5),
-        _stamp(w.WaitCompletedEvent(correlationId="wait_1"), 8),
+        _stamp(w.WaitCreatedEventData(resume_at=NOW).into_event("wait_1"), 5),
+        _stamp(w.WaitCompletedEvent(correlation_id="wait_1"), 8),
     ]
     world = _PagedEventsWorld(
         [[_seal(1), real[0], _seal(3), _seal(4), real[1], real[2], _seal(9)]],
@@ -337,30 +337,30 @@ def _recorded_log() -> list[w.Event]:
     return [
         _stamp(
             w.RunCreatedEventData(
-                deploymentId="dpl_1",
-                workflowName=WORKFLOW_NAME,
+                deployment_id="dpl_1",
+                workflow_name=WORKFLOW_NAME,
                 input=ser.dehydrate([]),
             ).into_event(),
             1,
             created_at=NOW,
         ),
         _stamp(
-            w.WaitCreatedEventData(resumeAt=resume_at).into_event(first),
+            w.WaitCreatedEventData(resume_at=resume_at).into_event(first),
             2,
             created_at=NOW + timedelta(minutes=1),
         ),
         _stamp(
-            w.WaitCompletedEvent(correlationId=first),
+            w.WaitCompletedEvent(correlation_id=first),
             3,
             created_at=NOW + timedelta(minutes=2),
         ),
         _stamp(
-            w.WaitCreatedEventData(resumeAt=resume_at).into_event(second),
+            w.WaitCreatedEventData(resume_at=resume_at).into_event(second),
             4,
             created_at=NOW + timedelta(minutes=3),
         ),
         _stamp(
-            w.WaitCompletedEvent(correlationId=second),
+            w.WaitCompletedEvent(correlation_id=second),
             5,
             created_at=NOW + timedelta(minutes=4),
         ),
@@ -418,7 +418,7 @@ class _ReplayWorld(NoStreams, w.World):
         raise NotImplementedError
 
     async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:
-        return w.PaginatedResult(data=list(self.log), cursor=None, hasMore=False)
+        return w.PaginatedResult(data=list(self.log), cursor=None, has_more=False)
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         self.written.append(data)

@@ -86,14 +86,14 @@ async def registered(tmp_path, monkeypatch) -> _RecordingLocalWorld:
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="",
-            workflowName=approvals.workflow_id,
+            deployment_id="",
+            workflow_name=approvals.workflow_id,
             input=ser.dehydrate([]),
         ).into_event(),
     )
     assert created.run is not None
     await runtime.workflow_handler(
-        w.WorkflowInvokePayload(runId=created.run.run_id).model_dump(by_alias=True),
+        w.WorkflowInvokePayload(run_id=created.run.run_id).model_dump(by_alias=True),
         attempt=1,
         queue_name=w.get_queue_name(approvals.workflow_id),
         message_id="msg_1",
@@ -205,7 +205,7 @@ async def test_encrypted_metadata_is_opened_with_the_run_key(tmp_path, monkeypat
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="dpl_1", workflowName="wf", input=ser.dehydrate([])
+            deployment_id="dpl_1", workflow_name="wf", input=ser.dehydrate([])
         ).into_event(),
     )
     assert created.run is not None

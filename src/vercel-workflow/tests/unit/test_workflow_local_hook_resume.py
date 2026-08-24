@@ -55,11 +55,11 @@ def _received(
     event = w.HookReceivedEventData(payload=dehydrated, token=TOKEN).into_event(hook)
     if resume_id is not None:
         event._queue_input = w.HookResumeInput(
-            resumeId=resume_id,
-            hookId=hook,
+            resume_id=resume_id,
+            hook_id=hook,
             token=TOKEN,
             payload=dehydrated,
-            payloadDigest=digest,
+            payload_digest=digest,
         )
     return event
 
@@ -200,7 +200,7 @@ async def test_a_claim_is_converged_on_by_the_resume_id_not_the_position(
         ),
         encoding="utf-8",
     )
-    _write_claim(world, eventId=occupied)
+    _write_claim(world, event_id=occupied)
 
     again = await world.events_create(RUN_ID, _received())
 
@@ -221,7 +221,7 @@ async def test_another_payload_at_the_claimed_position_is_not_adopted(
     # A plain sequential resume of the same hook: right hook, no resume id.
     other = await world.events_create(RUN_ID, _received("unrelated", resume_id=None))
     assert other.event is not None and other.event.server_props is not None
-    _write_claim(world, eventId=other.event.server_props.event_id)
+    _write_claim(world, event_id=other.event.server_props.event_id)
 
     with pytest.raises(w.EntityConflictError, match="not observable yet"):
         await world.events_create(RUN_ID, _received())
@@ -235,7 +235,7 @@ async def test_convergence_survives_the_hook_being_disposed(tmp_path, monkeypatc
     resume" and acks a message that may hold the only copy of the payload."""
     world = await _world(tmp_path, monkeypatch)
     first = await world.events_create(RUN_ID, _received())
-    await world.events_create(RUN_ID, w.HookDisposedEvent(correlationId=HOOK))
+    await world.events_create(RUN_ID, w.HookDisposedEvent(correlation_id=HOOK))
 
     again = await world.events_create(RUN_ID, _received())
 

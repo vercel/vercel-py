@@ -151,7 +151,7 @@ class FakeWorld(NoStreams, w.World):
         raise NotImplementedError
 
     async def events_list(self, run_id: str, *, pagination: Any = None) -> Any:
-        return w.PaginatedResult(data=list(self.events), cursor=None, hasMore=False)
+        return w.PaginatedResult(data=list(self.events), cursor=None, has_more=False)
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         if data.event_type == "run_started":

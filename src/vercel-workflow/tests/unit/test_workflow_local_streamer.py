@@ -225,14 +225,14 @@ class TestLiveRead:
 
 class TestSnapshot:
     async def test_get_info_reports_the_tail_and_the_closed_flag(self, world) -> None:
-        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tailIndex=-1, done=False)
+        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tail_index=-1, done=False)
 
         await world.streams_write(RUN_ID, NAME, b"a")
         await world.streams_write(RUN_ID, NAME, b"b")
-        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tailIndex=1, done=False)
+        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tail_index=1, done=False)
 
         await world.streams_close(RUN_ID, NAME)
-        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tailIndex=1, done=True)
+        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tail_index=1, done=True)
 
     async def test_get_chunks_returns_a_snapshot_not_a_live_read(self, world) -> None:
         for i in range(3):

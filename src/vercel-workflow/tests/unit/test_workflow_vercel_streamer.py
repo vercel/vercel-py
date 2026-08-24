@@ -243,7 +243,7 @@ class TestSnapshot:
             200, json={"tailIndex": 4, "done": True}
         )
 
-        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tailIndex=4, done=True)
+        assert await world.streams_get_info(RUN_ID, NAME) == w.StreamInfo(tail_index=4, done=True)
 
     @respx.mock
     async def test_get_chunks_passes_paging_and_parses_the_page(self, world) -> None:

@@ -870,10 +870,10 @@ async def test_a_plaintext_run_never_resolves_a_key() -> None:
     run = _run(input=ser.dehydrate([]))
     events: list[w.Event] = [
         w.StepCreatedEventData(
-            stepName="pay", input=ser.dehydrate(ser.step_arguments((), {}))
+            step_name="pay", input=ser.dehydrate(ser.step_arguments((), {}))
         ).into_event("step_0"),
         w.StepCompletedEventData(result=ser.dehydrate(42)).into_event("step_0"),
-        w.StepStartedEvent(correlationId="step_0"),
+        w.StepStartedEvent(correlation_id="step_0"),
         w.RunStartedEvent(),
     ]
 
@@ -899,7 +899,7 @@ async def test_one_encrypted_payload_anywhere_resolves_the_key_once(where: str) 
     run = _run(input=payload("input", ser.dehydrate([])))
     events: list[w.Event] = [
         w.StepCreatedEventData(
-            stepName="pay", input=payload("step input", ser.dehydrate({"args": []}))
+            step_name="pay", input=payload("step input", ser.dehydrate({"args": []}))
         ).into_event("step_0"),
         w.StepCompletedEventData(result=payload("step result", ser.dehydrate(42))).into_event(
             "step_0"

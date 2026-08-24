@@ -41,14 +41,14 @@ WORKFLOW_NAME = "workflow//tests.wf"
 
 def _running_step(step_name: str, *, attempt: int, input: bytes | None = None) -> w.WorkflowStep:
     return w.NonFinalWorkflowStep(
-        runId=RUN_ID,
-        stepId=STEP_ID,
-        stepName=step_name,
+        run_id=RUN_ID,
+        step_id=STEP_ID,
+        step_name=step_name,
         status="running",
         attempt=attempt,
-        createdAt=NOW,
-        updatedAt=NOW,
-        startedAt=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+        started_at=NOW,
         input=input if input is not None else ser.dehydrate(ser.step_arguments((), {})),
     )
 
@@ -125,9 +125,9 @@ WORKFLOW_QUEUE = f"__wkf_workflow_{WORKFLOW_NAME}"
 
 async def _invoke(registry: core.Workflows, step_name: str) -> w.QueueContinuation | None:
     payload = w.WorkflowInvokePayload(
-        runId=RUN_ID,
-        stepId=STEP_ID,
-        stepName=step_name,
+        run_id=RUN_ID,
+        step_id=STEP_ID,
+        step_name=step_name,
     )
     return await runtime.workflow_handler(
         payload.model_dump(by_alias=True),
@@ -344,20 +344,20 @@ async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) 
 
     future = datetime.now(UTC) + timedelta(seconds=30)
     step = w.NonFinalWorkflowStep(
-        runId=RUN_ID,
-        stepId=STEP_ID,
-        stepName="step//tests.my_step",
+        run_id=RUN_ID,
+        step_id=STEP_ID,
+        step_name="step//tests.my_step",
         status="pending",
         attempt=0,
-        createdAt=NOW,
-        updatedAt=NOW,
-        retryAfter=future,
+        created_at=NOW,
+        updated_at=NOW,
+        retry_after=future,
         input=ser.dehydrate(ser.step_arguments((), {})),
     )
     local_mod.write_json(world.data_dir / "steps" / f"{RUN_ID}-{STEP_ID}.json", step.model_dump())
 
     with pytest.raises(w.TooEarlyError) as ei:
-        await world.events_create(RUN_ID, w.StepStartedEvent(correlationId=STEP_ID))
+        await world.events_create(RUN_ID, w.StepStartedEvent(correlation_id=STEP_ID))
 
     assert ei.value.retry_after is not None
     assert 1 <= ei.value.retry_after <= 30

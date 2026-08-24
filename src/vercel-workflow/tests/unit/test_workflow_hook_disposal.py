@@ -27,10 +27,10 @@ async def test_redispose_raises_hook_not_found(tmp_path, monkeypatch) -> None:
     # which the runtime swallows.
     world = _world(tmp_path, monkeypatch)
     await world.events_create(RUN_ID, w.HookCreatedEventData(token=TOKEN).into_event("hook_1"))
-    await world.events_create(RUN_ID, w.HookDisposedEvent(correlationId="hook_1"))
+    await world.events_create(RUN_ID, w.HookDisposedEvent(correlation_id="hook_1"))
 
     try:
-        await world.events_create(RUN_ID, w.HookDisposedEvent(correlationId="hook_1"))
+        await world.events_create(RUN_ID, w.HookDisposedEvent(correlation_id="hook_1"))
     except w.HookNotFoundError:
         pass
     else:
@@ -60,7 +60,7 @@ async def test_concurrent_dispose_loser_gets_entity_conflict(tmp_path, monkeypat
     lock_path.write_text("")
 
     try:
-        await world.events_create(RUN_ID, w.HookDisposedEvent(correlationId="hook_1"))
+        await world.events_create(RUN_ID, w.HookDisposedEvent(correlation_id="hook_1"))
     except w.EntityConflictError:
         pass
     else:

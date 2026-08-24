@@ -52,7 +52,7 @@ async def test_reordered_step_args_raise_nondeterminism() -> None:
     step = core.Step(_greet)
     cid = "step_1"
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event(cid)
+        w.StepCreatedEventData(step_name=step.name, input=_args(name="a")).into_event(cid)
     ]
     ctx = _context(events)
     sus = _suspension(cid, _args(name="b"))
@@ -69,7 +69,7 @@ async def test_matching_step_parks_without_nondeterminism() -> None:
     step = core.Step(_greet)
     cid = "step_1"
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event(cid)
+        w.StepCreatedEventData(step_name=step.name, input=_args(name="a")).into_event(cid)
     ]
     ctx = _context(events)
     sus = _suspension(cid, _args(name="a"))
@@ -92,7 +92,7 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     """
     step = core.Step(_greet)
     events: list[w.Event] = [
-        w.StepCreatedEventData(stepName=step.name, input=_args(name="a")).into_event("step_1")
+        w.StepCreatedEventData(step_name=step.name, input=_args(name="a")).into_event("step_1")
     ]
     ctx = _context(events)
     wait = runtime.Wait(
@@ -121,7 +121,7 @@ _ARGS = _args(name="a")
 
 
 def _created(step: "core.Step[Any, Any]", cid: str) -> w.Event:
-    return w.StepCreatedEventData(stepName=step.name, input=_ARGS).into_event(cid)
+    return w.StepCreatedEventData(step_name=step.name, input=_ARGS).into_event(cid)
 
 
 def _completed(cid: str, result: Any) -> w.Event:
@@ -256,7 +256,7 @@ async def test_idle_resume_parks_when_nothing_to_deliver() -> None:
 
 def _stamp(event: w.Event, ts: datetime, *, event_id: str) -> w.Event:
     return event.model_copy(
-        update={"server_props": w.ServerProps(runId="wrun_test", eventId=event_id, createdAt=ts)}
+        update={"server_props": w.ServerProps(run_id="wrun_test", event_id=event_id, created_at=ts)}
     )
 
 

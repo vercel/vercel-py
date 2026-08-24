@@ -133,11 +133,20 @@ HOOK_RESUME_INPUT_VERSION = 1
 
 
 class BaseModel(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(serialize_by_alias=True)
+    # We use `snake_case = Field(alias="camelCase")` everywhere to support both
+    # the JS-style wire format and Pythonic identifiers in code.  So naturally,
+    # we turned on `serialize_by_alias` globally to `model_dump()` to wire format.
+    # But Pydantic doesn't differentiate model instantiation from validation,
+    # therefore, we validate by Python name here, so that all model constructors
+    # take snake case parameters; while, flip to validate by alias in `from_wire`
+    # below in order to read camel cases from the wire.
+    model_config = pydantic.ConfigDict(
+        serialize_by_alias=True, validate_by_alias=False, validate_by_name=True
+    )
 
     @classmethod
     def from_wire(cls, data: Any) -> Self:
-        return cls.model_validate(data)
+        return cls.model_validate(data, by_alias=True, by_name=False)
 
 
 class WireAdaptor(Generic[T]):
@@ -145,7 +154,7 @@ class WireAdaptor(Generic[T]):
         self._adaptor: pydantic.TypeAdapter[T] = pydantic.TypeAdapter(tp)
 
     def from_wire(self, data: Any) -> T:
-        return self._adaptor.validate_python(data)
+        return self._adaptor.validate_python(data, by_alias=True, by_name=False)
 
 
 class RunInput(BaseModel):
@@ -449,7 +458,7 @@ class RunCreatedEventData(BaseModel):
     )
 
     def into_event(self) -> "RunCreatedEvent":
-        return RunCreatedEvent(eventData=self)
+        return RunCreatedEvent(event_data=self)
 
 
 class RunCreatedEvent(BaseEvent):
@@ -491,16 +500,16 @@ class RunStartedEventData(BaseModel):
     def from_run_input(cls, run_input: RunInput) -> "RunStartedEventData":
         return cls(
             input=run_input.input,
-            deploymentId=run_input.deployment_id,
-            workflowName=run_input.workflow_name,
-            executionContext=run_input.execution_context,
+            deployment_id=run_input.deployment_id,
+            workflow_name=run_input.workflow_name,
+            execution_context=run_input.execution_context,
             attributes=run_input.attributes,
-            allowReservedAttributes=run_input.allow_reserved_attributes,
-            encryptionPublicKey=run_input.encryption_public_key,
+            allow_reserved_attributes=run_input.allow_reserved_attributes,
+            encryption_public_key=run_input.encryption_public_key,
         )
 
     def into_event(self, *, spec_version: int = SPEC_VERSION_CURRENT) -> "RunStartedEvent":
-        return RunStartedEvent(eventData=self, specVersion=spec_version)
+        return RunStartedEvent(event_data=self, spec_version=spec_version)
 
 
 class RunStartedEvent(BaseEvent):
@@ -527,7 +536,7 @@ class RunCompletedEventData(BaseModel):
     output: bytes
 
     def into_event(self) -> "RunCompletedEvent":
-        return RunCompletedEvent(eventData=self)
+        return RunCompletedEvent(event_data=self)
 
 
 class RunCompletedEvent(BaseEvent):
@@ -551,7 +560,7 @@ class RunFailedEventData(BaseModel):
     code: str | None = None
 
     def into_event(self) -> "RunFailedEvent":
-        return RunFailedEvent(eventData=self)
+        return RunFailedEvent(event_data=self)
 
 
 class RunFailedEvent(BaseEvent):
@@ -575,7 +584,7 @@ class StepCreatedEventData(BaseModel):
     input: bytes | dict[str, Any]
 
     def into_event(self, correlation_id: str) -> "StepCreatedEvent":
-        return StepCreatedEvent(correlationId=correlation_id, eventData=self)
+        return StepCreatedEvent(correlation_id=correlation_id, event_data=self)
 
 
 class StepCreatedEvent(BaseEvent):
@@ -599,7 +608,7 @@ class StepStartedEventData(BaseModel):
     attempt: int | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
     def into_event(self, correlation_id: str) -> "StepStartedEvent":
-        return StepStartedEvent(correlationId=correlation_id, eventData=self)
+        return StepStartedEvent(correlation_id=correlation_id, event_data=self)
 
 
 class StepStartedEvent(BaseEvent):
@@ -621,7 +630,7 @@ class StepRetryingEventData(BaseModel):
     )
 
     def into_event(self, correlation_id: str) -> "StepRetryingEvent":
-        return StepRetryingEvent(correlationId=correlation_id, eventData=self)
+        return StepRetryingEvent(correlation_id=correlation_id, event_data=self)
 
 
 class StepRetryingEvent(BaseEvent):
@@ -646,7 +655,7 @@ class StepCompletedEventData(BaseModel):
     result: bytes | Any = None
 
     def into_event(self, correlation_id: str) -> "StepCompletedEvent":
-        return StepCompletedEvent(correlationId=correlation_id, eventData=self)
+        return StepCompletedEvent(correlation_id=correlation_id, event_data=self)
 
 
 class StepCompletedEvent(BaseEvent):
@@ -666,7 +675,7 @@ class StepFailedEventData(BaseModel):
     stack: str | None = None
 
     def into_event(self, correlation_id: str) -> "StepFailedEvent":
-        return StepFailedEvent(correlationId=correlation_id, eventData=self)
+        return StepFailedEvent(correlation_id=correlation_id, event_data=self)
 
 
 class StepFailedEvent(BaseEvent):
@@ -700,7 +709,7 @@ class HookCreatedEventData(BaseModel):
     metadata: bytes | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
     def into_event(self, correlation_id: str) -> "HookCreatedEvent":
-        return HookCreatedEvent(correlationId=correlation_id, eventData=self)
+        return HookCreatedEvent(correlation_id=correlation_id, event_data=self)
 
 
 class HookCreatedEvent(BaseEvent):
@@ -725,7 +734,7 @@ class HookReceivedEventData(BaseModel):
     token: str | None = pydantic.Field(default=None, exclude_if=lambda e: e is None)
 
     def into_event(self, correlation_id: str) -> "HookReceivedEvent":
-        return HookReceivedEvent(correlationId=correlation_id, eventData=self)
+        return HookReceivedEvent(correlation_id=correlation_id, event_data=self)
 
 
 class HookReceivedEvent(BaseEvent):
@@ -776,7 +785,7 @@ class WaitCreatedEventData(BaseModel):
     resume_at: datetime = pydantic.Field(alias="resumeAt")
 
     def into_event(self, correlation_id: str) -> "WaitCreatedEvent":
-        return WaitCreatedEvent(correlationId=correlation_id, eventData=self)
+        return WaitCreatedEvent(correlation_id=correlation_id, event_data=self)
 
 
 class WaitCreatedEvent(BaseEvent):
