@@ -135,6 +135,18 @@ HOOK_RESUME_INPUT_VERSION = 1
 class BaseModel(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(serialize_by_alias=True)
 
+    @classmethod
+    def from_wire(cls, data: Any) -> Self:
+        return cls.model_validate(data)
+
+
+class WireAdaptor(Generic[T]):
+    def __init__(self, tp: Any) -> None:
+        self._adaptor: pydantic.TypeAdapter[T] = pydantic.TypeAdapter(tp)
+
+    def from_wire(self, data: Any) -> T:
+        return self._adaptor.validate_python(data)
+
 
 class RunInput(BaseModel):
     input: Any
@@ -238,7 +250,7 @@ class HealthCheckPayload(BaseModel):
 
 
 QueuePayload: TypeAlias = WorkflowInvokePayload | HealthCheckPayload
-QueuePayloadAdaptor: pydantic.TypeAdapter[QueuePayload] = pydantic.TypeAdapter(QueuePayload)
+QueuePayloadAdaptor: WireAdaptor[QueuePayload] = WireAdaptor(QueuePayload)
 
 
 class StructuredError(BaseModel):
@@ -322,7 +334,7 @@ WorkflowRun: TypeAlias = Annotated[
     NonFinalWorkflowRun | CancelledWorkflowRun | CompletedWorkflowRun | FailedWorkflowRun,
     pydantic.Field(discriminator="status"),
 ]
-WorkflowRunAdaptor: pydantic.TypeAdapter[WorkflowRun] = pydantic.TypeAdapter(WorkflowRun)
+WorkflowRunAdaptor: WireAdaptor[WorkflowRun] = WireAdaptor(WorkflowRun)
 
 
 class BaseWorkflowStep(BaseModel):
@@ -382,7 +394,7 @@ WorkflowStep: TypeAlias = Annotated[
     NonFinalWorkflowStep | CancelledWorkflowStep | CompletedWorkflowStep | FailedWorkflowStep,
     pydantic.Field(discriminator="status"),
 ]
-WorkflowStepAdaptor: pydantic.TypeAdapter[WorkflowStep] = pydantic.TypeAdapter(WorkflowStep)
+WorkflowStepAdaptor: WireAdaptor[WorkflowStep] = WireAdaptor(WorkflowStep)
 
 
 class ServerProps(BaseModel):
@@ -423,7 +435,7 @@ class BaseEvent(BaseModel):
             }
             rv = {k: v for k, v in data.items() if k not in server_props}
             if server_props:
-                rv["server_props"] = ServerProps.model_validate(server_props)
+                rv["server_props"] = ServerProps.from_wire(server_props)
             return rv
         return data
 
@@ -838,7 +850,7 @@ Event: TypeAlias = Annotated[
     ),
     pydantic.Field(discriminator="event_type"),
 ]
-EventAdaptor: pydantic.TypeAdapter[Event] = pydantic.TypeAdapter(Event)
+EventAdaptor: WireAdaptor[Event] = WireAdaptor(Event)
 
 
 # Hook events that require the target hook to still exist: the backend 404s them

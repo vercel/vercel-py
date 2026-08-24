@@ -104,6 +104,7 @@ class Hook(BaseSuspension, Generic[T]):
     metadata: bytes | None = None
 
     def set_result(self, raw_data: Any) -> None:
+        res: T
         if dataclasses.is_dataclass(self.hook_cls):
             res = self.hook_cls(**raw_data)
         elif issubclass(self.hook_cls, pydantic.BaseModel):
@@ -884,7 +885,7 @@ def _health_check_run_id(correlation_id: str) -> str:
 
 def _parse_health_check(message: Any) -> w.HealthCheckPayload | None:
     try:
-        return w.HealthCheckPayload.model_validate(message)
+        return w.HealthCheckPayload.from_wire(message)
     except pydantic.ValidationError:
         # The main non-health-check path: see workflow_handler() below
         return None
@@ -971,7 +972,7 @@ async def workflow_handler(
         await _answer_health_check(world, health)
         return None
 
-    req = w.WorkflowInvokePayload.model_validate(message)
+    req = w.WorkflowInvokePayload.from_wire(message)
     if req.step_id is not None:
         return await _execute_step(req, queue_name=queue_name, registry=registry)
 

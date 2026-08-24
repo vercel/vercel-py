@@ -21,7 +21,7 @@ def _world(tmp_path, monkeypatch) -> local_mod.LocalWorld:
 
 
 def _run_input(**overrides) -> w.RunInput:
-    return w.RunInput.model_validate(
+    return w.RunInput.from_wire(
         {
             "input": ser.dehydrate([7]),
             "deploymentId": "dpl_1",
@@ -234,7 +234,7 @@ async def test_incomplete_event_data_creates_nothing(tmp_path, monkeypatch, fiel
 
     with pytest.raises(RuntimeError, match="not found"):
         await world.events_create(
-            RUN_ID, w.RunStartedEvent(eventData=w.RunStartedEventData.model_validate(data))
+            RUN_ID, w.RunStartedEvent(eventData=w.RunStartedEventData.from_wire(data))
         )
 
     with pytest.raises(RuntimeError, match="not found"):

@@ -47,7 +47,7 @@ def _run(status: str = "running", **overrides: Any) -> w.WorkflowRun:
         "updatedAt": NOW,
         "startedAt": NOW,
     }
-    return w.WorkflowRunAdaptor.validate_python(fields | overrides)
+    return w.WorkflowRunAdaptor.from_wire(fields | overrides)
 
 
 def _run_input(**overrides: Any) -> dict[str, Any]:
@@ -354,8 +354,10 @@ def test_refuse_helper_skips_when_either_side_is_unknown() -> None:
 
     assert not runtime.refuse_cross_environment_delivery(fake, None, RUN_ID)
     assert not runtime.refuse_cross_environment_delivery(
-        fake, w.RunInput.model_validate(_run_input()), RUN_ID
+        fake, w.RunInput.from_wire(_run_input()), RUN_ID
     )
     assert runtime.refuse_cross_environment_delivery(
-        fake, w.RunInput.model_validate(_run_input(environment="production")), RUN_ID
+        fake,
+        w.RunInput.from_wire(_run_input(environment="production")),
+        RUN_ID,
     )

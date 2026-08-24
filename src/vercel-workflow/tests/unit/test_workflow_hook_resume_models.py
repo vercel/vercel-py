@@ -51,9 +51,7 @@ HOOK_INPUT_WIRE = {
 def test_hook_input_round_trips_every_field() -> None:
     """A field we drop here is a field the event we write loses -- and the digest
     and resume id are what keep the two writers to one event."""
-    payload = w.WorkflowInvokePayload.model_validate(
-        {"runId": "wrun_1", "hookInput": HOOK_INPUT_WIRE}
-    )
+    payload = w.WorkflowInvokePayload.from_wire({"runId": "wrun_1", "hookInput": HOOK_INPUT_WIRE})
 
     assert payload.hook_input is not None
     assert payload.hook_input.model_dump() == HOOK_INPUT_WIRE
@@ -62,7 +60,7 @@ def test_hook_input_round_trips_every_field() -> None:
 def test_hook_input_absent_on_the_sequential_path() -> None:
     """A producer that wrote the event first, or predates the fast path, sends the
     run id alone. That is normal: the event is already there."""
-    payload = w.WorkflowInvokePayload.model_validate({"runId": "wrun_1"})
+    payload = w.WorkflowInvokePayload.from_wire({"runId": "wrun_1"})
 
     assert payload.hook_input is None
     # Omitted rather than serialized as null: the TS reader types it `undefined`.
@@ -72,7 +70,7 @@ def test_hook_input_absent_on_the_sequential_path() -> None:
 def test_hook_input_deployment_id_may_be_absent() -> None:
     """Older producers omit it; everything else is required of any producer that
     takes the fast path at all."""
-    hook_input = w.HookResumeInput.model_validate(
+    hook_input = w.HookResumeInput.from_wire(
         {k: v for k, v in HOOK_INPUT_WIRE.items() if k != "deploymentId"}
     )
 
@@ -86,7 +84,7 @@ def test_hook_input_deployment_id_may_be_absent() -> None:
 def test_hook_received_carries_the_token_the_producer_wrote() -> None:
     """The two writers of one resume have to produce the same event body, and the
     producer's has `token` in it."""
-    event = w.EventAdaptor.validate_python(
+    event = w.EventAdaptor.from_wire(
         {
             "eventType": "hook_received",
             "correlationId": "hook_1",
@@ -122,7 +120,7 @@ def test_hook_received_payloads_expose_only_the_payload() -> None:
 def test_resume_id_folds_into_server_props() -> None:
     """Set by the world like `eventId`, not by the writer, so it belongs with the
     rest of the server-assigned fields rather than in the authored event."""
-    event = w.EventAdaptor.validate_python(
+    event = w.EventAdaptor.from_wire(
         {
             "eventType": "hook_received",
             "correlationId": "hook_1",
@@ -142,7 +140,7 @@ def test_resume_id_folds_into_server_props() -> None:
 def test_resume_id_absent_on_every_other_event() -> None:
     """Most events have none, and sending a null instead of nothing would give the
     TS reader a field it types `undefined`."""
-    event = w.EventAdaptor.validate_python(
+    event = w.EventAdaptor.from_wire(
         {
             "eventType": "hook_received",
             "correlationId": "hook_1",
@@ -166,7 +164,7 @@ def test_resume_id_absent_on_every_other_event() -> None:
 
 def _carried(**overrides: Any) -> w.HookResumeInput:
     """The `hookInput` a delivery arrived with."""
-    return w.HookResumeInput.model_validate(HOOK_INPUT_WIRE | overrides)
+    return w.HookResumeInput.from_wire(HOOK_INPUT_WIRE | overrides)
 
 
 def _hook_received(carried: w.HookResumeInput | None = None) -> w.HookReceivedEvent:

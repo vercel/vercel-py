@@ -107,7 +107,7 @@ def test_a_stored_payload_loads_as_binary_not_text() -> None:
     """
     payload = ser.dehydrate([{"amount": 21}])
 
-    run = w.WorkflowRunAdaptor.validate_python(_run_row(input=payload))
+    run = w.WorkflowRunAdaptor.from_wire(_run_row(input=payload))
 
     assert run.input == payload
     assert ser.hydrate(run.input, what="the input of run wrun_1") == [{"amount": 21}]
@@ -115,7 +115,7 @@ def test_a_stored_payload_loads_as_binary_not_text() -> None:
 
 def test_the_circular_marker_still_loads_as_text() -> None:
     # What a `run_created` response echoes back in place of the input.
-    run = w.WorkflowRunAdaptor.validate_python(_run_row(input="[Circular]"))
+    run = w.WorkflowRunAdaptor.from_wire(_run_row(input="[Circular]"))
 
     assert run.input == "[Circular]"
 

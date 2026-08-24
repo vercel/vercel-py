@@ -11,7 +11,6 @@ from typing import Any, TypeVar, overload
 
 import cbor2
 import httpx
-import pydantic
 
 import vercel.queue as vqs
 from vercel._internal.core.polyfills import UTC
@@ -321,7 +320,7 @@ class VercelWorld(w.World):
 
     @overload
     async def _cbor_request(
-        self, method: str, endpoint: str, *, schema: pydantic.TypeAdapter[U], data: Any = None
+        self, method: str, endpoint: str, *, schema: w.WireAdaptor[U], data: Any = None
     ) -> U: ...
 
     async def _cbor_request(
@@ -329,7 +328,7 @@ class VercelWorld(w.World):
         method: str,
         endpoint: str,
         *,
-        schema: type[T] | pydantic.TypeAdapter[Any],
+        schema: type[T] | w.WireAdaptor[Any],
         data: Any = None,
     ) -> Any:
         # utils.ts, getHttpConfig, makeRequest
@@ -361,10 +360,7 @@ class VercelWorld(w.World):
             raise self._error_for_response(method, endpoint, resp)
 
         result = _parse_response_body(resp)
-        if isinstance(schema, pydantic.TypeAdapter):
-            return schema.validate_python(result)
-        else:
-            return schema.model_validate(result)
+        return schema.from_wire(result)
 
     def _error_for_response(self, method: str, endpoint: str, resp: httpx.Response) -> Exception:
         """utils.ts, makeRequest — map a non-2xx response to a typed error."""
@@ -506,7 +502,7 @@ class VercelWorld(w.World):
             )
 
         try:
-            parsed = _RunKeyResponse.model_validate(resp.json())
+            parsed = _RunKeyResponse.from_wire(resp.json())
         except ValueError as error:
             raise w.WorkflowWorldError(
                 f'Invalid response from the Vercel API: expected {{"key": string | null}}, '
@@ -595,7 +591,7 @@ class VercelWorld(w.World):
                     # we may get a duplicate invocation but won't lose the scheduled wakeup.
                     await self.queue(
                         queue_name,
-                        w.QueuePayloadAdaptor.validate_python(payload),
+                        w.QueuePayloadAdaptor.from_wire(payload),
                         deployment_id=body.get("deploymentId"),
                         delay_seconds=delay_seconds,
                         idempotency_key=result.idempotency_key,
@@ -841,7 +837,7 @@ class VercelWorld(w.World):
         return await self._cbor_request(
             "GET",
             f"/v2/runs/{_quote(run_id)}/streams",
-            schema=pydantic.TypeAdapter(list[str]),
+            schema=w.WireAdaptor(list[str]),
         )
 
     async def streams_get_chunks(

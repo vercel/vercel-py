@@ -65,6 +65,7 @@ commands = [["./scripts/test.sh", { replace = "posargs", extend = true }]]
 
 [tool.mypy]
 python_version = "3.10"
+plugins = ["pydantic.mypy"]
 cache_dir = "$MYPY_CONFIG_FILE_DIR/.mypy_cache/root"
 ignore_missing_imports = true
 explicit_package_bases = true

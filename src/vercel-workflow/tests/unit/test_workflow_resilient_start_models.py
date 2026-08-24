@@ -33,9 +33,7 @@ RUN_INPUT_WIRE = {
 
 def test_run_input_round_trips_every_field() -> None:
     """A field we drop here is a field the recreated run loses permanently."""
-    payload = w.WorkflowInvokePayload.model_validate(
-        {"runId": "wrun_1", "runInput": RUN_INPUT_WIRE}
-    )
+    payload = w.WorkflowInvokePayload.from_wire({"runId": "wrun_1", "runInput": RUN_INPUT_WIRE})
 
     assert payload.run_input is not None
     assert payload.run_input.model_dump() == RUN_INPUT_WIRE
@@ -43,7 +41,7 @@ def test_run_input_round_trips_every_field() -> None:
 
 def test_run_input_absent_on_re_enqueues() -> None:
     """Re-enqueues and pre-v3 producers send no `runInput`, and that is normal."""
-    payload = w.WorkflowInvokePayload.model_validate({"runId": "wrun_1"})
+    payload = w.WorkflowInvokePayload.from_wire({"runId": "wrun_1"})
 
     assert payload.run_input is None
     # Omitted rather than serialized as null: the TS reader types it `undefined`.
@@ -52,7 +50,7 @@ def test_run_input_absent_on_re_enqueues() -> None:
 
 def test_run_input_optional_fields_may_all_be_absent() -> None:
     """Only the four creation essentials are required of a producer."""
-    run_input = w.RunInput.model_validate(
+    run_input = w.RunInput.from_wire(
         {
             "input": b"devl\x00payload",
             "deploymentId": "dpl_1",
@@ -70,7 +68,7 @@ def test_run_input_optional_fields_may_all_be_absent() -> None:
 
 def test_run_started_event_data_forwards_the_whole_run_input() -> None:
     """The echo into `run_started` is where a dropped field would be lost."""
-    run_input = w.RunInput.model_validate(RUN_INPUT_WIRE)
+    run_input = w.RunInput.from_wire(RUN_INPUT_WIRE)
 
     data = w.RunStartedEventData.from_run_input(run_input)
 
@@ -92,7 +90,7 @@ def test_run_started_event_data_forwards_the_whole_run_input() -> None:
 def test_run_started_carries_the_creating_client_spec_version() -> None:
     """A run recreated at our own CURRENT would be mislabelled: the row inherits
     the event's version, and the creator wrote 6, not 2."""
-    run_input = w.RunInput.model_validate(RUN_INPUT_WIRE)
+    run_input = w.RunInput.from_wire(RUN_INPUT_WIRE)
 
     event = w.RunStartedEventData.from_run_input(run_input).into_event(
         spec_version=run_input.spec_version
@@ -114,7 +112,7 @@ def test_bare_run_started_serializes_without_event_data() -> None:
 def test_run_started_payloads_expose_the_carried_input() -> None:
     """`payloads()` is what decides whether the run needs a decryption key, so
     a resilient start's input has to be visible to it."""
-    run_input = w.RunInput.model_validate(RUN_INPUT_WIRE)
+    run_input = w.RunInput.from_wire(RUN_INPUT_WIRE)
 
     with_data = w.RunStartedEventData.from_run_input(run_input).into_event()
 
@@ -125,7 +123,7 @@ def test_run_started_payloads_expose_the_carried_input() -> None:
 def test_run_started_accepts_a_server_echo_of_event_data() -> None:
     """The world strips `eventData` from the stored row, but a reader must not
     choke if one comes back."""
-    event = w.EventAdaptor.validate_python(
+    event = w.EventAdaptor.from_wire(
         {
             "eventType": "run_started",
             "runId": "wrun_1",
