@@ -61,7 +61,7 @@ def _seal_row(position: int, **overrides: Any) -> dict[str, Any]:
         "eventType": "noop",
         "correlationId": f"noop_{slot}",
         "eventData": {"sealed": True},
-        "specVersion": w.SPEC_VERSION_SUPPORTS_SEALED_LOG,
+        "specVersion": 7,  # SPEC_VERSION_SUPPORTS_SEALED_LOG
         "runId": RUN_ID,
         "eventId": f"evnt_{slot}",
         "createdAt": SEAL_TIME,
@@ -122,7 +122,7 @@ def test_the_read_ceiling_is_the_sealed_log_version() -> None:
     """Reading spec 7 is the point: `@workflow/world-local` and
     `@workflow/world-vercel` both stamp it now, so a run created by a
     TypeScript driver arrives labelled 7 whether or not it contains a seal."""
-    assert w.SPEC_VERSION_MAX_SUPPORTED == w.SPEC_VERSION_SUPPORTS_SEALED_LOG == 7
+    assert w.SPEC_VERSION_MAX_SUPPORTED == 7
     assert w.RunStartedEvent(specVersion=7).spec_version == 7
 
     with pytest.raises(pydantic.ValidationError, match="less than or equal to 7"):
