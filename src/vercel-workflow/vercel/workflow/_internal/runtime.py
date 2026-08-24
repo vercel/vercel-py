@@ -104,6 +104,7 @@ class Hook(BaseSuspension, Generic[T]):
     metadata: bytes | None = None
 
     def set_result(self, raw_data: Any) -> None:
+        res: T
         if dataclasses.is_dataclass(self.hook_cls):
             res = self.hook_cls(**raw_data)
         elif issubclass(self.hook_cls, pydantic.BaseModel):

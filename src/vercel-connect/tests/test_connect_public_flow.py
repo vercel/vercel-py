@@ -61,7 +61,7 @@ def test_service_options_are_frozen() -> None:
     options = ConnectServiceOptions()
 
     with pytest.raises(ConnectValidationError, match="frozen"):
-        options.base_url = "https://elsewhere.example.com"
+        options.base_url = "https://elsewhere.example.com"  # type: ignore[misc]
 
 
 @respx.mock
