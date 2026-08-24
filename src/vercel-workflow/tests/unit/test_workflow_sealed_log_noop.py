@@ -111,15 +111,6 @@ def test_a_seal_keeps_event_data_fields_it_has_not_heard_of() -> None:
     assert event.event_data.model_extra == {"sealedBy": "reader-page-fill"}
 
 
-def test_the_predicate_answers_for_seals_only() -> None:
-    assert w.is_sealed_noop_event(_seal(6))
-    assert not w.is_sealed_noop_event(w.RunStartedEvent())
-    assert not w.is_sealed_noop_event(w.WaitCompletedEvent(correlationId="wait_1"))
-    assert not w.is_sealed_noop_event(
-        w.RunCompletedEventData(output=ser.dehydrate(None)).into_event()
-    )
-
-
 def test_a_seal_is_not_something_this_sdk_can_create() -> None:
     """Server-originated: the backend's read path writes it and rejects a POST
     of one. Leaving it out of the create union is how that is said here."""

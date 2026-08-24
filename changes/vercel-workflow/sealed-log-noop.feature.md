@@ -1,1 +1,1 @@
-Read `specVersion` 7 event logs. A sealed-log `noop` event — written by a World's backend to occupy a slot whose writer died — now parses, and replay steps over it without offering it to the run or advancing the deterministic clock.
+Accept `specVersion` 7 sealed noop event logs.
