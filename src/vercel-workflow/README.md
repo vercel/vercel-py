@@ -34,6 +34,47 @@ async def main() -> None:
 steps that can be called only from inside a workflow. `sleep()` creates a
 durable wait in a workflow run.
 
+## Step retries
+
+A step that raises is retried up to `max_retries` times. Two errors change that
+from inside the body:
+
+```python
+from vercel.workflow import FatalError, RetryableError
+
+
+@app.step(max_retries=5)
+async def charge_customer(customer_id: str) -> None:
+    if not customer_id:
+        # Retrying cannot help, so fail the step on this attempt.
+        raise FatalError("no customer")
+    response = await http.post(...)
+    if response.status_code == 429:
+        # Retry, but not before the API says we may.
+        raise RetryableError("rate limited", retry_after="10s")
+```
+
+`retry_after` accepts the same values `sleep()` accepts — `"10s"`, a number of
+milliseconds, or an absolute timezone-aware `datetime` — and defaults to one
+second. It changes when the next attempt runs, not how many attempts there are:
+a step that has used up its retries fails whichever error it raised.
+
+Inside a step body, `get_step_metadata()` returns the run and step ids, the
+current `attempt`, and `step_started_at`. That last one is when the *first*
+attempt began, so a step can tell how long it has been trying in total:
+
+```python
+from datetime import datetime, timezone
+
+from vercel.workflow import get_step_metadata
+
+
+@app.step
+async def charge_customer(customer_id: str) -> None:
+    info = get_step_metadata()
+    elapsed = datetime.now(timezone.utc) - info.step_started_at
+```
+
 ## Queue namespaces
 
 Pass a namespace to a workflow registry to isolate its messages on a dedicated
