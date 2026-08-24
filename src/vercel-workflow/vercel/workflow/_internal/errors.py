@@ -28,7 +28,7 @@ class RetryableError(Exception):
     raised this.
     """
 
-    retry_after: datetime
+    retry_at: datetime
     """When the next attempt may start, resolved at construction time."""
 
     def __init__(
@@ -40,4 +40,4 @@ class RetryableError(Exception):
         super().__init__(message)
         if retry_after is None:
             retry_after = DEFAULT_RETRY_AFTER_MS
-        self.retry_after = parse_duration_to_date(retry_after)
+        self.retry_at = parse_duration_to_date(retry_after)

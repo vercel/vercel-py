@@ -1426,21 +1426,21 @@ async def _execute_step(
                 e,
             )
 
-            retry_after = e.retry_after if isinstance(e, errors.RetryableError) else None
+            retry_at = e.retry_at if isinstance(e, errors.RetryableError) else None
 
             # Set step to pending for retry
             error_stack = traceback.format_exc()
             await world.events_create(
                 req.run_id,
                 w.StepRetryingEventData(
-                    error=error_text, stack=error_stack, retryAfter=retry_after
+                    error=error_text, stack=error_stack, retryAfter=retry_at
                 ).into_event(req.step_id),
             )
 
             # Return timeout to keep message visible for retry
             delay_seconds = 1.0
-            if retry_after is not None:
-                remaining = (retry_after - datetime.now(UTC)).total_seconds()
+            if retry_at is not None:
+                remaining = (retry_at - datetime.now(UTC)).total_seconds()
                 delay_seconds = float(max(1, math.ceil(remaining)))
             return w.QueueContinuation(delay_seconds=delay_seconds)
 

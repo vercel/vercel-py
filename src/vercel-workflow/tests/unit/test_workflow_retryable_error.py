@@ -44,7 +44,7 @@ def test_retry_after_defaults_to_a_second() -> None:
     before = datetime.now(UTC)
     err = RetryableError("later")
 
-    assert timedelta(seconds=1) <= err.retry_after - before <= timedelta(seconds=2)
+    assert timedelta(seconds=1) <= err.retry_at - before <= timedelta(seconds=2)
 
 
 @pytest.mark.parametrize(
@@ -57,13 +57,13 @@ def test_retry_after_takes_the_durations_sleep_takes(
     before = datetime.now(UTC)
     err = RetryableError("later", retry_after=retry_after)
 
-    assert expected <= err.retry_after - before <= expected + timedelta(seconds=1)
+    assert expected <= err.retry_at - before <= expected + timedelta(seconds=1)
 
 
 def test_retry_after_takes_an_absolute_datetime() -> None:
     deadline = datetime(2030, 6, 1, tzinfo=UTC)
 
-    assert RetryableError("later", retry_after=deadline).retry_after == deadline
+    assert RetryableError("later", retry_after=deadline).retry_at == deadline
 
 
 def test_retry_after_rejects_a_naive_datetime() -> None:
