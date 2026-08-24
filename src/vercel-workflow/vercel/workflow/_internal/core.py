@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
 import functools
 import inspect
 import random as _random
-from collections.abc import AsyncIterator, Callable, Coroutine, Generator
+from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator
 from typing import Any, Generic, ParamSpec, TypeVar, overload
 
 import pydantic
@@ -28,9 +29,9 @@ def _bind_arguments(
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Split a call by what the callee's parameters can be *named*.
 
-    A value whose parameter has a usable name is recorded by name; only a
-    parameter that cannot be named -- positional-only (before a `/`) or
-    `*args` -- is recorded by position. So against
+    A value whose parameter has a usable name is normally recorded by name.
+    Positional-only parameters and `*args` are recorded by position, as is the
+    positional-or-keyword prefix required when `*args` has values. So against
     `async def charge(amount=1, currency="usd", *, tier="basic")`:
 
         charge(21)                  -> [{"amount": 21}]
@@ -52,7 +53,8 @@ def _bind_arguments(
     Recording by name also survives a reorder -- swapping two parameters cannot
     silently swap the values of a run already in flight, and a rename fails
     loudly. Recording by position gives that up in exchange for the shape
-    TypeScript writes, which is why it takes a `/` to ask for.
+    TypeScript writes. A `/` asks for that shape directly; populated `*args`
+    requires it so the call remains bindable after decoding.
 
     Defaults are deliberately not applied, so an omitted default stays off the
     wire and adding a parameter with one remains replay-safe.
@@ -73,13 +75,21 @@ def _bind_arguments(
 
     positional: list[Any] = []
     keyword: dict[str, Any] = {}
-    # Signature order, so a positional-only parameter keeps its slot ahead of
-    # whatever `*args` contributes.
+    has_var_positional = any(
+        param.kind is param.VAR_POSITIONAL and bool(bound.arguments.get(name))
+        for name, param in signature.parameters.items()
+    )
+    # Signature order, so the positional prefix stays ahead of whatever
+    # `*args` contributes. When `*args` has values, positional-or-keyword
+    # parameters must remain in that prefix: moving them into `keyword` would
+    # make the first variadic value bind to the first parameter as well.
     for name, param in signature.parameters.items():
         if name not in bound.arguments:
             continue
         value = bound.arguments[name]
-        if param.kind is param.POSITIONAL_ONLY:
+        if param.kind is param.POSITIONAL_ONLY or (
+            param.kind is param.POSITIONAL_OR_KEYWORD and has_var_positional
+        ):
             positional.append(value)
         elif param.kind is param.VAR_POSITIONAL:
             positional.extend(value)
@@ -285,11 +295,23 @@ class Workflows:
         if sandbox_policy is None:
             sandbox_policy = py_sandbox.SandboxPolicy()
         self._sandbox_policy = sandbox_policy
+
+        self._cached_sandbox = None
+        if sandbox_policy.share_sandboxes and not py_sandbox.in_sandbox():
+            self._cached_sandbox = py_sandbox.Sandbox(policy=sandbox_policy, run_cleanups=False)
+
         self._http_handler: w.HTTPHandler | None = None
         if as_vercel_job and not py_sandbox.in_sandbox():
             from . import runtime
 
             self._http_handler = runtime.workflow_entrypoint(self)
+
+    @contextlib.contextmanager
+    def _get_sandbox(self) -> Iterator[py_sandbox.Sandbox]:
+        if self._cached_sandbox:
+            yield self._cached_sandbox
+        else:
+            yield py_sandbox.Sandbox(policy=self._sandbox_policy)
 
     @property
     def namespace(self) -> str | None:

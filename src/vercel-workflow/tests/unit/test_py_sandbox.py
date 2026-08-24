@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import platform
 import sys
+from contextlib import contextmanager
 
 import pytest
 
-from vercel.workflow._internal.py_sandbox import SandboxRestrictionError, workflow_sandbox
+from vercel.workflow._internal.py_sandbox import Sandbox, SandboxRestrictionError
 from vercel.workflow.sandbox import (
     ALL_CLEANUPS,
     SandboxCleanupContext,
@@ -25,6 +26,12 @@ from vercel.workflow.sandbox import (
 )
 
 CLEANUP_ALL = SandboxPolicy(cleanups=ALL_CLEANUPS)
+
+
+@contextmanager
+def workflow_sandbox(*, policy: SandboxPolicy | None = None):
+    with Sandbox(policy=policy).enter():
+        yield
 
 
 # ── helpers ────────────────────────────────────────────────────
@@ -1165,3 +1172,33 @@ class TestSandboxPolicy:
         registry = core.Workflows(as_vercel_job=False, sandbox_policy=policy)
         assert registry._sandbox_policy is policy
         assert core.Workflows(as_vercel_job=False)._sandbox_policy == SandboxPolicy()
+
+    @staticmethod
+    def _modules_seen_by_two_runs(policy: SandboxPolicy | None) -> list:
+        from vercel.workflow._internal import core
+
+        registry = core.Workflows(as_vercel_job=False, sandbox_policy=policy)
+        modules = []
+        for _ in range(2):
+            with registry._get_sandbox() as sandbox, sandbox.enter():
+                import uuid  # noqa: PLC0415
+
+                modules.append(uuid)
+        return modules
+
+    def test_shared_sandboxes_reuse_modules_across_runs(self):
+        """With share_sandboxes=True every run gets the one cached sandbox,
+        so a re-imported module is the same object run to run."""
+        first, second = self._modules_seen_by_two_runs(SandboxPolicy(share_sandboxes=True))
+        assert first is second
+
+    def test_unshared_sandboxes_import_modules_freshly_each_run(self):
+        """With share_sandboxes=False every run gets its own sandbox, and
+        with it its own fresh imports."""
+        first, second = self._modules_seen_by_two_runs(SandboxPolicy(share_sandboxes=False))
+        assert first is not second
+
+    def test_sandboxes_are_not_shared_by_default(self):
+        assert SandboxPolicy().share_sandboxes is False
+        first, second = self._modules_seen_by_two_runs(None)
+        assert first is not second

@@ -24,7 +24,6 @@ from vercel._internal.core.polyfills import UTC, Self
 
 from . import core, errors, loop, nanoid, serialization as ser, streams, ulid, world as w
 from .duration import parse_duration_to_date
-from .py_sandbox import workflow_sandbox
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -463,8 +462,13 @@ class WorkflowOrchestratorContext:
         if not workflow_run.input:
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
 
-        with workflow_sandbox(policy=self.registry._sandbox_policy):
-            mod = importlib.import_module(wf.module)
+        with (
+            self.registry._get_sandbox() as sandbox,
+            sandbox.enter(),
+        ):
+            # Hold a lock over the import, to avoid weird init races
+            with sandbox.import_lock:
+                mod = importlib.import_module(wf.module)
 
             # Resolve the sandboxed Workflow by qualname from the
             # re-imported module.

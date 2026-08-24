@@ -1,0 +1,1 @@
+Add a `share_sandboxes` parameter to `SandboxPolicy` to enable reusing already created sandboxes instead of creating a new one on each invocation. This speeds up workflows but means that modifications to global state may persist between invocations.

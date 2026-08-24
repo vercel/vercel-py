@@ -3,17 +3,23 @@
 The array `@workflow/core` records has one slot per positional argument and
 nowhere to name anything, so keyword arguments ride in a trailing object -- see
 `serialization.argument_array`. What decides the split is the *callee's*
-signature, not the caller's spelling: a parameter with a usable name is recorded
-by name, and only one that cannot be named -- positional-only or `*args` -- is
-recorded by position.
+signature, not the caller's spelling: a parameter with a usable name is normally
+recorded by name, while positional-only and `*args` parameters are recorded by
+position. A populated `*args` also keeps the preceding positional-or-keyword
+parameters positional, because otherwise its first value would bind to the
+first named parameter after decoding.
 
 So `*,` is no longer load-bearing at all: ordinary and keyword-only parameters
-encode alike, name-keyed, which is reorder-safe and rename-loud. `/` is what
-asks for the order-keyed array a TypeScript peer writes.
+normally encode alike, name-keyed, which is reorder-safe and rename-loud. `/`
+asks for the order-keyed array a TypeScript peer writes, and populated `*args`
+requires it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
@@ -24,6 +30,19 @@ from vercel.workflow._internal.worlds.local import LocalWorld
 
 def _registry() -> core.Workflows:
     return core.Workflows(as_vercel_job=False)
+
+
+def _bindings_before_and_after_round_trip(
+    func: Callable[..., Coroutine[Any, Any, Any]],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[inspect.BoundArguments, inspect.BoundArguments]:
+    signature = inspect.signature(func)
+    before = signature.bind(*args, **kwargs)
+    encoded = ser.argument_array(*core.Step(func).bind_arguments(args, kwargs))
+    decoded_args, decoded_kwargs = ser.call_arguments(encoded, what="a call")
+    after = signature.bind(*decoded_args, **decoded_kwargs)
+    return before, after
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -97,7 +116,8 @@ def test_the_wire_does_not_depend_on_how_the_call_was_written(spellings, array) 
     for args, kwargs in spellings:
         bound_args, bound_kwargs = step.bind_arguments(args, kwargs)
         assert ser.argument_array(bound_args, bound_kwargs) == array, f"{args=} {kwargs=}"
-        assert ser.call_arguments(array, what="a call") == (list(bound_args), bound_kwargs)
+        before, after = _bindings_before_and_after_round_trip(_charge, args, kwargs)
+        assert after.arguments == before.arguments
 
 
 def test_a_named_parameter_is_recorded_by_name_whatever_its_kind() -> None:
@@ -129,6 +149,14 @@ def test_positional_only_and_var_positional_stay_positional() -> None:
     ]
 
 
+def test_positional_or_keyword_parameters_before_varargs_round_trip() -> None:
+    async def collect(first: int, second: int, *rest: int) -> None: ...
+
+    before, after = _bindings_before_and_after_round_trip(collect, (1, 2, 3), {})
+
+    assert after.arguments == before.arguments
+
+
 def test_defaults_are_not_applied() -> None:
     """An omitted default stays off the wire, so adding one is replay-safe."""
     step = core.Step(_charge)
@@ -146,6 +174,43 @@ def test_an_arity_mistake_is_a_typeerror_naming_the_callee() -> None:
         step.bind_arguments((21,), {"nope": 1})
     with pytest.raises(TypeError, match=r"_charge\(\) too many positional arguments"):
         step.bind_arguments((21, "eur", "pro"), {})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# a complete local run
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+round_trip_registry = core.Workflows(as_vercel_job=False)
+
+
+@round_trip_registry.step
+async def collect_arguments(first: int, second: int, *rest: int) -> list[int]:
+    return [first, second, *rest]
+
+
+@round_trip_registry.workflow
+async def call_collect_arguments() -> list[int]:
+    return await collect_arguments(1, 2, 3)
+
+
+async def test_positional_or_keyword_parameters_before_varargs_survive_a_run(
+    tmp_path, monkeypatch, isolated_subscriptions
+) -> None:
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    world = LocalWorld()
+    w.set_world(world)
+    runtime.workflow_entrypoint(round_trip_registry)
+    await world._get_queue_client()
+
+    try:
+        run = await runtime.start(call_collect_arguments)
+        result = await asyncio.wait_for(run.return_value(), 30)
+    finally:
+        await world.aclose()
+        w.set_world(None)
+
+    assert result == [1, 2, 3]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -258,7 +323,8 @@ async def test_an_object_passed_positionally_survives_the_round_trip(tmp_path, m
     hydrated = ser.hydrate(stored.input, what="the input")
 
     assert hydrated == [{"a": 1}, {}]
-    assert ser.call_arguments(hydrated, what="the input") == ([{"a": 1}], {})
+    before, after = _bindings_before_and_after_round_trip(ingest.func, ({"a": 1},), {})
+    assert after.arguments == before.arguments
 
     named = await _start(ingest_named, {"a": 1})
     assert ser.hydrate(named.input, what="the input") == [{"payload": {"a": 1}}]
