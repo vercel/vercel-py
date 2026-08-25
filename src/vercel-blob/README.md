@@ -51,4 +51,8 @@ owned by the SDK session in which they were opened and reject I/O after that ses
 
 Use unique pathnames in scripts and tests, and call `remove(pathname, missing_ok=True)` from a
 `finally` block for best-effort cleanup. Complete runnable lifecycle examples are in
-`examples/blob_async_text.py` and `examples/blob_sync_binary.py`.
+`examples/blob_async_text.py` and `examples/blob_sync_binary.py`. The standalone
+`examples/blob_sandbox_streaming.py` example copies in bounded chunks from a local file to
+Blob, from Blob to a Sandbox, and from the transformed Sandbox result back through Blob to a
+local file. It requires both `vercel-blob` and `vercel-sandbox` plus credentials for both
+services.
