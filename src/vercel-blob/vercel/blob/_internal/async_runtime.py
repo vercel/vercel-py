@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any, Generic, Protocol, TypeVar, cast
@@ -11,7 +10,7 @@ import anyio
 
 from .models import Access, BlobStatResult
 from .service import BlobService
-from .streams import BinaryReaderCore, BinaryWriterCore, TextReaderCore
+from .streams import BinaryReaderCore, BinaryWriterCore, TextReaderCore, TextWriterCore
 
 
 class _AsyncStreamProtocol(Protocol):
@@ -250,6 +249,12 @@ class AsyncBlobTextWriter:
         self.encoding = encoding
         self.errors = errors
         self.newline = newline
+        self._text = TextWriterCore(
+            binary._core,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
 
     @property
     def closed(self) -> bool:
@@ -270,19 +275,13 @@ class AsyncBlobTextWriter:
     async def write(self, text: str) -> int:
         if not isinstance(text, str):
             raise TypeError("write() argument must be str")
-        translated = text
-        newline = self.newline
-        target_newline = os.linesep if newline is None else newline
-        if target_newline not in ("", "\n"):
-            translated = text.replace("\n", target_newline)
-        await self.buffer.write(translated.encode(self.encoding, self.errors))
-        return len(text)
+        return await self.buffer._run(lambda: self._text.write(text))
 
     async def flush(self) -> None:
-        await self.buffer.flush()
+        await self.buffer._run(self._text.flush)
 
     async def close(self) -> None:
-        await self.buffer.close()
+        await self.buffer._run(self._text.close)
 
     async def abort(self) -> None:
         await self.buffer.abort()

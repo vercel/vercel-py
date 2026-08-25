@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from datetime import timedelta
 
 from vercel._internal.core.byte_stream import StagingFileRuntime
 from vercel._internal.core.session import SdkSession, SyncSdkSession
-from vercel.blob.errors import BlobNotFoundError, BlobStreamError
+from vercel.blob.errors import BlobCredentialsError, BlobNotFoundError, BlobStreamError
 
 from .api_client import BlobApiClient
 from .models import (
@@ -86,7 +87,20 @@ def _adapt_sync_credentials_factory(
     factory: SyncBlobCredentialsFactory,
 ) -> BlobCredentialsFactory:
     async def credentials_factory() -> BlobCredentials:
-        return factory()
+        credentials = factory()
+        if inspect.isawaitable(credentials):
+            close = getattr(credentials, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except BaseException as cleanup_error:
+                    raise BlobCredentialsError(
+                        "synchronous credential factory must not return an awaitable"
+                    ) from cleanup_error
+            raise BlobCredentialsError(
+                "synchronous credential factory must not return an awaitable"
+            )
+        return credentials
 
     return credentials_factory
 

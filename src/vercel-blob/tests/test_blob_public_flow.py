@@ -205,9 +205,9 @@ async def test_async_text_handles_split_codepoints_and_newlines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import vercel.blob as blob
-    import vercel.blob._internal.async_runtime as blob_async_runtime
+    import vercel.blob._internal.streams as blob_streams
 
-    monkeypatch.setattr(blob_async_runtime.os, "linesep", "\r\n")
+    monkeypatch.setattr(blob_streams.os, "linesep", "\r\n")
     store = Store()
     async with session(
         service_options=[options(read_buffer_size=2)],
@@ -223,6 +223,14 @@ async def test_async_text_handles_split_codepoints_and_newlines(
             assert await reader.readline() == "a€\n"
             assert reader.tell() == 6
             assert await reader.read() == "b"
+
+        for encoding in ("utf-16", "utf-8-sig", "iso2022_jp"):
+            pathname = f"async-{encoding}.txt"
+            async with blob.open(pathname, "w", encoding=encoding) as writer:
+                assert await writer.write("日") == 1
+                await writer.flush()
+                assert await writer.write("本") == 1
+            assert store.objects[pathname] == "日本".encode(encoding)
 
 
 @pytest.mark.anyio
@@ -458,6 +466,14 @@ def test_sync_lifecycle_supports_stdlib_text_and_binary_io() -> None:
         with blob.open("rows.csv", "r", newline="") as reader:
             assert list(csv.reader(reader)) == [["name", "value"], ["one", "1"]]
 
+        for encoding in ("utf-16", "utf-8-sig", "iso2022_jp"):
+            pathname = f"sync-{encoding}.txt"
+            with blob.open(pathname, "w", encoding=encoding) as writer:
+                assert writer.write("日") == 1
+                writer.flush()
+                assert writer.write("本") == 1
+            assert store.objects[pathname] == "日本".encode(encoding)
+
         with blob.open("copy.bin", "wb") as writer:
             writer.write(b"binary")
         with blob.open("copy.bin", "rb") as reader:
@@ -472,6 +488,44 @@ def test_sync_lifecycle_supports_stdlib_text_and_binary_io() -> None:
         assert aborted.closed
         assert "aborted.bin" not in store.objects
         blob.remove("copy.bin")
+
+
+def test_sync_open_validates_access_before_constructing_transport() -> None:
+    import vercel.blob.sync as blob
+
+    def fail_factory() -> httpx.Client:
+        raise AssertionError("HTTP client factory must not be called")
+
+    with session(httpx_client_factory=fail_factory):
+        with pytest.raises(ValueError, match="access must be"):
+            blob.open("object", "rb", access="invalid")  # type: ignore[call-overload]
+
+
+def test_sync_rejects_async_credentials_factory_without_warning() -> None:
+    import warnings
+
+    import vercel.blob.sync as blob
+
+    async def credentials() -> BlobCredentials:
+        return BlobCredentials("oidc", "store", "oidc")
+
+    configured = SyncBlobServiceOptions(
+        base_url=BASE_URL,
+        credentials_factory=credentials,  # type: ignore[arg-type]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with session(
+            service_options=[configured],
+            httpx_client_factory=lambda: httpx.Client(
+                transport=httpx.MockTransport(Store().sync_handler)
+            ),
+        ):
+            with pytest.raises(
+                blob.BlobCredentialsError,
+                match="synchronous credential factory must not return an awaitable",
+            ):
+                blob.stat("object")
 
 
 def test_sync_publication_failure_closes_and_breaks_writer() -> None:

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import io
-import os
 import threading
+from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from typing import Any
 
@@ -12,7 +12,7 @@ from vercel._internal.core.iter_coroutine import iter_coroutine
 
 from .models import Access, BlobStatResult
 from .service import BlobService
-from .streams import BinaryReaderCore, BinaryWriterCore, TextReaderCore
+from .streams import BinaryReaderCore, BinaryWriterCore, TextReaderCore, TextWriterCore
 
 
 class SyncBlobBinaryStream(io.BufferedIOBase):
@@ -104,7 +104,10 @@ class SyncBlobBinaryWriter(io.BufferedIOBase):
                 raise ValueError("flush of closed file")
             iter_coroutine(self._core.flush())
 
-    def close(self) -> None:
+    def _close(
+        self,
+        operation: Callable[[], Coroutine[None, None, None]] | None = None,
+    ) -> None:
         with self._close_lock:
             self._closing = True
             try:
@@ -115,12 +118,16 @@ class SyncBlobBinaryWriter(io.BufferedIOBase):
                         if self._abort_on_close:
                             iter_coroutine(self._core.abort())
                         else:
-                            iter_coroutine(self._core.close())
+                            close = self._core.close if operation is None else operation
+                            iter_coroutine(close())
             finally:
                 try:
                     super().close()
                 finally:
                     self._closing = False
+
+    def close(self) -> None:
+        self._close()
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         self._abort_on_close = exc_type is not None
@@ -219,6 +226,12 @@ class SyncBlobTextWriter(io.TextIOBase):
         self._errors = errors
         self._newline = newline
         self._closing = False
+        self._text = TextWriterCore(
+            binary._core,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
 
     @property
     def name(self) -> str:
@@ -250,13 +263,8 @@ class SyncBlobTextWriter(io.TextIOBase):
         self._checkClosed()
         if not isinstance(text, str):
             raise TypeError("write() argument must be str")
-        translated = text
-        newline = self._newline
-        target_newline = os.linesep if newline is None else newline
-        if target_newline not in ("", "\n"):
-            translated = text.replace("\n", target_newline)
-        self._binary.write(translated.encode(self._encoding, self._errors))
-        return len(text)
+        with self._binary._lock:
+            return iter_coroutine(self._text.write(text))
 
     def flush(self) -> None:
         if self._closing:
@@ -271,7 +279,7 @@ class SyncBlobTextWriter(io.TextIOBase):
             if self._binary._core.broken is not None:
                 self._binary.close()
             elif not self.closed:
-                self._binary.close()
+                self._binary._close(self._text.close)
         finally:
             try:
                 super().close()

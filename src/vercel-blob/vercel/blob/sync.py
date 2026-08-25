@@ -121,10 +121,10 @@ def open(
         content_type=content_type,
         cache_control_max_age=cache_control_max_age,
     )
+    if access is not None and access not in ("public", "private"):
+        raise ValueError("access must be 'public' or 'private'")
     service = get_sync_blob_service(get_active_sync_session())
     resolved_access = service.options.default_access if access is None else access
-    if resolved_access not in ("public", "private"):
-        raise ValueError("access must be 'public' or 'private'")
     return open_sync_stream(
         service,
         path,

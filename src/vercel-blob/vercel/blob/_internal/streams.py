@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import io
+import os
 from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
 from typing import Any
@@ -220,6 +221,40 @@ class BinaryWriterCore:
             raise
         else:
             self._cleanup_complete = True
+
+
+class TextWriterCore:
+    def __init__(
+        self,
+        binary: BinaryWriterCore,
+        *,
+        encoding: str,
+        errors: str,
+        newline: str | None,
+    ) -> None:
+        self.binary = binary
+        self.newline = newline
+        self._encoder = codecs.getincrementalencoder(encoding)(errors=errors)
+
+    async def write(self, text: str) -> int:
+        translated = text
+        target_newline = os.linesep if self.newline is None else self.newline
+        if target_newline not in ("", "\n"):
+            translated = text.replace("\n", target_newline)
+        await self.binary.write(self._encoder.encode(translated, final=False))
+        return len(text)
+
+    async def flush(self) -> None:
+        await self.binary.flush()
+
+    async def close(self) -> None:
+        if self.binary.closed:
+            await self.binary.close()
+            return
+        tail = self._encoder.encode("", final=True)
+        if tail:
+            await self.binary.write(tail)
+        await self.binary.close()
 
 
 class TextReaderCore:
