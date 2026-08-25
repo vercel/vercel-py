@@ -6,8 +6,6 @@ from io import StringIO
 import pytest
 
 from benchmarks.async_load import (
-    BENCHMARK_ROOT,
-    JS_CLIENT_ROOT,
     BenchmarkConfig,
     BenchmarkResult,
     LatencySummary,
@@ -31,10 +29,6 @@ def test_parse_args_accepts_scenarios() -> None:
         "3",
         "--poll-limit",
         "4",
-        "--architecture",
-        "split",
-        "--client",
-        "js",
     ])
 
     configs = configs_from_args(args)
@@ -46,8 +40,6 @@ def test_parse_args_accepts_scenarios() -> None:
             messages=12,
             concurrency=3,
             poll_limit=4,
-            architecture="split",
-            client="js",
         )
     ]
 
@@ -57,16 +49,6 @@ def test_parse_args_rejects_invalid_poll_limit() -> None:
     with redirect_stderr(stderr), pytest.raises(SystemExit):
         parse_args(["--poll-limit", "11"])
     assert "--poll-limit" in stderr.getvalue()
-
-
-def test_js_client_requires_split_push() -> None:
-    with pytest.raises(ValueError, match="--client js"):
-        BenchmarkConfig(scenario="small", messages=1, client="js")
-
-
-def test_benchmark_state_uses_project_benchmarks_root() -> None:
-    assert BENCHMARK_ROOT.name == ".benchmarks"
-    assert JS_CLIENT_ROOT == BENCHMARK_ROOT / "js-client"
 
 
 async def test_small_message_benchmark_completes(anyio_backend: str) -> None:
@@ -180,8 +162,15 @@ def test_json_summary_has_stable_metric_keys() -> None:
         "total_seconds",
     }
     assert summary["config"]["delivery"] == "pull"
-    assert summary["config"]["architecture"] == "in-process"
-    assert summary["config"]["client"] == "python"
+    assert set(summary["config"]) == {
+        "chunk_size",
+        "concurrency",
+        "delivery",
+        "large_payload_bytes",
+        "messages",
+        "poll_limit",
+        "small_payload_bytes",
+    }
     assert set(summary["send"]) == {
         "bytes",
         "latency",
