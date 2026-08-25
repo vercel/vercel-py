@@ -14,7 +14,8 @@ suite, so what passes here is what that suite expects to see.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import contextlib
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -104,14 +105,28 @@ def _reset_world():
     clear_subscriptions()
 
 
-@pytest.fixture
-async def world(tmp_path: Path, monkeypatch) -> Any:
+@contextlib.asynccontextmanager
+async def running_world(tmp_path, monkeypatch) -> AsyncIterator[local_mod.LocalWorld]:
+    """A world whose embedded queue service this task opens and closes.
+
+    Both halves have to happen in one task, which is why this is a context
+    manager the test enters rather than a fixture: anyio refuses to exit a cancel
+    scope from a task other than the one that entered it, and a fixture's
+    teardown is not reliably the setup's task. `aclose()` in a fixture `finally`
+    passes on 3.11+ and fails on 3.10.
+
+    The queue client is opened here for the same reason -- otherwise the first
+    message to publish opens it, from a task of its own.
+    """
     monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
     world = local_mod.LocalWorld()
     w.set_world(world)
     runtime.workflow_entrypoint(registry)
-    yield world
-    await world.aclose()
+    await world._get_queue_client()
+    try:
+        yield world
+    finally:
+        await world.aclose()
 
 
 async def _run(world: local_mod.LocalWorld, wf: Any, *args: Any) -> tuple[str, Any]:
@@ -121,88 +136,96 @@ async def _run(world: local_mod.LocalWorld, wf: Any, *args: Any) -> tuple[str, A
     return run.run_id, result
 
 
-async def test_a_body_write_lands_on_the_run(world) -> None:
-    run_id, result = await _run(world, sets_attributes, 7)
+async def test_a_body_write_lands_on_the_run(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run_id, result = await _run(world, sets_attributes, 7)
 
-    assert result == 21
-    # The first call sets phase and source, the second overwrites phase, the
-    # third removes source.
-    run = await world.runs_get(run_id)
-    assert run.attributes == {"phase": "done"}
+        assert result == 21
+        # The first call sets phase and source, the second overwrites phase, the
+        # third removes source.
+        run = await world.runs_get(run_id)
+        assert run.attributes == {"phase": "done"}
 
 
-async def test_a_client_reads_them_back_off_the_run(world) -> None:
+async def test_a_client_reads_them_back_off_the_run(tmp_path, monkeypatch) -> None:
     """The read side of the API: what a caller holding a `Run` can see."""
-    run = await runtime.start(sets_attributes, 7)
-    await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
-
-    assert await run.attributes() == {"phase": "done"}
-
-
-async def test_each_body_write_appends_one_event(world) -> None:
-    run_id, _ = await _run(world, sets_attributes, 7)
-
-    events = (await world.events_list(run_id)).data
-    attr_events = [e for e in events if e.event_type == "attr_set"]
-    assert len(attr_events) == 3
-    assert all(isinstance(e.event_data.writer, w.WorkflowAttributeWriter) for e in attr_events)
-    # Correlated, so a replay can tell which call each one answers.
-    assert all(e.correlation_id and e.correlation_id.startswith("attr_") for e in attr_events)
-
-
-async def test_a_step_write_is_attributed_to_the_step(world) -> None:
-    run_id, result = await _run(world, sets_attributes_inside_a_step, 9)
-
-    assert result == 36
-    run = await world.runs_get(run_id)
-    assert run.attributes == {"phase": "step-done", "source": "step-body", "input": "9"}
-
-    events = (await world.events_list(run_id)).data
-    writers = [e.event_data.writer for e in events if e.event_type == "attr_set"]
-    assert len(writers) == 2
-    assert all(isinstance(writer, w.StepAttributeWriter) for writer in writers)
-    assert all(writer.attempt == 1 for writer in writers)
-
-
-async def test_parallel_writes_of_disjoint_keys_all_land(world) -> None:
-    run_id, result = await _run(world, sets_attributes_in_parallel)
-
-    assert result == "done"
-    run = await world.runs_get(run_id)
-    assert run.attributes == {"a": "1", "b": "2", "c": "3"}
-
-
-async def test_a_run_that_fails_keeps_what_it_wrote(world) -> None:
-    run = await runtime.start(throws_after_setting_attributes)
-    # "workflow failed" and nothing else: the thrown value does not survive the
-    # event log yet (gap 13). What matters here is the attributes, below.
-    with pytest.raises(RuntimeError, match="workflow failed"):
+    async with running_world(tmp_path, monkeypatch):
+        run = await runtime.start(sets_attributes, 7)
         await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
 
-    stored = await world.runs_get(run.run_id)
-    assert stored.status == "failed"
-    assert stored.error is not None and "intentional failure" in stored.error.message
-    # The write was awaited, so it landed before the throw -- and the
-    # run_failed write has to carry the attribute snapshot forward.
-    assert stored.attributes == {"phase": "about-to-fail", "reason": "intentional"}
+        assert await run.attributes() == {"phase": "done"}
 
 
-async def test_a_rejected_write_does_not_wedge_the_run(world) -> None:
-    run_id, outcomes = await _run(world, catches_invalid_attributes)
+async def test_each_body_write_appends_one_event(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run_id, _ = await _run(world, sets_attributes, 7)
 
-    assert all(outcome.startswith("FatalError: ") for outcome in outcomes.values()), outcomes
-    assert "reserved prefix" in outcomes["reserved"]
-    assert "must not be empty" in outcomes["emptyKey"]
-    assert "key length 257 exceeds limit 256" in outcomes["keyTooLong"]
-    assert "byte length 257 exceeds limit 256" in outcomes["valueTooLong"]
-    assert "byte length 400 exceeds limit 256" in outcomes["valueTooManyBytes"]
-    assert "exceed limit: 65 > 64" in outcomes["overCap"]
-    assert "requires a mapping" in outcomes["nonObject"]
+        events = (await world.events_list(run_id)).data
+        attr_events = [e for e in events if e.event_type == "attr_set"]
+        assert len(attr_events) == 3
+        assert all(isinstance(e.event_data.writer, w.WorkflowAttributeWriter) for e in attr_events)
+        # Correlated, so a replay can tell which call each one answers.
+        assert all(e.correlation_id and e.correlation_id.startswith("attr_") for e in attr_events)
 
-    # No invalid write reached the run, and the valid one after them did.
-    run = await world.runs_get(run_id)
-    assert run.status == "completed"
-    assert run.attributes == {"phase": "validated"}
+
+async def test_a_step_write_is_attributed_to_the_step(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run_id, result = await _run(world, sets_attributes_inside_a_step, 9)
+
+        assert result == 36
+        run = await world.runs_get(run_id)
+        assert run.attributes == {"phase": "step-done", "source": "step-body", "input": "9"}
+
+        events = (await world.events_list(run_id)).data
+        writers = [e.event_data.writer for e in events if e.event_type == "attr_set"]
+        assert len(writers) == 2
+        for writer in writers:
+            assert isinstance(writer, w.StepAttributeWriter)
+            assert writer.attempt == 1
+
+
+async def test_parallel_writes_of_disjoint_keys_all_land(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run_id, result = await _run(world, sets_attributes_in_parallel)
+
+        assert result == "done"
+        run = await world.runs_get(run_id)
+        assert run.attributes == {"a": "1", "b": "2", "c": "3"}
+
+
+async def test_a_run_that_fails_keeps_what_it_wrote(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(throws_after_setting_attributes)
+        # "workflow failed" and nothing else: the thrown value does not survive
+        # the event log yet (gap 13). What matters here is the attributes, below.
+        with pytest.raises(RuntimeError, match="workflow failed"):
+            await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
+
+        stored = await world.runs_get(run.run_id)
+        assert stored.status == "failed"
+        assert stored.error is not None and "intentional failure" in stored.error.message
+        # The write was awaited, so it landed before the throw -- and the
+        # run_failed write has to carry the attribute snapshot forward.
+        assert stored.attributes == {"phase": "about-to-fail", "reason": "intentional"}
+
+
+async def test_a_rejected_write_does_not_wedge_the_run(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run_id, outcomes = await _run(world, catches_invalid_attributes)
+
+        assert all(outcome.startswith("FatalError: ") for outcome in outcomes.values()), outcomes
+        assert "reserved prefix" in outcomes["reserved"]
+        assert "must not be empty" in outcomes["emptyKey"]
+        assert "key length 257 exceeds limit 256" in outcomes["keyTooLong"]
+        assert "byte length 257 exceeds limit 256" in outcomes["valueTooLong"]
+        assert "byte length 400 exceeds limit 256" in outcomes["valueTooManyBytes"]
+        assert "exceed limit: 65 > 64" in outcomes["overCap"]
+        assert "requires a mapping" in outcomes["nonObject"]
+
+        # No invalid write reached the run, and the valid one after them did.
+        run = await world.runs_get(run_id)
+        assert run.status == "completed"
+        assert run.attributes == {"phase": "validated"}
 
 
 async def test_the_error_type_is_catchable_in_a_body() -> None:
