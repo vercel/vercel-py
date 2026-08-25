@@ -1,28 +1,28 @@
-"""Asynchronous, file-oriented Vercel Blob SDK."""
+"""Synchronous, file-oriented Vercel Blob SDK."""
 
 from __future__ import annotations
 
 import os
 from typing import Any, Literal, overload
 
-from vercel._internal.core.session import get_active_session
-from vercel.blob._internal.async_runtime import (
-    AsyncBlobBinaryStream,
-    AsyncBlobBinaryWriter,
-    AsyncBlobTextStream,
-    AsyncBlobTextWriter,
-    OpenBlobOperation,
-    open_async_stream,
-)
+from vercel._internal.core.iter_coroutine import iter_coroutine
+from vercel._internal.core.session import get_active_sync_session
 from vercel.blob._internal.models import (
     Access,
     BlobCredentials,
-    BlobCredentialsFactory,
     BlobStatResult,
     DurationInput,
+    SyncBlobCredentialsFactory,
 )
-from vercel.blob._internal.options import BlobServiceOptions
-from vercel.blob._internal.service import get_blob_service
+from vercel.blob._internal.options import SyncBlobServiceOptions as BlobServiceOptions
+from vercel.blob._internal.service import get_sync_blob_service
+from vercel.blob._internal.sync_runtime import (
+    SyncBlobBinaryStream,
+    SyncBlobBinaryWriter,
+    SyncBlobTextStream,
+    SyncBlobTextWriter,
+    open_sync_stream,
+)
 from vercel.blob._internal.validation import normalize_path, validate_open
 from vercel.blob.errors import (
     BlobAccessError,
@@ -41,8 +41,6 @@ from vercel.blob.errors import (
     BlobUnknownError,
 )
 
-from . import sync
-
 StrPath = str | os.PathLike[str]
 
 
@@ -57,7 +55,7 @@ def open(
     newline: str | None = None,
     content_type: str | None = None,
     cache_control_max_age: DurationInput = None,
-) -> OpenBlobOperation[AsyncBlobTextStream]: ...
+) -> SyncBlobTextStream: ...
 
 
 @overload
@@ -71,7 +69,7 @@ def open(
     newline: None = None,
     content_type: str | None = None,
     cache_control_max_age: DurationInput = None,
-) -> OpenBlobOperation[AsyncBlobBinaryStream]: ...
+) -> SyncBlobBinaryStream: ...
 
 
 @overload
@@ -85,7 +83,7 @@ def open(
     newline: None = None,
     content_type: str | None = None,
     cache_control_max_age: DurationInput = None,
-) -> OpenBlobOperation[AsyncBlobBinaryWriter]: ...
+) -> SyncBlobBinaryWriter: ...
 
 
 @overload
@@ -99,7 +97,7 @@ def open(
     newline: str | None = None,
     content_type: str | None = None,
     cache_control_max_age: DurationInput = None,
-) -> OpenBlobOperation[AsyncBlobTextWriter]: ...
+) -> SyncBlobTextWriter: ...
 
 
 def open(
@@ -112,8 +110,8 @@ def open(
     newline: str | None = None,
     content_type: str | None = None,
     cache_control_max_age: DurationInput = None,
-) -> OpenBlobOperation[Any]:
-    """Return a deferred, single-use operation that opens a Blob stream."""
+) -> Any:
+    """Open a Blob object as a synchronous file-like stream."""
     path, parsed_mode, _, normalized_cache_control_max_age = validate_open(
         pathname,
         mode,
@@ -125,48 +123,40 @@ def open(
     )
     if access is not None and access not in ("public", "private"):
         raise ValueError("access must be 'public' or 'private'")
-    session = get_active_session()
-
-    async def operation():
-        service = get_blob_service(session)
-        resolved_access = service.options.default_access if access is None else access
-        return await open_async_stream(
-            service,
-            path,
-            parsed_mode,
-            access=resolved_access,
-            encoding=encoding or "utf-8",
-            errors=errors or "strict",
-            newline=newline,
-            content_type=content_type,
-            cache_control_max_age=normalized_cache_control_max_age,
-        )
-
-    return OpenBlobOperation(operation)
+    service = get_sync_blob_service(get_active_sync_session())
+    resolved_access = service.options.default_access if access is None else access
+    return open_sync_stream(
+        service,
+        path,
+        parsed_mode,
+        access=resolved_access,
+        encoding=encoding or "utf-8",
+        errors=errors or "strict",
+        newline=newline,
+        content_type=content_type,
+        cache_control_max_age=normalized_cache_control_max_age,
+    )
 
 
-async def stat(pathname: StrPath) -> BlobStatResult:
+def stat(pathname: StrPath) -> BlobStatResult:
     path = normalize_path(pathname)
-    return await get_blob_service(get_active_session()).stat(path)
+    return iter_coroutine(get_sync_blob_service(get_active_sync_session()).stat(path))
 
 
-async def remove(pathname: StrPath, *, missing_ok: bool = False) -> None:
+def remove(pathname: StrPath, *, missing_ok: bool = False) -> None:
     if not isinstance(missing_ok, bool):
         raise TypeError("missing_ok must be bool")
     path = normalize_path(pathname)
-    await get_blob_service(get_active_session()).remove(path, missing_ok=missing_ok)
+    iter_coroutine(
+        get_sync_blob_service(get_active_sync_session()).remove(path, missing_ok=missing_ok)
+    )
 
 
 __all__ = [
-    "AsyncBlobBinaryStream",
-    "AsyncBlobBinaryWriter",
-    "AsyncBlobTextStream",
-    "AsyncBlobTextWriter",
     "BlobAccessError",
     "BlobContentTypeNotAllowedError",
     "BlobCredentials",
     "BlobCredentialsError",
-    "BlobCredentialsFactory",
     "BlobError",
     "BlobFileTooLargeError",
     "BlobNotFoundError",
@@ -180,9 +170,12 @@ __all__ = [
     "BlobStoreSuspendedError",
     "BlobStreamError",
     "BlobUnknownError",
-    "OpenBlobOperation",
+    "SyncBlobBinaryStream",
+    "SyncBlobBinaryWriter",
+    "SyncBlobCredentialsFactory",
+    "SyncBlobTextStream",
+    "SyncBlobTextWriter",
     "open",
     "remove",
     "stat",
-    "sync",
 ]
