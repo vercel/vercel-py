@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vercel.queue import Message, RetryAfter, asgi_app, subscribe
+from vercel.queue import Message, RetryAfter, subscribe
 
 
 @subscribe(topic="jobs", retry_after=30, max_attempts=3)
@@ -10,6 +10,3 @@ async def process_job(message: Message[dict[str, object]]) -> None:
         print("Retrying job", job_id, "attempt", message.metadata.delivery_count)
         raise RetryAfter(30)
     print("Processed job", job_id, "attempt", message.metadata.delivery_count)
-
-
-app = asgi_app()
