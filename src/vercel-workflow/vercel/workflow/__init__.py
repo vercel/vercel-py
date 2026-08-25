@@ -36,6 +36,7 @@ from . import sandbox
 from .errors import (
     EntityConflictError,
     FatalError,
+    HookConflictError,
     HookNotFoundError,
     RemoteError,
     RetryableError,
@@ -82,6 +83,7 @@ __all__ = [
     "register_serializable",
     "EntityConflictError",
     "FatalError",
+    "HookConflictError",
     "HookNotFoundError",
     "RemoteError",
     "RetryableError",

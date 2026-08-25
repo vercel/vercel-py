@@ -990,11 +990,10 @@ class WorkflowOrchestratorContext:
                     hook = self.suspensions.pop(event.correlation_id, None)
                     if hook is not None:
                         assert isinstance(hook, Hook)
-                        conflict = f'Hook token "{token}" is already in use by another workflow'
                         while hook.futures:
                             future = hook.futures.popleft()
                             if not future.cancelled():
-                                future.set_exception(RuntimeError(conflict))
+                                future.set_exception(errors.HookConflictError(token))
 
                 case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
                     hook = self.suspensions[event.correlation_id]
@@ -1215,6 +1214,13 @@ def refuse_cross_environment_delivery(
     return True
 
 
+class _ReplayImmediately:
+    """Ask the current queue delivery to cold-replay without acknowledging it."""
+
+
+_REPLAY_IMMEDIATELY = _ReplayImmediately()
+
+
 async def workflow_handler(
     message: Any,
     *,
@@ -1280,6 +1286,29 @@ async def workflow_handler(
     if workflow_run.status != "running":
         # Workflow has already completed or failed, so we can skip it
         return None
+
+    while True:
+        replay_result = await _workflow_replay_pass(
+            req=req,
+            workflow_run=workflow_run,
+            workflow_started_at=workflow_started_at,
+            registry=registry,
+            namespace=namespace,
+        )
+        if not isinstance(replay_result, _ReplayImmediately):
+            return replay_result
+
+
+async def _workflow_replay_pass(
+    *,
+    req: w.WorkflowInvokePayload,
+    workflow_run: w.WorkflowRun,
+    workflow_started_at: int,
+    registry: core.Workflows,
+    namespace: str | None,
+) -> w.QueueContinuation | _ReplayImmediately | None:
+    world = w.get_world()
+    run_id = req.run_id
 
     # Load all events into memory before running
     loaded = await get_all_workflow_run_events(run_id)
@@ -1408,7 +1437,8 @@ async def workflow_handler(
 
     # Now that the workflow is fully suspended, we can create all pending events in parallel
     events_created = False
-    attributes_written = False
+    immediate_replay_reasons: set[str] = set()
+
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
             if sus.has_created_event:
@@ -1460,9 +1490,14 @@ async def workflow_handler(
                 async def create_hook(s=sus):
                     hook_data = w.HookCreatedEventData(token=s.token, metadata=s.metadata)
                     try:
-                        await world.events_create(run_id, hook_data.into_event(s.correlation_id))
+                        result = await world.events_create(
+                            run_id, hook_data.into_event(s.correlation_id)
+                        )
                     except w.EntityConflictError:
                         logger.debug(f"Workflow hook {s.correlation_id!r} has already been created")
+                    else:
+                        if isinstance(result.event, w.HookConflictEvent):
+                            immediate_replay_reasons.add("hook_conflict")
 
                 tg.start_soon(create_hook)
                 events_created = True
@@ -1481,10 +1516,10 @@ async def workflow_handler(
                         logger.debug(
                             f"Workflow attributes {s.correlation_id!r} have already been set"
                         )
+                    immediate_replay_reasons.add("attr_set")
 
                 tg.start_soon(set_attr)
                 events_created = True
-                attributes_written = True
 
         for hook in context.hooks.values():
             if hook.disposed and not hook.has_dispose_event:
@@ -1503,18 +1538,18 @@ async def workflow_handler(
                 tg.start_soon(dispose_hook)
                 events_created = True
 
-    if attributes_written or (not context.suspensions and events_created):
-        # An attribute write is immediately ready after the replay, so we can just
-        # run replay again without requeuing. The second case is caused by a disposed
-        # hook that cleared its suspensions, so do the same if event log changed.
-        return await workflow_handler(
-            message,
-            attempt=attempt,
-            queue_name=queue_name,
-            message_id=message_id,
-            registry=registry,
-            namespace=namespace,
+    if not context.suspensions and events_created:
+        # A disposed hook can clear the last suspension while its lifecycle
+        # event is still being flushed. Replay it before acknowledging.
+        immediate_replay_reasons.add("suspensions_cleared")
+
+    if immediate_replay_reasons:
+        logger.debug(
+            "[Workflows] '%s' - replaying after durable local progress: %s",
+            run_id,
+            ", ".join(sorted(immediate_replay_reasons)),
         )
+        return _REPLAY_IMMEDIATELY
 
     now = datetime.now(UTC)
     min_timeout_seconds = -1.0
