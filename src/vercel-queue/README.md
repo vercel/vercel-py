@@ -5,7 +5,7 @@ designed for seamless integration with Vercel deployments.
 
 ## Features
 
-- **Simple API**: `send`, `subscribe`, and `poll` cover standard workflows.
+- **Simple API**: `send`, `subscribe`, and `asgi_app` cover standard workflows.
 - **Automatic Triggering on Vercel**: Vercel invokes your function when messages are ready.
 - **Works Anywhere**: `send`, decorated subscribers, and manual `poll` loops work on Vercel, self-hosted workers, and locally.
 - **Sync and Async Clients**: Prefer async for applications, use sync for scripts and blocking workers.

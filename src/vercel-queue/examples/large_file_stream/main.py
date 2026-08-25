@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterable
 
-from vercel.queue import subscribe
+from vercel.queue import asgi_app, subscribe
 
 
 @subscribe(topic="files")
@@ -11,3 +11,6 @@ async def archive_file(payload: AsyncIterable[bytes]) -> None:
     async for chunk in payload:
         size += len(chunk)
     print(f"received {size} bytes")
+
+
+app = asgi_app()

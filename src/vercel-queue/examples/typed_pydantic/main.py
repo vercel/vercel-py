@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from vercel.queue import subscribe
+from vercel.queue import asgi_app, subscribe
 
 
 class Order(BaseModel):
@@ -13,3 +13,6 @@ class Order(BaseModel):
 @subscribe(topic="typed-orders")
 async def handle_order(order: Order) -> None:
     print("Billing order", order.order_id, order.total_cents)
+
+
+app = asgi_app()
