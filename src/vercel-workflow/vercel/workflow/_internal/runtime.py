@@ -159,7 +159,89 @@ class StepInfo:
     step_started_at: datetime
 
 
-_step_ctx: contextvars.ContextVar[StepInfo] = contextvars.ContextVar("WorkflowStepContext")
+@dataclasses.dataclass(frozen=True)
+class WorkflowFeatures:
+    """Capabilities active for the current workflow run."""
+
+    encryption: bool
+    """Whether step inputs, outputs and other serialized data are encrypted
+    at rest for this run."""
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkflowInfo:
+    """Metadata about the current workflow run.
+
+    Mirrors the JS SDK's ``getWorkflowMetadata()`` return value, so a body or
+    step comparing values across the two SDKs sees the same fields. ``run_id``
+    keeps the name :class:`StepInfo` already uses for the same value (JS calls
+    it ``workflowRunId``).
+    """
+
+    run_id: str
+    workflow_name: str
+    started_at: datetime | None
+    """When the workflow run started.
+
+    ``None`` inside a step.
+    """
+    url: str
+    """The base URL of the deployment serving this run."""
+    features: WorkflowFeatures
+
+
+@dataclasses.dataclass(frozen=True)
+class _StepState:
+    """The metadata of the step invocation currently executing.
+
+    Workflows are not covered: a body reads its metadata off the orchestrator
+    context instead.
+    """
+
+    step_info: StepInfo
+    workflow_info: WorkflowInfo
+
+
+_step_state_ctx: contextvars.ContextVar[_StepState] = contextvars.ContextVar("WorkflowStepContext")
+
+
+def _workflow_url() -> str:
+    """The deployment's base URL, matching the JS runtime's derivation."""
+    vercel_url = os.environ.get("VERCEL_URL")
+    if vercel_url:
+        return f"https://{vercel_url}"
+    return f"http://localhost:{os.environ.get('PORT', '3000')}"
+
+
+def _workflow_name_from_queue(queue_name: str) -> str:
+    """The workflow name a queue name routes to.
+
+    The queue name identifies the workflow (see ``get_queue_name``): the
+    prefix is ``__wkf_workflow_`` or ``__{namespace}_wkf_workflow_``, so
+    splitting on the invariant part strips either form — the same derivation
+    the JS runtime uses for its step executions.
+    """
+    return queue_name.split("_wkf_workflow_", 1)[-1]
+
+
+def get_workflow_metadata() -> WorkflowInfo:
+    """Return metadata for the workflow run currently executing.
+
+    Mirrors the JS SDK's ``getWorkflowMetadata()``: callable from a workflow
+    body or from a step body, returning the same values in both places.
+    Raises ``RuntimeError`` when called outside either.
+    """
+    try:
+        return _step_state_ctx.get().workflow_info
+    except LookupError:
+        pass
+    try:
+        info = WorkflowOrchestratorContext.current().workflow_info
+    except LookupError:
+        info = None
+    if info is None:
+        raise RuntimeError("get_workflow_metadata() can only be called inside a workflow or a step")
+    return info
 
 
 @dataclasses.dataclass
@@ -285,7 +367,7 @@ def get_step_metadata() -> StepInfo:
     Must be called from within a step body; raises ``RuntimeError`` otherwise.
     """
     try:
-        return _step_ctx.get()
+        return _step_state_ctx.get().step_info
     except LookupError:
         raise RuntimeError("get_step_metadata() can only be called inside a step") from None
 
@@ -445,12 +527,16 @@ class WorkflowOrchestratorContext:
         started_at: int,
         registry: core.Workflows,
         run_key: bytes | None = None,
+        workflow_info: WorkflowInfo | None = None,
     ):
         self.run_id = run_id
         self.events = events
         # The key is per-run, so it is resolved once and reused for every
         # payload in the replay.
         self.run_key = run_key
+        # What get_workflow_metadata() returns inside the body; None only for
+        # contexts built without a run entity (tests, tooling).
+        self.workflow_info = workflow_info
         # List of Out-of-order HookReceivedEvent: such events may arrive at any time unexpectedly,
         # so we stash them separately for delayed consumption
         self.ooo_hook_received_events: deque[w.HookReceivedEvent] = deque()
@@ -1105,6 +1191,13 @@ async def workflow_handler(
         started_at=workflow_started_at,
         registry=registry,
         run_key=await _resolve_run_key(world, workflow_run, events),
+        workflow_info=WorkflowInfo(
+            run_id=run_id,
+            workflow_name=workflow_run.workflow_name,
+            started_at=workflow_run.started_at,
+            url=_workflow_url(),
+            features=WorkflowFeatures(encryption=workflow_run.encryption_public_key is not None),
+        ),
     )
     try:
         output = context.run_workflow(workflow_run)
@@ -1294,6 +1387,8 @@ async def _execute_step(
         raise RuntimeError(f"step_started event for '{req.step_id}' did not return step entity")
     step_run = start_result.step
     current_attempt = step_run.attempt
+    if not step_run.started_at:
+        raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
 
     # Check max retries AFTER step_started (the attempt was just incremented).
     # Use > here (not >=) because this guards re-invocation AFTER all attempts are used.
@@ -1332,11 +1427,32 @@ async def _execute_step(
     # register with this step or nothing would ever drain it.
     streams_token = _step_streams_ctx.set(step_streams)
 
+    # Populate step_info and workflow_info
+    step_state_token = _step_state_ctx.set(
+        _StepState(
+            step_info=StepInfo(
+                run_id=req.run_id,
+                step_id=req.step_id,
+                step_name=step.name,
+                attempt=current_attempt,
+                step_started_at=step_run.started_at,
+            ),
+            workflow_info=WorkflowInfo(
+                run_id=req.run_id,
+                workflow_name=_workflow_name_from_queue(queue_name),
+                # We have no way to get started_at without fetching
+                # the run, which we don't want to have to do.
+                started_at=None,
+                url=_workflow_url(),
+                features=WorkflowFeatures(
+                    encryption=bool(step_run.input) and ser.is_encrypted(step_run.input)
+                ),
+            ),
+        )
+    )
+
     try:
         async with step_streams.dispatching():
-            if not step_run.started_at:
-                raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
-
             # Deserialize step input
             if not step_run.input:
                 raise RuntimeError(f"Step '{req.step_id}' has no input")
@@ -1356,20 +1472,8 @@ async def _execute_step(
                 req.step_id,
                 current_attempt,
             )
-            token = _step_ctx.set(
-                StepInfo(
-                    run_id=req.run_id,
-                    step_id=req.step_id,
-                    step_name=step.name,
-                    attempt=current_attempt,
-                    step_started_at=step_run.started_at,
-                )
-            )
             # Execute the step function
-            try:
-                result = await step.func(*args, **kwargs)
-            finally:
-                _step_ctx.reset(token)
+            result = await step.func(*args, **kwargs)
 
             # A stream write returns as soon as it is buffered, so the chunks
             # this step wrote are not durable yet. Force them out before
@@ -1473,6 +1577,7 @@ async def _execute_step(
             return w.QueueContinuation(delay_seconds=delay_seconds)
 
     finally:
+        _step_state_ctx.reset(step_state_token)
         _step_streams_ctx.reset(streams_token)
 
     # Re-invoke the workflow to continue execution
