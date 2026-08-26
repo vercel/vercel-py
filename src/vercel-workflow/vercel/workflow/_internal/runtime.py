@@ -14,7 +14,7 @@ import traceback
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Mapping
 from datetime import datetime
-from typing import Any, Generic, Literal, NoReturn, ParamSpec, TypeVar, cast
+from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
@@ -60,10 +60,6 @@ def _wait_continuation_dispatch(
     delay = min(timeout_seconds, WAIT_CONTINUATION_MAX_DELAY_SECONDS)
     key = wait_correlation_id if hop == 1 else f"{wait_correlation_id}:hop-{hop}"
     return delay, key
-
-
-class _SuspendException(BaseException):
-    """Raised to trigger suspending of the workflow."""
 
 
 class NondeterminismError(Exception):
@@ -650,7 +646,7 @@ class WorkflowOrchestratorContext:
             raise asyncio.CancelledError("workflow execution is suspended")
         return cur
 
-    def suspend(self) -> NoReturn:
+    def suspend(self) -> None:
         # When a workflow gets suspended, we would ideally just throw
         # away all of the inflight coroutines and never finishing
         # executing them at all.
@@ -673,10 +669,14 @@ class WorkflowOrchestratorContext:
         # while being suspended (dispose() a hook, call a step, etc),
         # it will immediately fail.
         self.suspended = True
-        raise _SuspendException()
+        # Close down the tasks
+        for task in asyncio.all_tasks(asyncio.get_event_loop()):
+            task.cancel()
 
-    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes:
-        """Run the body inside the sandbox, returning its result serialized there."""
+    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes | None:
+        """Run the body inside the sandbox, returning its result serialized there.
+
+        Returns None if the workflow execution is suspended."""
         wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input:
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
@@ -714,6 +714,10 @@ class WorkflowOrchestratorContext:
                         )
                     )
                 )
+            except asyncio.CancelledError:
+                if not self.suspended:
+                    raise RuntimeError("workflow was cancelled") from None
+                return None
             finally:
                 self._ctx.reset(token)
 
@@ -1382,9 +1386,6 @@ async def workflow_handler(
     )
     try:
         output = context.run_workflow(workflow_run)
-    except _SuspendException:
-        # Workflow suspended, continue outside the try..except block.
-        pass
     except Exception as e:
         error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
         logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
@@ -1399,7 +1400,8 @@ async def workflow_handler(
         except w.EntityConflictError:
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
-    else:
+
+    if output is not None:
         try:
             await world.events_create(
                 run_id,
