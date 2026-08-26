@@ -472,7 +472,7 @@ class TestAsyncioRestrictions:
 
             loop = asyncio.get_running_loop()
             with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
-                loop.create_connection(None, "localhost", 80)
+                loop.create_connection(None, "localhost", 80)  # type: ignore[call-overload]
 
     @pytest.mark.asyncio
     async def test_loop_subprocess_exec_blocked(self):
@@ -481,7 +481,7 @@ class TestAsyncioRestrictions:
 
             loop = asyncio.get_running_loop()
             with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
-                loop.subprocess_exec(None, "echo")
+                loop.subprocess_exec(None, "echo")  # type: ignore[arg-type,unused-coroutine]
 
     @pytest.mark.asyncio
     async def test_loop_subprocess_shell_blocked(self):
@@ -490,7 +490,7 @@ class TestAsyncioRestrictions:
 
             loop = asyncio.get_running_loop()
             with pytest.raises(SandboxRestrictionError, match="loop.subprocess_shell"):
-                loop.subprocess_shell(None, "echo")
+                loop.subprocess_shell(None, "echo")  # type: ignore[arg-type,unused-coroutine]
 
     @pytest.mark.asyncio
     async def test_loop_call_soon_allowed(self):
@@ -498,7 +498,7 @@ class TestAsyncioRestrictions:
             import asyncio
 
             loop = asyncio.get_running_loop()
-            called = []
+            called: list[int] = []
             loop.call_soon(called.append, 1)
             await asyncio.sleep(0)  # yield to let call_soon fire
             # call_soon should not raise — we can't easily assert it fired
@@ -543,7 +543,7 @@ class TestAsyncioRestrictions:
             async def worker(value: int) -> None:
                 results.append(value)
 
-            async with asyncio.TaskGroup() as tg:
+            async with asyncio.TaskGroup() as tg:  # type: ignore[attr-defined]
                 tg.create_task(worker(1))
                 tg.create_task(worker(2))
 
@@ -575,8 +575,8 @@ class TestAsyncioRestrictions:
                     cancelled.set()
                     raise
 
-            with pytest.raises(ExceptionGroup) as exc_info:  # noqa: F821
-                async with asyncio.TaskGroup() as tg:
+            with pytest.raises(ExceptionGroup) as exc_info:  # type: ignore[name-defined] # noqa: F821
+                async with asyncio.TaskGroup() as tg:  # type: ignore[attr-defined]
                     tg.create_task(slow())
                     tg.create_task(failing())
 
@@ -639,7 +639,9 @@ class TestUvloopProxy:
 
                 proxy_loop = asyncio.get_running_loop()
                 with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
-                    proxy_loop.create_connection(None, "localhost", 80)
+                    proxy_loop.create_connection(  # type: ignore[call-overload]
+                        None, "localhost", 80
+                    )
 
         self._run_async(go(), loop)
 
@@ -652,7 +654,10 @@ class TestUvloopProxy:
 
                 proxy_loop = asyncio.get_running_loop()
                 with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
-                    proxy_loop.subprocess_exec(None, "echo")
+                    proxy_loop.subprocess_exec(  # type: ignore[arg-type,unused-coroutine]
+                        None,  # type: ignore[arg-type]
+                        "echo",
+                    )
 
         self._run_async(go(), loop)
 
@@ -664,7 +669,7 @@ class TestUvloopProxy:
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
-                called = []
+                called: list[int] = []
                 proxy_loop.call_soon(called.append, 1)
                 await asyncio.sleep(0)
                 # call_soon should not raise

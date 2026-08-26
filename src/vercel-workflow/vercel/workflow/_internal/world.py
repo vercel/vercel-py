@@ -258,8 +258,8 @@ class _ContextWrapper(Generic[T]):
     def __getattr__(self, item):
         return getattr(self.value, item)
 
-    def __getitem__(self, item):
-        return self.value[item]
+    def __getitem__(self, item: Any) -> Any:
+        return self.value[item]  # type: ignore[index]
 
 
 class BaseWorkflowRun(BaseModel):

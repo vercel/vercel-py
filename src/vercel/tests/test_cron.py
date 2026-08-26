@@ -226,15 +226,21 @@ class TestCronDecorator:
 
     def test_get_crons_string(self):
         module = __name__
-        assert _cron_string.get_crons() == [(f"{module}:_cron_string", "0 0 * * *")]
+        assert _cron_string.get_crons() == [  # type: ignore[attr-defined]
+            (f"{module}:_cron_string", "0 0 * * *")
+        ]
 
     def test_get_crons_kwargs(self):
         module = __name__
-        assert _cron_kwargs.get_crons() == [(f"{module}:_cron_kwargs", "* 6 * * *")]
+        assert _cron_kwargs.get_crons() == [  # type: ignore[attr-defined]
+            (f"{module}:_cron_kwargs", "* 6 * * *")
+        ]
 
     def test_get_crons_schedule(self):
         module = __name__
-        assert _cron_schedule.get_crons() == [(f"{module}:_cron_schedule", "*/5 * * * *")]
+        assert _cron_schedule.get_crons() == [  # type: ignore[attr-defined]
+            (f"{module}:_cron_schedule", "*/5 * * * *")
+        ]
 
     def test_rejects_local_function(self):
         @cron("0 0 * * *")
@@ -242,4 +248,4 @@ class TestCronDecorator:
             pass
 
         with pytest.raises(CronTabError, match="only module-level functions"):
-            local_job.get_crons()
+            local_job.get_crons()  # type: ignore[attr-defined]

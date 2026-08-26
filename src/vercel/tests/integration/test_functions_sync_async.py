@@ -273,10 +273,13 @@ class TestSetGetHeaders:
         from vercel.functions import get_headers, set_headers
 
         set_headers({"First": "value1"})
-        assert get_headers()["First"] == "value1"
+        headers = get_headers()
+        assert headers is not None
+        assert headers["First"] == "value1"
 
         set_headers({"Second": "value2"})
         headers = get_headers()
+        assert headers is not None
         assert headers.get("First") is None
         assert headers["Second"] == "value2"
 
@@ -313,7 +316,7 @@ class TestEnvImmutability:
         env = get_env()
 
         with pytest.raises(AttributeError):  # Frozen dataclass
-            env.VERCEL = "2"
+            env.VERCEL = "2"  # type: ignore[misc]
 
 
 class TestGeoTypedDict:

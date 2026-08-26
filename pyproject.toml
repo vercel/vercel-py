@@ -66,6 +66,7 @@ commands = [["./scripts/test.sh", { replace = "posargs", extend = true }]]
 [tool.mypy]
 python_version = "3.10"
 cache_dir = "$MYPY_CONFIG_FILE_DIR/.mypy_cache/root"
+check_untyped_defs = true
 ignore_missing_imports = true
 explicit_package_bases = true
 mypy_path = [
