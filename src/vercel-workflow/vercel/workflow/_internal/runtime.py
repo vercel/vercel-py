@@ -879,12 +879,14 @@ class WorkflowOrchestratorContext:
             self.replay_index < len(self.events) or self.ooo_hook_received_events
         ) and self.suspensions:
             event: w.Event | None = None
-            if self.ooo_hook_received_events:
-                event = self.ooo_hook_received_events[0]
+            # Look for any out-of-order hooks that can be applied
+            for event in self.ooo_hook_received_events:
                 if event.correlation_id in self.suspensions:
-                    self.ooo_hook_received_events.popleft()
-                else:
-                    event = None
+                    self.ooo_hook_received_events.remove(event)
+                    break
+            else:
+                event = None
+
             if event is None:
                 if self.replay_index < len(self.events):
                     event = self.events[self.replay_index]
@@ -943,7 +945,11 @@ class WorkflowOrchestratorContext:
                                 continue
                     self.replay_index += 1
                 else:
-                    break
+                    # There are OOO hooks that don't apply but there
+                    # aren't any events. We need to suspend.
+                    # TODO: untangle the control flow
+                    self.suspend()
+                    return
 
             match event:
                 case w.StepCreatedEvent(

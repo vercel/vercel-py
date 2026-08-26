@@ -121,6 +121,27 @@ async def replace_cancelled_error() -> int:
     return payload.n
 
 
+@registry.workflow
+async def wait_for_abab() -> list[int]:
+    hook_a = Ping.wait(token="a")
+    first_a = await hook_a
+    assert first_a is not None and first_a.n is not None
+
+    hook_b = Ping.wait(token="b")
+    first_b = await hook_b
+    assert first_b is not None and first_b.n is not None
+
+    hook_c = Ping.wait(token="c")
+    c = await hook_c
+    assert c is not None and c.n is not None
+
+    second_a = await hook_a
+    assert second_a is not None and second_a.n is not None
+    second_b = await hook_b
+    assert second_b is not None and second_b.n is not None
+    return [first_a.n, first_b.n, c.n, second_a.n, second_b.n]
+
+
 @pytest.fixture(autouse=True)
 def _reset_world():
     # Queue subscriptions are process-global and refuse a second registration on
@@ -201,16 +222,27 @@ class Resume:
         )
 
 
-async def publish(world: local_mod.LocalWorld, resume: Resume) -> None:
+async def publish(world: local_mod.LocalWorld, resume: Resume) -> str:
     """The fast path's queue publish, carrying the payload."""
     run = await world.runs_get(resume.hook.run_id)
-    await world.queue(
+    return await world.queue(
         w.get_queue_name(run.workflow_name, None),
         w.WorkflowInvokePayload(
             run_id=resume.hook.run_id,
             hook_input=resume.as_input(run.deployment_id),
         ),
     )
+
+
+async def wait_for_delivery(world: local_mod.LocalWorld, message_id: str) -> None:
+    """Until the embedded worker has finished handling a published signal."""
+    service = world._embedded_queue_service
+    assert service is not None
+    for _ in range(RUN_DEADLINE_SECONDS * 10):
+        if service.server.state.by_id[message_id].acknowledged:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"queue message {message_id!r} was never acknowledged")
 
 
 async def write_event(world: local_mod.LocalWorld, resume: Resume) -> None:
@@ -341,6 +373,31 @@ async def test_replacing_cancelled_error_cannot_fail_a_suspended_workflow(
         await publish(world, Resume.of(hook, {"n": 7}))
 
         assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
+
+
+async def test_out_of_order_repeated_hook_resumes_reach_the_matching_wait(
+    tmp_path, monkeypatch
+) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(wait_for_abab)
+        hook_a = await wait_for_hook(world, "a")
+
+        first_a = await publish(world, Resume.of(hook_a, {"n": 1}))
+        await wait_for_delivery(world, first_a)
+
+        # B is not registered until the workflow has consumed A and reached
+        # its first B wait, so this also proves the first signal arrived.
+        hook_b = await wait_for_hook(world, "b")
+        first_b = await publish(world, Resume.of(hook_b, {"n": 2}))
+        await wait_for_delivery(world, first_b)
+
+        hook_c = await wait_for_hook(world, "c")
+
+        await publish(world, Resume.of(hook_b, {"n": 3}))
+        await publish(world, Resume.of(hook_a, {"n": 4}))
+        await publish(world, Resume.of(hook_c, {"n": 0}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == [1, 2, 0, 4, 3]
 
 
 async def test_the_producers_own_write_converges_on_the_re_ensured_event(
