@@ -128,6 +128,11 @@ dependencies at build time to use the current sibling package versions, while
 preserving markers, extras, and upper bounds. Third-party dependencies pass
 through unchanged.
 
+When a planned workspace release reaches an existing exclusive upper bound,
+release preparation advances that bound to the next compatibility boundary in
+the released dependent. It never adds upper bounds to dependencies that do not
+already declare one, and ambiguous constraints must be updated manually.
+
 Local development still uses `[tool.uv.sources]` workspace links.
 
 There is a tiny `hatch_build.py` loader in each package root because Hatch's

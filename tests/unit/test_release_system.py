@@ -377,6 +377,99 @@ def test_compute_releases_force_preserves_larger_fragment_bump(
     ]
 
 
+def test_advance_workspace_upper_bounds_crosses_compatibility_boundary(tmp_path: Path) -> None:
+    core_root = tmp_path / "core"
+    app_root = tmp_path / "app"
+    core_root.mkdir()
+    app_root.mkdir()
+    (core_root / "pyproject.toml").write_text('[project]\nname = "core"\n', encoding="utf-8")
+    (app_root / "pyproject.toml").write_text(
+        """
+[project]
+name = "app"
+
+[tool.vercel.release.dependencies]
+dependencies = ["core>=0.1.0,<0.2.0", "httpx>=0.27,<1"]
+""".strip(),
+        encoding="utf-8",
+    )
+    packages = {
+        "core": workspace.Package("core", core_root, core_root / "version.py", ()),
+        "app": workspace.Package("app", app_root, app_root / "version.py", ("core",)),
+    }
+    releases = [
+        release.Release("core", "0.1.9", "0.2.0", "minor", ()),
+        release.Release("app", "1.0.0", "1.0.1", "patch", (), dependency_only=True),
+    ]
+
+    release._advance_workspace_upper_bounds(releases, packages)
+
+    assert '"core>=0.1.0,<0.3.0"' in (app_root / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"httpx>=0.27,<1"' in (app_root / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_advance_workspace_upper_bounds_does_not_invent_a_bound(tmp_path: Path) -> None:
+    core_root = tmp_path / "core"
+    aggregate_root = tmp_path / "aggregate"
+    core_root.mkdir()
+    aggregate_root.mkdir()
+    (core_root / "pyproject.toml").write_text('[project]\nname = "core"\n', encoding="utf-8")
+    pyproject = aggregate_root / "pyproject.toml"
+    pyproject.write_text(
+        """
+[project]
+name = "aggregate"
+
+[tool.vercel.release.dependencies]
+dependencies = ["core>=0.1.0"]
+""".strip(),
+        encoding="utf-8",
+    )
+    packages = {
+        "core": workspace.Package("core", core_root, core_root / "version.py", ()),
+        "aggregate": workspace.Package(
+            "aggregate", aggregate_root, aggregate_root / "version.py", ("core",)
+        ),
+    }
+    releases = [
+        release.Release("core", "0.1.9", "0.2.0", "minor", ()),
+        release.Release("aggregate", "1.0.0", "1.0.1", "patch", (), dependency_only=True),
+    ]
+
+    release._advance_workspace_upper_bounds(releases, packages)
+
+    assert '"core>=0.1.0"' in pyproject.read_text(encoding="utf-8")
+
+
+def test_advance_workspace_upper_bounds_rejects_ambiguous_constraint(tmp_path: Path) -> None:
+    core_root = tmp_path / "core"
+    app_root = tmp_path / "app"
+    core_root.mkdir()
+    app_root.mkdir()
+    (core_root / "pyproject.toml").write_text('[project]\nname = "core"\n', encoding="utf-8")
+    (app_root / "pyproject.toml").write_text(
+        """
+[project]
+name = "app"
+
+[tool.vercel.release.dependencies]
+dependencies = ["core>=0.1.0,!=0.2.0"]
+""".strip(),
+        encoding="utf-8",
+    )
+    packages = {
+        "core": workspace.Package("core", core_root, core_root / "version.py", ()),
+        "app": workspace.Package("app", app_root, app_root / "version.py", ("core",)),
+    }
+    releases = [
+        release.Release("core", "0.1.9", "0.2.0", "minor", ()),
+        release.Release("app", "1.0.0", "1.0.1", "patch", (), dependency_only=True),
+    ]
+
+    with pytest.raises(RuntimeError, match="advance its upper bound manually"):
+        release._advance_workspace_upper_bounds(releases, packages)
+
+
 def test_workspace_dependency_hook_rewrites_lower_bound(tmp_path: Path) -> None:
     workspace_root = tmp_path
     package_root = workspace_root / "src/app"
