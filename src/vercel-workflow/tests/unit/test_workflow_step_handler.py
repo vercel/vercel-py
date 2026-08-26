@@ -272,6 +272,51 @@ async def test_an_ordinary_failure_below_max_retries_asks_for_a_retry(
     assert result == w.QueueContinuation(delay_seconds=1.0)
     assert _event_types(fake) == ["step_retrying"]
     assert _workflow_enqueues(fake) == []
+    (retrying,) = fake.events
+    recorded = ser.hydrate_error(retrying.event_data.error, what="the recorded error")
+    assert isinstance(recorded, RuntimeError)
+    assert str(recorded) == "flaky"
+
+
+async def test_keyboard_interrupt_bypasses_step_error_serialization(
+    registry: core.Workflows,
+) -> None:
+    @registry.step
+    async def interrupted_step() -> None:
+        raise KeyboardInterrupt
+
+    fake = FakeWorld(started_step=_running_step(interrupted_step.name, attempt=1))
+    w.set_world(fake)
+
+    with pytest.raises(KeyboardInterrupt):
+        await _invoke(registry, interrupted_step.name)
+
+    assert fake.events == []
+    assert fake.queued == []
+
+
+async def test_the_last_attempt_wraps_the_thrown_error_in_a_fatal_one(
+    registry: core.Workflows,
+) -> None:
+    @registry.step
+    async def my_step() -> str:
+        raise RuntimeError("still flaky")
+
+    my_step.max_retries = 1
+    fake = FakeWorld(started_step=_running_step(my_step.name, attempt=2))
+    w.set_world(fake)
+
+    result = await _invoke(registry, my_step.name)
+
+    assert result is None
+    assert _event_types(fake) == ["step_failed"]
+    (failed,) = fake.events
+    recorded = ser.hydrate_error(failed.event_data.error, what="the recorded error")
+    assert isinstance(recorded, FatalError)
+    assert str(recorded) == f"Step '{my_step.name}' failed after 1 retry: RuntimeError: still flaky"
+    assert isinstance(recorded.__cause__, RuntimeError)
+    assert str(recorded.__cause__) == "still flaky"
+    assert "RuntimeError: still flaky" in recorded.stack  # type: ignore[attr-defined]
 
 
 async def test_a_fatal_failure_gives_up_on_the_first_attempt(registry: core.Workflows) -> None:
@@ -298,10 +343,10 @@ async def test_a_fatal_failure_gives_up_on_the_first_attempt(registry: core.Work
     assert _event_types(fake) == ["step_failed"]
     assert len(_workflow_enqueues(fake)) == 1
     (failed,) = fake.events
-    # No retry count: none were spent, and the phrasing would be misleading.
-    assert failed.event_data.error == (
-        f"Step '{my_step.name}' failed: vercel.workflow._internal.errors.FatalError: card declined"
-    )
+    recorded = ser.hydrate_error(failed.event_data.error, what="the recorded error")
+    assert isinstance(recorded, FatalError)
+    assert str(recorded) == "card declined"
+    assert recorded.__cause__ is None
 
 
 async def test_input_that_does_not_match_the_annotation_is_fatal(
@@ -330,7 +375,9 @@ async def test_input_that_does_not_match_the_annotation_is_fatal(
     assert result is None
     assert ran is False
     assert _event_types(fake) == ["step_failed"]
-    assert "does not match" in fake.events[0].event_data.error
+    recorded = ser.hydrate_error(fake.events[0].event_data.error, what="the recorded error")
+    assert isinstance(recorded, FatalError)
+    assert "does not match" in str(recorded)
 
 
 async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) -> None:

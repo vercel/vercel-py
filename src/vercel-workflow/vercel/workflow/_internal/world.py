@@ -262,12 +262,6 @@ QueuePayload: TypeAlias = WorkflowInvokePayload | HealthCheckPayload
 QueuePayloadAdaptor: WireAdaptor[QueuePayload] = WireAdaptor(QueuePayload)
 
 
-class StructuredError(BaseModel):
-    message: str
-    stack: str | None = None
-    code: str | None = None
-
-
 WorkflowRunStatus: TypeAlias = Literal["pending", "running", "completed", "failed", "cancelled"]
 StepStatus: TypeAlias = Literal["pending", "running", "completed", "failed", "cancelled"]
 
@@ -299,7 +293,10 @@ class BaseWorkflowRun(BaseModel):
     # while run_completed returns input_ref
     input: bytes | str | None = None
     output: bytes | None = None
-    error: StructuredError | None = None
+    # Serialized error payload, or a legacy {message, stack, code} value.
+    error: Any = None
+    # Kept outside the payload so it remains available without decryption.
+    error_code: str | None = pydantic.Field(default=None, alias="errorCode")
     attributes: dict[str, str] = pydantic.Field(default_factory=dict)
     encryption_public_key: str | None = pydantic.Field(default=None, alias="encryptionPublicKey")
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
@@ -333,7 +330,6 @@ class CompletedWorkflowRun(BaseWorkflowRun):
 class FailedWorkflowRun(BaseWorkflowRun):
     status: Literal["failed"]
     output: None = None
-    error: StructuredError | None = None
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
 
@@ -353,12 +349,8 @@ class BaseWorkflowStep(BaseModel):
     status: StepStatus
     input: bytes | None = None
     output: bytes | None = None
-    """
-    The error from a step_retrying or step_failed event.
-    This tracks the most recent error the step encountered, which may
-    be from a retry attempt (step_retrying) or the final failure (step_failed).
-    """
-    error: StructuredError | None = None
+    """The latest serialized error from ``step_retrying`` or ``step_failed``."""
+    error: Any = None
     attempt: int
     """
     When the step first started executing. Set by the first step_started event
@@ -393,7 +385,6 @@ class CompletedWorkflowStep(BaseWorkflowStep):
 class FailedWorkflowStep(BaseWorkflowStep):
     status: Literal["failed"]
     output: None = None
-    error: StructuredError
     completed_at: datetime = pydantic.Field(alias="completedAt")
 
 
@@ -555,7 +546,9 @@ class RunCompletedEvent(BaseEvent):
 
 class RunFailedEventData(BaseModel):
     error: Any
-    code: str | None = None
+    error_code: str | None = pydantic.Field(
+        default=None, alias="errorCode", exclude_if=lambda e: e is None
+    )
 
     def into_event(self) -> "RunFailedEvent":
         return RunFailedEvent(event_data=self)
@@ -676,7 +669,6 @@ class StepStartedEvent(BaseEvent):
 
 class StepRetryingEventData(BaseModel):
     error: Any
-    stack: str | None = None
     retry_after: datetime | None = pydantic.Field(
         default=None, alias="retryAfter", exclude_if=lambda e: e is None
     )
@@ -724,7 +716,6 @@ class StepCompletedEvent(BaseEvent):
 
 class StepFailedEventData(BaseModel):
     error: Any
-    stack: str | None = None
 
     def into_event(self, correlation_id: str) -> "StepFailedEvent":
         return StepFailedEvent(correlation_id=correlation_id, event_data=self)

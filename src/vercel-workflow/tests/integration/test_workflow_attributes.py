@@ -21,7 +21,12 @@ from typing import Any
 import pytest
 
 from vercel.queue.testing import clear_subscriptions
-from vercel.workflow import FatalError, remove_attributes, set_attributes
+from vercel.workflow import (
+    FatalError,
+    WorkflowRunFailedError,
+    remove_attributes,
+    set_attributes,
+)
 from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -196,14 +201,14 @@ async def test_parallel_writes_of_disjoint_keys_all_land(tmp_path, monkeypatch) 
 async def test_a_run_that_fails_keeps_what_it_wrote(tmp_path, monkeypatch) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
         run = await runtime.start(throws_after_setting_attributes)
-        # "workflow failed" and nothing else: the thrown value does not survive
-        # the event log yet (gap 13). What matters here is the attributes, below.
-        with pytest.raises(RuntimeError, match="workflow failed"):
+        with pytest.raises(WorkflowRunFailedError, match="intentional failure") as caught:
             await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
+        assert isinstance(caught.value.__cause__, RuntimeError)
+        assert caught.value.error_code == "USER_ERROR"
 
         stored = await world.runs_get(run.run_id)
         assert stored.status == "failed"
-        assert stored.error is not None and "intentional failure" in stored.error.message
+        assert stored.error_code == "USER_ERROR"
         # The write was awaited, so it landed before the throw -- and the
         # run_failed write has to carry the attribute snapshot forward.
         assert stored.attributes == {"phase": "about-to-fail", "reason": "intentional"}

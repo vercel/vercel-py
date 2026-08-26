@@ -29,6 +29,11 @@ async def _wf() -> str:
     return "done"
 
 
+@_REGISTRY.workflow
+async def _interrupting_wf() -> None:
+    raise KeyboardInterrupt
+
+
 # The handler resolves the workflow from the run's `workflowName`, and the id is
 # derived from the function, so the run rows below have to name this one.
 WORKFLOW_NAME = _wf.workflow_id
@@ -162,6 +167,21 @@ async def test_setup_never_reads_the_run(registry: core.Workflows) -> None:
 
     assert fake.runs_get_calls == 0
     assert _started(fake) is not None
+
+
+async def test_keyboard_interrupt_bypasses_run_error_serialization(
+    registry: core.Workflows,
+) -> None:
+    fake = FakeWorld(started_run=_run(workflowName=_interrupting_wf.workflow_id))
+    w.set_world(fake)
+
+    with pytest.raises(KeyboardInterrupt):
+        await _invoke(
+            registry,
+            run_input=_run_input(workflowName=_interrupting_wf.workflow_id),
+        )
+
+    assert [event.event_type for event in fake.events] == ["run_started"]
 
 
 async def test_run_started_carries_the_queued_run_input(registry: core.Workflows) -> None:

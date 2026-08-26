@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from .duration import parse_duration_to_date
 
@@ -9,6 +10,30 @@ DEFAULT_RETRY_AFTER_MS = 1_000
 
 class FatalError(Exception):
     """A step failure that will not be retried."""
+
+    # TypeScript's FatalError.is() also accepts this marker.
+    fatal = True
+
+
+class RemoteError(Exception):
+    """An error whose class is unavailable in Python."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        name: str,
+    ) -> None:
+        super().__init__(message)
+        self.name = name
+        self.message = message
+        # Keep enough data to preserve TypeScript-only error tags and fields
+        # when the value crosses Python and is serialized again.
+        self._wire_tag: str | None = None
+        self._wire_payload: dict[str, Any] | None = None
+
+    def __str__(self) -> str:
+        return f"{self.name}: {self.message}" if self.message else self.name
 
 
 class RetryableError(Exception):
@@ -41,3 +66,20 @@ class RetryableError(Exception):
         if retry_after is None:
             retry_after = DEFAULT_RETRY_AFTER_MS
         self.retry_at = parse_duration_to_date(retry_after)
+
+
+class WorkflowRunFailedError(Exception):
+    def __init__(self, run_id: str, error: Any, *, error_code: str | None = None) -> None:
+        if error is None:
+            message = "unknown error"
+        else:
+            try:
+                message = str(error)
+            except Exception:
+                message = type(error).__name__
+        super().__init__(f'Workflow run "{run_id}" failed: {message}')
+        self.run_id = run_id
+        self.error = error
+        self.error_code = error_code
+        if isinstance(error, Exception):
+            self.__cause__ = error
