@@ -1022,15 +1022,15 @@ class LocalWorld(w.World):
             attr_data = data.event_data
             assert current_run is not None  # a missing run was rejected above
             changes = [(c.key, c.value) for c in attr_data.changes]
+
+            # Validate a workflow write before claiming its correlation id, or a validation
+            # failure would leave a claim for an event that was never created. Step writes
+            # have no correlation id to claim.
             attrs.validate_attribute_changes(
                 changes,
                 existing_keys=current_run.attributes,
                 allow_reserved=attr_data.allow_reserved_attributes is True,
             )
-            # Claimed after validation: a rejected write has to leave the correlation
-            # id free, or its retry comes back as "already exists" and the body waits
-            # for an event nobody writes. A step's write is not replayed and carries
-            # no correlation id, so it doesn't need a claim.
             if data.correlation_id and isinstance(attr_data.writer, w.WorkflowAttributeWriter):
                 claim_path = (
                     self.data_dir
