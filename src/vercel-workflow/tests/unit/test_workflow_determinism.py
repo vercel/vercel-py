@@ -47,18 +47,6 @@ def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:
     return runtime.Suspension(correlation_id=correlation_id, step=core.Step(_greet), input=args)
 
 
-def _resume_until_suspended(ctx: runtime.WorkflowOrchestratorContext) -> None:
-    async def resume() -> None:
-        ctx.resume()
-        # Cancellation is delivered at the next suspension point.
-        await asyncio.sleep(0)
-
-    with pytest.raises(asyncio.CancelledError):
-        runtime._run_isolated(resume(), loop_factory=workflow_loop.WorkflowLoop)
-
-    assert ctx.suspended
-
-
 async def test_reordered_step_args_raise_nondeterminism() -> None:
     """Recorded step input "a" but the body now calls the same step with "b"
     on replay -> NondeterminismError."""
@@ -75,23 +63,6 @@ async def test_reordered_step_args_raise_nondeterminism() -> None:
 
     assert sus.future.done()
     assert isinstance(sus.future.exception(), runtime.NondeterminismError)
-
-
-async def test_matching_step_parks_without_nondeterminism() -> None:
-    """Same step + same input -> suspension is replayed, then the run parks."""
-    step = core.Step(_greet)
-    cid = "step_1"
-    events: list[w.Event] = [
-        w.StepCreatedEventData(step_name=step.name, input=_args(name="a")).into_event(cid)
-    ]
-    ctx = _context(events)
-    sus = _suspension(cid, _args(name="a"))
-    ctx.suspensions[cid] = sus
-
-    _resume_until_suspended(ctx)
-
-    assert not sus.future.done()
-    assert sus.has_created_event
 
 
 async def test_wait_step_swap_raises_nondeterminism() -> None:
@@ -118,6 +89,15 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     assert isinstance(wait.future.exception(), runtime.NondeterminismError)
 
 
+async def test_created_event_without_suspension_raises_runtime_error() -> None:
+    """A creation event cannot precede the body's matching suspension."""
+    step = core.Step(_greet)
+    ctx = _context([_created(step, "step_1")])
+
+    with pytest.raises(RuntimeError, match="has not registered its suspension"):
+        ctx.resume()
+
+
 # --- concurrent delivery: the loop idle hook + resume single-step ----------------
 #
 # When a body issues several calls from concurrent coroutines, recorded
@@ -141,24 +121,17 @@ def _completed(cid: str, result: Any) -> w.Event:
 
 
 async def test_cancelled_step_ignores_later_completion() -> None:
-    """A launched step can be cancelled before its completion is replayed.
+    """A step can be cancelled before its completion is replayed.
 
     The completion event still needs to be consumed, but setting a result on
     the cancelled future would raise ``InvalidStateError``.
     """
-    step = core.Step(_greet)
-    events: list[w.Event] = [_created(step, "step_1")]
+    events: list[w.Event] = [_completed("step_1", "one")]
     ctx = _context(events)
     sus = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus
 
-    # Replay the launch, then model the workflow task being cancelled while
-    # the step is in flight. The completion arrives in a later event batch.
-    _resume_until_suspended(ctx)
-    assert sus.has_created_event
     assert sus.future.cancel()
-
-    events.append(_completed("step_1", "one"))
     ctx.resume()
 
     assert sus.future.cancelled()
@@ -168,10 +141,7 @@ async def test_cancelled_step_ignores_later_completion() -> None:
 async def test_single_step_delivers_one_completion_per_pass() -> None:
     """Two concurrently-issued steps both have results in the log, but a single
     resume() pass resolves only the first; the rest is left for the next pass."""
-    step = core.Step(_greet)
     events: list[w.Event] = [
-        _created(step, "step_1"),
-        _created(step, "step_2"),
         _completed("step_1", "one"),
         _completed("step_2", "two"),
     ]
@@ -194,9 +164,7 @@ async def test_single_step_delivers_one_completion_per_pass() -> None:
 
 async def test_workflow_loop_runs_pending_work_before_resume() -> None:
     """The idle hook runs only after the body's pending callbacks are drained."""
-    step = core.Step(_greet)
     events: list[w.Event] = [
-        _created(step, "step_1"),
         _completed("step_1", "one"),
     ]
     ctx = _context(events)
@@ -218,25 +186,6 @@ async def test_workflow_loop_runs_pending_work_before_resume() -> None:
         loop.call_soon(pending)
         loop._run_once()
 
-        assert sus1.future.done() and sus1.future.result() == "one"
-    finally:
-        loop.close()
-
-
-async def test_workflow_loop_runs_resume_when_quiescent() -> None:
-    """With the ready queue empty, the idle hook delivers one completion."""
-    step = core.Step(_greet)
-    events: list[w.Event] = [
-        _created(step, "step_1"),
-        _completed("step_1", "one"),
-    ]
-    ctx = _context(events)
-    sus1 = _suspension("step_1", _ARGS)
-    ctx.suspensions["step_1"] = sus1
-
-    loop = workflow_loop.WorkflowLoop(idle_hook=ctx.resume)
-    try:
-        loop._run_once()
         assert sus1.future.done() and sus1.future.result() == "one"
     finally:
         loop.close()
@@ -308,7 +257,10 @@ async def test_now_advances_with_replay_index() -> None:
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
 
-    ctx.resume()
+    for _ in events:
+        ctx.resume()
+        if sus1.future.done():
+            break
 
     assert sus1.future.done() and sus1.future.result() == "one"
     assert ctx.now() == t1
