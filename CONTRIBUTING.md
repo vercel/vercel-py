@@ -20,10 +20,12 @@ changes.
 
 The `pre-commit.checks` hook runs `uv run poe pre-commit`, which runs lint and
 typecheck in parallel with buffered output. The `pre-push.checks` hook runs
-`uv run poe pre-push`, which runs news-fragment, lint, typecheck, and test
-checks in parallel with buffered output. The news-fragment check requires
-changed package code to have a news fragment. Git hooks are local clone state,
-so each checkout needs this once.
+`uv run poe pre-push`, which runs new-package version, news-fragment, lint,
+typecheck, and test checks in parallel with buffered output. New packages must
+start at the unpublished `0.0.0` sentinel; the release workflow assigns their
+first publishable version. Unpublished packages are exempt from news-fragment
+enforcement until a fragment is added deliberately to request their first
+release. Git hooks are local clone state, so each checkout needs this once.
 
 ## Development Commands
 
@@ -110,7 +112,9 @@ changes/vercel-cache/123.bugfix.md
 
 Use `uv run poe lint-towncrier` to validate existing news fragments. The Git
 `pre-push.news-fragments` hook enforces that changed package code has a
-news fragment, but it does not replace the full lint/test/typecheck suite.
+news fragment, except while a package remains at the unpublished `0.0.0`
+sentinel. Add its first fragment when the package is ready for its initial
+`0.1.0` release. The hook does not replace the full lint/test/typecheck suite.
 
 Release PR mechanics, version bump rules, dependency cascades, and publishing
 are documented in `RELEASING.md`.

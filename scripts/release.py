@@ -25,6 +25,7 @@ CHANGES = ROOT / "changes"
 IGNORED_FRAGMENT_FILES = {".gitignore", ".gitkeep", ".keep"}
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 BUMP_NAMES = {value: key for key, value in BUMP_ORDER.items()}
+UNPUBLISHED_VERSION = "0.0.0"
 FRAGMENT_TYPES = {
     "breaking": "Breaking Changes",
     "feature": "Features",
@@ -111,6 +112,8 @@ def parse_fragments(packages: set[str]) -> list[Fragment]:
 
 
 def _bump_for_fragment(kind: str, version: str) -> str:
+    if version == UNPUBLISHED_VERSION:
+        return "minor"
     bump = TYPE_BUMPS[kind]
     major = int(version.split(".", 1)[0])
     if major == 0 and bump == "major":
@@ -147,6 +150,8 @@ def compute_releases(*, force_bump: str | None = None) -> list[Release]:
 
     if force_bump:
         for name in packages_by_name:
+            if versions[name] == UNPUBLISHED_VERSION:
+                continue
             bumps[name] = _larger(bumps.get(name, "patch"), force_bump)
 
     reverse_edges = workspace.reverse_dependencies(packages_by_name)
@@ -154,7 +159,7 @@ def compute_releases(*, force_bump: str | None = None) -> list[Release]:
     while queue:
         package = queue.pop(0)
         for dependent in sorted(reverse_edges[package]):
-            if dependent not in bumps:
+            if dependent not in bumps and versions[dependent] != UNPUBLISHED_VERSION:
                 bumps[dependent] = "patch"
                 queue.append(dependent)
 
@@ -745,6 +750,7 @@ def check_fragments(base: str | None = None) -> int:
     changed -= {
         name for name, package in packages_by_name.items() if package.version_file in changed_paths
     }
+    changed = set(publishable_packages(changed, packages_by_name=packages_by_name))
     packages_with_fragments = {
         fragment.package for fragment in fragments if fragment.path in changed_paths
     }
@@ -760,14 +766,61 @@ def check_fragments(base: str | None = None) -> int:
     return 0
 
 
+def check_new_package_versions(base: str | None = None) -> int:
+    packages_by_name = workspace.packages()
+    head = os.environ.get("WORKSPACE_POE_GIT_COMMIT")
+    if base is None:
+        base = os.environ.get("WORKSPACE_POE_GIT_BASE") or _default_base_ref()
+    if base is None:
+        print("Could not detect a base branch for new package version enforcement.")
+        return 1
+
+    added_paths = _added_paths(base=base, head=head)
+    invalid: list[tuple[str, str]] = []
+    for name, package in sorted(packages_by_name.items()):
+        if package.path / "pyproject.toml" not in added_paths:
+            continue
+        version = workspace.read_version(package.version_file)
+        if version != UNPUBLISHED_VERSION:
+            invalid.append((name, version))
+    if invalid:
+        packages = ", ".join(f"{name} ({version})" for name, version in invalid)
+        print(f"New packages must start at {UNPUBLISHED_VERSION}: {packages}")
+        print("The release workflow assigns the first publishable version.")
+        return 1
+    return 0
+
+
 def changed_packages(base: str = "HEAD^", head: str = "HEAD") -> list[str]:
     packages_by_name = workspace.packages()
     changed = _changed_packages(packages_by_name, base=base, head=head, code_only=False)
-    return [name for name in workspace.topological_names(packages_by_name) if name in changed]
+    return publishable_packages(changed, packages_by_name=packages_by_name)
+
+
+def publishable_packages(
+    names: Iterable[str] | None = None,
+    *,
+    packages_by_name: dict[str, workspace.Package] | None = None,
+) -> list[str]:
+    if packages_by_name is None:
+        packages_by_name = workspace.packages()
+    selected = set(packages_by_name) if names is None else set(names)
+    return [
+        name
+        for name in workspace.topological_names(packages_by_name)
+        if name in selected
+        and workspace.read_version(packages_by_name[name].version_file) != UNPUBLISHED_VERSION
+    ]
 
 
 def print_changed_packages(args: argparse.Namespace) -> int:
     for name in changed_packages(base=args.base, head=args.head):
+        print(name)
+    return 0
+
+
+def print_publishable_packages(_args: argparse.Namespace) -> int:
+    for name in publishable_packages():
         print(name)
     return 0
 
@@ -790,6 +843,14 @@ def _changed_paths(*, base: str, head: str | None) -> set[Path]:
     diff_range = [f"{base}..{head}"] if head is not None else [base]
     output = subprocess.check_output(
         ["git", "diff", "--name-only", *diff_range], cwd=ROOT, text=True
+    )
+    return {ROOT / line for line in output.splitlines() if line}
+
+
+def _added_paths(*, base: str, head: str | None) -> set[Path]:
+    diff_range = [f"{base}..{head}"] if head is not None else [base]
+    output = subprocess.check_output(
+        ["git", "diff", "--diff-filter=A", "--name-only", *diff_range], cwd=ROOT, text=True
     )
     return {ROOT / line for line in output.splitlines() if line}
 
@@ -834,6 +895,7 @@ def main(argv: list[str] | None = None) -> int:
     changed_parser.add_argument("--base", default="HEAD^")
     changed_parser.add_argument("--head", default="HEAD")
     changed_parser.set_defaults(func=print_changed_packages)
+    subparsers.add_parser("publishable").set_defaults(func=print_publishable_packages)
 
     github_release_body_parser = subparsers.add_parser("github-release-body")
     github_release_body_parser.add_argument("package")
@@ -851,6 +913,10 @@ def main(argv: list[str] | None = None) -> int:
     check_parser = subparsers.add_parser("check-news-fragments")
     check_parser.add_argument("--base")
     check_parser.set_defaults(func=lambda args: check_fragments(args.base))
+
+    package_versions_parser = subparsers.add_parser("check-new-package-versions")
+    package_versions_parser.add_argument("--base")
+    package_versions_parser.set_defaults(func=lambda args: check_new_package_versions(args.base))
 
     subparsers.add_parser("lint-towncrier").set_defaults(func=lambda _args: lint_towncrier())
     args = parser.parse_args(argv)

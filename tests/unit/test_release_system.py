@@ -63,6 +63,72 @@ def test_compute_releases_cascades_dependency_only_patch(
     ]
 
 
+def test_compute_releases_promotes_unpublished_feature_to_initial_minor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    fragment_dir = changes / "pkg"
+    fragment_dir.mkdir(parents=True)
+    (fragment_dir / "initial.feature.md").write_text("Add package.\n", encoding="utf-8")
+
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+    packages = {"pkg": workspace.Package("pkg", tmp_path / "pkg", version_file, ())}
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+
+    releases = release.compute_releases()
+
+    assert [(item.old_version, item.new_version) for item in releases] == [("0.0.0", "0.1.0")]
+
+
+def test_compute_releases_promotes_any_unpublished_fragment_to_initial_minor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    fragment_dir = changes / "pkg"
+    fragment_dir.mkdir(parents=True)
+    (fragment_dir / "initial.internal.md").write_text("Prepare package.\n", encoding="utf-8")
+
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+    packages = {"pkg": workspace.Package("pkg", tmp_path / "pkg", version_file, ())}
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+
+    releases = release.compute_releases()
+
+    assert [(item.old_version, item.new_version) for item in releases] == [("0.0.0", "0.1.0")]
+
+
+def test_compute_releases_does_not_cascade_to_unpublished_dependent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    fragment_dir = changes / "lib"
+    fragment_dir.mkdir(parents=True)
+    (fragment_dir / "123.bugfix.md").write_text("Fix library.\n", encoding="utf-8")
+
+    lib_version = tmp_path / "lib/version.py"
+    app_version = tmp_path / "app/version.py"
+    lib_version.parent.mkdir()
+    app_version.parent.mkdir()
+    lib_version.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+    app_version.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+    packages = {
+        "lib": workspace.Package("lib", tmp_path / "lib", lib_version, ()),
+        "app": workspace.Package("app", tmp_path / "app", app_version, ("lib",)),
+    }
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+
+    releases = release.compute_releases()
+
+    assert [(item.package, item.new_version) for item in releases] == [("lib", "1.2.4")]
+
+
 def test_split_release_graph_propagates_in_publication_order(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -268,6 +334,23 @@ def test_compute_releases_force_accepts_patch_bump(
     assert [(item.package, item.new_version, item.bump, item.forced) for item in releases] == [
         ("pkg", "1.2.4", "patch", True)
     ]
+
+
+def test_compute_releases_force_does_not_publish_unpublished_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    changes = tmp_path / "changes"
+    changes.mkdir()
+
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+
+    packages = {"pkg": workspace.Package("pkg", tmp_path / "pkg", version_file, ())}
+    monkeypatch.setattr(release, "CHANGES", changes)
+    monkeypatch.setattr(workspace, "packages", lambda: packages)
+
+    assert release.compute_releases(force_bump="minor") == []
 
 
 def test_compute_releases_force_preserves_larger_fragment_bump(
@@ -821,6 +904,7 @@ def test_check_fragments_requires_changed_package_fragment(
 ) -> None:
     version_file = tmp_path / "pkg/version.py"
     version_file.parent.mkdir(parents=True)
+    version_file.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
     package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
     monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
     monkeypatch.setattr(release, "parse_fragments", lambda _packages: [])
@@ -834,6 +918,24 @@ def test_check_fragments_requires_changed_package_fragment(
     output = capsys.readouterr().out
     assert "Missing news fragments for changed packages: pkg" in output
     assert "Run `poe changelog`" in output
+
+
+def test_check_fragments_exempts_unpublished_package_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir(parents=True)
+    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+    package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
+    monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
+    monkeypatch.setattr(release, "parse_fragments", lambda _packages: [])
+    monkeypatch.setattr(
+        release,
+        "_changed_paths",
+        lambda *, base, head: {tmp_path / "pkg/code.py"},
+    )
+
+    assert release.check_fragments(base="origin/main") == 0
 
 
 def test_check_fragments_uses_environment_base(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -872,6 +974,62 @@ def test_check_fragments_explicit_base_overrides_environment(
     assert seen == ["explicit-base"]
 
 
+def test_check_new_package_versions_rejects_publishable_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    package_path = tmp_path / "pkg"
+    version_file = package_path / "version.py"
+    package_path.mkdir()
+    version_file.write_text('__version__ = "0.1.0"\n', encoding="utf-8")
+    package = workspace.Package("pkg", package_path, version_file, ())
+    monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
+    monkeypatch.setattr(
+        release,
+        "_added_paths",
+        lambda *, base, head: {package_path / "pyproject.toml", version_file},
+    )
+
+    assert release.check_new_package_versions(base="origin/main") == 1
+    assert "New packages must start at 0.0.0: pkg (0.1.0)" in capsys.readouterr().out
+
+
+def test_check_new_package_versions_accepts_unpublished_sentinel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package_path = tmp_path / "pkg"
+    version_file = package_path / "version.py"
+    package_path.mkdir()
+    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+    package = workspace.Package("pkg", package_path, version_file, ())
+    monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
+    monkeypatch.setenv("WORKSPACE_POE_GIT_BASE", "stack-base")
+    monkeypatch.setenv("WORKSPACE_POE_GIT_COMMIT", "pushed-head")
+    seen: list[tuple[str, str | None]] = []
+
+    def added_paths(*, base: str, head: str | None) -> set[Path]:
+        seen.append((base, head))
+        return {package_path / "pyproject.toml", version_file}
+
+    monkeypatch.setattr(release, "_added_paths", added_paths)
+
+    assert release.check_new_package_versions() == 0
+    assert seen == [("stack-base", "pushed-head")]
+
+
+def test_check_new_package_versions_ignores_existing_package_bump(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package_path = tmp_path / "pkg"
+    version_file = package_path / "version.py"
+    package_path.mkdir()
+    version_file.write_text('__version__ = "0.1.0"\n', encoding="utf-8")
+    package = workspace.Package("pkg", package_path, version_file, ())
+    monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
+    monkeypatch.setattr(release, "_added_paths", lambda *, base, head: {version_file})
+
+    assert release.check_new_package_versions(base="origin/main") == 0
+
+
 def test_check_fragments_exempts_release_prep_version_bumps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -893,6 +1051,8 @@ def test_check_fragments_ignores_unchanged_fragment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir(parents=True)
+    version_file.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
     fragment_path = tmp_path / "changes/pkg/old.bugfix.md"
     package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
     fragment = release.Fragment("pkg", fragment_path, "bugfix", "Fix an older bug.")
@@ -908,6 +1068,8 @@ def test_check_fragments_accepts_changed_fragment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir(parents=True)
+    version_file.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
     fragment_path = tmp_path / "changes/pkg/new.bugfix.md"
     package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
     fragment = release.Fragment("pkg", fragment_path, "bugfix", "Fix the current bug.")
@@ -942,7 +1104,10 @@ def test_changed_paths_uses_index_diff_when_head_is_none(
 def test_changed_packages_accepts_explicit_range(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    package = workspace.Package("pkg", tmp_path / "pkg", tmp_path / "pkg/version.py", ())
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+    package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
     monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
     monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["pkg"])
 
@@ -962,6 +1127,20 @@ def test_changed_packages_accepts_explicit_range(
 
     assert release.changed_packages(base="abc", head="def") == ["pkg"]
     assert seen == {"base": "abc", "head": "def", "code_only": False}
+
+
+def test_changed_packages_excludes_unpublished_sentinel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+    package = workspace.Package("pkg", tmp_path / "pkg", version_file, ())
+    monkeypatch.setattr(workspace, "packages", lambda: {"pkg": package})
+    monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["pkg"])
+    monkeypatch.setattr(release, "_changed_packages", lambda *_args, **_kwargs: {"pkg"})
+
+    assert release.changed_packages() == []
 
 
 def test_collect_changelog_diff_paths_staged_uses_cached_diff(
@@ -1072,9 +1251,15 @@ def test_changelog_base_lower_bound_requires_base_ref(
 def test_initial_changelog_selection_marks_changed_uncovered_packages(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    lib_version = tmp_path / "lib/version.py"
+    app_version = tmp_path / "app/version.py"
+    lib_version.parent.mkdir()
+    app_version.parent.mkdir()
+    lib_version.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
+    app_version.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
     packages = {
-        "lib": workspace.Package("lib", tmp_path / "lib", tmp_path / "lib/version.py", ()),
-        "app": workspace.Package("app", tmp_path / "app", tmp_path / "app/version.py", ("lib",)),
+        "lib": workspace.Package("lib", tmp_path / "lib", lib_version, ()),
+        "app": workspace.Package("app", tmp_path / "app", app_version, ("lib",)),
     }
     monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["lib", "app"])
 
@@ -1084,6 +1269,21 @@ def test_initial_changelog_selection_marks_changed_uncovered_packages(
     assert selection.packages["lib"].selected is True
     assert selection.packages["app"].selected is False
     assert selection.packages["app"].covered is True
+
+
+def test_initial_changelog_selection_does_not_preselect_unpublished_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    version_file = tmp_path / "pkg/version.py"
+    version_file.parent.mkdir()
+    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
+    packages = {"pkg": workspace.Package("pkg", tmp_path / "pkg", version_file, ())}
+    monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["pkg"])
+
+    selection = clogedit.initial_changelog_selection(packages, {"pkg"}, set())
+
+    assert selection.packages["pkg"].changed is True
+    assert selection.packages["pkg"].selected is False
 
 
 def test_packages_for_paths_detects_package_code(tmp_path: Path) -> None:

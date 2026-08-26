@@ -45,6 +45,11 @@ release script adds `- ` when a line does not already start with a bullet.
 Dependency-only cascade releases do not need handwritten news fragments. The
 release script writes `Update dependencies.` for those changelog entries.
 
+Packages at `0.0.0` are unpublished and exempt from news-fragment enforcement
+and dependency-only cascades. Add a fragment deliberately when such a package
+is ready to publish; its first release is promoted to `0.1.0` regardless of the
+fragment type.
+
 ## Release Prep
 
 Run:
@@ -165,7 +170,8 @@ For broader confidence, run:
 types, and non-empty news fragment content. The Git `pre-push-news-fragments`
 hook generated from `scripts/githooks/pre-push.news-fragments.sh` runs `uv run
 poe check-news-fragments` to require news fragments for changed package code
-without maintaining a hard-coded package registry. `sync-githooks` installs
+except for unpublished `0.0.0` packages, without maintaining a hard-coded
+package registry. `sync-githooks` installs
 pre-push hooks with `WORKSPACE_POE_GIT_SCOPE=commit`, so this check runs against
 the commit tree being pushed. The news fragment format is Towncrier-style, but
 enforcement is repo-local because stock Towncrier does not support
