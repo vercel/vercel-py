@@ -69,8 +69,8 @@ async def test_metadata_matches_between_body_and_step(tmp_path, monkeypatch) -> 
     run_result = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deploymentId="",
-            workflowName=probe_workflow.workflow_id,
+            deployment_id="",
+            workflow_name=probe_workflow.workflow_id,
             input=ser.dehydrate(ser.argument_array((), {})),
         ).into_event(),
     )
@@ -89,7 +89,7 @@ async def test_metadata_matches_between_body_and_step(tmp_path, monkeypatch) -> 
 
     # First delivery replays the body until it suspends on the step, queueing
     # the step's invoke.
-    await deliver(w.WorkflowInvokePayload(runId=run_id))
+    await deliver(w.WorkflowInvokePayload(run_id=run_id))
     [step_msg] = [
         m
         for _, m in world.queued
@@ -98,7 +98,7 @@ async def test_metadata_matches_between_body_and_step(tmp_path, monkeypatch) -> 
 
     # Execute the step, then the completion replay.
     await deliver(step_msg)
-    await deliver(w.WorkflowInvokePayload(runId=run_id))
+    await deliver(w.WorkflowInvokePayload(run_id=run_id))
 
     run = await world.runs_get(run_id)
     assert run.status == "completed"
