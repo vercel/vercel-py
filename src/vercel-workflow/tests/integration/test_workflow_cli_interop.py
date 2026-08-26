@@ -243,6 +243,9 @@ registry = core.Workflows(as_vercel_job=False)
 @registry.step
 async def charge(*, amount: int) -> int:
     """A named parameter, so the call is recorded name-keyed: `[{"amount": 21}]`."""
+    # An attribute write from host context, which the CLI reads back off the
+    # run row along with the ones the body wrote.
+    await runtime.set_attributes(source="step-body")
     # Streams the progress a client would render, then leaves the stream open:
     # the run's stream spans steps, and `finish` is what ends it.
     writable = runtime.get_writable()
@@ -267,9 +270,14 @@ async def finish() -> None:
 
 @registry.workflow
 async def checkout(amount: int) -> str:
+    # Two writes from the body, the second a removal: that reaches the wire as
+    # an explicit `null`, which the TS reader requires and would reject if it
+    # were dropped.
+    await runtime.set_attributes(phase="charging", temporary="yes")
     total = await charge(amount=amount)
     result = await notify(total)
     await finish()
+    await runtime.remove_attributes("temporary")
     return result
 
 
@@ -334,8 +342,10 @@ async def test_cli_lists_the_run_python_wrote(workflow_cli, py_run) -> None:
     assert run["status"] == "completed"
     assert run["workflowName"] == checkout.workflow_id
     assert run["specVersion"] == 2
-    # Written by py because TS materializes it on every run row.
-    assert run["attributes"] == {}
+    # Materialized by py's own `attr_set` handling, and read back through the
+    # TS schema: both writers (the body and a step), and the key the body
+    # removed is gone rather than present-and-null.
+    assert run["attributes"] == {"phase": "charging", "source": "step-body"}
     # Dates survive as `Date`s: the CLI re-serializes them to the same
     # millisecond-precision ISO strings, not to epoch (which is what a null
     # would coerce to through `z.coerce.date()`).
@@ -368,8 +378,23 @@ async def test_cli_lists_the_event_log_python_wrote(workflow_cli, py_run) -> Non
     assert [event["eventType"] for event in reversed(events)] == [
         "run_created",
         "run_started",
-        *["step_created", "step_started", "step_completed"] * 3,
+        # The body's first attribute write, then `charge`, whose own write
+        # lands from host context while the step is running.
+        "attr_set",
+        "step_created",
+        "step_started",
+        "attr_set",
+        "step_completed",
+        *["step_created", "step_started", "step_completed"] * 2,
+        # The body's second write, after the last step and before the run ends.
+        "attr_set",
         "run_completed",
+    ]
+    attr_events = [event for event in events if event["eventType"] == "attr_set"]
+    assert sorted(event["eventData"]["writer"]["type"] for event in attr_events) == [
+        "step",
+        "workflow",
+        "workflow",
     ]
     created = [event for event in events if event["eventType"] == "step_created"]
     assert {event["eventData"]["stepName"] for event in created} == {

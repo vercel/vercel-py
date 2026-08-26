@@ -300,8 +300,6 @@ class BaseWorkflowRun(BaseModel):
     input: bytes | str | None = None
     output: bytes | None = None
     error: StructuredError | None = None
-    # Plaintext string-string metadata. Always materialized (as `{}` when
-    # unset) so a run row carries the same field set the TS SDK writes.
     attributes: dict[str, str] = pydantic.Field(default_factory=dict)
     encryption_public_key: str | None = pydantic.Field(default=None, alias="encryptionPublicKey")
     expired_at: datetime | None = pydantic.Field(default=None, alias="expiredAt")
@@ -579,6 +577,60 @@ class RunFailedEvent(BaseEvent):
         return (self.event_data.error,)
 
 
+class AttributeChange(BaseModel):
+    """One key of a `set_attributes()` call. ``value=None`` removes the key."""
+
+    key: str
+    value: str | None
+
+    @pydantic.model_serializer(mode="wrap")
+    def _keep_the_null(self, handler: Any) -> dict[str, Any]:
+        """Write ``value: null`` instead of dropping the key.
+
+        `LocalWorld` dumps with `exclude_none`, which is right for a field that
+        is absent but not for this one: the null is what removes the attribute,
+        and TS's `AttributeChangeSchema` requires it.
+        """
+        data: dict[str, Any] = handler(self)
+        data.setdefault("value", None)
+        return data
+
+
+class WorkflowAttributeWriter(BaseModel):
+    type: Literal["workflow"] = "workflow"
+
+
+class StepAttributeWriter(BaseModel):
+    type: Literal["step"] = "step"
+    step_id: str = pydantic.Field(alias="stepId")
+    attempt: int
+
+
+AttributeWriter: TypeAlias = Annotated[
+    WorkflowAttributeWriter | StepAttributeWriter,
+    pydantic.Field(discriminator="type"),
+]
+
+
+class AttrSetEventData(BaseModel):
+    changes: list[AttributeChange]
+    writer: AttributeWriter
+    allow_reserved_attributes: Literal[True] | None = pydantic.Field(
+        default=None, alias="allowReservedAttributes", exclude_if=lambda e: e is None
+    )
+
+    def into_event(self, correlation_id: str | None = None) -> "AttrSetEvent":
+        return AttrSetEvent(correlation_id=correlation_id, event_data=self)
+
+
+class AttrSetEvent(BaseEvent):
+    event_type: Literal["attr_set"] = pydantic.Field(
+        default="attr_set",
+        alias="eventType",
+    )
+    event_data: AttrSetEventData = pydantic.Field(alias="eventData")
+
+
 class StepCreatedEventData(BaseModel):
     step_name: str = pydantic.Field(alias="stepName")
     input: bytes | dict[str, Any]
@@ -827,6 +879,7 @@ CreateEventRequest: TypeAlias = (
     RunStartedEvent
     | RunCompletedEvent
     | RunFailedEvent
+    | AttrSetEvent
     | StepCreatedEvent
     | StepStartedEvent
     | StepRetryingEvent
@@ -844,6 +897,7 @@ Event: TypeAlias = Annotated[
         | RunStartedEvent
         | RunCompletedEvent
         | RunFailedEvent
+        | AttrSetEvent
         | StepCreatedEvent
         | StepStartedEvent
         | StepRetryingEvent

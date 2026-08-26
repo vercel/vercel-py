@@ -75,6 +75,35 @@ async def charge_customer(customer_id: str) -> None:
     elapsed = datetime.now(timezone.utc) - info.step_started_at
 ```
 
+## Run attributes
+
+`set_attributes()` puts plaintext key/value metadata on the run. Callable from
+a workflow body or a step:
+
+```python
+from vercel.workflow import remove_attributes, set_attributes
+
+@app.workflow
+async def renew_subscription(customer_id: str) -> None:
+    await set_attributes(customer=customer_id, phase="charging")
+    await charge_customer(customer_id)
+    await set_attributes(phase="done")
+    await remove_attributes("customer")
+```
+
+Attributes are never encrypted, so they shouldn't carry sensitive information;
+keys are capped at 256 characters, values at 256 bytes when encoded, and a run
+at 64 attributes.
+
+`run.attributes()` reads them back:
+
+```python
+run = await start(renew_subscription, "cus_123")
+await run.return_value()
+
+assert await run.attributes() == {"phase": "done"}
+```
+
 ## Queue namespaces
 
 Pass a namespace to a workflow registry to isolate its messages on a dedicated
