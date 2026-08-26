@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.0 - 2026-08-26
+
+### Features
+
+- Expose `get_deadline()` for reading the current Function invocation deadline. (#306)
+- Answer workflow health checks for both queue-based transport and HTTP. (#292)
+- Add support to read the sealed (`encp`) workflow payloads (X25519 + AES-GCM) an outside writer addresses to a run, under the `encryption` extra. (#297)
+
+### Bug Fixes
+
+- Remove upper bounds on aggregate Sandbox and Workflow dependencies so sibling releases cannot make the `vercel` package un-installable. (#334)
+- Start a workflow run even when its queue message arrives before the `run_created` event has landed. (#284)
+
+### Internal
+
+- The Workflows implementation now ships in the separate `vercel-workflow` distribution, which `vercel` depends on, so `vercel.workflow` imports keep working without installing anything extra. (#299)
+
 ## 0.10.0 - 2026-08-12
 
 ### Breaking Changes

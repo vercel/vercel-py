@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 - 2026-08-26
+
+### Internal
+
+- Support disabling HTTP timeouts for selected SDK operations while preserving the client default elsewhere. (#307)
+
 ## 0.1.2 - 2026-08-07
 
 ### Internal

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 - 2026-08-26
+
+### Features
+
+- Add sync and async `fork_sandbox(...)` support for creating a sandbox from an existing named sandbox with optional configuration overrides. (#257)
+- Add `region` and `failover_regions` configuration for sandbox creation, forks, and updates, plus multi-region snapshot availability reporting. (#308)
+
+### Bug Fixes
+
+- Allow Sandbox process waits and log streams to remain idle longer than the session HTTP timeout. (#307)
+
 ## 0.4.0 - 2026-08-07
 
 ### Breaking Changes

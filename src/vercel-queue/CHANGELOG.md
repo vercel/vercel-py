@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 - 2026-08-26
+
+### Documentation
+
+- Remove documentation and examples for `asgi_app` in preparation for its removal. (#309)
+
 ## 0.8.0 - 2026-08-12
 
 ### Features
