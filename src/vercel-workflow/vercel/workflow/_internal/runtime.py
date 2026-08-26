@@ -444,7 +444,7 @@ async def _write_attributes(pairs: list[tuple[str, str | None]], *, allow_reserv
         return
 
     try:
-        step = _step_ctx.get()
+        step = _step_state_ctx.get().step_info
     except LookupError:
         raise errors.FatalError(
             "set_attributes() can only be called inside a workflow or a step"
