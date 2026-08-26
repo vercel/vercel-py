@@ -170,10 +170,14 @@ class _RestrictedRandomMeta(type):
 
 
 class _RestrictedRandom(random.Random, metaclass=_RestrictedRandomMeta):
-    def seed(self, a=None, **kwargs):
+    def seed(
+        self,
+        a: Any = None,
+        version: int = 2,
+    ) -> None:
         if a is None:
             _restricted("random.Random.seed")()
-        super().seed(a, **kwargs)
+        super().seed(a, version=version)
 
 
 def _wrap_get_loop(real_fn: Callable[..., Any]) -> Callable[..., Any]:

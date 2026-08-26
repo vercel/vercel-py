@@ -9,6 +9,7 @@ timestamps go backwards or are the same.
 import os
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 # Crockford's Base32 alphabet
 ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -104,7 +105,11 @@ def _increment_base32(base32_str: str) -> str | None:
     return None
 
 
-def monotonic_factory(prng: Callable[[], float] | None = None) -> Callable[[int | None], str]:
+class _MonotonicGenerator(Protocol):
+    def __call__(self, timestamp_ms: int | None = None) -> str: ...
+
+
+def monotonic_factory(prng: Callable[[], float] | None = None) -> _MonotonicGenerator:
     """
     Create a monotonic ULID generator function.
 
