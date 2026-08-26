@@ -12,6 +12,7 @@ def sandbox_service_options(
     token: str = "token",
     team_id: str = "team_123",
     project_id: str = "prj_123",
+    region: str | None = None,
     sync: bool | None = None,
 ) -> list[ServiceOptions]:
     """Build Sandbox options for the test's current session mode."""
@@ -34,6 +35,7 @@ def sandbox_service_options(
             sandbox_sync.SandboxServiceOptions(
                 base_url=base_url,
                 credentials_factory=sync_credentials_factory,
+                region=region,
             )
         ]
 
@@ -44,5 +46,6 @@ def sandbox_service_options(
         SandboxServiceOptions(
             base_url=base_url,
             credentials_factory=async_credentials_factory,
+            region=region,
         )
     ]
