@@ -16,6 +16,7 @@ dev = [
     "cryptography>=48.0.1",
     "uvloop<1",
     "mypy>=1.20.2,<2",
+    "django-stubs>=6.0.6,<7",
     "build<2",
     "twine<7",
     "ty==0.0.55",
@@ -30,14 +31,14 @@ dev = [
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
     "lograil~=0.7.0",
-    "ggt>=1.5.2; python_version >= '3.11'",
+    "ggt>=1.5.5; python_version >= '3.11'",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = false
 exclude-newer = "2 days"
-exclude-newer-package = { ggt = "2026-08-10T00:00:00Z", lograil = "2026-08-10T21:20:07.442Z" }
+exclude-newer-package = { ggt = "2026-08-27T00:00:00Z", lograil = "2026-08-10T21:20:07.442Z" }
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
@@ -82,6 +83,7 @@ mypy_path = [
     "src/vercel-workflow",
     "integrations/vercel-apscheduler",
     "integrations/vercel-celery",
+    "integrations/vercel-django-tasks",
     "integrations/vercel-dramatiq",
     "tests/stubs",
 ]

@@ -1,0 +1,22 @@
+[project]
+name = "vercel-django-tasks-example-chunks"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "Django>=6",
+    "vercel-cache",
+    "vercel-django-tasks",
+]
+
+[tool.vercel]
+entrypoint = "chunks_project.wsgi:application"
+
+# Compiles the Django WSGI application into a queue-triggered function. With
+# no "topics" filter, the subscriber consumes every task queue registered
+# while Django starts up.
+[[tool.vercel.subscribers]]
+entrypoint = "chunks_project.wsgi"
+
+[tool.uv.sources]
+vercel-cache = { path = "../../../../src/vercel-cache", editable = true }
+vercel-django-tasks = { path = "../..", editable = true }
