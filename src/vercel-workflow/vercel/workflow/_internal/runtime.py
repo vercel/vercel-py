@@ -717,9 +717,13 @@ class WorkflowOrchestratorContext:
             except asyncio.CancelledError:
                 if not self.suspended:
                     raise RuntimeError("workflow was cancelled") from None
-                return None
             finally:
                 self._ctx.reset(token)
+                # Turn suspended into a None return regardless of what the
+                # task actually did with it.
+                # noqa because we are *intentionally* silencing an exception here.
+                if self.suspended:
+                    return None  # noqa: B012
 
     async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         # Bound to the step's own signature, so the recorded bytes depend on it
