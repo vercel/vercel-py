@@ -14,7 +14,7 @@ import traceback
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Mapping
 from datetime import datetime
-from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast
+from typing import Any, Generic, Literal, NoReturn, ParamSpec, TypeVar, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
@@ -639,9 +639,41 @@ class WorkflowOrchestratorContext:
         self.hooks: dict[str, Hook] = {}
         self.registry = registry
 
+        self.suspended = False
+
     @classmethod
     def current(cls) -> Self:
-        return cls._ctx.get()
+        cur = cls._ctx.get()
+        # If the workflow is suspended, keep cancelling the task.
+        # See comment in suspend, below.
+        if cur.suspended:
+            raise asyncio.CancelledError("workflow execution is suspended")
+        return cur
+
+    def suspend(self) -> NoReturn:
+        # When a workflow gets suspended, we would ideally just throw
+        # away all of the inflight coroutines and never finishing
+        # executing them at all.
+        #
+        # In particular, we don't actually want exception handlers and
+        # finally blocks to run, because from the perspective of the
+        # workflow programming model, there is no exception.
+        #
+        # Unfortunately for our case (though /probably/ fortunately in
+        # general), Python insists on always closing
+        # generator/coroutine objects by throwing a GeneratorExit into
+        # them if they haven't already finished.
+        #
+        # So instead, when we suspend the workflow, we set the
+        # suspended flag, and when current() (above) is called and the
+        # workflow is suspended, it raises a CancelledError.
+        #
+        # All user-facing workflow operations go through current(), and
+        # so this means that if a workflow attempts to *do* anything
+        # while being suspended (dispose() a hook, call a step, etc),
+        # it will immediately fail.
+        self.suspended = True
+        raise _SuspendException()
 
     def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes:
         """Run the body inside the sandbox, returning its result serialized there."""
@@ -797,8 +829,7 @@ class WorkflowOrchestratorContext:
 
         Resolves at most one suspension before breaking.
 
-        If the event log is exhausted, cancel the future and suspend
-        the workflow.
+        If the event log is exhausted, suspend the workflow.
         """
 
         # NOTE: resume() does single-step delivery, so we resolve at most
@@ -992,7 +1023,7 @@ class WorkflowOrchestratorContext:
         # event log exhausted without doing any work.
         # Suspend.
         else:
-            raise _SuspendException()
+            self.suspend()
 
 
 # ── lazy hook resume ───────────────────────────────────────────────────────

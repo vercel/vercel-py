@@ -38,6 +38,8 @@ from vercel.workflow._internal.worlds import local as local_mod
 
 RUN_DEADLINE_SECONDS = 30
 TOKEN = "resume-token"
+FINALLY_TOKEN = "finally-resume-token"
+FINALLY_STEP_TOKEN = "finally-step-resume-token"
 
 # Module level, not function level: replay re-imports the workflow's defining
 # module by name inside the sandbox, so it has to live somewhere importable.
@@ -71,6 +73,28 @@ async def collect() -> list[int]:
         seen.append(await double(n=payload.n))
     hook.dispose()
     return seen
+
+
+@registry.workflow
+async def receive_one_with_finally() -> int:
+    hook = Ping.wait(token=FINALLY_TOKEN)
+    try:
+        payload = await hook
+        assert payload is not None and payload.n is not None
+        return payload.n
+    finally:
+        hook.dispose()
+
+
+@registry.workflow
+async def receive_one_with_finally_step() -> int:
+    hook = Ping.wait(token=FINALLY_STEP_TOKEN)
+    try:
+        payload = await hook
+        assert payload is not None and payload.n is not None
+        return payload.n
+    finally:
+        await double(n=21)
 
 
 @pytest.fixture(autouse=True)
@@ -230,6 +254,27 @@ async def test_a_run_completes_on_carried_payloads_alone(tmp_path, monkeypatch) 
         result = await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
         assert result == [2, 4]
         assert (await event_types(world, run.run_id)).count("hook_received") == 3
+
+
+async def test_dispose_in_finally_does_not_dispose_a_suspended_hook(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(receive_one_with_finally)
+        hook = await wait_for_hook(world, FINALLY_TOKEN)
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
+
+
+async def test_a_step_in_finally_runs_after_the_hook_resumes(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(receive_one_with_finally_step)
+        hook = await wait_for_hook(world, FINALLY_STEP_TOKEN)
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
+        assert (await event_types(world, run.run_id)).count("step_completed") == 1
 
 
 async def test_the_producers_own_write_converges_on_the_re_ensured_event(
