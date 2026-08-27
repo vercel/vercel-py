@@ -210,6 +210,11 @@ def _wrap_get_loop(real_fn: Callable[..., Any]) -> Callable[..., Any]:
                 "shutdown_default_executor",
                 # Deterministic scheduling
                 "call_soon",
+                # Sleep based scheduling (does a workflow sleep)
+                "call_at",
+                "call_later",
+                # Time (uses deterministic time)
+                "time",
                 # Task / future creation
                 "create_future",
                 "create_task",

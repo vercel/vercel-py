@@ -98,7 +98,7 @@ async def test_created_event_without_suspension_raises_runtime_error() -> None:
         ctx.resume()
 
 
-# --- concurrent delivery: the loop idle hook + resume single-step ----------------
+# --- concurrent delivery: the loop workflow + resume single-step -----------------
 #
 # When a body issues several calls from concurrent coroutines, recorded
 # completions must be delivered ONE AT A TIME, each only once the body has fully
@@ -106,7 +106,8 @@ async def test_created_event_without_suspension_raises_runtime_error() -> None:
 # still-running one and the two issue their next calls in a different order than
 # at record time -> the positional correlation IDs no longer line up ->
 # NondeterminismError. Two pieces cooperate:
-#   * WorkflowLoop calls resume() only when its ready queue is empty (quiescent).
+#   * WorkflowLoop calls workflow.resume() only when its ready queue is empty
+#     (quiescent).
 #   * resume() applies at most one recorded event (single-step), or parks.
 
 _ARGS = _args(name="a")
@@ -181,7 +182,20 @@ async def test_workflow_loop_runs_pending_work_before_resume() -> None:
         assert pending_ran
         ctx.resume()
 
-    loop = workflow_loop.WorkflowLoop(idle_hook=resume)
+    class Workflow:
+        def resume(self) -> None:
+            resume()
+
+        def time(self) -> float:
+            raise NotImplementedError
+
+        def check_suspended(self) -> None:
+            pass
+
+        def run_wait(self, param: Any) -> asyncio.Future[None]:
+            raise NotImplementedError
+
+    loop = workflow_loop.WorkflowLoop(workflow=Workflow())
     try:
         loop.call_soon(pending)
         loop._run_once()
@@ -206,7 +220,7 @@ async def test_idle_resume_parks_when_nothing_to_deliver() -> None:
     with pytest.raises(asyncio.CancelledError):
         runtime._run_isolated(
             wait_forever(),
-            loop_factory=lambda: workflow_loop.WorkflowLoop(idle_hook=ctx.resume),
+            loop_factory=lambda: workflow_loop.WorkflowLoop(workflow=ctx),
         )
 
     assert ctx.suspended
