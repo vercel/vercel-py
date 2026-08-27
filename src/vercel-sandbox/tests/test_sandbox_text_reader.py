@@ -143,6 +143,30 @@ async def test_async_text_reader_close_preserves_stream_destination(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_text_reader_close_all_readers_finishes_transport(
+    anyio_backend: str,
+) -> None:
+    opened = 0
+
+    async def open_response() -> StreamingResponse:
+        nonlocal opened
+        opened += 1
+        return _logs_response()
+
+    transport, stdout, stderr = _text_transport_and_readers(
+        open_response, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    assert transport is not None and stdout is not None and stderr is not None
+
+    await stdout.aclose()
+    await stderr.aclose()
+    await transport.drain()
+
+    assert opened == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 async def test_async_text_reader_rejects_concurrent_reads(anyio_backend: str) -> None:
     started = anyio.Event()
     release = anyio.Event()
@@ -266,6 +290,26 @@ def test_sync_text_reader_close_preserves_stream_destination() -> None:
     iter_coroutine(transport.drain())
 
     assert stderr.getvalue() == "inherited\n"
+
+
+def test_sync_text_reader_close_all_readers_finishes_transport() -> None:
+    opened = 0
+
+    def open_response() -> StreamingResponse:
+        nonlocal opened
+        opened += 1
+        return _logs_response()
+
+    transport, stdout, stderr = _sync_text_transport_and_readers(
+        open_response, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    assert transport is not None and stdout is not None and stderr is not None
+
+    stdout.close()
+    stderr.close()
+    iter_coroutine(transport.drain())
+
+    assert opened == 0
 
 
 def test_sync_text_reader_propagates_in_band_errors() -> None:

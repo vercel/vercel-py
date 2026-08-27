@@ -69,7 +69,8 @@ def _validate_reader_destination(
         if allow_stdout_merge:
             return subprocess.STDOUT
         raise ValueError("STDOUT is only supported for stderr")
-    _resolve_target(destination, inherited=sys.stdout, name=name)
+    inherited = sys.stderr if name == "stderr" else sys.stdout
+    _resolve_target(destination, inherited=inherited, name=name)
     return destination
 
 

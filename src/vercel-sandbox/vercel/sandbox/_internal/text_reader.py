@@ -246,6 +246,7 @@ class _TextTransportCore:
                 if target is buffer:
                     self._routes[stream] = None
             if all(target is None for target in self._routes.values()):
+                self._eof = True
                 await self._cleanup()
         finally:
             self._lock.release()

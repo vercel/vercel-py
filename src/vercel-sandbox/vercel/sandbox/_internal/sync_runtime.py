@@ -117,8 +117,8 @@ class SyncProcess(_ProcessHandleState):
 
     The ``stdout`` and ``stderr`` readers each consume their process log
     stream once; reads make forward progress through the stream and cannot
-    rewind. A reader is ``None`` when its stream was dropped with
-    ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
+    rewind. A reader exists only when its stream uses ``subprocess.PIPE``;
+    inherited, redirected, dropped, and merged streams have no reader.
     """
 
     __slots__ = ("_service", "_transport", "stderr", "stdout")
