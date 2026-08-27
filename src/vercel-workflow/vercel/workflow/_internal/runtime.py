@@ -1215,7 +1215,7 @@ def refuse_cross_environment_delivery(
 
 
 class _ReplayImmediately:
-    """Ask the current queue delivery to cold-replay without acknowledging it."""
+    """Sentinel to have workflow_handler rerun _workflow_replay_pass"""
 
 
 _REPLAY_IMMEDIATELY = _ReplayImmediately()
