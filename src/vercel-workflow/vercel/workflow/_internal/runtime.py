@@ -665,9 +665,12 @@ class WorkflowOrchestratorContext:
         cur = cls._ctx.get()
         # If the workflow is suspended, keep cancelling the task.
         # See comment in suspend, below.
-        if cur.suspended:
-            raise asyncio.CancelledError("workflow execution is suspended")
+        cur.check_suspended()
         return cur
+
+    def check_suspended(self) -> None:
+        if self.suspended:
+            raise asyncio.CancelledError("workflow execution is suspended")
 
     def suspend(self) -> None:
         # When a workflow gets suspended, we would ideally just throw
@@ -733,7 +736,7 @@ class WorkflowOrchestratorContext:
                     obj.codec.dump_return(
                         _run_isolated(
                             obj.func(*args, **kwargs),
-                            loop_factory=lambda: loop.WorkflowLoop(idle_hook=self.resume),
+                            loop_factory=lambda: loop.WorkflowLoop(workflow=self),
                         )
                     )
                 )
@@ -748,7 +751,9 @@ class WorkflowOrchestratorContext:
                 if self.suspended:
                     return None  # noqa: B012
 
-    async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    def run_step(
+        self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs
+    ) -> asyncio.Future[T]:
         # Bound to the step's own signature, so the recorded bytes depend on it
         # rather than on how the body spelled the call -- see
         # `core._bind_arguments`, which the determinism check relies on.
@@ -757,26 +762,26 @@ class WorkflowOrchestratorContext:
         input_data = ser.dehydrate(ser.step_arguments(dumped_args, dumped_kwargs))
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
-        return await sus.future
+        return sus.future
 
-    async def run_wait(self, param: DurationParam) -> None:
+    def run_wait(self, param: DurationParam) -> asyncio.Future[None]:
         wait = Wait(
             correlation_id=f"wait_{self.generate_ulid()}",
             resume_at=(parse_duration_to_date(param)),
         )
         self.suspensions[wait.correlation_id] = wait
-        await wait.future
+        return wait.future
 
-    async def set_attributes(
+    def set_attributes(
         self, changes: list[w.AttributeChange], *, allow_reserved: bool
-    ) -> None:
+    ) -> asyncio.Future[None]:
         attr_sus = Attributes(
             correlation_id=f"attr_{self.generate_ulid()}",
             changes=changes,
             allow_reserved=allow_reserved,
         )
         self.suspensions[attr_sus.correlation_id] = attr_sus
-        await attr_sus.future
+        return attr_sus.future
 
     def now(self) -> datetime:
         if not self.events:
@@ -784,6 +789,10 @@ class WorkflowOrchestratorContext:
         event = self.events[max(self.replay_index - 1, 0)]
         assert event.server_props is not None
         return event.server_props.created_at
+
+    def time(self) -> float:
+        delta = self.now() - _EPOCH
+        return delta.total_seconds()
 
     def time_ns(self) -> int:
         delta = self.now() - _EPOCH
@@ -814,14 +823,14 @@ class WorkflowOrchestratorContext:
         self.hooks[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
 
-    async def run_hook(self, *, correlation_id: str) -> T:
+    def run_hook(self, *, correlation_id: str) -> asyncio.Future[T]:
         hook = self.hooks[correlation_id]
         if hook.disposed:
             raise StopAsyncIteration
         self.suspensions[hook.correlation_id] = hook
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
-        return await fut
+        return fut
 
     def dispose_hook(self, *, correlation_id: str) -> None:
         hook = self.hooks[correlation_id]
