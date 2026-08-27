@@ -1,3 +1,4 @@
+import abc
 import asyncio
 import contextlib
 import contextvars
@@ -96,29 +97,39 @@ def classify_run_error(error: Exception) -> str:
 
 
 @dataclasses.dataclass(kw_only=True)
-class BaseSuspension:
+class BaseSuspension(abc.ABC):
     correlation_id: str
     has_created_event: bool = False
 
+    @abc.abstractmethod
+    def fail(self, exc: Exception) -> None:
+        """Resume this suspension by raising ``exc`` in its awaiter."""
+
 
 @dataclasses.dataclass(kw_only=True)
-class Suspension(BaseSuspension, Generic[T]):
-    step: core.Step[Any, T]
-    input: bytes
+class FutureSuspension(BaseSuspension, Generic[T]):
     future: asyncio.Future[T] = dataclasses.field(default_factory=asyncio.Future)
 
+    def fail(self, exc: Exception) -> None:
+        if not self.future.done():
+            self.future.set_exception(exc)
+
 
 @dataclasses.dataclass(kw_only=True)
-class Wait(BaseSuspension):
+class Suspension(FutureSuspension[T], Generic[T]):
+    step: core.Step[Any, T]
+    input: bytes
+
+
+@dataclasses.dataclass(kw_only=True)
+class Wait(FutureSuspension[None]):
     resume_at: datetime
-    future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
 
 
 @dataclasses.dataclass(kw_only=True)
-class Attributes(BaseSuspension):
+class Attributes(FutureSuspension[None]):
     changes: list[w.AttributeChange]
     allow_reserved: bool = False
-    future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -129,6 +140,12 @@ class Hook(BaseSuspension, Generic[T]):
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
     hook_cls: type[T]
     metadata: bytes | None = None
+
+    def fail(self, exc: Exception) -> None:
+        while self.futures:
+            future = self.futures.popleft()
+            if not future.done():
+                future.set_exception(exc)
 
     def set_result(self, raw_data: Any) -> None:
         res: T
@@ -870,16 +887,6 @@ class WorkflowOrchestratorContext:
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
 
-    def _fail_suspension(self, sus: BaseSuspension, exc: Exception) -> None:
-        """Surface ``exc`` on whichever future(s) a suspension is awaiting."""
-        if isinstance(sus, Hook):
-            while sus.futures:
-                fut = sus.futures.popleft()
-                if not fut.done():
-                    fut.set_exception(exc)
-        elif isinstance(sus, (Suspension, Wait, Attributes)) and not sus.future.done():
-            sus.future.set_exception(exc)
-
     def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
 
@@ -889,7 +896,7 @@ class WorkflowOrchestratorContext:
         also stashed for ``run_workflow`` to raise, and the run is suspended
         so nothing else executes.
         """
-        self._fail_suspension(sus, exc)
+        sus.fail(exc)
         self.resume_exception = exc
         self.suspend()
 
