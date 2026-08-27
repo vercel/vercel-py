@@ -9,6 +9,7 @@ import pytest
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow import (
     FatalError,
+    HookConflictError,
     RemoteError,
     RetryableError,
     WorkflowRunFailedError,
@@ -39,6 +40,16 @@ def _raised(error: Exception) -> Exception:
 
 def test_fatal_error_uses_the_typescript_tag() -> None:
     assert _wire(FatalError("card declined")) == '[["FatalError",1],{"message":2},"card declined"]'
+
+
+def test_hook_conflict_uses_the_typescript_tag() -> None:
+    error = HookConflictError("shared-token", "wrun_owner")
+
+    assert _wire(error) == (
+        '[["HookConflictError",1],{"message":2,"token":3,"conflictingRunId":4},'
+        '"Hook token \\"shared-token\\" is already in use by another workflow '
+        '(run \\"wrun_owner\\")","shared-token","wrun_owner"]'
+    )
 
 
 def test_cause_uses_its_own_error_tag() -> None:
@@ -93,6 +104,12 @@ TS_FATAL_WITH_CAUSE = ser.DEVALUE_V1 + (
     b'"TypeError: underlying type error\\n    at throwFatalErrorWithCause (99_e2e.ts:1364:16)"]'
 )
 
+TS_HOOK_CONFLICT = ser.DEVALUE_V1 + (
+    b'[["HookConflictError",1],{"message":2,"token":3,"conflictingRunId":4},'
+    b'"Hook token \\"shared-token\\" is already in use by another workflow '
+    b'(run \\"wrun_owner\\")","shared-token","wrun_owner"]'
+)
+
 
 def test_typescript_fatal_error_hydrates_to_python_fatal_error() -> None:
     error = ser.hydrate_error(TS_FATAL_WITH_CAUSE, what="the error of step step_0")
@@ -101,6 +118,17 @@ def test_typescript_fatal_error_hydrates_to_python_fatal_error() -> None:
     assert str(error) == "fatal with cause"
     assert isinstance(error.__cause__, TypeError)
     assert str(error.__cause__) == "underlying type error"
+
+
+def test_typescript_hook_conflict_hydrates_to_python_hook_conflict() -> None:
+    error = ser.hydrate_error(TS_HOOK_CONFLICT, what="an error")
+
+    assert isinstance(error, HookConflictError)
+    assert error.token == "shared-token"
+    assert error.conflicting_run_id == "wrun_owner"
+    assert str(error) == (
+        'Hook token "shared-token" is already in use by another workflow (run "wrun_owner")'
+    )
 
 
 def test_error_payload_requires_a_message() -> None:
@@ -226,6 +254,14 @@ def test_fatal_error_and_cause_survive_a_round_trip() -> None:
     assert str(error) == "fatal with cause"
     assert isinstance(error.__cause__, TypeError)
     assert str(error.__cause__) == "underlying type error"
+
+
+def test_hook_conflict_survives_a_round_trip_without_an_owner() -> None:
+    error = _round_trip(HookConflictError("shared-token"))
+
+    assert isinstance(error, HookConflictError)
+    assert error.token == "shared-token"
+    assert error.conflicting_run_id is None
 
 
 @pytest.mark.parametrize(

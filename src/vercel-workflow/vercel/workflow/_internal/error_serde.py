@@ -10,7 +10,7 @@ from typing import Any, TypedDict, cast
 
 from vercel._internal.core.polyfills import UTC
 
-from .errors import FatalError, RemoteError, RetryableError
+from .errors import FatalError, HookConflictError, RemoteError, RetryableError
 
 
 class _OptionalErrorFields(TypedDict, total=False):
@@ -30,6 +30,14 @@ class RetryableErrorPayload(ErrorPayload):
     retryAfter: int
 
 
+class _OptionalHookConflictFields(TypedDict, total=False):
+    conflictingRunId: str
+
+
+class HookConflictErrorPayload(ErrorPayload, _OptionalHookConflictFields):
+    token: str
+
+
 _ERROR_CLASS_BY_TAG: dict[str, type[Exception]] = {
     "FatalError": FatalError,
     "TypeError": TypeError,
@@ -39,6 +47,7 @@ _ERROR_CLASS_BY_TAG: dict[str, type[Exception]] = {
 }
 
 ERROR_TAG = "Error"
+HOOK_CONFLICT_ERROR_TAG = "HookConflictError"
 RETRYABLE_ERROR_TAG = "RetryableError"
 
 # Error tags without Python counterparts. RemoteError retains their original
@@ -48,7 +57,6 @@ _FOREIGN_ERROR_TAGS = (
     "URIError",
     "DOMException",
     "AggregateError",
-    "HookConflictError",
     "RuntimeDecryptionError",
 )
 
@@ -142,6 +150,31 @@ def _revive_error_class(cls: type[Exception]) -> Callable[[Any], Any]:
     return revive
 
 
+def _reduce_hook_conflict_error(value: Any) -> HookConflictErrorPayload | bool:
+    if not isinstance(value, HookConflictError):
+        return False
+    payload: HookConflictErrorPayload = {
+        **_error_payload(value),
+        "token": value.token,
+    }
+    if value.conflicting_run_id is not None:
+        payload["conflictingRunId"] = value.conflicting_run_id
+    return payload
+
+
+def _revive_hook_conflict_error(value: Any) -> HookConflictError:
+    payload = _require_error_payload(value)
+    token = value.get("token")
+    if not isinstance(token, str):
+        raise ValueError(f"invalid HookConflictError token: {token!r}")
+    conflicting_run_id = value.get("conflictingRunId")
+    if conflicting_run_id is not None and not isinstance(conflicting_run_id, str):
+        raise ValueError(f"invalid HookConflictError conflictingRunId: {conflicting_run_id!r}")
+    exc = HookConflictError(token, conflicting_run_id)
+    _apply_error_payload(exc, payload)
+    return exc
+
+
 def _reduce_retryable_error(value: Any) -> RetryableErrorPayload | bool:
     if not isinstance(value, RetryableError):
         return False
@@ -214,6 +247,7 @@ REDUCERS: dict[str, Callable[[Any], Any]] = {
         tag: _reduce_error_class(cls, subclasses=cls is FatalError)
         for tag, cls in _ERROR_CLASS_BY_TAG.items()
     },
+    HOOK_CONFLICT_ERROR_TAG: _reduce_hook_conflict_error,
     RETRYABLE_ERROR_TAG: _reduce_retryable_error,
     **{tag: _reduce_foreign_error(tag) for tag in _FOREIGN_ERROR_TAGS},
     ERROR_TAG: reduce_error,
@@ -222,6 +256,7 @@ REDUCERS: dict[str, Callable[[Any], Any]] = {
 REVIVERS: dict[str, Callable[[Any], Any]] = {
     **{tag: _revive_error_class(cls) for tag, cls in _ERROR_CLASS_BY_TAG.items()},
     **{tag: _revive_foreign_error(tag) for tag in _FOREIGN_ERROR_TAGS},
+    HOOK_CONFLICT_ERROR_TAG: _revive_hook_conflict_error,
     RETRYABLE_ERROR_TAG: _revive_retryable_error,
     ERROR_TAG: revive_error,
 }

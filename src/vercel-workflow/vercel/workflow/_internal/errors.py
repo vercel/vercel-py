@@ -15,6 +15,19 @@ class FatalError(Exception):
     fatal = True
 
 
+class HookConflictError(Exception):
+    """A hook token already owned by another active workflow run."""
+
+    token: str
+    conflicting_run_id: str | None
+
+    def __init__(self, token: str, conflicting_run_id: str | None = None) -> None:
+        owner = f' (run "{conflicting_run_id}")' if conflicting_run_id else ""
+        super().__init__(f'Hook token "{token}" is already in use by another workflow{owner}')
+        self.token = token
+        self.conflicting_run_id = conflicting_run_id
+
+
 class RemoteError(Exception):
     """An error whose class is unavailable in Python."""
 
