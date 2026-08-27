@@ -6,6 +6,7 @@ results matched onto the wrong calls. ``resume()`` must detect this and fail
 loudly rather than silently returning the wrong value.
 """
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,6 +47,18 @@ def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:
     return runtime.Suspension(correlation_id=correlation_id, step=core.Step(_greet), input=args)
 
 
+def _resume_until_suspended(ctx: runtime.WorkflowOrchestratorContext) -> None:
+    async def resume() -> None:
+        ctx.resume()
+        # Cancellation is delivered at the next suspension point.
+        await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.CancelledError):
+        runtime._run_isolated(resume(), loop_factory=workflow_loop.WorkflowLoop)
+
+    assert ctx.suspended
+
+
 async def test_reordered_step_args_raise_nondeterminism() -> None:
     """Recorded step input "a" but the body now calls the same step with "b"
     on replay -> NondeterminismError."""
@@ -75,8 +88,7 @@ async def test_matching_step_parks_without_nondeterminism() -> None:
     sus = _suspension(cid, _args(name="a"))
     ctx.suspensions[cid] = sus
 
-    with pytest.raises(runtime._SuspendException):
-        ctx.resume()
+    _resume_until_suspended(ctx)
 
     assert not sus.future.done()
     assert sus.has_created_event
@@ -142,8 +154,7 @@ async def test_cancelled_step_ignores_later_completion() -> None:
 
     # Replay the launch, then model the workflow task being cancelled while
     # the step is in flight. The completion arrives in a later event batch.
-    with pytest.raises(runtime._SuspendException):
-        ctx.resume()
+    _resume_until_suspended(ctx)
     assert sus.has_created_event
     assert sus.future.cancel()
 
@@ -240,15 +251,18 @@ async def test_idle_resume_parks_when_nothing_to_deliver() -> None:
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
 
-    loop = workflow_loop.WorkflowLoop(idle_hook=ctx.resume)
-    try:
-        with pytest.raises(runtime._SuspendException):
-            loop._run_once()
+    async def wait_forever() -> None:
+        await asyncio.Future()
 
-        assert sus1.has_created_event
-        assert not sus1.future.done()
-    finally:
-        loop.close()
+    with pytest.raises(asyncio.CancelledError):
+        runtime._run_isolated(
+            wait_forever(),
+            loop_factory=lambda: workflow_loop.WorkflowLoop(idle_hook=ctx.resume),
+        )
+
+    assert ctx.suspended
+    assert sus1.has_created_event
+    assert not sus1.future.done()
 
 
 # --- now(): deterministic clock anchored to replay progress, not list tail ------

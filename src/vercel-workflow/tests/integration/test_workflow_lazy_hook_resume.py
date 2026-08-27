@@ -38,6 +38,10 @@ from vercel.workflow._internal.worlds import local as local_mod
 
 RUN_DEADLINE_SECONDS = 30
 TOKEN = "resume-token"
+FINALLY_TOKEN = "finally-resume-token"
+FINALLY_STEP_TOKEN = "finally-step-resume-token"
+CANCELLED_ERROR_TOKEN = "cancelled-error-token"
+REPLACED_CANCELLED_ERROR_TOKEN = "replaced-cancelled-error-token"
 
 # Module level, not function level: replay re-imports the workflow's defining
 # module by name inside the sandbox, so it has to live somewhere importable.
@@ -71,6 +75,50 @@ async def collect() -> list[int]:
         seen.append(await double(n=payload.n))
     hook.dispose()
     return seen
+
+
+@registry.workflow
+async def receive_one_with_finally() -> int:
+    hook = Ping.wait(token=FINALLY_TOKEN)
+    try:
+        payload = await hook
+        assert payload is not None and payload.n is not None
+        return payload.n
+    finally:
+        hook.dispose()
+
+
+@registry.workflow
+async def receive_one_with_finally_step() -> int:
+    hook = Ping.wait(token=FINALLY_STEP_TOKEN)
+    try:
+        payload = await hook
+        assert payload is not None and payload.n is not None
+        return payload.n
+    finally:
+        await double(n=21)
+
+
+@registry.workflow
+async def catch_cancelled_error() -> int:
+    hook = Ping.wait(token=CANCELLED_ERROR_TOKEN)
+    try:
+        payload = await hook
+    except asyncio.CancelledError:
+        return -1
+    assert payload is not None and payload.n is not None
+    return payload.n
+
+
+@registry.workflow
+async def replace_cancelled_error() -> int:
+    hook = Ping.wait(token=REPLACED_CANCELLED_ERROR_TOKEN)
+    try:
+        payload = await hook
+    except asyncio.CancelledError:
+        raise RuntimeError("replaced workflow cancellation") from None
+    assert payload is not None and payload.n is not None
+    return payload.n
 
 
 @pytest.fixture(autouse=True)
@@ -187,6 +235,22 @@ async def wait_for_hook(world: local_mod.LocalWorld, token: str) -> w.Hook:
     raise AssertionError(f"hook {token!r} was never registered")
 
 
+async def wait_for_hook_without_run_finishing(
+    world: local_mod.LocalWorld, run_id: str, token: str
+) -> w.Hook:
+    for _ in range(200):
+        try:
+            return await world.hooks_get_by_token(token)
+        except w.HookNotFoundError:
+            run = await world.runs_get(run_id)
+            if run.status in {"completed", "failed", "cancelled"}:
+                raise AssertionError(
+                    f"run finished as {run.status!r} before hook {token!r} was registered"
+                ) from None
+            await asyncio.sleep(0.05)
+    raise AssertionError(f"hook {token!r} was never registered")
+
+
 async def event_types(world: local_mod.LocalWorld, run_id: str) -> list[str]:
     return [e.event_type for e in (await world.events_list(run_id)).data]
 
@@ -230,6 +294,53 @@ async def test_a_run_completes_on_carried_payloads_alone(tmp_path, monkeypatch) 
         result = await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
         assert result == [2, 4]
         assert (await event_types(world, run.run_id)).count("hook_received") == 3
+
+
+async def test_dispose_in_finally_does_not_dispose_a_suspended_hook(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(receive_one_with_finally)
+        hook = await wait_for_hook(world, FINALLY_TOKEN)
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
+
+
+async def test_a_step_in_finally_runs_after_the_hook_resumes(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(receive_one_with_finally_step)
+        hook = await wait_for_hook(world, FINALLY_STEP_TOKEN)
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
+        assert (await event_types(world, run.run_id)).count("step_completed") == 1
+
+
+async def test_catching_cancelled_error_cannot_complete_a_suspended_workflow(
+    tmp_path, monkeypatch
+) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(catch_cancelled_error)
+        hook = await wait_for_hook_without_run_finishing(world, run.run_id, CANCELLED_ERROR_TOKEN)
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
+
+
+async def test_replacing_cancelled_error_cannot_fail_a_suspended_workflow(
+    tmp_path, monkeypatch
+) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(replace_cancelled_error)
+        hook = await wait_for_hook_without_run_finishing(
+            world, run.run_id, REPLACED_CANCELLED_ERROR_TOKEN
+        )
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
 
 
 async def test_the_producers_own_write_converges_on_the_re_ensured_event(
