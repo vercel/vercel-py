@@ -75,6 +75,9 @@ class WorkflowLoop(asyncio.BaseEventLoop):
                         "exception": fut.exception(),
                     }
                 )
+                # Signal anyway, to avoid some weird hangs.
+                # TODO: More decisive failures on this case.
+                self._ready.append(timer)
             else:
                 self._ready.append(timer)
 
