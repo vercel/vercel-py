@@ -96,6 +96,7 @@ def _npm_install_into(prefix: Path) -> bool:
             str(prefix),
         ],
         capture_output=True,
+        encoding="utf-8",
         text=True,
         timeout=600,
         check=False,
@@ -191,6 +192,7 @@ def _inspect_raw(cli: Path, data_dir: Path, *args: str) -> str:
     result = subprocess.run(
         ["node", str(cli), "inspect", *args, "--backend", "local", "--json"],
         capture_output=True,
+        encoding="utf-8",
         text=True,
         timeout=120,
         cwd=data_dir,
