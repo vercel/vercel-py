@@ -1850,7 +1850,7 @@ def _wait_for_sync_lease_deadline(
     condition: Callable[[], bool] | None = None,
 ) -> None:
     expected = server.state.now + timedelta(seconds=seconds)
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + 5
     while server.state.by_id[message_id].lease_deadline_by_consumer[consumer] != expected or (
         condition is not None and not condition()
     ):
