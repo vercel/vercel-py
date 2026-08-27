@@ -34,7 +34,7 @@ from . import (
     ulid,
     world as w,
 )
-from .duration import parse_duration_to_date
+from .duration import DurationParam, parse_duration_to_date
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -60,10 +60,6 @@ def _wait_continuation_dispatch(
     delay = min(timeout_seconds, WAIT_CONTINUATION_MAX_DELAY_SECONDS)
     key = wait_correlation_id if hop == 1 else f"{wait_correlation_id}:hop-{hop}"
     return delay, key
-
-
-class _SuspendException(BaseException):
-    """Raised to trigger suspending of the workflow."""
 
 
 class NondeterminismError(Exception):
@@ -662,12 +658,51 @@ class WorkflowOrchestratorContext:
         self.hooks: dict[str, Hook] = {}
         self.registry = registry
 
+        self.suspended = False
+
     @classmethod
     def current(cls) -> Self:
-        return cls._ctx.get()
+        cur = cls._ctx.get()
+        # If the workflow is suspended, keep cancelling the task.
+        # See comment in suspend, below.
+        cur.check_suspended()
+        return cur
 
-    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes:
-        """Run the body inside the sandbox, returning its result serialized there."""
+    def check_suspended(self) -> None:
+        if self.suspended:
+            raise asyncio.CancelledError("workflow execution is suspended")
+
+    def suspend(self) -> None:
+        # When a workflow gets suspended, we would ideally just throw
+        # away all of the inflight coroutines and never finishing
+        # executing them at all.
+        #
+        # In particular, we don't actually want exception handlers and
+        # finally blocks to run, because from the perspective of the
+        # workflow programming model, there is no exception.
+        #
+        # Unfortunately for our case (though /probably/ fortunately in
+        # general), Python insists on always closing
+        # generator/coroutine objects by throwing a GeneratorExit into
+        # them if they haven't already finished.
+        #
+        # So instead, when we suspend the workflow, we set the
+        # suspended flag, and when current() (above) is called and the
+        # workflow is suspended, it raises a CancelledError.
+        #
+        # All user-facing workflow operations go through current(), and
+        # so this means that if a workflow attempts to *do* anything
+        # while being suspended (dispose() a hook, call a step, etc),
+        # it will immediately fail.
+        self.suspended = True
+        # Close down the tasks
+        for task in asyncio.all_tasks(asyncio.get_event_loop()):
+            task.cancel()
+
+    def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes | None:
+        """Run the body inside the sandbox, returning its result serialized there.
+
+        Returns None if the workflow execution is suspended."""
         wf = self.registry._get_workflow(workflow_run.workflow_name)
         if not workflow_run.input:
             raise RuntimeError(f"Invalid workflow input for run {workflow_run.run_id}")
@@ -697,18 +732,34 @@ class WorkflowOrchestratorContext:
 
             token = self._ctx.set(self)
             try:
-                return ser.dehydrate(
+                result = ser.dehydrate(
                     obj.codec.dump_return(
                         _run_isolated(
                             obj.func(*args, **kwargs),
-                            loop_factory=lambda: loop.WorkflowLoop(idle_hook=self.resume),
+                            loop_factory=lambda: loop.WorkflowLoop(workflow=self),
                         )
                     )
                 )
+            except BaseException as ex:
+                # Turn suspended into a None return regardless of what the
+                # task actually did with it.
+                if self.suspended:
+                    return None
+                if isinstance(ex, asyncio.CancelledError):
+                    raise RuntimeError("workflow was cancelled") from None
+                else:
+                    raise
+            else:
+                if self.suspended:
+                    return None
             finally:
                 self._ctx.reset(token)
 
-    async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+            return result
+
+    def run_step(
+        self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs
+    ) -> asyncio.Future[T]:
         # Bound to the step's own signature, so the recorded bytes depend on it
         # rather than on how the body spelled the call -- see
         # `core._bind_arguments`, which the determinism check relies on.
@@ -717,26 +768,26 @@ class WorkflowOrchestratorContext:
         input_data = ser.dehydrate(ser.step_arguments(dumped_args, dumped_kwargs))
         sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
-        return await sus.future
+        return sus.future
 
-    async def run_wait(self, param: int | float | datetime | str) -> None:
+    def run_wait(self, param: DurationParam) -> asyncio.Future[None]:
         wait = Wait(
             correlation_id=f"wait_{self.generate_ulid()}",
             resume_at=(parse_duration_to_date(param)),
         )
         self.suspensions[wait.correlation_id] = wait
-        await wait.future
+        return wait.future
 
-    async def set_attributes(
+    def set_attributes(
         self, changes: list[w.AttributeChange], *, allow_reserved: bool
-    ) -> None:
+    ) -> asyncio.Future[None]:
         attr_sus = Attributes(
             correlation_id=f"attr_{self.generate_ulid()}",
             changes=changes,
             allow_reserved=allow_reserved,
         )
         self.suspensions[attr_sus.correlation_id] = attr_sus
-        await attr_sus.future
+        return attr_sus.future
 
     def now(self) -> datetime:
         if not self.events:
@@ -744,6 +795,10 @@ class WorkflowOrchestratorContext:
         event = self.events[max(self.replay_index - 1, 0)]
         assert event.server_props is not None
         return event.server_props.created_at
+
+    def time(self) -> float:
+        delta = self.now() - _EPOCH
+        return delta.total_seconds()
 
     def time_ns(self) -> int:
         delta = self.now() - _EPOCH
@@ -774,14 +829,14 @@ class WorkflowOrchestratorContext:
         self.hooks[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
 
-    async def run_hook(self, *, correlation_id: str) -> T:
+    def run_hook(self, *, correlation_id: str) -> asyncio.Future[T]:
         hook = self.hooks[correlation_id]
         if hook.disposed:
             raise StopAsyncIteration
         self.suspensions[hook.correlation_id] = hook
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
-        return await fut
+        return fut
 
     def dispose_hook(self, *, correlation_id: str) -> None:
         hook = self.hooks[correlation_id]
@@ -818,208 +873,186 @@ class WorkflowOrchestratorContext:
         they are one at a time, and it needs to be indistinguishable
         from that.)
 
-        Resolves at most one suspension before breaking.
+        Resolves at most one suspension.
 
-        If the event log is exhausted, cancel the future and suspend
-        the workflow.
+        If the event log is exhausted, suspend the workflow.
         """
 
         # NOTE: resume() does single-step delivery, so we resolve at most
         # one suspension per invocation of resume().
-        # As an optimization for processing StepCreatedEvent and similar,
-        # we still structure this as a loop, though.
-        # The cases that do *not* invoke a suspension will continue,
-        # and the main bottom of the loop will break.
         #
         # This makes sure that resume() gets interleaved directly one
         # to one with event deliveries, instead of sometimes having
-        # multiple deliveries bunched up before a resume(), which can
+        # multiple deliveries bunched up before a resume(), which could
         # lead to mismatches between a recording trace and a replaying
         # one.
-        while (
-            self.replay_index < len(self.events) or self.ooo_hook_received_events
-        ) and self.suspensions:
-            event: w.Event | None = None
-            if self.ooo_hook_received_events:
-                event = self.ooo_hook_received_events[0]
-                if event.correlation_id in self.suspensions:
-                    self.ooo_hook_received_events.popleft()
-                else:
-                    event = None
-            if event is None:
-                if self.replay_index < len(self.events):
-                    event = self.events[self.replay_index]
-                    if event.correlation_id not in self.suspensions:
-                        match event:
-                            # A step's attribute write. It answers no call in
-                            # this body, so consume it and move on.
-                            case (
-                                w.AttrSetEvent(correlation_id=None)
-                                | w.AttrSetEvent(
-                                    event_data=w.AttrSetEventData(writer=w.StepAttributeWriter())
-                                )
-                            ):
-                                self.replay_index += 1
-                                continue
-                            # In case of multitasking, one task may progress twice in a row,
-                            # when we see the replayed event before actually having the
-                            # suspension from the task. So we yield here and let the task
-                            # suspend and resume again in next iteration.
-                            case (
-                                w.StepCreatedEvent(correlation_id=str() as slot_id)
-                                | w.HookCreatedEvent(correlation_id=str() as slot_id)
-                                | w.WaitCreatedEvent(correlation_id=str() as slot_id)
-                                | w.AttrSetEvent(correlation_id=str() as slot_id)
-                            ):
-                                # ...unless the body already registered a different-kind
-                                # call at this positional slot (same ULID, different
-                                # prefix). A same-kind match would have hit the dict
-                                # lookup above, so a ULID collision here is a step/wait/
-                                # hook swap -- the body is non-deterministic. Fail loudly
-                                # instead of yielding forever (the matching ID will never
-                                # appear, so plain `return` would deadlock the run).
-                                pos = _correlation_ulid(slot_id)
-                                for sus in self.suspensions.values():
-                                    if _correlation_ulid(sus.correlation_id) == pos:
-                                        self._fail_suspension(
-                                            sus,
-                                            NondeterminismError(
-                                                f"workflow replay diverged at position "
-                                                f"{pos}: recorded a "
-                                                f"{_correlation_kind(slot_id)!r} "
-                                                f"call, but the body now issues a "
-                                                f"{_correlation_kind(sus.correlation_id)!r} "
-                                                "call. The workflow body is "
-                                                "non-deterministic."
-                                            ),
-                                        )
-                                        return
-                                return
-                            # HookReceivedEvent is not created from workflows, it may arrive
-                            # at any time out of order. At this momemnt we don't need one,
-                            # so we just stash it and continue with the event log.
-                            case w.HookReceivedEvent():
-                                self.ooo_hook_received_events.append(event)
-                                self.replay_index += 1
-                                continue
-                    self.replay_index += 1
-                else:
-                    break
-
-            match event:
-                case w.StepCreatedEvent(
-                    event_data=w.StepCreatedEventData(step_name=name, input=recorded_input)
-                ):
-                    sus = self.suspensions[event.correlation_id]
-                    assert isinstance(sus, Suspension)
-                    # The recorded step at this (positional) correlation ID must be
-                    # the same call the body just issued; a mismatch means the body
-                    # is non-deterministic.
-                    if sus.step.name != name or sus.input != recorded_input:
-                        self._fail_suspension(
-                            sus,
-                            NondeterminismError(
-                                f"workflow replay diverged at {event.correlation_id}: "
-                                f"recorded step {name!r}, but the body now calls "
-                                f"{sus.step.name!r} with different arguments. The workflow "
-                                "body is non-deterministic."
-                            ),
-                        )
-                        return
-                    sus.has_created_event = True
-                    continue
-
-                case w.HookCreatedEvent() | w.WaitCreatedEvent():
-                    self.suspensions[event.correlation_id].has_created_event = True
-                    continue
-
-                case w.AttrSetEvent(
-                    correlation_id=str() as attr_id,
-                    event_data=w.AttrSetEventData(changes=recorded_changes),
-                ):
-                    attr_sus = self.suspensions.pop(attr_id)
-                    assert isinstance(attr_sus, Attributes)
-                    if recorded_changes != attr_sus.changes:
-                        self._fail_suspension(
-                            attr_sus,
-                            NondeterminismError(
-                                f"workflow replay diverged at {attr_id}: "
-                                f"recorded attributes {recorded_changes!r}, but the body "
-                                f"now sets {attr_sus.changes!r}. The workflow body is "
-                                "non-deterministic."
-                            ),
-                        )
-                        return
-                    if not attr_sus.future.cancelled():
-                        attr_sus.future.set_result(None)
-
-                case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
-                    sus = self.suspensions.pop(event.correlation_id)
-                    assert isinstance(sus, Suspension)
-                    result = ser.hydrate(
-                        data,
-                        what=f"the result of step {event.correlation_id}",
-                        key=self.run_key,
-                    )
-                    if not sus.future.cancelled():
-                        try:
-                            validated = sus.step.codec.validate_return(result)
-                        except signature_codec.TypeValidationError as error:
-                            sus.future.set_exception(error)
-                        else:
-                            sus.future.set_result(validated)
-
-                case w.WaitCompletedEvent():
-                    wait = self.suspensions.pop(event.correlation_id)
-                    assert isinstance(wait, Wait)
-                    if not wait.future.cancelled():
-                        wait.future.set_result(None)
-
-                case w.StepFailedEvent(event_data=w.StepFailedEventData(error=data)):
-                    sus = self.suspensions.pop(event.correlation_id)
-                    assert isinstance(sus, Suspension)
-                    what = f"the error of step {event.correlation_id}"
-                    try:
-                        failure = ser.hydrate_error(data, what=what, key=self.run_key)
-                    except ser.SerializationError as error:
-                        failure = errors.FatalError(f"Cannot read {what}: {error}")
-                    if not sus.future.cancelled():
-                        sus.future.set_exception(failure)
-
-                case w.HookConflictEvent(event_data=w.HookConflictEventData(token=token)):
-                    hook = self.suspensions.pop(event.correlation_id, None)
-                    if hook is not None:
-                        assert isinstance(hook, Hook)
-                        while hook.futures:
-                            future = hook.futures.popleft()
-                            if not future.cancelled():
-                                future.set_exception(errors.HookConflictError(token))
-
-                case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
-                    hook = self.suspensions[event.correlation_id]
-                    assert isinstance(hook, Hook)
-                    result = ser.hydrate(
-                        data,
-                        what=f"the payload of hook {event.correlation_id}",
-                        key=self.run_key,
-                    )
-                    hook.set_result(result)
-                    if not hook.futures:
-                        self.suspensions.pop(event.correlation_id)
-
-                case w.HookDisposedEvent():
-                    self.hooks[event.correlation_id].has_dispose_event = True
-                    self.dispose_hook(correlation_id=event.correlation_id)
-
-            # One wake per pass: yield to the body so it drains to its next
-            # suspension before we deliver the next recorded event.
-            break
-
-        # If we did not break out of the loop, that means that the
-        # event log exhausted without doing any work.
-        # Suspend.
+        event: w.Event | None = None
+        # Look for any out-of-order hooks that can be applied
+        for event in self.ooo_hook_received_events:
+            if event.correlation_id in self.suspensions:
+                self.ooo_hook_received_events.remove(event)
+                break
         else:
-            raise _SuspendException()
+            event = None
+
+        if event is None and self.replay_index < len(self.events):
+            event = self.events[self.replay_index]
+            if event.correlation_id not in self.suspensions:
+                match event:
+                    # A step's attribute write. It answers no call in
+                    # this body, so consume it and move on.
+                    case (
+                        w.AttrSetEvent(correlation_id=None)
+                        | w.AttrSetEvent(
+                            event_data=w.AttrSetEventData(writer=w.StepAttributeWriter())
+                        )
+                    ):
+                        self.replay_index += 1
+                        return
+                    case (
+                        w.StepCreatedEvent(correlation_id=str() as slot_id)
+                        | w.HookCreatedEvent(correlation_id=str() as slot_id)
+                        | w.WaitCreatedEvent(correlation_id=str() as slot_id)
+                        | w.AttrSetEvent(correlation_id=str() as slot_id)
+                    ):
+                        # Error if body already registered a different-kind
+                        # call at this positional slot (same ULID, different
+                        # prefix). A same-kind match would have hit the dict
+                        # lookup above, so a ULID collision here is a step/wait/
+                        # hook swap -- the body is non-deterministic. Fail loudly
+                        # instead of yielding forever (the matching ID will never
+                        # appear, so plain `return` would deadlock the run).
+                        pos = _correlation_ulid(slot_id)
+                        for sus in self.suspensions.values():
+                            if _correlation_ulid(sus.correlation_id) == pos:
+                                self._fail_suspension(
+                                    sus,
+                                    NondeterminismError(
+                                        f"workflow replay diverged at position {pos}: recorded a "
+                                        f"{_correlation_kind(slot_id)!r} call, but the body now "
+                                        f"issues a {_correlation_kind(sus.correlation_id)!r} call. "
+                                        "The workflow body is non-deterministic."
+                                    ),
+                                )
+                                return
+                        raise RuntimeError(
+                            f"workflow replay cannot deliver {slot_id!r}: "
+                            "the workflow body has not registered its suspension"
+                        )
+                    # HookReceivedEvent is not created from workflows, it may arrive
+                    # at any time out of order. At this momemnt we don't need one,
+                    # so we just stash it and continue with the event log.
+                    case w.HookReceivedEvent():
+                        self.ooo_hook_received_events.append(event)
+                        self.replay_index += 1
+                        return
+            self.replay_index += 1
+
+        # No events to process. Suspend.
+        if not event:
+            self.suspend()
+            return
+
+        match event:
+            case w.StepCreatedEvent(
+                event_data=w.StepCreatedEventData(step_name=name, input=recorded_input)
+            ):
+                sus = self.suspensions[event.correlation_id]
+                assert isinstance(sus, Suspension)
+                # The recorded step at this (positional) correlation ID must be
+                # the same call the body just issued; a mismatch means the body
+                # is non-deterministic.
+                if sus.step.name != name or sus.input != recorded_input:
+                    self._fail_suspension(
+                        sus,
+                        NondeterminismError(
+                            f"workflow replay diverged at {event.correlation_id}: recorded "
+                            f"step {name!r}, but the body now calls {sus.step.name!r} with "
+                            "different arguments. The workflow body is non-deterministic."
+                        ),
+                    )
+                    return
+                sus.has_created_event = True
+
+            case w.HookCreatedEvent() | w.WaitCreatedEvent():
+                self.suspensions[event.correlation_id].has_created_event = True
+
+            case w.AttrSetEvent(
+                correlation_id=str() as attr_id,
+                event_data=w.AttrSetEventData(changes=recorded_changes),
+            ):
+                attr_sus = self.suspensions.pop(attr_id)
+                assert isinstance(attr_sus, Attributes)
+                if recorded_changes != attr_sus.changes:
+                    self._fail_suspension(
+                        attr_sus,
+                        NondeterminismError(
+                            f"workflow replay diverged at {attr_id}: recorded attributes "
+                            f"{recorded_changes!r}, but the body now sets "
+                            f"{attr_sus.changes!r}. The workflow body is non-deterministic."
+                        ),
+                    )
+                    return
+                if not attr_sus.future.cancelled():
+                    attr_sus.future.set_result(None)
+
+            case w.StepCompletedEvent(event_data=w.StepCompletedEventData(result=data)):
+                sus = self.suspensions.pop(event.correlation_id)
+                assert isinstance(sus, Suspension)
+                result = ser.hydrate(
+                    data,
+                    what=f"the result of step {event.correlation_id}",
+                    key=self.run_key,
+                )
+                if not sus.future.cancelled():
+                    try:
+                        validated = sus.step.codec.validate_return(result)
+                    except signature_codec.TypeValidationError as error:
+                        sus.future.set_exception(error)
+                    else:
+                        sus.future.set_result(validated)
+
+            case w.WaitCompletedEvent():
+                wait = self.suspensions.pop(event.correlation_id)
+                assert isinstance(wait, Wait)
+                if not wait.future.cancelled():
+                    wait.future.set_result(None)
+
+            case w.StepFailedEvent(event_data=w.StepFailedEventData(error=data)):
+                sus = self.suspensions.pop(event.correlation_id)
+                assert isinstance(sus, Suspension)
+                what = f"the error of step {event.correlation_id}"
+                try:
+                    failure = ser.hydrate_error(data, what=what, key=self.run_key)
+                except ser.SerializationError as error:
+                    failure = errors.FatalError(f"Cannot read {what}: {error}")
+                if not sus.future.cancelled():
+                    sus.future.set_exception(failure)
+
+            case w.HookConflictEvent(event_data=w.HookConflictEventData(token=token)):
+                hook = self.suspensions.pop(event.correlation_id, None)
+                if hook is not None:
+                    assert isinstance(hook, Hook)
+                    while hook.futures:
+                        future = hook.futures.popleft()
+                        if not future.cancelled():
+                            future.set_exception(errors.HookConflictError(token))
+
+            case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
+                hook = self.suspensions[event.correlation_id]
+                assert isinstance(hook, Hook)
+                result = ser.hydrate(
+                    data,
+                    what=f"the payload of hook {event.correlation_id}",
+                    key=self.run_key,
+                )
+                hook.set_result(result)
+                if not hook.futures:
+                    self.suspensions.pop(event.correlation_id)
+
+            case w.HookDisposedEvent():
+                self.hooks[event.correlation_id].has_dispose_event = True
+                self.dispose_hook(correlation_id=event.correlation_id)
 
 
 # ── lazy hook resume ───────────────────────────────────────────────────────
@@ -1408,9 +1441,6 @@ async def _workflow_replay_pass(
     )
     try:
         output = context.run_workflow(workflow_run)
-    except _SuspendException:
-        # Workflow suspended, continue outside the try..except block.
-        pass
     except Exception as e:
         error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
         logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
@@ -1425,7 +1455,8 @@ async def _workflow_replay_pass(
         except w.EntityConflictError:
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
-    else:
+
+    if output is not None:
         try:
             await world.events_create(
                 run_id,

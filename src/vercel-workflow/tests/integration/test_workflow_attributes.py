@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -31,7 +32,7 @@ from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
 # How long a run gets before the test fails instead of hanging. Every run here
-# finishes in well under a second.
+# finishes quickly, including the workflow sleep test.
 RUN_DEADLINE_SECONDS = 30
 
 # Module level, not function level: replay re-imports the workflow's defining
@@ -47,6 +48,48 @@ async def sets_attributes(value: int, /) -> int:
     await set_attributes({"phase": "done"})
     await remove_attributes("source")
     return tripled
+
+
+@registry.workflow
+async def sleeps_between_values() -> list[str]:
+    values = ["before"]
+    await asyncio.sleep(1)
+    values.append("between")
+    await asyncio.sleep(1)
+    values.append("after")
+    return values
+
+
+@registry.workflow
+async def wait_for_sleep_to_finish() -> str:
+    await asyncio.wait_for(asyncio.sleep(1), timeout=20)
+    return "finished"
+
+
+@registry.workflow
+async def wait_for_sleep_to_time_out() -> str:
+    try:
+        await asyncio.wait_for(asyncio.sleep(20), timeout=1)
+    except asyncio.TimeoutError:
+        return "timed out"
+    return "unexpectedly finished"
+
+
+class NeverSignaled(core.BaseHook):
+    pass
+
+
+@registry.workflow
+async def wait_for_never_signaled_hook() -> str:
+    hook = NeverSignaled.wait(token="never-signaled")
+    try:
+        async with asyncio.timeout(1):  # type: ignore[attr-defined]
+            await hook
+    except TimeoutError:
+        return "timed out"
+    finally:
+        hook.dispose()
+    return "unexpectedly finished"
 
 
 @registry.step
@@ -139,6 +182,45 @@ async def _run(world: local_mod.LocalWorld, wf: Any, *args: Any) -> tuple[str, A
     run = await runtime.start(wf, *args)
     result = await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
     return run.run_id, result
+
+
+async def test_a_workflow_can_sleep_and_resume(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run_id, result = await _run(world, sleeps_between_values)
+
+        assert result == ["before", "between", "after"]
+        events = (await world.events_list(run_id)).data
+        waits = [event for event in events if event.event_type == "wait_created"]
+        completions = [event for event in events if event.event_type == "wait_completed"]
+        assert len(waits) == len(completions) == 2
+        assert [event.correlation_id for event in waits] == [
+            event.correlation_id for event in completions
+        ]
+
+
+async def test_asyncio_wait_for_allows_a_workflow_sleep_to_finish(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        _, result = await _run(world, wait_for_sleep_to_finish)
+
+        assert result == "finished"
+
+
+async def test_asyncio_wait_for_times_out_a_workflow_sleep(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        _, result = await _run(world, wait_for_sleep_to_time_out)
+
+        assert result == "timed out"
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="asyncio.timeout requires Python 3.11")
+async def test_asyncio_timeout_times_out_a_never_signaled_hook(tmp_path, monkeypatch) -> None:
+    async with running_world(tmp_path, monkeypatch) as world:
+        run_id, result = await _run(world, wait_for_never_signaled_hook)
+
+        assert result == "timed out"
+        events = (await world.events_list(run_id)).data
+        assert [event.event_type for event in events].count("hook_created") == 1
+        assert not any(event.event_type == "hook_received" for event in events)
 
 
 async def test_a_body_write_lands_on_the_run(tmp_path, monkeypatch) -> None:

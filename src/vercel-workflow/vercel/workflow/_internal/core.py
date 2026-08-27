@@ -14,6 +14,7 @@ import pydantic
 from vercel._internal.core.polyfills import Self
 
 from . import py_sandbox, signature_codec, world as w
+from .duration import DurationParam
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -155,7 +156,7 @@ class Step(Generic[P, T]):
         return await ctx.run_step(self, *args, **kwargs)
 
 
-async def sleep(param: int | float | datetime.datetime | str) -> None:
+async def sleep(param: DurationParam) -> None:
     from . import runtime
 
     try:
