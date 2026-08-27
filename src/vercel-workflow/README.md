@@ -55,8 +55,9 @@ async def charge_customer(customer_id: str) -> None:
 ```
 
 `retry_after` accepts the same values `sleep()` accepts — `"10s"`, a number of
-milliseconds, or an absolute timezone-aware `datetime` — and defaults to one
-second. It changes when the next attempt runs, not how many attempts there are:
+milliseconds, a `datetime.timedelta`, or an absolute timezone-aware `datetime`
+— and defaults to one second. It changes when the next attempt runs, not how
+many attempts there are:
 a step that has used up its retries fails whichever error it raised.
 
 Inside a step body, `get_step_metadata()` returns the run and step ids, the
