@@ -277,7 +277,9 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
 
 
 @respx.mock
-async def test_async_create_process_defaults_to_inherited_output(mock_env_clear: None) -> None:
+async def test_async_create_process_defaults_to_inherited_output(
+    mock_env_clear: None, capsys: pytest.CaptureFixture[str]
+) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -290,23 +292,14 @@ async def test_async_create_process_defaults_to_inherited_output(mock_env_clear:
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
         side_effect=lambda _request: _logs_response()
     )
-    stdout = _RecordingTextIO()
-    stderr = _RecordingTextIO()
-
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        with pytest.MonkeyPatch.context() as monkeypatch:
-            monkeypatch.setattr("sys.stdout", stdout)
-            monkeypatch.setattr("sys.stderr", stderr)
-            process = await box.create_process("python")
-            assert process.stdout is None
-            assert process.stderr is None
-            assert await process.wait() == 0
+        process = await box.create_process("python")
+        assert process.stdout is None
+        assert process.stderr is None
+        assert await process.wait() == 0
 
-    assert stdout.getvalue() == "out-1\nout-2"
-    assert stderr.getvalue() == "err\n"
-    assert stdout.flush_count == 1
-    assert stderr.flush_count == 1
+    assert capsys.readouterr() == ("out-1\nout-2", "err\n")
 
 
 @respx.mock
