@@ -49,10 +49,14 @@ def test_retry_after_defaults_to_a_second() -> None:
 
 @pytest.mark.parametrize(
     "retry_after,expected",
-    [("10s", timedelta(seconds=10)), (1_500, timedelta(milliseconds=1_500))],
+    [
+        ("10s", timedelta(seconds=10)),
+        (1_500, timedelta(milliseconds=1_500)),
+        (timedelta(seconds=10), timedelta(seconds=10)),
+    ],
 )
 def test_retry_after_takes_the_durations_sleep_takes(
-    retry_after: str | int, expected: timedelta
+    retry_after: str | int | timedelta, expected: timedelta
 ) -> None:
     before = datetime.now(UTC)
     err = RetryableError("later", retry_after=retry_after)
@@ -69,6 +73,11 @@ def test_retry_after_takes_an_absolute_datetime() -> None:
 def test_retry_after_rejects_a_naive_datetime() -> None:
     with pytest.raises(RuntimeError, match="tzinfo"):
         RetryableError("later", retry_after=datetime(2030, 6, 1))
+
+
+def test_retry_after_rejects_a_negative_timedelta() -> None:
+    with pytest.raises(RuntimeError, match="non-negative"):
+        RetryableError("later", retry_after=timedelta(seconds=-1))
 
 
 # ── the step path ──────────────────────────────────────────────────────────

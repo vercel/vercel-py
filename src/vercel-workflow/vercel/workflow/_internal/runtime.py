@@ -34,7 +34,7 @@ from . import (
     ulid,
     world as w,
 )
-from .duration import parse_duration_to_date
+from .duration import DurationParam, parse_duration_to_date
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -759,7 +759,7 @@ class WorkflowOrchestratorContext:
         self.suspensions[sus.correlation_id] = sus
         return await sus.future
 
-    async def run_wait(self, param: int | float | datetime | str) -> None:
+    async def run_wait(self, param: DurationParam) -> None:
         wait = Wait(
             correlation_id=f"wait_{self.generate_ulid()}",
             resume_at=(parse_duration_to_date(param)),

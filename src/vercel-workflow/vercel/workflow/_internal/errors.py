@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from .duration import parse_duration_to_date
+from .duration import DurationParam, parse_duration_to_date
 
 DEFAULT_RETRY_AFTER_MS = 1_000
 
@@ -44,8 +44,8 @@ class RetryableError(Exception):
         raise RetryableError("rate limited", retry_after="10s")
 
     ``retry_after`` accepts the same values ``sleep()`` accepts: a duration
-    string, a number of milliseconds, or an absolute timezone-aware
-    ``datetime``. It defaults to one second from now, as ``RetryableError``
+    string, a number of milliseconds, a ``timedelta``, or an absolute
+    timezone-aware ``datetime``. It defaults to one second from now, as ``RetryableError``
     in ``@workflow/errors`` does.
 
     It changes only *when* the next attempt runs, not how many attempts there
@@ -60,7 +60,7 @@ class RetryableError(Exception):
         self,
         message: str,
         *,
-        retry_after: int | float | str | datetime | None = None,
+        retry_after: DurationParam | None = None,
     ) -> None:
         super().__init__(message)
         if retry_after is None:
