@@ -7,6 +7,7 @@ loudly rather than silently returning the wrong value.
 """
 
 import asyncio
+import traceback
 from datetime import datetime, timezone
 from typing import Any
 
@@ -47,6 +48,22 @@ def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:
     return runtime.Suspension(correlation_id=correlation_id, step=core.Step(_greet), input=args)
 
 
+def _resume_isolated(ctx: runtime.WorkflowOrchestratorContext) -> None:
+    """One resume() pass in a throwaway loop.
+
+    A nondeterminism failure suspends the run, which cancels every task in the
+    running loop -- including the test's own task, were resume() called in it.
+    """
+
+    async def body() -> None:
+        ctx.resume()
+
+    try:
+        runtime._run_isolated(body(), loop_factory=asyncio.new_event_loop)
+    except asyncio.CancelledError:
+        pass
+
+
 async def test_reordered_step_args_raise_nondeterminism() -> None:
     """Recorded step input "a" but the body now calls the same step with "b"
     on replay -> NondeterminismError."""
@@ -59,10 +76,14 @@ async def test_reordered_step_args_raise_nondeterminism() -> None:
     sus = _suspension(cid, _args(name="b"))
     ctx.suspensions[cid] = sus
 
-    ctx.resume()
+    _resume_isolated(ctx)
 
     assert sus.future.done()
     assert isinstance(sus.future.exception(), runtime.NondeterminismError)
+    # Stashed for run_workflow() to raise, and the run is suspended, so the
+    # failure holds even if the body never awaits (or catches) the future.
+    assert ctx.resume_exception is sus.future.exception()
+    assert ctx.suspended
 
 
 async def test_wait_step_swap_raises_nondeterminism() -> None:
@@ -83,10 +104,12 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     )
     ctx.suspensions["wait_1"] = wait
 
-    ctx.resume()
+    _resume_isolated(ctx)
 
     assert wait.future.done()
     assert isinstance(wait.future.exception(), runtime.NondeterminismError)
+    assert ctx.resume_exception is wait.future.exception()
+    assert ctx.suspended
 
 
 async def test_created_event_without_suspension_raises_runtime_error() -> None:
@@ -226,6 +249,99 @@ async def test_idle_resume_parks_when_nothing_to_deliver() -> None:
     assert ctx.suspended
     assert sus1.has_created_event
     assert not sus1.future.done()
+
+
+# --- nondeterminism fails the run whatever the body does -------------------------
+#
+# Failing the diverged suspension's future is not enough on its own: the body
+# may not be blocked on that future, and even when it is, user code can catch
+# the error. run_workflow() must fail the run either way.
+
+_run_registry = core.Workflows(as_vercel_job=False)
+
+
+@_run_registry.step
+async def _record(*, name: str) -> str:
+    return name
+
+
+@_run_registry.workflow
+async def _diverging() -> str:
+    return await _record(name="b")
+
+
+@_run_registry.workflow
+async def _suppressing() -> str:
+    try:
+        return await _record(name="b")
+    except BaseException:  # noqa: B036
+        return "swallowed"
+
+
+@_run_registry.workflow
+async def _reraising() -> str:
+    try:
+        return await _record(name="b")
+    except BaseException:  # noqa: B036
+        raise runtime.NondeterminismError("surfaced by the body") from None
+
+
+def _running_run(workflow_id: str) -> w.WorkflowRun:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return w.NonFinalWorkflowRun(
+        run_id="wrun_test",
+        status="running",
+        deployment_id="",
+        workflow_name=workflow_id,
+        input=ser.dehydrate(ser.argument_array((), {})),
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+    )
+
+
+def _diverged_log() -> list[w.Event]:
+    """A recorded first step whose input differs from what the body issues.
+
+    The probe context shares the run's seed, so its first ULID is the one the
+    body's first call will be assigned.
+    """
+    cid = f"step_{_context([]).generate_ulid()}"
+    return [w.StepCreatedEventData(step_name=_record.name, input=_args(name="a")).into_event(cid)]
+
+
+async def test_nondeterminism_fails_the_run() -> None:
+    ctx = runtime.WorkflowOrchestratorContext(
+        _diverged_log(), run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+
+    with pytest.raises(runtime.NondeterminismError) as excinfo:
+        ctx.run_workflow(_running_run(_diverging.workflow_id))
+
+    # The error is raised out of the body's own await, so its traceback shows
+    # where in the workflow the divergence happened.
+    frames = traceback.extract_tb(excinfo.value.__traceback__)
+    assert any(frame.name == "_diverging" for frame in frames)
+
+
+async def test_nondeterminism_cannot_be_suppressed_by_the_body() -> None:
+    ctx = runtime.WorkflowOrchestratorContext(
+        _diverged_log(), run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+
+    with pytest.raises(runtime.NondeterminismError):
+        ctx.run_workflow(_running_run(_suppressing.workflow_id))
+
+
+async def test_nondeterminism_surfaced_by_the_body_wins() -> None:
+    """A body that lets (or re-raises) the divergence error out keeps its own
+    instance -- and with it the traceback -- over the stashed one."""
+    ctx = runtime.WorkflowOrchestratorContext(
+        _diverged_log(), run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+
+    with pytest.raises(runtime.NondeterminismError, match="surfaced by the body"):
+        ctx.run_workflow(_running_run(_reraising.workflow_id))
 
 
 # --- now(): deterministic clock anchored to replay progress, not list tail ------

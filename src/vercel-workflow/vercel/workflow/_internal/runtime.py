@@ -659,6 +659,9 @@ class WorkflowOrchestratorContext:
         self.registry = registry
 
         self.suspended = False
+        # An error the run must fail with regardless of what the body does;
+        # raised by run_workflow(). See _fail_nondeterminism.
+        self.resume_exception: Exception | None = None
 
     @classmethod
     def current(cls) -> Self:
@@ -697,6 +700,19 @@ class WorkflowOrchestratorContext:
         self.suspended = True
         # Close down the tasks
         for task in asyncio.all_tasks(asyncio.get_event_loop()):
+            # If the task is blocked on a future that has already
+            # finished with an exception, skip cancelling it.
+            #
+            # The goal here is to give the raised-on-a-task version of
+            # resume_exception a chance to bring down the workflow
+            # itself, so that the final exception has a useful
+            # traceback.
+            # If it doesn't work, the task will get cancelled the
+            # next time through the resume() loop.
+            fut: asyncio.Future[object] | None = task._fut_waiter  # type: ignore[attr-defined]
+            if fut and fut.done() and not fut.cancelled() and fut.exception():
+                continue
+
             task.cancel()
 
     def run_workflow(self: Self, workflow_run: w.WorkflowRun) -> bytes | None:
@@ -741,6 +757,12 @@ class WorkflowOrchestratorContext:
                     )
                 )
             except BaseException as ex:
+                if self.resume_exception is not None:
+                    # If the body surfaced the error itself, keep its
+                    # traceback.
+                    if type(ex) is type(self.resume_exception):
+                        raise
+                    raise self.resume_exception from None
                 # Turn suspended into a None return regardless of what the
                 # task actually did with it.
                 if self.suspended:
@@ -750,6 +772,8 @@ class WorkflowOrchestratorContext:
                 else:
                     raise
             else:
+                if self.resume_exception is not None:
+                    raise self.resume_exception
                 if self.suspended:
                     return None
             finally:
@@ -848,11 +872,7 @@ class WorkflowOrchestratorContext:
         self.suspensions.pop(correlation_id, None)
 
     def _fail_suspension(self, sus: BaseSuspension, exc: Exception) -> None:
-        """Surface ``exc`` on whichever future(s) a suspension is awaiting.
-
-        The error propagates through the body's ``await`` of the step/wait/hook,
-        out of ``run_workflow``, and into the run-failed path.
-        """
+        """Surface ``exc`` on whichever future(s) a suspension is awaiting."""
         if isinstance(sus, Hook):
             while sus.futures:
                 fut = sus.futures.popleft()
@@ -860,6 +880,19 @@ class WorkflowOrchestratorContext:
                     fut.set_exception(exc)
         elif isinstance(sus, (Suspension, Wait, Attributes)) and not sus.future.done():
             sus.future.set_exception(exc)
+
+    def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
+        """Fail the run with a replay-divergence error the body cannot suppress.
+
+        The diverged suspension may not be what the body is currently blocked
+        on, so failing its future alone might never surface anywhere -- and a
+        body that is awaiting it could catch the error. So the exception is
+        also stashed for ``run_workflow`` to raise, and the run is suspended
+        so nothing else executes.
+        """
+        self._fail_suspension(sus, exc)
+        self.resume_exception = exc
+        self.suspend()
 
     def resume(self) -> None:
         """Run over the the event log and try to apply an event.
@@ -877,6 +910,13 @@ class WorkflowOrchestratorContext:
 
         If the event log is exhausted, suspend the workflow.
         """
+
+        # Once suspended, replaying further events could only deliver results
+        # onto failed or cancelled futures. Just keep cancelling whatever the
+        # body is still running until the loop winds down.
+        if self.suspended:
+            self.suspend()
+            return
 
         # NOTE: resume() does single-step delivery, so we resolve at most
         # one suspension per invocation of resume().
@@ -925,7 +965,7 @@ class WorkflowOrchestratorContext:
                         pos = _correlation_ulid(slot_id)
                         for sus in self.suspensions.values():
                             if _correlation_ulid(sus.correlation_id) == pos:
-                                self._fail_suspension(
+                                self._fail_nondeterminism(
                                     sus,
                                     NondeterminismError(
                                         f"workflow replay diverged at position {pos}: recorded a "
@@ -963,7 +1003,7 @@ class WorkflowOrchestratorContext:
                 # the same call the body just issued; a mismatch means the body
                 # is non-deterministic.
                 if sus.step.name != name or sus.input != recorded_input:
-                    self._fail_suspension(
+                    self._fail_nondeterminism(
                         sus,
                         NondeterminismError(
                             f"workflow replay diverged at {event.correlation_id}: recorded "
@@ -984,7 +1024,7 @@ class WorkflowOrchestratorContext:
                 attr_sus = self.suspensions.pop(attr_id)
                 assert isinstance(attr_sus, Attributes)
                 if recorded_changes != attr_sus.changes:
-                    self._fail_suspension(
+                    self._fail_nondeterminism(
                         attr_sus,
                         NondeterminismError(
                             f"workflow replay diverged at {attr_id}: recorded attributes "
