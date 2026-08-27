@@ -166,6 +166,7 @@ def test_public_process_exports() -> None:
     for name in (
         "CompletedProcess",
         "Process",
+        "ProcessSignal",
         "ProcessStatus",
         "SandboxCredentials",
         "SandboxCredentialsFactory",
@@ -174,6 +175,7 @@ def test_public_process_exports() -> None:
         assert name in sandbox.__all__
     for name in (
         "CompletedProcess",
+        "ProcessSignal",
         "ProcessStatus",
         "SandboxCredentials",
         "SyncProcess",
@@ -233,12 +235,22 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
         await process.terminate()
         await process.kill()
         await process.send_signal(signal.SIGINT)
+        await process.send_signal(sandbox.ProcessSignal.SIGUSR1)
+        await process.send_signal("USR1")
+        with pytest.raises(ValueError, match="Unknown signal"):
+            await process.send_signal(32)
 
     assert get_process.calls[0].request.url.params["wait"] == "false"
     assert get_process.calls[1].request.url.params["wait"] == "true"
     assert logs.call_count == 1
     assert all(call.request.headers["connection"] == "close" for call in logs.calls)
-    assert signals == [signal.SIGTERM, signal.SIGKILL, signal.SIGINT]
+    assert signals == [
+        sandbox.ProcessSignal.SIGTERM,
+        sandbox.ProcessSignal.SIGKILL,
+        sandbox.ProcessSignal.SIGINT,
+        sandbox.ProcessSignal.SIGUSR1,
+        sandbox.ProcessSignal.SIGUSR1,
+    ]
 
 
 @respx.mock
@@ -273,7 +285,7 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
         process.terminate()
         process.kill()
 
-    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert signals == [sandbox.ProcessSignal.SIGTERM, sandbox.ProcessSignal.SIGKILL]
 
 
 @respx.mock

@@ -41,6 +41,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
+    ProcessSignal,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -186,12 +187,17 @@ class SyncProcess(_ProcessHandleState):
         self.wait()
         return stdout, stderr
 
-    def send_signal(self, signal: int | str | signal_module.Signals) -> None:
+    def send_signal(self, signal: int | str | signal_module.Signals | ProcessSignal) -> None:
         """Send a signal to the running process.
 
         Args:
-            signal: Numeric signal, ``Signals`` member, or name such as
+            signal: Numeric signal, ``ProcessSignal`` member, or name such as
                 ``"TERM"`` or ``"SIGTERM"``.
+
+        Note:
+            Passing ``signal.Signals`` directly is deprecated. Use
+            ``ProcessSignal`` so signal availability does not depend on the
+            SDK host platform.
         """
         payload = iter_coroutine(
             self._service.send_process_signal(
@@ -204,11 +210,11 @@ class SyncProcess(_ProcessHandleState):
 
     def terminate(self) -> None:
         """Request graceful process termination with ``SIGTERM``."""
-        self.send_signal(signal_module.SIGTERM)
+        self.send_signal(ProcessSignal.SIGTERM)
 
     def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
-        self.send_signal(signal_module.SIGKILL)
+        self.send_signal(ProcessSignal.SIGKILL)
 
 
 class SyncSnapshot(SnapshotHandleBase):
