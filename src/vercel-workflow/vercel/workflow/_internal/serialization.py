@@ -21,7 +21,7 @@ from typing import Any
 
 from vercel.workflow._internal import devalue
 
-from . import encryption, serde
+from . import encryption, error_serde, errors, serde
 
 FORMAT_PREFIX_LENGTH = 4
 
@@ -73,10 +73,18 @@ def _revive_writable_stream(value: Any) -> Any:
     return runtime.open_writable(run_id if isinstance(run_id, str) else None, value["name"])
 
 
-# `serde` owns the custom-type rail; streams sit alongside it on a tag
-# `@workflow/core` composes itself.
-REDUCERS: dict[str, Any] = {**serde.REDUCERS, "WritableStream": _reduce_writable_stream}
-REVIVERS: dict[str, Any] = {**serde.REVIVERS, "WritableStream": _revive_writable_stream}
+# Instance must precede the error reducers so registered exception classes keep
+# their custom serialization. Streams do not overlap either group.
+REDUCERS: dict[str, Any] = {
+    **serde.REDUCERS,
+    **error_serde.REDUCERS,
+    "WritableStream": _reduce_writable_stream,
+}
+REVIVERS: dict[str, Any] = {
+    **serde.REVIVERS,
+    **error_serde.REVIVERS,
+    "WritableStream": _revive_writable_stream,
+}
 
 
 def dehydrate(value: Any) -> bytes:
@@ -92,6 +100,36 @@ def dehydrate(value: Any) -> bytes:
         # A registered serializer failed. `serde` has already named the class,
         # so this only puts the codec-level frame behind a typed error.
         raise SerializationError(f"Cannot serialize value: {error}") from error
+
+
+def dehydrate_error(error: Exception) -> bytes:
+    """Encode an error, falling back to a serializable summary."""
+    try:
+        return dehydrate(error)
+    except Exception as encode_error:
+        name = type(error).__name__
+        return dehydrate(
+            errors.RemoteError(f"{name} could not be serialized: {encode_error}", name=name)
+        )
+
+
+def hydrate_error(data: Any, *, what: str, key: bytes | None = None) -> Exception:
+    """Decode an error payload as something Python can raise.
+
+    String and ``{message, stack, code}`` values are accepted for runs written
+    by Python SDK versions that predate serialized errors.
+    """
+    if isinstance(data, str):
+        return RuntimeError(data)
+    if isinstance(data, dict) and "message" in data:
+        payload = {
+            "name": data.get("name") or data.get("code") or "RuntimeError",
+            "message": data["message"],
+        }
+        if "stack" in data:
+            payload["stack"] = data["stack"]
+        return error_serde.as_exception(error_serde.revive_error(payload))
+    return error_serde.as_exception(hydrate(data, what=what, key=key))
 
 
 def is_encrypted(data: Any) -> bool:

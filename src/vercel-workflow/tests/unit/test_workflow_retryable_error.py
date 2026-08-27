@@ -265,14 +265,15 @@ async def test_local_world_parks_the_step_until_its_deadline(tmp_path, monkeypat
     await world.events_create(
         run_id,
         w.StepRetryingEventData(
-            error="boom", stack="Traceback...", retry_after=retry_after
+            error=ser.dehydrate_error(RuntimeError("boom")), retry_after=retry_after
         ).into_event(STEP_ID),
     )
 
     step = await world.steps_get(run_id, STEP_ID)
     assert step.status == "pending"
     assert step.retry_after == retry_after
-    assert step.error is not None and step.error.message == "boom"
+    failure = ser.hydrate_error(step.error, what="the recorded error")
+    assert isinstance(failure, RuntimeError) and str(failure) == "boom"
     # The first attempt's start is kept, not overwritten, which is what makes
     # StepInfo.step_started_at measure the whole step.
     assert step.started_at is not None
