@@ -1,3 +1,4 @@
+import io
 import json
 import subprocess
 from collections.abc import AsyncIterator, Iterator
@@ -7,8 +8,14 @@ import httpx
 import pytest
 
 from vercel._internal.core.http import StreamingResponse
+from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.sandbox._internal.errors import SandboxStreamError
-from vercel.sandbox._internal.text_reader import _sync_text_readers, _text_readers
+from vercel.sandbox._internal.text_reader import (
+    _sync_text_readers,
+    _sync_text_transport_and_readers,
+    _text_readers,
+    _text_transport_and_readers,
+)
 
 
 class _TestStreamingResponse(StreamingResponse):
@@ -109,6 +116,29 @@ async def test_async_text_reader_lines_shared_cursor_eof_and_close(anyio_backend
     assert await peer.read() == "ignored\n"
     with pytest.raises(anyio.ClosedResourceError):
         await reader.read()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
+async def test_async_text_reader_close_preserves_stream_destination(
+    anyio_backend: str,
+) -> None:
+    stderr = io.StringIO()
+    transport, reader, peer = _text_transport_and_readers(
+        lambda: _logs_response(
+            {"stream": "stdout", "data": "captured\n"},
+            {"stream": "stderr", "data": "inherited\n"},
+        ),
+        stdout=subprocess.PIPE,
+        stderr=stderr,
+    )
+    assert transport is not None and reader is not None and peer is None
+
+    assert await reader.readline() == "captured\n"
+    await reader.aclose()
+    await transport.drain()
+
+    assert stderr.getvalue() == "inherited\n"
 
 
 @pytest.mark.anyio
@@ -217,6 +247,25 @@ def test_sync_text_reader_lines_shared_cursor_eof_and_close() -> None:
     assert peer.read() == "ignored\n"
     with pytest.raises(anyio.ClosedResourceError):
         reader.read()
+
+
+def test_sync_text_reader_close_preserves_stream_destination() -> None:
+    stderr = io.StringIO()
+    transport, reader, peer = _sync_text_transport_and_readers(
+        lambda: _logs_response(
+            {"stream": "stdout", "data": "captured\n"},
+            {"stream": "stderr", "data": "inherited\n"},
+        ),
+        stdout=subprocess.PIPE,
+        stderr=stderr,
+    )
+    assert transport is not None and reader is not None and peer is None
+
+    assert reader.readline() == "captured\n"
+    reader.close()
+    iter_coroutine(transport.drain())
+
+    assert stderr.getvalue() == "inherited\n"
 
 
 def test_sync_text_reader_propagates_in_band_errors() -> None:

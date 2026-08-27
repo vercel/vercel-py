@@ -2,12 +2,13 @@
 
 import inspect
 import subprocess
+import sys
 import threading
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from types import TracebackType
-from typing import Protocol, TypeAlias
+from typing import Protocol, TextIO, TypeAlias
 
 import anyio
 
@@ -113,8 +114,17 @@ class SyncTextReader(ABC):
         self.close()
 
 
-def _distinct_buffers(routes: Mapping[ProcessLogStream, _TextBuffer | None]) -> list[_TextBuffer]:
-    return list({id(buffer): buffer for buffer in routes.values() if buffer is not None}.values())
+_TextDestination: TypeAlias = _TextBuffer | TextIO | None
+
+
+def _distinct_buffers(routes: Mapping[ProcessLogStream, _TextDestination]) -> list[_TextBuffer]:
+    return list(
+        {
+            id(destination): destination
+            for destination in routes.values()
+            if isinstance(destination, _TextBuffer)
+        }.values()
+    )
 
 
 class _PumpLock(Protocol):
@@ -163,15 +173,15 @@ class _TextTransportCore:
     def __init__(
         self,
         open_response: Callable[[], Awaitable[StreamingResponse]],
-        routes: Mapping[ProcessLogStream, _TextBuffer | None],
+        routes: Mapping[ProcessLogStream, _TextDestination],
         lock: _PumpLock,
     ) -> None:
         self._open_response = open_response
         self._response: StreamingResponse | None = None
         self._lines: AsyncIterator[str] | None = None
         self._routes = dict(routes)
-        self._live = len(_distinct_buffers(routes))
         self._broken = False
+        self._eof = False
         self._lock = lock
 
     async def _cleanup(self) -> None:
@@ -183,6 +193,8 @@ class _TextTransportCore:
     async def pump(self) -> None:
         if self._broken:
             raise anyio.BrokenResourceError
+        if self._eof:
+            return
         await self._lock.acquire()
         try:
             if self._broken:
@@ -198,6 +210,7 @@ class _TextTransportCore:
                     except StopAsyncIteration:
                         for buffer in _distinct_buffers(self._routes):
                             buffer.eof = True
+                        self._eof = True
                         await self._cleanup()
                         return
                     if not line:
@@ -205,8 +218,11 @@ class _TextTransportCore:
                     event = _parse_command_log_record(line)
                     if event is not None:
                         target = self._routes[event.stream]
-                        if target is not None:
+                        if isinstance(target, _TextBuffer):
                             target.append(event.data)
+                        elif target is not None:
+                            target.write(event.data)
+                            target.flush()
                         return
             except BaseException:
                 self._broken = True
@@ -217,6 +233,10 @@ class _TextTransportCore:
         finally:
             self._lock.release()
 
+    async def drain(self) -> None:
+        while not self._eof:
+            await self.pump()
+
     async def close(self, buffer: _TextBuffer) -> None:
         await self._lock.acquire()
         try:
@@ -225,8 +245,7 @@ class _TextTransportCore:
             for stream, target in self._routes.items():
                 if target is buffer:
                     self._routes[stream] = None
-            self._live -= 1
-            if self._live == 0:
+            if all(target is None for target in self._routes.values()):
                 await self._cleanup()
         finally:
             self._lock.release()
@@ -314,64 +333,103 @@ class _SyncTextReader(SyncTextReader):
         iter_coroutine(self._core.close())
 
 
-def _reader_buffers(stdout: int, stderr: int) -> tuple[_TextBuffer | None, _TextBuffer | None]:
-    stdout_buffer = _TextBuffer() if stdout == subprocess.PIPE else None
-    if stderr == subprocess.STDOUT:
-        stderr_buffer = stdout_buffer
-    elif stderr == subprocess.PIPE:
-        stderr_buffer = _TextBuffer()
-    else:
-        stderr_buffer = None
-    return stdout_buffer, stderr_buffer
+def _destination(value: TextIO | int | None, inherited: TextIO) -> _TextDestination:
+    if value is None:
+        return inherited
+    if value == subprocess.PIPE:
+        return _TextBuffer()
+    if value == subprocess.DEVNULL:
+        return None
+    if isinstance(value, int):
+        raise ValueError(f"unsupported output destination: {value}")
+    return value
 
 
 def _cores(
     open_response: Callable[[], Awaitable[StreamingResponse]],
-    stdout: int,
-    stderr: int,
+    stdout: TextIO | int | None,
+    stderr: TextIO | int | None,
     lock: _PumpLock,
-) -> tuple[_ReaderCore | None, _ReaderCore | None]:
-    stdout_buffer, stderr_buffer = _reader_buffers(stdout, stderr)
-    if stdout_buffer is None and stderr_buffer is None:
-        return None, None
+) -> tuple[_TextTransportCore | None, _ReaderCore | None, _ReaderCore | None]:
+    stdout_destination = _destination(stdout, sys.stdout)
+    stderr_destination = (
+        stdout_destination if stderr == subprocess.STDOUT else _destination(stderr, sys.stderr)
+    )
+    if stdout_destination is None and stderr_destination is None:
+        return None, None, None
     transport = _TextTransportCore(
         open_response,
-        {ProcessLogStream.STDOUT: stdout_buffer, ProcessLogStream.STDERR: stderr_buffer},
+        {
+            ProcessLogStream.STDOUT: stdout_destination,
+            ProcessLogStream.STDERR: stderr_destination,
+        },
         lock,
     )
+    stdout_core = (
+        _ReaderCore(transport, stdout_destination)
+        if isinstance(stdout_destination, _TextBuffer)
+        else None
+    )
+    stderr_core = (
+        _ReaderCore(transport, stderr_destination)
+        if isinstance(stderr_destination, _TextBuffer)
+        and stderr_destination is not stdout_destination
+        else None
+    )
+    return transport, stdout_core, stderr_core
+
+
+def _text_transport_and_readers(
+    open_response: _OpenResponse,
+    *,
+    stdout: TextIO | int | None,
+    stderr: TextIO | int | None,
+) -> tuple[_TextTransportCore | None, TextReader | None, TextReader | None]:
+    transport, stdout_core, stderr_core = _cores(
+        _normalize_open_response(open_response), stdout, stderr, _AsyncPumpLock()
+    )
     return (
-        None if stdout_buffer is None else _ReaderCore(transport, stdout_buffer),
-        None
-        if stderr_buffer is None or stderr_buffer is stdout_buffer
-        else _ReaderCore(transport, stderr_buffer),
+        transport,
+        None if stdout_core is None else _TextReader(stdout_core),
+        None if stderr_core is None else _TextReader(stderr_core),
     )
 
 
 def _text_readers(
     open_response: _OpenResponse,
     *,
-    stdout: int = subprocess.PIPE,
-    stderr: int = subprocess.PIPE,
+    stdout: TextIO | int | None = subprocess.PIPE,
+    stderr: TextIO | int | None = subprocess.PIPE,
 ) -> tuple[TextReader | None, TextReader | None]:
-    stdout_core, stderr_core = _cores(
-        _normalize_open_response(open_response), stdout, stderr, _AsyncPumpLock()
+    _, stdout_reader, stderr_reader = _text_transport_and_readers(
+        open_response, stdout=stdout, stderr=stderr
+    )
+    return stdout_reader, stderr_reader
+
+
+def _sync_text_transport_and_readers(
+    open_response: _OpenResponse,
+    *,
+    stdout: TextIO | int | None,
+    stderr: TextIO | int | None,
+) -> tuple[_TextTransportCore | None, SyncTextReader | None, SyncTextReader | None]:
+    transport, stdout_core, stderr_core = _cores(
+        _normalize_open_response(open_response), stdout, stderr, _SyncPumpLock()
     )
     return (
-        None if stdout_core is None else _TextReader(stdout_core),
-        None if stderr_core is None else _TextReader(stderr_core),
+        transport,
+        None if stdout_core is None else _SyncTextReader(stdout_core),
+        None if stderr_core is None else _SyncTextReader(stderr_core),
     )
 
 
 def _sync_text_readers(
     open_response: _OpenResponse,
     *,
-    stdout: int = subprocess.PIPE,
-    stderr: int = subprocess.PIPE,
+    stdout: TextIO | int | None = subprocess.PIPE,
+    stderr: TextIO | int | None = subprocess.PIPE,
 ) -> tuple[SyncTextReader | None, SyncTextReader | None]:
-    stdout_core, stderr_core = _cores(
-        _normalize_open_response(open_response), stdout, stderr, _SyncPumpLock()
+    _, stdout_reader, stderr_reader = _sync_text_transport_and_readers(
+        open_response, stdout=stdout, stderr=stderr
     )
-    return (
-        None if stdout_core is None else _SyncTextReader(stdout_core),
-        None if stderr_core is None else _SyncTextReader(stderr_core),
-    )
+    return stdout_reader, stderr_reader

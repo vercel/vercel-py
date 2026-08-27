@@ -212,7 +212,7 @@ async def test_async_process_readers_wait_and_signals(mock_env_clear: None) -> N
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
+        process = await box.create_process("python", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert process.name == "python"
         assert process.args == []
         assert process.cwd == "/vercel/sandbox"
@@ -267,13 +267,74 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
+        process = box.create_process("python", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert process.communicate() == ("out-1\nout-2", "err\n")
         assert process.returncode == 0
         process.terminate()
         process.kill()
 
     assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+@respx.mock
+async def test_async_create_process_defaults_to_inherited_output(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        side_effect=lambda _request: _logs_response()
+    )
+    stdout = _RecordingTextIO()
+    stderr = _RecordingTextIO()
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.create_sandbox(name="preview")
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr("sys.stdout", stdout)
+            monkeypatch.setattr("sys.stderr", stderr)
+            process = await box.create_process("python")
+            assert process.stdout is None
+            assert process.stderr is None
+            assert await process.wait() == 0
+
+    assert stdout.getvalue() == "out-1\nout-2"
+    assert stderr.getvalue() == "err\n"
+    assert stdout.flush_count == 1
+    assert stderr.flush_count == 1
+
+
+@respx.mock
+def test_sync_create_process_routes_pipe_and_inherited_stderr(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd").mock(
+        return_value=httpx.Response(200, json=_process_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
+        return_value=httpx.Response(200, json=_process_response(0))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        side_effect=lambda _request: _logs_response()
+    )
+    stderr = _RecordingTextIO()
+
+    with session(service_options=_session_options()):
+        box = sandbox_sync.create_sandbox(name="preview")
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr("sys.stderr", stderr)
+            process = box.create_process("python", stdout=subprocess.PIPE)
+            assert process.stdout is not None
+            assert process.stderr is None
+            assert process.communicate() == ("out-1\nout-2", None)
+
+    assert stderr.getvalue() == "err\n"
 
 
 @respx.mock
@@ -295,7 +356,9 @@ async def test_async_create_process_merges_stderr_into_stdout_reader(
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.STDOUT)
+        process = await box.create_process(
+            "python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
         assert process.stderr is None
         assert process.stdout is not None
         assert await process.communicate() == ("out-1\nout-2err\n", None)
@@ -321,7 +384,9 @@ async def test_async_create_process_devnull_drops_reader(mock_env_clear: None) -
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python", stderr=subprocess.DEVNULL)
+        process = await box.create_process(
+            "python", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
         assert process.stderr is None
         assert await process.communicate() == ("out-1\nout-2", None)
 
@@ -357,11 +422,8 @@ async def test_async_create_process_with_no_readers_never_requests_logs(
     "kwargs",
     [
         {"stdout": subprocess.STDOUT},
-        {"stdout": None},
-        {"stderr": None},
         {"stdout": 42},
         {"stderr": 42},
-        {"stdout": io.StringIO()},
         {"stderr": io.BytesIO()},
     ],
 )
@@ -399,7 +461,7 @@ def test_sync_create_process_merges_stderr_into_stdout_reader(mock_env_clear: No
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python", stderr=subprocess.STDOUT)
+        process = box.create_process("python", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         assert process.stderr is None
         assert process.stdout is not None
         assert process.communicate() == ("out-1\nout-2err\n", None)
@@ -734,7 +796,7 @@ async def test_async_process_readers_read_chunked_ndjson(mock_env_clear: None) -
 
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
-        process = await box.create_process("python")
+        process = await box.create_process("python", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = await process.communicate()
 
     assert output == ("café\n", "雪\n")
@@ -764,7 +826,7 @@ def test_sync_process_readers_read_chunked_ndjson(mock_env_clear: None) -> None:
 
     with session(service_options=_session_options()):
         box = sandbox_sync.create_sandbox(name="preview")
-        process = box.create_process("python")
+        process = box.create_process("python", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = process.communicate()
 
     assert output == ("café\n", "雪\n")

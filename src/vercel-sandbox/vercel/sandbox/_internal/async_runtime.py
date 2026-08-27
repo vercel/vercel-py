@@ -98,7 +98,7 @@ from vercel.sandbox._internal.state import (
     SnapshotSessionState,
     SnapshotState,
 )
-from vercel.sandbox._internal.text_reader import TextReader, _text_readers
+from vercel.sandbox._internal.text_reader import TextReader, _text_transport_and_readers
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -118,7 +118,7 @@ class Process(_ProcessHandleState):
     ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
     """
 
-    __slots__ = ("_service", "stderr", "stdout")
+    __slots__ = ("_service", "_transport", "stderr", "stdout")
 
     stdout: TextReader | None
     stderr: TextReader | None
@@ -128,12 +128,12 @@ class Process(_ProcessHandleState):
         *,
         payload: ProcessState,
         service: SandboxService,
-        stdout: int = subprocess.PIPE,
-        stderr: int = subprocess.PIPE,
+        stdout: TextIO | int | None = subprocess.PIPE,
+        stderr: TextIO | int | None = subprocess.PIPE,
     ) -> None:
         super().__init__(payload)
         self._service = service
-        self.stdout, self.stderr = _text_readers(
+        self._transport, self.stdout, self.stderr = _text_transport_and_readers(
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
@@ -145,13 +145,18 @@ class Process(_ProcessHandleState):
         self._apply_payload(payload)
         return self
 
+    async def _drain_output(self) -> None:
+        if self._transport is not None:
+            await self._transport.drain()
+
     async def wait(self) -> int:
-        """Wait for the process to exit and return its exit code.
+        """Drain process output, wait for exit, and return the exit code.
 
         Raises:
             SandboxResponseError: If the service response omits the process
                 return code.
         """
+        await self._drain_output()
         payload = await self._service.get_process(
             session_id=self._session_id, process_id=self.id, wait=True
         )
@@ -177,6 +182,7 @@ class Process(_ProcessHandleState):
         """
         if input is not None:
             raise NotImplementedError("process stdin is not supported")
+        await self._drain_output()
         stdout = None if self.stdout is None else await self.stdout.read()
         stderr = None if self.stderr is None else await self.stderr.read()
         await self.wait()
@@ -791,8 +797,8 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-        stdout: int = subprocess.PIPE,
-        stderr: int = subprocess.PIPE,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
     ) -> Process:
         """Start a process without waiting for it to exit.
 
@@ -804,11 +810,13 @@ class SandboxRuntimeSession(RuntimeSessionHandleBase):
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
                 with ``SIGKILL``.
-            stdout: ``subprocess.PIPE`` (default) for a live reader or
-                ``subprocess.DEVNULL`` to drop the stream.
-            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
-                ``subprocess.STDOUT`` to merge stderr into the stdout reader
-                in arrival order.
+            stdout: Writable text stream or subprocess output sentinel.
+                ``None`` inherits the local stdout stream, ``PIPE`` provides a
+                live reader, and ``DEVNULL`` drops the stream.
+            stderr: Writable text stream or subprocess output sentinel.
+                ``None`` inherits the local stderr stream, ``PIPE`` provides a
+                live reader, ``DEVNULL`` drops the stream, and ``STDOUT`` routes
+                stderr to the stdout destination in arrival order.
 
         Returns:
             A handle for monitoring and controlling the process.
@@ -1102,8 +1110,8 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-        stdout: int = subprocess.PIPE,
-        stderr: int = subprocess.PIPE,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
     ) -> Process:
         """Start a process in the current session without waiting for it.
 

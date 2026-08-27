@@ -98,7 +98,10 @@ from vercel.sandbox._internal.sync_filesystem_handle import (
     SyncSandboxTextReader,
     SyncSandboxTextWriter,
 )
-from vercel.sandbox._internal.text_reader import SyncTextReader, _sync_text_readers
+from vercel.sandbox._internal.text_reader import (
+    SyncTextReader,
+    _sync_text_transport_and_readers,
+)
 
 
 def _terminal_error(error: _SandboxTerminalState, sandbox: object) -> SandboxTerminalStateError:
@@ -118,7 +121,7 @@ class SyncProcess(_ProcessHandleState):
     ``subprocess.DEVNULL`` or merged with ``subprocess.STDOUT``.
     """
 
-    __slots__ = ("_service", "stderr", "stdout")
+    __slots__ = ("_service", "_transport", "stderr", "stdout")
 
     stdout: SyncTextReader | None
     stderr: SyncTextReader | None
@@ -128,12 +131,12 @@ class SyncProcess(_ProcessHandleState):
         *,
         payload: ProcessState,
         service: SandboxService,
-        stdout: int = subprocess.PIPE,
-        stderr: int = subprocess.PIPE,
+        stdout: TextIO | int | None = subprocess.PIPE,
+        stderr: TextIO | int | None = subprocess.PIPE,
     ) -> None:
         super().__init__(payload)
         self._service = service
-        self.stdout, self.stderr = _sync_text_readers(
+        self._transport, self.stdout, self.stderr = _sync_text_transport_and_readers(
             lambda: service.process_logs_response(session_id=self._session_id, process_id=self.id),
             stdout=stdout,
             stderr=stderr,
@@ -147,13 +150,18 @@ class SyncProcess(_ProcessHandleState):
         self._apply_payload(payload)
         return self
 
+    def _drain_output(self) -> None:
+        if self._transport is not None:
+            iter_coroutine(self._transport.drain())
+
     def wait(self) -> int:
-        """Wait for the process to exit and return its exit code.
+        """Drain process output, wait for exit, and return the exit code.
 
         Raises:
             SandboxResponseError: If the service response omits the process
                 return code.
         """
+        self._drain_output()
         payload = iter_coroutine(
             self._service.get_process(session_id=self._session_id, process_id=self.id, wait=True)
         )
@@ -179,6 +187,7 @@ class SyncProcess(_ProcessHandleState):
         """
         if input is not None:
             raise NotImplementedError("process stdin is not supported")
+        self._drain_output()
         stdout = None if self.stdout is None else self.stdout.read()
         stderr = None if self.stderr is None else self.stderr.read()
         self.wait()
@@ -840,8 +849,8 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-        stdout: int = subprocess.PIPE,
-        stderr: int = subprocess.PIPE,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
     ) -> SyncProcess:
         """Start a process without waiting for it to exit.
 
@@ -853,11 +862,13 @@ class SyncSandboxRuntimeSession(RuntimeSessionHandleBase):
             sudo: Whether to run with elevated privileges.
             kill_after: Duration after which the service kills the process
                 with ``SIGKILL``.
-            stdout: ``subprocess.PIPE`` (default) for a live reader or
-                ``subprocess.DEVNULL`` to drop the stream.
-            stderr: ``subprocess.PIPE`` (default), ``subprocess.DEVNULL``, or
-                ``subprocess.STDOUT`` to merge stderr into the stdout reader
-                in arrival order.
+            stdout: Writable text stream or subprocess output sentinel.
+                ``None`` inherits the local stdout stream, ``PIPE`` provides a
+                live reader, and ``DEVNULL`` drops the stream.
+            stderr: Writable text stream or subprocess output sentinel.
+                ``None`` inherits the local stderr stream, ``PIPE`` provides a
+                live reader, ``DEVNULL`` drops the stream, and ``STDOUT`` routes
+                stderr to the stdout destination in arrival order.
 
         Returns:
             A handle for monitoring and controlling the process.
@@ -1213,8 +1224,8 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         env: Mapping[str, str] | None = None,
         sudo: bool = False,
         kill_after: float | timedelta | None = None,
-        stdout: int = subprocess.PIPE,
-        stderr: int = subprocess.PIPE,
+        stdout: TextIO | int | None = None,
+        stderr: TextIO | int | None = None,
     ) -> SyncProcess:
         """Start a process in the current session without waiting for it.
 

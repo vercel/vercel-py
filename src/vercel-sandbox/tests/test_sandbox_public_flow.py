@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import json
+import subprocess
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -1899,7 +1900,7 @@ async def test_closed_session_rejects_handles_and_lazy_readers(mock_env_clear: N
         resumed = await sandbox.resume_sandbox(name="preview")
         assert resumed.current_session is not None
         runtime_session = resumed.current_session
-        command = await handle.create_process("sleep", ["30"])
+        command = await handle.create_process("sleep", ["30"], stdout=subprocess.PIPE)
         snapshot = await handle.snapshot()
         assert snapshot.region == "iad1"
         assert snapshot.regions == ("iad1", "sfo1", "cle1")
