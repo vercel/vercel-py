@@ -729,7 +729,7 @@ class WorkflowOrchestratorContext:
 
             token = self._ctx.set(self)
             try:
-                return ser.dehydrate(
+                result = ser.dehydrate(
                     obj.codec.dump_return(
                         _run_isolated(
                             obj.func(*args, **kwargs),
@@ -737,16 +737,22 @@ class WorkflowOrchestratorContext:
                         )
                     )
                 )
-            except asyncio.CancelledError:
-                if not self.suspended:
-                    raise RuntimeError("workflow was cancelled") from None
-            finally:
-                self._ctx.reset(token)
+            except BaseException as ex:
                 # Turn suspended into a None return regardless of what the
                 # task actually did with it.
-                # noqa because we are *intentionally* silencing an exception here.
                 if self.suspended:
-                    return None  # noqa: B012
+                    return None
+                if isinstance(ex, asyncio.CancelledError):
+                    raise RuntimeError("workflow was cancelled") from None
+                else:
+                    raise
+            else:
+                if self.suspended:
+                    return None
+            finally:
+                self._ctx.reset(token)
+
+            return result
 
     async def run_step(self, step: core.Step[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         # Bound to the step's own signature, so the recorded bytes depend on it
