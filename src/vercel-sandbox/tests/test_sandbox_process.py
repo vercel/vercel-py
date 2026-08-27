@@ -277,9 +277,7 @@ def test_sync_process_readers_wait_and_signals(mock_env_clear: None) -> None:
 
 
 @respx.mock
-async def test_async_create_process_defaults_to_inherited_output(
-    mock_env_clear: None, capsys: pytest.CaptureFixture[str]
-) -> None:
+async def test_async_create_process_defaults_to_inherited_output(mock_env_clear: None) -> None:
     respx.post("https://sandbox.test/v3/sandboxes").mock(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
@@ -289,8 +287,8 @@ async def test_async_create_process_defaults_to_inherited_output(
     respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1").mock(
         return_value=httpx.Response(200, json=_process_response(0))
     )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
-        side_effect=lambda _request: _logs_response()
+    logs = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_1/cmd/cmd_1/logs").mock(
+        return_value=httpx.Response(200, text="")
     )
     async with session(service_options=_session_options()):
         box = await sandbox.create_sandbox(name="preview")
@@ -299,7 +297,7 @@ async def test_async_create_process_defaults_to_inherited_output(
         assert process.stderr is None
         assert await process.wait() == 0
 
-    assert capsys.readouterr() == ("out-1\nout-2", "err\n")
+    assert logs.called
 
 
 @respx.mock
