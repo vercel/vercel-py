@@ -9,25 +9,66 @@ on:
 permissions: {}
 
 jobs:
-  lint-test-and-build:
-    name: test (py${{ matrix.python-version }})
+  lint-and-typecheck:
+    name: Lint and typecheck
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Sync dependencies
+        run: uv sync --all-packages --locked --python 3.12
+
+      - name: Lint
+        run: uv run poe lint
+
+      - name: Typecheck
+        run: uv run poe typecheck
+
+  test:
+    name: Test (${{ matrix.os.name }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os.runner }}
     environment: ci
     permissions:
       contents: read
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - name: Linux
+            runner: ubuntu-latest
+            redis-image: redis:7-alpine
+            redis-url: redis://localhost:6379/9
+          - name: macOS
+            runner: macos-latest
+            redis-image: ""
+            redis-url: ""
+          - name: Windows
+            runner: windows-latest
+            redis-image: ""
+            redis-url: ""
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     services:
       # The vercel-apscheduler driver tests exercise their Lua scripts against
-      # a real Redis; without this service they skip silently.
+      # a real Redis on Linux; without this service they skip silently.
       redis:
-        image: redis:7-alpine
+        image: ${{ matrix.os.redis-image }} # zizmor: ignore[unpinned-images]
         ports:
           - 6379:6379
     env:
-      APSCHEDULER_TEST_REDIS_URL: redis://localhost:6379/9
+      APSCHEDULER_TEST_REDIS_URL: ${{ matrix.os.redis-url }}
       BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
@@ -82,14 +123,8 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-packages --locked --python ${{ matrix.python-version }}
 
-      - name: Lint
-        run: ./scripts/lint.sh
-
-      - name: Typecheck
-        run: ./scripts/typecheck.sh
-
       - name: Test
-        run: ./scripts/test.sh
+        run: uv run poe test
         env:
           VERCEL_DEVALUE_JS: ${{ runner.temp }}/devalue
           VERCEL_WORKFLOW_CLI: ${{ runner.temp }}/workflow-cli/node_modules/workflow
@@ -98,5 +133,41 @@ jobs:
         if: matrix.python-version == '3.12'
         run: uv run poe test-examples
 
+  build:
+    name: Build packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false
+
+      - name: Sync dependencies
+        run: uv sync --all-packages --locked --python 3.12
+
       - name: Build package
-        run: ./scripts/build.sh
+        run: uv run poe dist
+
+  overall:
+    name: CI Overall
+    if: always()
+    needs:
+      - build
+      - lint-and-typecheck
+      - test
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check CI results
+        if: >-
+          needs.build.result != 'success' ||
+          needs.lint-and-typecheck.result != 'success' ||
+          needs.test.result != 'success'
+        run: exit 1

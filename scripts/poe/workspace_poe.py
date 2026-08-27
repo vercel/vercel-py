@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ RESOLVER = SCRIPT_DIR / "workspace_poe_resolve.py"
 PARALLEL_FALSE = {"0", "false", "no"}
 FAILURE_TAIL_LINES = 20
 QUIET_FAILURE_DETAIL = "workspace_poe.failure.detail"
+TEST_FAILURE_DETAILS = "workspace_poe.test.failure_details"
 ROOT_TASKS = {
     "fix": "fix-root",
     "lint": "lint-root",
@@ -402,26 +403,26 @@ def run_root_task(task: str, argv: Sequence[str]) -> int:
         else:
             args.append("tests/unit")
         args.extend(extra_args)
-        return run_command(
-            env_command(
-                "pytest",
-                shlex.join((os.environ["PYTEST"], *args)),
-                category="test",
-                parser="pytest",
-            )
-        )
+        return run_command(root_pytest_command(args, category="test"))
     if task == "test-examples-root":
         extra_args = list(argv) or poe_extra_args()
         args = ["tests/test_examples.py", *extra_args]
-        return run_command(
-            env_command(
-                "pytest",
-                shlex.join((os.environ["PYTEST"], *args)),
-                category="test-examples",
-                parser="pytest",
-            )
-        )
+        return run_command(root_pytest_command(args, category="test-examples"))
     raise SystemExit(f"unsupported root task: {task}")
+
+
+def root_pytest_command(args: Sequence[str], *, category: str) -> CommandSpec:
+    subject = os.environ.get("WORKSPACE_POE_PACKAGE") or Path.cwd().name
+    return CommandSpec(
+        label=lograil_name("pytest", subject),
+        argv=(sys.executable, str(SCRIPT_DIR / "tasks" / "tool"), "pytest", *args),
+        cwd=Path.cwd(),
+        env=os.environ.copy(),
+        display_label="pytest",
+        category=category,
+        subject=subject,
+        parser="pytest",
+    )
 
 
 def env_command(
@@ -470,7 +471,7 @@ def run_group(
     for command in commands:
         remaps = list(DEFAULT_REMAPS)
         if command.category in PYTEST_TASKS and command.parser == "generic":
-            remaps.append(_preserve_test_scope_identity)
+            remaps.append(_ggt_entry_remap())
         if command.suppress_output:
             remaps.append(_quiet_entry)
         specs.append(
@@ -518,7 +519,13 @@ def print_failure_summary(processes: Sequence[Any]) -> None:
 
 def failure_tail_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
+    retained: list[str] = []
     for entry in entries:
+        details = entry.get(TEST_FAILURE_DETAILS)
+        if isinstance(details, (list, tuple)):
+            for detail in details:
+                if isinstance(detail, str) and detail and detail not in retained:
+                    retained.append(detail)
         message = entry.get("message") or entry.get(QUIET_FAILURE_DETAIL)
         if not isinstance(message, str):
             continue
@@ -528,7 +535,10 @@ def failure_tail_lines(entries: Sequence[dict[str, Any]]) -> list[str]:
         if is_low_signal_failure_tail_line(message):
             continue
         lines.append(message)
-    return lines[-FAILURE_TAIL_LINES:]
+    retained = retained[-FAILURE_TAIL_LINES:]
+    lines = [line for line in lines if line not in retained]
+    available = FAILURE_TAIL_LINES - len(retained)
+    return [*retained, *(lines[-available:] if available else [])]
 
 
 def is_low_signal_failure_tail_line(message: str) -> bool:
@@ -538,6 +548,8 @@ def is_low_signal_failure_tail_line(message: str) -> bool:
     if stripped.startswith("[") and "]" in stripped and "::" in stripped:
         return True
     if stripped.startswith("tests/") and "::" in stripped and "PASSED" in stripped:
+        return True
+    if stripped.startswith("PASSED "):
         return True
     return False
 
@@ -552,11 +564,32 @@ def _quiet_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-def _preserve_test_scope_identity(entry: dict[str, Any]) -> dict[str, Any]:
-    """Keep the package label while accepting native ggt progress detail."""
-    entry.pop("lograil.progress.process", None)
-    entry.pop("lograil.progress.subject", None)
-    return entry
+def _ggt_entry_remap() -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Keep package identity and retain failures past lograil's bounded tail."""
+    failures: list[str] = []
+
+    def remap(entry: dict[str, Any]) -> dict[str, Any]:
+        entry.pop("lograil.progress.process", None)
+        entry.pop("lograil.progress.subject", None)
+        if entry.get("levelname") in {"ERROR", "CRITICAL"}:
+            message = entry.get("message")
+            detail = entry.get("ggt.detail")
+            detail_messages = (
+                tuple(
+                    detail.get(field)
+                    for field in ("error_message", "server_traceback", "stdout", "stderr")
+                )
+                if isinstance(detail, dict)
+                else ()
+            )
+            for failure in (message, *detail_messages):
+                if isinstance(failure, str) and failure and failure not in failures:
+                    failures.append(failure)
+        if failures:
+            entry[TEST_FAILURE_DETAILS] = tuple(failures[-FAILURE_TAIL_LINES:])
+        return entry
+
+    return remap
 
 
 def run_sequential(

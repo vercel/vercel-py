@@ -1,310 +1,185 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python
+from __future__ import annotations
 
-task_name="$(basename "$0")"
-script_dir="$(cd "$(dirname "$0")" && pwd -P)"
-workspace_root="$(cd "$script_dir/../../.." && pwd -P)"
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from collections.abc import Iterable, Sequence
+from pathlib import Path
 
-workspace_poe_parallel_enabled() {
-  case "${WORKSPACE_POE_PARALLEL:-}" in
-    0|false|no)
-      return 1
-      ;;
-    *)
-      return 0
-      ;;
-  esac
-}
+FALSE_VALUES = {"0", "false", "no"}
+TRUE_VALUES = {"1", "true", "yes"}
+WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 
-workspace_poe_pytest_forced() {
-  case "${FORCE_PYTEST:-}" in
-    1|true|yes)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
 
-workspace_poe_mypy_cache_package() {
-  if [[ -n "${WORKSPACE_POE_PACKAGE:-}" ]]; then
-    printf '%s\n' "$WORKSPACE_POE_PACKAGE"
-  elif [[ "$(pwd -P)" == "$workspace_root" ]]; then
-    printf 'root\n'
-  else
-    basename "$(pwd -P)"
-  fi
-}
+def enabled(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() not in FALSE_VALUES
 
-workspace_poe_drop_duplicate_extra_args() {
-  local start
-  local index
-  local matched
 
-  if ((${#extra_args[@]} == 0 || ${#scope_args[@]} < ${#extra_args[@]})); then
-    return
-  fi
+def split_env(name: str) -> list[str]:
+    value = os.environ.get(name, "")
+    return shlex.split(value) if value else []
 
-  for ((start = 0; start <= ${#scope_args[@]} - ${#extra_args[@]}; start++)); do
-    matched=1
-    for ((index = 0; index < ${#extra_args[@]}; index++)); do
-      if [[ "${scope_args[start + index]}" != "${extra_args[index]}" ]]; then
-        matched=0
-        break
-      fi
-    done
-    if ((matched)); then
-      extra_args=()
-      return
-    fi
-  done
-}
 
-case "$task_name" in
-  pytest)
-    if [[ "${WORKSPACE_POE_TEST_RUNNER:-}" == ggt ]]; then
-      command=(ggt)
-      test_runner=ggt
-    elif [[ "${WORKSPACE_POE_TEST_RUNNER:-}" == pytest ]]; then
-      command=(pytest)
-      test_runner=pytest
-    elif ! workspace_poe_pytest_forced && command -v ggt >/dev/null 2>&1; then
-      command=(ggt)
-      test_runner=ggt
-    else
-      command=(pytest)
-      test_runner=pytest
-    fi
-    if [[ "$test_runner" == ggt ]] &&
-      [[ "${WORKSPACE_POE_LOGRAIL_PROGRESS:-}" == 1 ]]; then
-      command+=(--output-format json)
-    fi
-    ;;
-  ruff-check)
-    command=(ruff check)
-    ;;
-  ruff-check-fix)
-    command=(ruff check --fix)
-    ;;
-  ruff-format)
-    command=(ruff format --check)
-    ;;
-  ruff-format-fix)
-    command=(ruff format)
-    ;;
-  ty)
-    command=(ty check)
-    ;;
-  mypy)
-    command=(mypy)
-    ;;
-  *)
-    echo "unsupported poe tool wrapper: $task_name" >&2
-    exit 2
-    ;;
-esac
+def has_option(
+    args: Iterable[str],
+    *,
+    flags: set[str],
+    prefixes: tuple[str, ...],
+) -> bool:
+    return any(arg in flags or arg.startswith(prefixes) for arg in args)
 
-extra_args=()
-if [[ -n "${POE_EXTRA_ARGS:-}" ]]; then
-  eval "extra_args=(${POE_EXTRA_ARGS})"
-fi
-if [[ "${extra_args[0]:-}" == -- ]]; then
-  extra_args=("${extra_args[@]:1}")
-fi
 
-scope_args=("$@")
-if [[ "$task_name" == ruff-* && -z "${RUFF_CACHE_DIR:-}" ]]; then
-  export RUFF_CACHE_DIR="$workspace_root/.ruff_cache"
-fi
-if [[ "$task_name" == mypy ]]; then
-  cache_dir=""
-  has_config_file=0
-  has_cache_dir=0
-  option_value=0
-  if ((${#scope_args[@]})); then
-    for arg in "${scope_args[@]}"; do
-      if ((option_value)); then
-        option_value=0
-        continue
-      fi
-      case "$arg" in
-        --config-file)
-          has_config_file=1
-          option_value=1
-          ;;
-        --config-file=*)
-          has_config_file=1
-          ;;
-        --cache-dir)
-          has_cache_dir=1
-          option_value=1
-          ;;
-        --cache-dir=*)
-          has_cache_dir=1
-          ;;
-      esac
-    done
-  fi
-  if ((${#extra_args[@]})); then
-    for arg in "${extra_args[@]}"; do
-      if ((option_value)); then
-        option_value=0
-        continue
-      fi
-      case "$arg" in
-        --config-file)
-          has_config_file=1
-          option_value=1
-          ;;
-        --config-file=*)
-          has_config_file=1
-          ;;
-        --cache-dir)
-          has_cache_dir=1
-          option_value=1
-          ;;
-        --cache-dir=*)
-          has_cache_dir=1
-          ;;
-      esac
-    done
-  fi
-  if ((has_config_file == 0)); then
-    if ((${#scope_args[@]})); then
-      scope_args=(--config-file "$workspace_root/pyproject.toml" "${scope_args[@]}")
-    else
-      scope_args=(--config-file "$workspace_root/pyproject.toml")
-    fi
-  fi
-  if ((has_cache_dir == 0)); then
-    cache_dir="$workspace_root/.mypy_cache/$(workspace_poe_mypy_cache_package)"
-    if ((${#scope_args[@]})); then
-      scope_args=(--cache-dir "$cache_dir" "${scope_args[@]}")
-    else
-      scope_args=(--cache-dir "$cache_dir")
-    fi
-  fi
-fi
-if ((${#scope_args[@]} == 0)) && [[ -n "${WORKSPACE_POE_SCOPE_ARGS:-}" ]]; then
-  eval "scope_args=(${WORKSPACE_POE_SCOPE_ARGS})"
-fi
-if [[ "$task_name" == mypy ]]; then
-  has_target=0
-  option_value=0
-  if ((${#scope_args[@]})); then
-    for arg in "${scope_args[@]}"; do
-      if ((option_value)); then
-        option_value=0
-        continue
-      fi
-      case "$arg" in
-        --cache-dir|--config-file|--python-version)
-          option_value=1
-          ;;
-        --cache-dir=*|--config-file=*|--python-version=*)
-          ;;
-        --*)
-          ;;
-        *)
-          has_target=1
-          ;;
-      esac
-    done
-  fi
-  if ((has_target == 0)); then
-    if [[ -n "${WORKSPACE_POE_SCOPE_ARGS:-}" ]]; then
-      eval "scope_args+=( ${WORKSPACE_POE_SCOPE_ARGS} )"
-    else
-      scope_args+=(.)
-    fi
-  fi
-fi
-if [[ "$task_name" == pytest ]]; then
-  has_workers=0
-  has_verbosity=0
-  option_value=0
-  if ((${#scope_args[@]})); then
-    for arg in "${scope_args[@]}"; do
-      if ((option_value)); then
-        option_value=0
-        continue
-      fi
-      case "$arg" in
-        -n|--numprocesses|-j|--jobs)
-          has_workers=1
-          option_value=1
-          ;;
-        -n*|--numprocesses=*|-j*|--jobs=*)
-          has_workers=1
-          ;;
-        -q|--quiet|-v|--verbose)
-          has_verbosity=1
-          ;;
-        -q*|-v*)
-          has_verbosity=1
-          ;;
-      esac
-    done
-  fi
-  if ((${#extra_args[@]})); then
-    for arg in "${extra_args[@]}"; do
-      if ((option_value)); then
-        option_value=0
-        continue
-      fi
-      case "$arg" in
-        -n|--numprocesses|-j|--jobs)
-          has_workers=1
-          option_value=1
-          ;;
-        -n*|--numprocesses=*|-j*|--jobs=*)
-          has_workers=1
-          ;;
-        -q|--quiet|-v|--verbose)
-          has_verbosity=1
-          ;;
-        -q*|-v*)
-          has_verbosity=1
-          ;;
-      esac
-    done
-  fi
-  if ((has_verbosity == 0)) &&
-    [[ "${WORKSPACE_POE_LOGRAIL_PROGRESS:-}" == 1 ]] &&
-    [[ "$test_runner" == pytest ]]; then
-    if ((${#scope_args[@]})); then
-      scope_args=(-v "${scope_args[@]}")
-    else
-      scope_args=(-v)
-    fi
-  fi
-  if ((has_workers == 0)); then
-    if [[ "$test_runner" == pytest ]] && workspace_poe_parallel_enabled; then
-      scope_args=(-n auto "${scope_args[@]}")
-    elif [[ "$test_runner" == ggt ]] && ! workspace_poe_parallel_enabled; then
-      scope_args=(-j 1 "${scope_args[@]}")
-    fi
-  fi
-fi
-if ((${#scope_args[@]} == 0)); then
-  if [[ "$task_name" == ruff-* && "$(pwd -P)" == "$workspace_root" ]]; then
-    scope_args=(tests examples)
-  else
-    scope_args=(.)
-  fi
-fi
+def has_mypy_target(args: Sequence[str]) -> bool:
+    takes_value = False
+    for arg in args:
+        if takes_value:
+            takes_value = False
+            continue
+        if arg in {"--cache-dir", "--config-file", "--python-version"}:
+            takes_value = True
+        elif arg.startswith(("--cache-dir=", "--config-file=", "--python-version=")):
+            continue
+        elif not arg.startswith("--"):
+            return True
+    return False
 
-workspace_poe_drop_duplicate_extra_args
 
-run_args=("${command[@]}")
-if ((${#scope_args[@]})); then
-  run_args+=("${scope_args[@]}")
-fi
-if ((${#extra_args[@]})); then
-  run_args+=("${extra_args[@]}")
-fi
+def drop_duplicate_args(scope_args: list[str], extra_args: list[str]) -> list[str]:
+    size = len(extra_args)
+    if not size or len(scope_args) < size:
+        return extra_args
+    if any(
+        scope_args[index : index + size] == extra_args
+        for index in range(len(scope_args) - size + 1)
+    ):
+        return []
+    return extra_args
 
-printf '%q ' "${run_args[@]}"
-printf '\n'
-exec "${run_args[@]}"
+
+def pytest_command() -> tuple[list[str], str]:
+    selected = os.environ.get("WORKSPACE_POE_TEST_RUNNER")
+    force_pytest = os.environ.get("FORCE_PYTEST", "").lower() in TRUE_VALUES
+    if selected == "ggt" or (selected != "pytest" and not force_pytest and shutil.which("ggt")):
+        command = ["ggt"]
+        runner = "ggt"
+    else:
+        command = ["pytest"]
+        runner = "pytest"
+    if runner == "ggt" and os.environ.get("WORKSPACE_POE_LOGRAIL_PROGRESS") == "1":
+        command.extend(("--output-format", "json"))
+    return command, runner
+
+
+def build_command(task_name: str, argv: Sequence[str]) -> list[str]:
+    test_runner: str | None = None
+    if task_name == "pytest":
+        command, test_runner = pytest_command()
+    else:
+        commands = {
+            "ruff-check": ["ruff", "check"],
+            "ruff-check-fix": ["ruff", "check", "--fix"],
+            "ruff-format": ["ruff", "format", "--check"],
+            "ruff-format-fix": ["ruff", "format"],
+            "ty": ["ty", "check"],
+            "mypy": ["mypy"],
+        }
+        try:
+            command = commands[task_name]
+        except KeyError:
+            raise SystemExit(f"unsupported poe tool wrapper: {task_name}") from None
+
+    extra_args = split_env("POE_EXTRA_ARGS")
+    if extra_args[:1] == ["--"]:
+        extra_args.pop(0)
+    scope_args = list(argv)
+
+    if task_name.startswith("ruff-"):
+        os.environ.setdefault("RUFF_CACHE_DIR", str(WORKSPACE_ROOT / ".ruff_cache"))
+
+    if task_name == "mypy":
+        all_args = [*scope_args, *extra_args]
+        if not has_option(
+            all_args,
+            flags={"--config-file"},
+            prefixes=("--config-file=",),
+        ):
+            scope_args[:0] = [
+                "--config-file",
+                str(WORKSPACE_ROOT / "pyproject.toml"),
+            ]
+        if not has_option(
+            all_args,
+            flags={"--cache-dir"},
+            prefixes=("--cache-dir=",),
+        ):
+            package = os.environ.get("WORKSPACE_POE_PACKAGE")
+            if not package:
+                package = "root" if Path.cwd().resolve() == WORKSPACE_ROOT else Path.cwd().name
+            scope_args[:0] = [
+                "--cache-dir",
+                str(WORKSPACE_ROOT / ".mypy_cache" / package),
+            ]
+
+    if not scope_args:
+        scope_args = split_env("WORKSPACE_POE_SCOPE_ARGS")
+
+    if task_name == "mypy" and not has_mypy_target(scope_args):
+        scope_args.extend(split_env("WORKSPACE_POE_SCOPE_ARGS") or ["."])
+
+    if task_name == "pytest":
+        all_args = [*scope_args, *extra_args]
+        has_workers = has_option(
+            all_args,
+            flags={"-n", "--numprocesses", "-j", "--jobs"},
+            prefixes=("-n", "--numprocesses=", "-j", "--jobs="),
+        )
+        has_verbosity = has_option(
+            all_args,
+            flags={"-q", "--quiet", "-v", "--verbose"},
+            prefixes=("-q", "-v"),
+        )
+        parallel = enabled("WORKSPACE_POE_PARALLEL", default=True)
+        if (
+            not has_verbosity
+            and os.environ.get("WORKSPACE_POE_LOGRAIL_PROGRESS") == "1"
+            and test_runner == "pytest"
+        ):
+            scope_args.insert(0, "-v")
+        if not has_workers:
+            if test_runner == "pytest" and parallel:
+                scope_args[:0] = ["-n", "auto"]
+            elif test_runner == "ggt" and not parallel:
+                scope_args[:0] = ["-j", "1"]
+
+    if not scope_args:
+        if task_name.startswith("ruff-") and Path.cwd().resolve() == WORKSPACE_ROOT:
+            scope_args = ["tests", "examples"]
+        else:
+            scope_args = ["."]
+
+    extra_args = drop_duplicate_args(scope_args, extra_args)
+    return [*command, *scope_args, *extra_args]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    invoked_name = Path(sys.argv[0]).name
+    if invoked_name == "tool":
+        if not args:
+            raise SystemExit("missing poe tool name")
+        task_name = args.pop(0)
+    else:
+        task_name = invoked_name
+    command = build_command(task_name, args)
+    print(shlex.join(command), flush=True)
+    return subprocess.call(command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

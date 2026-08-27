@@ -370,7 +370,10 @@ async def test_clogedit_escape_returns_to_previous_step() -> None:
     assert pilot.app.return_value == []
 
 
-async def test_clogedit_single_escape_on_package_step_arms_exit() -> None:
+async def test_clogedit_single_escape_on_package_step_arms_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clogedit, "ESC_EXIT_SECONDS", 30)
     selection = clogedit.ChangelogSelection(
         {
             "pkg": clogedit.PackageNewsState(
@@ -397,7 +400,10 @@ async def test_clogedit_single_escape_on_package_step_arms_exit() -> None:
     assert pilot.app.return_value == []
 
 
-async def test_clogedit_double_escape_on_package_step_exits() -> None:
+async def test_clogedit_double_escape_on_package_step_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clogedit, "ESC_EXIT_SECONDS", 30)
     selection = clogedit.ChangelogSelection(
         {
             "pkg": clogedit.PackageNewsState(
@@ -415,7 +421,8 @@ async def test_clogedit_double_escape_on_package_step_exits() -> None:
     )
 
     async with app.run_test() as pilot:
-        await pilot.press("escape", "escape")
+        await pilot.press("escape")
+        await pilot.press("escape")
 
     assert pilot.app.return_value == []
 
@@ -443,7 +450,7 @@ async def test_clogedit_escape_exit_timeout_resets(monkeypatch: pytest.MonkeyPat
         await pilot.pause(0.03)
         assert app.escape_exit_timer is None
         assert app.status == clogedit.PACKAGE_STATUS
-        monkeypatch.setattr(clogedit, "ESC_EXIT_SECONDS", 0.5)
+        monkeypatch.setattr(clogedit, "ESC_EXIT_SECONDS", 30)
         await pilot.press("escape")
         assert app.escape_exit_timer is not None
         await pilot.press("ctrl+d")

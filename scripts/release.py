@@ -431,7 +431,14 @@ def _release_pr_numbers(releases: list[Release]) -> dict[Path, int]:
 def _fragment_pr_number(path: Path) -> int | None:
     try:
         log = subprocess.check_output(
-            ["git", "log", "--full-history", "--format=%s", "--", str(path.relative_to(ROOT))],
+            [
+                "git",
+                "log",
+                "--full-history",
+                "--format=%s",
+                "--",
+                path.relative_to(ROOT).as_posix(),
+            ],
             cwd=ROOT,
             text=True,
         )
