@@ -33,12 +33,13 @@ from vercel.sandbox._internal.filesystem_handle_core import (
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
+    NO_PRIVATE_PARAMETERS,
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
     FailoverRegionsInput,
-    JSONValue,
     NetworkPolicy,
+    PrivateSandboxParameters,
     ProcessLog,
     SandboxQuery,
     SandboxResources,
@@ -1517,7 +1518,7 @@ def create_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> _ManagedSyncSandbox:
     try:
         state = iter_coroutine(
@@ -1568,7 +1569,7 @@ def fork_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> _ManagedSyncSandbox:
     try:
         state = iter_coroutine(
@@ -1607,7 +1608,7 @@ def get_sandbox(
     project_id: str | None = None,
     resume: bool = False,
     include_system_routes: bool | None = None,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> SyncSandbox:
     return SyncSandbox(
         payload=iter_coroutine(
@@ -1644,7 +1645,7 @@ def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[SyncSandbox, bool]:
     try:
         state, created = iter_coroutine(
@@ -1694,7 +1695,7 @@ def resume_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> _ManagedSyncSandbox:
     return _ManagedSyncSandbox(
         payload=iter_coroutine(

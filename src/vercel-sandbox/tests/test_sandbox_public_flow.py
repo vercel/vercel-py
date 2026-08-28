@@ -111,15 +111,42 @@ def _sandbox_response(
 
 
 @respx.mock
-async def test_public_create_forwards_private_parameters(mock_env_clear: None) -> None:
-    route = respx.post("https://sandbox.test/v3/sandboxes").mock(
-        return_value=httpx.Response(200, json=_sandbox_response())
+async def test_async_lifecycle_forwards_private_parameters_without_leaking_to_polls(
+    mock_env_clear: None,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="created", status="pending"))
+    )
+    create_poll = respx.get("https://sandbox.test/v2/sandboxes/created").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="created"))
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/created/fork").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="forked", status="pending"))
+    )
+    fork_poll = respx.get("https://sandbox.test/v2/sandboxes/forked").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="forked"))
+    )
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/fetched").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="fetched"))
+    )
+    resume_route = respx.get("https://sandbox.test/v2/sandboxes/resumed").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="resumed"))
     )
 
     async with session(service_options=_session_options()):
-        await sandbox.create_sandbox(__networkId="network_123")
+        await sandbox.create_sandbox(name="created", __networkId="network_123")
+        await sandbox.fork_sandbox(
+            source_sandbox="created", name="forked", __networkId="network_123"
+        )
+        await sandbox.get_sandbox(name="fetched", __includeSystemRoutes=True)
+        await sandbox.resume_sandbox(name="resumed", __includeSystemRoutes=True)
 
-    assert json.loads(route.calls.last.request.content)["__networkId"] == "network_123"
+    assert json.loads(create_route.calls.last.request.content)["__networkId"] == "network_123"
+    assert "__networkId" not in create_poll.calls.last.request.url.params
+    assert json.loads(fork_route.calls.last.request.content)["__networkId"] == "network_123"
+    assert "__networkId" not in fork_poll.calls.last.request.url.params
+    assert get_route.calls.last.request.url.params["__includeSystemRoutes"] == "true"
+    assert resume_route.calls.last.request.url.params["__includeSystemRoutes"] == "true"
 
 
 @respx.mock
@@ -135,8 +162,10 @@ def test_sync_get_forwards_private_parameters(mock_env_clear: None) -> None:
 
 
 def test_public_sandbox_functions_reject_unknown_parameters() -> None:
-    with pytest.raises(TypeError, match="Unexpected sandbox parameter: 'typo'"):
-        sandbox.create_sandbox(typo=True)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'network_id'"):
+        sandbox.create_sandbox(network_id="network_123")
+    with pytest.raises(TypeError, match="unexpected keyword argument 'network_id'"):
+        sandbox_sync.create_sandbox(network_id="network_123")
 
 
 def _image_sandbox_response(
@@ -1714,6 +1743,7 @@ async def test_async_get_or_create_recreates_stale_snapshot(mock_env_clear: None
             "projectId": "prj_123",
             "name": "stale",
             "image": "stale-repository:latest",
+            "__networkId": "network_123",
         }
         return httpx.Response(
             200,
@@ -1724,7 +1754,9 @@ async def test_async_get_or_create_recreates_stale_snapshot(mock_env_clear: None
 
     async with session(service_options=_session_options()):
         recreated, created = await sandbox.get_or_create_sandbox(
-            name="stale", image="stale-repository:latest"
+            name="stale",
+            image="stale-repository:latest",
+            __networkId="network_123",
         )
 
     assert recreated.name == "stale"
@@ -1732,6 +1764,8 @@ async def test_async_get_or_create_recreates_stale_snapshot(mock_env_clear: None
     assert recreated.image == "my-repository@sha256:resolved"
     assert not hasattr(recreated, "runtime")
     assert get_route.calls.last.request.url.params["resume"] == "true"
+    assert get_route.calls.last.request.url.params["__networkId"] == "network_123"
+    assert "__networkId" not in delete_route.calls.last.request.url.params
     assert delete_route.call_count == 1
     assert create_route.call_count == 1
 

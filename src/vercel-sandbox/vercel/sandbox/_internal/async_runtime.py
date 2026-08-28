@@ -39,12 +39,13 @@ from vercel.sandbox._internal.filesystem_handle_core import (
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
+    NO_PRIVATE_PARAMETERS,
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
     FailoverRegionsInput,
-    JSONValue,
     NetworkPolicy,
+    PrivateSandboxParameters,
     ProcessLog,
     SandboxQuery,
     SandboxResources,
@@ -1428,7 +1429,7 @@ class _CreateSandboxParams:
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: Mapping[str, JSONValue] | None = None
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS
 
 
 class CreateSandboxOperation:
@@ -1526,7 +1527,7 @@ class _ForkSandboxParams:
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: Mapping[str, JSONValue] | None = None
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS
 
 
 class ForkSandboxOperation:
@@ -1611,7 +1612,7 @@ class _ResumeSandboxParams:
     name: str
     project_id: str | None = None
     include_system_routes: bool | None = None
-    private_parameters: Mapping[str, JSONValue] | None = None
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS
 
 
 class ResumeSandboxOperation:
@@ -1729,7 +1730,7 @@ def create_sandbox_operation(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> CreateSandboxOperation:
     return CreateSandboxOperation(
         service=service,
@@ -1774,7 +1775,7 @@ def fork_sandbox_operation(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> ForkSandboxOperation:
     return ForkSandboxOperation(
         service=service,
@@ -1807,7 +1808,7 @@ async def get_sandbox(
     project_id: str | None = None,
     resume: bool = False,
     include_system_routes: bool | None = None,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> Sandbox:
     return Sandbox(
         payload=await service.get_sandbox(
@@ -1842,7 +1843,7 @@ async def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[Sandbox, bool]:
     try:
         state, created = await service.get_or_create_sandbox(
@@ -1890,7 +1891,7 @@ async def resume_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> Sandbox:
     return Sandbox(
         payload=await service.resume_sandbox(
@@ -1910,7 +1911,7 @@ def resume_sandbox_operation(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
-    private_parameters: Mapping[str, JSONValue] | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> ResumeSandboxOperation:
     return ResumeSandboxOperation(
         service=service,

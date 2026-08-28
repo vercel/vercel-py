@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from subprocess import CalledProcessError
 from types import MappingProxyType
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Final, Literal, TypeAlias, cast
 
 from pydantic import (
     BaseModel,
@@ -20,6 +20,8 @@ from vercel._internal.core.time import SECOND, coerce_duration, to_ms_int
 
 JSONValue: TypeAlias = PydanticJsonValue
 JSONObject: TypeAlias = dict[str, JSONValue]
+PrivateSandboxParameters: TypeAlias = Mapping[str, JSONValue]
+NO_PRIVATE_PARAMETERS: Final[PrivateSandboxParameters] = MappingProxyType({})
 DurationInput: TypeAlias = int | float | timedelta | None
 FailoverRegionsInput: TypeAlias = Iterable[str] | None
 _MIN_SNAPSHOT_EXPIRATION = timedelta(days=1)
@@ -27,11 +29,13 @@ _MAX_SNAPSHOT_EXPIRATION = timedelta(days=365 * 10)
 _ZERO_DELTA = timedelta(0)
 
 
-def extract_private_parameters(parameters: Mapping[str, JSONValue]) -> JSONObject:
+def normalize_private_parameters(
+    operation: str, parameters: PrivateSandboxParameters
+) -> JSONObject:
     """Validate and return private Sandbox API parameters."""
     for name in parameters:
         if not name.startswith("__"):
-            raise TypeError(f"Unexpected sandbox parameter: {name!r}")
+            raise TypeError(f"{operation}() got an unexpected keyword argument {name!r}")
     return dict(parameters)
 
 

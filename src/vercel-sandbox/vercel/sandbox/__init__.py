@@ -53,7 +53,7 @@ from vercel.sandbox._internal.models import (
     DurationInput,
     FailoverRegionsInput,
     GitSource,
-    JSONValue,
+    JSONValue as _JSONValue,
     NetworkPolicy,
     NetworkPolicyKeyValueMatcher,
     NetworkPolicyMatcher,
@@ -76,7 +76,7 @@ from vercel.sandbox._internal.models import (
     SnapshotSource,
     TagFilter,
     TarballSource,
-    extract_private_parameters,
+    normalize_private_parameters as _normalize_private_parameters,
 )
 from vercel.sandbox._internal.options import (
     SandboxCredentials,
@@ -112,7 +112,7 @@ def create_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
-    **private_parameters: JSONValue,
+    **private_parameters: _JSONValue,
 ) -> CreateSandboxOperation:
     """Prepare an asynchronous sandbox creation operation.
 
@@ -168,7 +168,7 @@ def create_sandbox(
         region=region,
         failover_regions=failover_regions,
         destroy=destroy,
-        private_parameters=extract_private_parameters(private_parameters),
+        private_parameters=_normalize_private_parameters("create_sandbox", private_parameters),
     )
 
 
@@ -190,7 +190,7 @@ def fork_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
-    **private_parameters: JSONValue,
+    **private_parameters: _JSONValue,
 ) -> ForkSandboxOperation:
     """Prepare an asynchronous sandbox fork operation.
 
@@ -247,7 +247,7 @@ def fork_sandbox(
         region=region,
         failover_regions=failover_regions,
         destroy=destroy,
-        private_parameters=extract_private_parameters(private_parameters),
+        private_parameters=_normalize_private_parameters("fork_sandbox", private_parameters),
     )
 
 
@@ -270,7 +270,7 @@ async def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
-    **private_parameters: JSONValue,
+    **private_parameters: _JSONValue,
 ) -> tuple[Sandbox, bool]:
     """Get a named sandbox or create it when it does not exist.
 
@@ -326,7 +326,9 @@ async def get_or_create_sandbox(
         snapshot_retention=snapshot_retention,
         region=region,
         failover_regions=failover_regions,
-        private_parameters=extract_private_parameters(private_parameters),
+        private_parameters=_normalize_private_parameters(
+            "get_or_create_sandbox", private_parameters
+        ),
     )
 
 
@@ -335,7 +337,7 @@ async def get_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
-    **private_parameters: JSONValue,
+    **private_parameters: _JSONValue,
 ) -> Sandbox:
     """Fetch a sandbox by name without resuming it.
 
@@ -359,7 +361,7 @@ async def get_sandbox(
         name=name,
         project_id=project_id,
         include_system_routes=include_system_routes,
-        private_parameters=extract_private_parameters(private_parameters),
+        private_parameters=_normalize_private_parameters("get_sandbox", private_parameters),
     )
 
 
@@ -368,7 +370,7 @@ def resume_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
-    **private_parameters: JSONValue,
+    **private_parameters: _JSONValue,
 ) -> ResumeSandboxOperation:
     """Prepare an asynchronous sandbox resume operation.
 
@@ -392,7 +394,7 @@ def resume_sandbox(
         name=name,
         project_id=project_id,
         include_system_routes=include_system_routes,
-        private_parameters=extract_private_parameters(private_parameters),
+        private_parameters=_normalize_private_parameters("resume_sandbox", private_parameters),
     )
 
 
