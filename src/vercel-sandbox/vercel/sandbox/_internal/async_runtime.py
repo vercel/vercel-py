@@ -5,7 +5,7 @@ import subprocess
 import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
@@ -1429,7 +1429,9 @@ class _CreateSandboxParams:
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS
+    private_parameters: PrivateSandboxParameters = field(
+        default_factory=lambda: NO_PRIVATE_PARAMETERS
+    )
 
 
 class CreateSandboxOperation:
@@ -1527,7 +1529,9 @@ class _ForkSandboxParams:
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
-    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS
+    private_parameters: PrivateSandboxParameters = field(
+        default_factory=lambda: NO_PRIVATE_PARAMETERS
+    )
 
 
 class ForkSandboxOperation:
@@ -1612,7 +1616,9 @@ class _ResumeSandboxParams:
     name: str
     project_id: str | None = None
     include_system_routes: bool | None = None
-    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS
+    private_parameters: PrivateSandboxParameters = field(
+        default_factory=lambda: NO_PRIVATE_PARAMETERS
+    )
 
 
 class ResumeSandboxOperation:
