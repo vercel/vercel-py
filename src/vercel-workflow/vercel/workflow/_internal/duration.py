@@ -47,7 +47,7 @@ def parse_duration_to_date(param: DurationParam) -> datetime:
     elif isinstance(param, (int, float)):
         if param < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=param)
+        return datetime.now(UTC) + timedelta(seconds=param)
 
     elif isinstance(param, timedelta):
         if param < timedelta(0):

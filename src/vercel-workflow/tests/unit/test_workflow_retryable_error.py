@@ -51,12 +51,13 @@ def test_retry_after_defaults_to_a_second() -> None:
     "retry_after,expected",
     [
         ("10s", timedelta(seconds=10)),
-        (1_500, timedelta(milliseconds=1_500)),
+        (2, timedelta(seconds=2)),
+        (1.5, timedelta(seconds=1.5)),
         (timedelta(seconds=10), timedelta(seconds=10)),
     ],
 )
 def test_retry_after_takes_the_durations_sleep_takes(
-    retry_after: str | int | timedelta, expected: timedelta
+    retry_after: str | int | float | timedelta, expected: timedelta
 ) -> None:
     before = datetime.now(UTC)
     err = RetryableError("later", retry_after=retry_after)
