@@ -358,13 +358,13 @@ async def test_private_parameters_are_forwarded_to_sandbox_api() -> None:
 
     await client.fork_sandbox(
         source_sandbox="preview",
-        private_parameters={"__secureCompute": {"enabled": True}},
+        private_parameters={"__privateFeature": {"enabled": True}},
     )
 
     assert transport.request is not None
     body = transport.request[4]
     assert isinstance(body, JSONBody)
-    assert body.data["__secureCompute"] == {"enabled": True}
+    assert body.data["__privateFeature"] == {"enabled": True}
 
     await client.get_sandbox(
         name="preview",
