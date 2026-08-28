@@ -6,15 +6,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
 from threading import Condition, Event
-from typing import Any
+from typing import Any, cast
 
 import anyio
-import httpx
+import httpx as legacy_httpx
+import httpx2 as httpx
 import pytest
-import respx
 from pydantic import BaseModel, ValidationError
 from sandbox_fixtures import sandbox_service_options as _session_options
 
+import vendor.respx as respx
 from vercel import sandbox
 from vercel._internal.core.session import get_active_session
 from vercel.api import session
@@ -159,6 +160,49 @@ def test_sync_get_forwards_private_parameters(mock_env_clear: None) -> None:
         sandbox_sync.get_sandbox(name="preview", __includeSystemRoutes=True)
 
     assert route.calls.last.request.url.params["__includeSystemRoutes"] == "true"
+
+
+def test_sync_sandbox_supports_legacy_httpx_session_client(mock_env_clear: None) -> None:
+    requests: list[legacy_httpx.Request] = []
+
+    def handler(request: legacy_httpx.Request) -> legacy_httpx.Response:
+        requests.append(request)
+        return legacy_httpx.Response(200, json=_sandbox_response(name="legacy-sync"))
+
+    client = legacy_httpx.Client(transport=legacy_httpx.MockTransport(handler))
+    with session(
+        service_options=_session_options(),
+        httpx_client_factory=cast(Any, lambda: client),
+    ):
+        instance = sandbox_sync.get_sandbox(name="legacy-sync")
+
+    assert instance.name == "legacy-sync"
+    assert requests[0].url.path == "/v2/sandboxes/legacy-sync"
+    assert requests[0].url.params["teamId"] == "team_123"
+    assert client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_async_sandbox_supports_legacy_httpx_session_client(
+    mock_env_clear: None,
+) -> None:
+    requests: list[legacy_httpx.Request] = []
+
+    async def handler(request: legacy_httpx.Request) -> legacy_httpx.Response:
+        requests.append(request)
+        return legacy_httpx.Response(200, json=_sandbox_response(name="legacy-async"))
+
+    client = legacy_httpx.AsyncClient(transport=legacy_httpx.MockTransport(handler))
+    async with session(
+        service_options=_session_options(),
+        httpx_client_factory=cast(Any, lambda: client),
+    ):
+        instance = await sandbox.get_sandbox(name="legacy-async")
+
+    assert instance.name == "legacy-async"
+    assert requests[0].url.path == "/v2/sandboxes/legacy-async"
+    assert requests[0].url.params["teamId"] == "team_123"
+    assert client.is_closed
 
 
 def test_public_sandbox_functions_reject_unknown_parameters() -> None:

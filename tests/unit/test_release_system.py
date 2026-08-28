@@ -1696,7 +1696,7 @@ def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_dep
             "vercel": {
                 "release": {
                     "dependencies": [
-                        "httpx>=0.27,<1",
+                        "httpx2>=2",
                         "celery>=5.3,<6",
                         "vercel-cache>=0.6.0",
                         "vercel-queue>=0.6.0",
@@ -1904,15 +1904,15 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
         "_lock_versions",
         lambda: {
             "anyio": "4.13.0",
-            "certifi": "2026.4.22",
             "h11": "0.16.0",
             "h2": "4.3.0",
             "hpack": "4.2.0",
-            "httpcore": "1.0.9",
-            "httpx": "0.28.1",
+            "httpcore2": "2.12.0",
+            "httpx2": "2.12.0",
             "hyperframe": "6.1.0",
             "idna": "3.13",
             "python-multipart": "0.0.32",
+            "truststore": "0.10.4",
             "typing-extensions": "4.15.0",
         },
     )
@@ -1938,7 +1938,7 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
                 "release": {
                     "dependencies": [
                         "anyio>=4.0.0",
-                        "httpx[http2]>=0.27.0",
+                        "httpx2[http2]>=2",
                         "python-multipart>=0.0.20",
                         "typing_extensions>=4.0.0",
                         "vercel-headers>=0.6.0",
@@ -1966,14 +1966,14 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
         bundle_release.SHARED_VENDORED_PACKAGE, {}
     ) == (
         "anyio==4.13.0",
-        "certifi==2026.4.22",
         "h11==0.16.0",
         "h2==4.3.0",
         "hpack==4.2.0",
-        "httpcore==1.0.9",
-        "httpx==0.28.1",
+        "httpcore2==2.12.0",
+        "httpx2==2.12.0",
         "hyperframe==6.1.0",
         "idna==3.13",
+        "truststore==0.10.4",
         "typing-extensions==4.15.0",
     )
     assert bundle_release._derive_vendor_requirements(  # noqa: SLF001
@@ -1996,7 +1996,7 @@ def test_shared_bundle_package_is_generated(
         bundle_release,
         "_derive_vendor_requirements",
         lambda package, _data: (
-            ("httpx==0.28.1",) if package == bundle_release.SHARED_VENDORED_PACKAGE else ()
+            ("httpx2==2.12.0",) if package == bundle_release.SHARED_VENDORED_PACKAGE else ()
         ),
     )
 
@@ -2005,13 +2005,12 @@ def test_shared_bundle_package_is_generated(
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     metadata = (tmp_path / "vercel/internal/_vendor/_shared_deps.json").read_text(encoding="utf-8")
     assert 'name = "vercel-internal-shared-vendored-deps"' in pyproject
-    assert '"/vercel/internal/_vendor/certifi/cacert.pem",' in pyproject
     assert "[tool.vendoring]" not in pyproject
     assert (tmp_path / "vercel/internal/_vendor/version.py").read_text(
         encoding="utf-8"
     ) == '__version__ = "0.8.1"\n'
     assert '"fingerprint": "abc123"' in metadata
-    assert '"httpx==0.28.1"' in metadata
+    assert '"httpx2==2.12.0"' in metadata
 
 
 def test_vendoring_config_is_generated_into_pyproject(tmp_path: Path) -> None:
@@ -2074,7 +2073,7 @@ path = "vercel/pkg/version.py"
     assert "import anyio\\\\.from_thread" in pyproject
 
 
-def test_shared_vendoring_config_rewrites_certifi_resource_anchors(tmp_path: Path) -> None:
+def test_shared_vendoring_config_normalizes_anyio_dotted_imports(tmp_path: Path) -> None:
     plan = bundle_release._shared_vendored_plan()  # noqa: SLF001
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "vercel-internal-shared-vendored-deps"\n',
@@ -2084,10 +2083,9 @@ def test_shared_vendoring_config_rewrites_certifi_resource_anchors(tmp_path: Pat
     bundle_release._write_vendoring_config(plan, tmp_path)  # noqa: SLF001
 
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    match, replace = bundle_release.CERTIFI_RESOURCE_SUBSTITUTION
-    assert json.dumps(match) in pyproject
-    assert json.dumps(replace) in pyproject
-    assert "vercel.internal._vendor.certifi" in replace
+    for match, replace in bundle_release.SHARED_ANYIO_SUBSTITUTIONS:
+        assert json.dumps(match) in pyproject
+        assert json.dumps(replace) in pyproject
 
 
 def test_shared_deps_fingerprint_includes_recipe_revision(
@@ -2096,7 +2094,7 @@ def test_shared_deps_fingerprint_includes_recipe_revision(
     monkeypatch.setattr(
         bundle_release,
         "_derive_vendor_requirements",
-        lambda _package, _data: ("httpx==0.28.1",),
+        lambda _package, _data: ("httpx2==2.12.0",),
     )
     before = bundle_release._shared_deps_fingerprint()  # noqa: SLF001
     monkeypatch.setattr(
@@ -2347,7 +2345,7 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
         "from vercel.headers import get_headers\n"
         "from vercel.oidc.utils import find_project_info\n"
         "from vercel.queue import sanitize_name\n"
-        "import httpx\n"
+        "import httpx2 as httpx\n"
         "from anyio.abc import ObjectReceiveStream\n"
         "import anyio.from_thread\n"
         "from typing_extensions import override\n"
@@ -2371,7 +2369,7 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
     assert "from vercel.headers import get_headers" in rewritten
     assert "from vercel.oidc.utils import find_project_info" in rewritten
     assert "from vercel.queue import sanitize_name" in rewritten
-    assert "from vercel.internal._vendor import httpx" in rewritten
+    assert "import vercel.internal._vendor.httpx2 as httpx" in rewritten
     assert "from vercel.internal._vendor.anyio.abc import ObjectReceiveStream" in rewritten
     assert "from vercel.internal._vendor.anyio import from_thread" in rewritten
     assert "from vercel.internal._vendor.typing_extensions import override" in rewritten
@@ -2401,19 +2399,19 @@ def test_vendored_nested_namespace_rewrite_deduplicates_vendor_prefix(tmp_path: 
             namespace="vercel.queue._vendor",
             protected_files=("__init__.py", "vendor.txt"),
         ),
-        vendored_requirements=("httpcore==1.0.9",),
+        vendored_requirements=("httpcore2==2.12.0",),
         external_dependencies=(),
     )
-    path = tmp_path / "pkg/vercel/queue/_vendor/httpx/_transports/default.py"
+    path = tmp_path / "pkg/vercel/queue/_vendor/httpx2/_transports/default.py"
     path.parent.mkdir(parents=True)
     path.write_text(
-        "from vercel.queue._vendor.vercel.queue._vendor import httpcore\n",
+        "from vercel.queue._vendor.vercel.queue._vendor import httpcore2\n",
         encoding="utf-8",
     )
 
     bundle_release._rewrite_nested_vendor_namespace(plan, tmp_path / "pkg")  # noqa: SLF001
 
-    assert path.read_text(encoding="utf-8") == "from vercel.queue._vendor import httpcore\n"
+    assert path.read_text(encoding="utf-8") == "from vercel.queue._vendor import httpcore2\n"
 
 
 def test_workspace_dependency_edge_survives_extras() -> None:

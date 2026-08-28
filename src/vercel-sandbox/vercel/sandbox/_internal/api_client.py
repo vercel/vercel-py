@@ -9,8 +9,8 @@ from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Literal, TypeVar, cast
 
-from httpx import Response
-from httpx._types import QueryParamTypes
+from httpx2 import Response
+from httpx2._types import QueryParamTypes
 from pydantic import (
     AliasChoices,
     BaseModel,

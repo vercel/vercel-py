@@ -8,7 +8,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Any, TypeVar
 from urllib.parse import quote
 
-from httpx import Response
+from httpx2 import Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vercel._internal.core.http import (

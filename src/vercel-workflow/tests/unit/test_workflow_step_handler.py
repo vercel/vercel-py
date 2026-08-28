@@ -15,11 +15,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pydantic
 import pytest
-import respx
 
+import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow import FatalError, StepNotRegisteredError

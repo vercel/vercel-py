@@ -9,10 +9,11 @@ dev = [
     "pytest>=7.0.0,<10",
     "pytest-asyncio<2",
     "pytest-xdist<4",
+    # Runtime-only migration compatibility; never included in release metadata.
+    "httpx==0.28.1",
     "fastapi>=0.115.0,<1",
     "uvicorn>=0.30.0,<1",
     "hypothesis>=6.0.0,<7",
-    "respx>=0.21.0,<1",
     "cryptography>=48.0.1",
     "uvloop<1; sys_platform != 'win32'",
     "mypy>=1.20.2,<2",
@@ -42,6 +43,23 @@ exclude-newer-package = { ggt = "2026-09-01T00:00:00Z", lograil = "2026-08-21T00
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
+
+[tool.vendoring]
+destination = "vendor/"
+requirements = "vendor/vendor.txt"
+namespace = "vendor"
+protected-files = ["__init__.py", "vendor.txt"]
+
+[tool.vendoring.transformations]
+substitute = [
+    { match = "(?m)^import httpcore$", replace = "import httpcore2 as httpcore" },
+    { match = "(?m)^import httpx$", replace = "import httpx2 as httpx" },
+    { match = "(?m)^from httpx import ", replace = "from httpx2 import " },
+    { match = "\"httpx\\.", replace = "\"httpx2." },
+    { match = "\"httpcore\\.", replace = "\"httpcore2." },
+    { match = 'from \.__version__ import __version__', replace = "# Vendored from respx 0.23.1 and ported to httpx2/httpcore2.\nfrom .__version__ import __version__" },
+]
+drop = ["*.dist-info"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -96,6 +114,7 @@ root = ["./src", "./integrations"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["vendor"]
 
 [tool.ruff.lint]
 select = [

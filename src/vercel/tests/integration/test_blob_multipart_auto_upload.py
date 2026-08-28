@@ -6,9 +6,9 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
+import vendor.respx as respx
 
 from vercel._internal.blob.multipart import MIN_PART_SIZE
 from vercel.blob.multipart import (

@@ -5,9 +5,9 @@ Tests both sync and async variants to ensure API parity.
 
 import io
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
+import vendor.respx as respx
 
 from vercel._internal.blob.core import decode_blob_response_json
 from vercel.blob import (

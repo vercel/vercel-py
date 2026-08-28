@@ -6,11 +6,11 @@ survive into `extra` rather than being dropped or silently widening the type.
 
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 from conftest import TEST_BASE_URL, session_options
 
+import vendor.respx as respx
 from vercel.api import session
 from vercel.connect import ConnectApiError, get_connector_metadata, sync as connect_sync
 

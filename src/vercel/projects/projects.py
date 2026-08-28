@@ -4,7 +4,7 @@ import os
 import urllib.parse
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
 from vercel.internal.telemetry import track
 

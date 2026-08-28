@@ -2,7 +2,7 @@ import threading
 from typing import cast
 
 import anyio
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.core.http import (

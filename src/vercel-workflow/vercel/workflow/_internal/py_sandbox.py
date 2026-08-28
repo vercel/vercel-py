@@ -462,9 +462,9 @@ _PASSTHROUGHS: set[str] = {
     "typing_extensions",
     "annotated_types",
     # Supporting zstandard here is a little ad-hoc, but it is a
-    # dependency of vercel-workflow itself, and httpx has an optional
-    # dependency on it and will try to import it. So importing httpx
-    # would fail unless we allow zstandard. (Actually *using* httpx
+    # dependency of vercel-workflow itself, and httpx2 has an optional
+    # dependency on it and will try to import it. So importing httpx2
+    # would fail unless we allow zstandard. (Actually *using* httpx2
     # will still actually fail, of course.)
     "zstandard",
 }

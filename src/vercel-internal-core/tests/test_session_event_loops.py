@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.core.errors import VercelSessionClosedError

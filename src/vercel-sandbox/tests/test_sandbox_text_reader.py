@@ -3,7 +3,7 @@ import subprocess
 from collections.abc import AsyncIterator, Iterator
 
 import anyio
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.core.http import StreamingResponse

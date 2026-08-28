@@ -16,7 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 import cbor2
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel.oidc import VercelOidcTokenError

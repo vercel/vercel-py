@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.core.http.transport import TransportOptions
 from vercel._internal.core.time import to_seconds_float

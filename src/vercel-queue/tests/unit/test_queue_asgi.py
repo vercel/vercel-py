@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import anyio
-import httpx
+import httpx2 as httpx
 import pytest
 
 import vercel.queue._internal.devserver as queue_devserver_internal

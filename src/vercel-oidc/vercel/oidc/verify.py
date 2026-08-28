@@ -34,7 +34,7 @@ from datetime import timedelta
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
-import httpx
+import httpx2 as httpx
 
 from .token import VercelOidcTokenError
 

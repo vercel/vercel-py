@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.core.errors import VercelError
 
@@ -16,7 +16,7 @@ class ConnectApiError(ConnectError):
     """Raised when the Connect API returns an error response.
 
     Attributes:
-        response: The raw httpx response.
+        response: The raw httpx2 response.
         status_code: HTTP status code.
         status_text: HTTP reason phrase.
         code: Server-supplied error code, when present. Error classes are chosen

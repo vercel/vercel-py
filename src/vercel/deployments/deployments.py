@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
 from vercel.internal.telemetry import track
 

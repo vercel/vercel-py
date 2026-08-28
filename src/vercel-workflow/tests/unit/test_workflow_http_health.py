@@ -17,7 +17,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel.workflow._internal import core, runtime, world as w

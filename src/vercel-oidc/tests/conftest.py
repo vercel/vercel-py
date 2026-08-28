@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+pytest_plugins = ["vendor.respx.plugin"]
+
 JWKS_URL = "https://oidc.vercel.com/.well-known/jwks"
 ISSUER = "https://oidc.vercel.com"
 KID = "test-key-1"

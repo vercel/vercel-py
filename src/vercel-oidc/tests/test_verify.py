@@ -12,12 +12,12 @@ from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 from conftest import ISSUER, JWKS_URL, KID, b64url, claims, forge_hs256, jwks_for, sign
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+import vendor.respx as respx
 from vercel.oidc import resolve_vercel_oidc_token_identity, verify_vercel_oidc_token
 from vercel.oidc.aio import (
     resolve_vercel_oidc_token_identity as resolve_vercel_oidc_token_identity_async,

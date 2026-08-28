@@ -4,9 +4,10 @@ Tests RuntimeCache and AsyncRuntimeCache using the in-memory fallback
 when cache environment variables are not set.
 """
 
-import httpx
+import httpx2 as httpx
 import pytest
-from respx import MockRouter
+
+from vendor.respx import MockRouter
 
 
 class TestBuildCacheStrictErrors:

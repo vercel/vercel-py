@@ -17,7 +17,7 @@ path = "hatch_build.py"
 [tool.vercel.release.dependencies]
 dependencies = [
     "anyio>=4.0.0",
-    "httpx[http2]>=0.27.0",
+    "httpx2[http2]>=2",
     "python-multipart>=0.0.20",
     "typing_extensions>=4.0.0",
     "vercel-headers>=0.6.0",
@@ -200,6 +200,7 @@ max-statements-in-try = 10
 "asyncio.wait_for".msg = "prefer-anyio-primitives: use anyio fail_after or move_on_after instead."
 
 [tool.pytest.ini_options]
+pythonpath = ["../.."]
 addopts = "--no-header --capture=tee-sys"
 asyncio_mode = "strict"
 testpaths = ["tests"]

@@ -11,13 +11,13 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from types import TracebackType
-from typing import Any, Final, TypeAlias, final
+from typing import Any, Final, TypeAlias, cast, final
 
 import anyio
-import httpx
+import httpx2 as httpx
 from anyio.abc import ObjectReceiveStream, ObjectSendStream
-from httpx import USE_CLIENT_DEFAULT
 
+from vercel._internal.core.http._compat import is_async_http_client
 from vercel._internal.core.polyfills import StrEnum
 from vercel._internal.core.time import to_seconds_float
 
@@ -183,7 +183,7 @@ class BaseTransport(abc.ABC):
                 method,
                 _normalize_path(path),
                 params=params,
-                timeout=httpx.Timeout(to_seconds_float(timeout)),
+                timeout=to_seconds_float(timeout),
                 headers=headers,
                 json=json,
                 content=content,
@@ -311,13 +311,14 @@ class _SyncStreamingRequest(StreamingRequest):
     def _run(self) -> None:
         response: httpx.Response | None = None
         try:
-            response = self._client.send(
-                self._request,
-                stream=True,
-                follow_redirects=self._follow_redirects
-                if self._follow_redirects is not None
-                else USE_CLIENT_DEFAULT,
-            )
+            if self._follow_redirects is None:
+                response = self._client.send(self._request, stream=True)
+            else:
+                response = self._client.send(
+                    self._request,
+                    stream=True,
+                    follow_redirects=self._follow_redirects,
+                )
             _read_sync_response(response, self._read_response)
             self._response = response
         except _RequestStreamAborted:
@@ -480,13 +481,14 @@ class _AsyncStreamingRequest(StreamingRequest):
                 if self._aborted:
                     cancel_scope.cancel()
                 else:
-                    response = await self._client.send(
-                        self._request,
-                        stream=True,
-                        follow_redirects=self._follow_redirects
-                        if self._follow_redirects is not None
-                        else USE_CLIENT_DEFAULT,
-                    )
+                    if self._follow_redirects is None:
+                        response = await self._client.send(self._request, stream=True)
+                    else:
+                        response = await self._client.send(
+                            self._request,
+                            stream=True,
+                            follow_redirects=self._follow_redirects,
+                        )
                     await _read_async_response(response, self._read_response)
                     self._response = response
             if self._aborted and response is not None and self._response is None:
@@ -641,13 +643,14 @@ class SyncTransport(BaseTransport):
             headers=headers,
             timeout=timeout,
         )
-        response = self._client.send(
-            request,
-            stream=stream,
-            follow_redirects=follow_redirects
-            if follow_redirects is not None
-            else USE_CLIENT_DEFAULT,
-        )
+        if follow_redirects is None:
+            response = self._client.send(request, stream=stream)
+        else:
+            response = self._client.send(
+                request,
+                stream=stream,
+                follow_redirects=follow_redirects,
+            )
         _read_sync_response(response, read_response)
         return response
 
@@ -747,9 +750,10 @@ class AsyncTransport(BaseTransport):
         that outlives a loop passes a callable and gets a client per loop. The
         transport object itself is memoized by callers and cannot be swapped out.
         """
-        self._resolve_client: Callable[[], httpx.AsyncClient] = (
-            (lambda: client) if isinstance(client, httpx.AsyncClient) else client
-        )
+        if is_async_http_client(client):
+            self._resolve_client = lambda: cast(httpx.AsyncClient, client)
+        else:
+            self._resolve_client = cast(Callable[[], httpx.AsyncClient], client)
         # Resolved once here so a factory that yields the wrong kind of client
         # fails when the transport is built, as it did before.
         self._resolve_client()
@@ -779,13 +783,14 @@ class AsyncTransport(BaseTransport):
             headers=headers,
             timeout=timeout,
         )
-        response = await client.send(
-            request,
-            stream=stream,
-            follow_redirects=follow_redirects
-            if follow_redirects is not None
-            else USE_CLIENT_DEFAULT,
-        )
+        if follow_redirects is None:
+            response = await client.send(request, stream=stream)
+        else:
+            response = await client.send(
+                request,
+                stream=stream,
+                follow_redirects=follow_redirects,
+            )
         await _read_async_response(response, read_response)
         return response
 

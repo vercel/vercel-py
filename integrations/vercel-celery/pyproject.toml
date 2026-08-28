@@ -17,6 +17,7 @@ path = "hatch_build.py"
 [tool.vercel.release.dependencies]
 dependencies = [
     "celery>=5.3,<6",
+    "httpx2>=2",
     "vercel-cache>=0.6.0",
     "vercel-queue>=0.6.0",
 ]

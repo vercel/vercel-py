@@ -46,14 +46,14 @@ LICENSE_FILE_RE = re.compile(
 )
 SHARED_VENDORED_LIBS = {
     "anyio": "anyio",
-    "certifi": "certifi",
     "h11": "h11",
     "h2": "h2",
     "hpack": "hpack",
-    "httpcore": "httpcore",
-    "httpx": "httpx",
+    "httpcore2": "httpcore2",
+    "httpx2": "httpx2",
     "hyperframe": "hyperframe",
     "idna": "idna",
+    "truststore": "truststore",
     "typing_extensions": "typing-extensions",
 }
 SHARED_VENDORED_REQUIREMENTS = tuple(SHARED_VENDORED_LIBS.values())
@@ -104,16 +104,13 @@ ANYIO_FROM_THREAD_SUBSTITUTION = (
     r"import anyio\.from_thread",
     "from anyio import from_thread",
 )
-# certifi locates cacert.pem with importlib.resources anchored at the literal
-# top-level "certifi" distribution, which does not exist in a bundle install.
-# Rewrite the anchors so the vendored copy resolves its own cacert.pem.
-CERTIFI_RESOURCE_SUBSTITUTION = (
-    r'(files|get_path|read_text)\("certifi"',
-    rf'\1("{SHARED_VENDOR_NAMESPACE}.certifi"',
+SHARED_ANYIO_SUBSTITUTIONS = (
+    (r"import anyio\.abc", "from anyio import abc"),
+    (r"import anyio\.streams\.tls", "from anyio.streams import tls"),
 )
 # Bump to force a republish of the shared vendored package when the vendoring
 # recipe changes without any change to the pinned requirements.
-SHARED_VENDOR_RECIPE_REVISION = 2
+SHARED_VENDOR_RECIPE_REVISION = 3
 
 
 @dataclass(frozen=True)
@@ -594,7 +591,6 @@ path = "vercel/internal/_vendor/version.py"
 [tool.hatch.build.targets.sdist]
 include = [
     "/vercel/internal/_vendor/**/*.py",
-    "/vercel/internal/_vendor/certifi/cacert.pem",
     "/vercel/internal/_vendor/{SHARED_DEPS_METADATA}",
     "/vercel/internal/_vendor/py.typed",
     "/README.md",
@@ -671,7 +667,7 @@ def _render_vendoring_config(plan: VendoredPlan) -> str:
 def _vendoring_transformations(plan: VendoredPlan) -> VendoringTransformations:
     if plan.package.name == SHARED_VENDORED_PACKAGE:
         return VendoringTransformations(
-            substitutions=(*_shared_h2_substitution_pairs(), CERTIFI_RESOURCE_SUBSTITUTION),
+            substitutions=(*_shared_h2_substitution_pairs(), *SHARED_ANYIO_SUBSTITUTIONS),
         )
     vendored_names = {_requirement_name(requirement) for requirement in plan.vendored_requirements}
     substitutions = (ANYIO_FROM_THREAD_SUBSTITUTION,) if "anyio" in vendored_names else ()

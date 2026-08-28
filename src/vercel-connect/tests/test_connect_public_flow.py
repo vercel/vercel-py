@@ -2,11 +2,11 @@
 
 import asyncio
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 from conftest import TEST_BASE_URL, session_options
 
+import vendor.respx as respx
 from vercel.api import session
 from vercel.connect import (
     ConnectAppTokenSubject,

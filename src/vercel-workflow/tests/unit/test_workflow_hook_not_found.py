@@ -8,10 +8,10 @@ skip. Other 404s stay a generic WorkflowWorldError carrying the status.
 
 from __future__ import annotations
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 
+import vendor.respx as respx
 from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds.vercel import VercelWorld
 

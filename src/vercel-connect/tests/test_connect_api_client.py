@@ -9,7 +9,7 @@ import json
 from datetime import timedelta
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.core.http import (
