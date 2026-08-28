@@ -26,6 +26,7 @@ from vercel.sandbox._internal.models import (
     DurationInput,
     FailoverRegionsInput,
     GitSource,
+    JSONValue,
     NetworkPolicy,
     NetworkPolicyKeyValueMatcher,
     NetworkPolicyMatcher,
@@ -48,6 +49,7 @@ from vercel.sandbox._internal.models import (
     SnapshotSource,
     TagFilter,
     TarballSource,
+    extract_private_parameters,
 )
 from vercel.sandbox._internal.options import (
     SandboxCredentials,
@@ -105,6 +107,7 @@ def create_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
+    **private_parameters: JSONValue,
 ) -> _ManagedSyncSandbox:
     """Create a sandbox and wait until it is ready.
 
@@ -159,6 +162,7 @@ def create_sandbox(
         region=region,
         failover_regions=failover_regions,
         destroy=destroy,
+        private_parameters=extract_private_parameters(private_parameters),
     )
 
 
@@ -180,6 +184,7 @@ def fork_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
+    **private_parameters: JSONValue,
 ) -> _ManagedSyncSandbox:
     """Fork a sandbox and wait until the fork is ready.
 
@@ -237,6 +242,7 @@ def fork_sandbox(
         region=region,
         failover_regions=failover_regions,
         destroy=destroy,
+        private_parameters=extract_private_parameters(private_parameters),
     )
 
 
@@ -259,6 +265,7 @@ def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
+    **private_parameters: JSONValue,
 ) -> tuple[SyncSandbox, bool]:
     """Get a named sandbox or create it when it does not exist.
 
@@ -314,6 +321,7 @@ def get_or_create_sandbox(
         snapshot_retention=snapshot_retention,
         region=region,
         failover_regions=failover_regions,
+        private_parameters=extract_private_parameters(private_parameters),
     )
 
 
@@ -322,6 +330,7 @@ def get_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
+    **private_parameters: JSONValue,
 ) -> SyncSandbox:
     """Fetch a sandbox by name without resuming it.
 
@@ -345,6 +354,7 @@ def get_sandbox(
         name=name,
         project_id=project_id,
         include_system_routes=include_system_routes,
+        private_parameters=extract_private_parameters(private_parameters),
     )
 
 
@@ -353,6 +363,7 @@ def resume_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
+    **private_parameters: JSONValue,
 ) -> _ManagedSyncSandbox:
     """Resume a sandbox and return a managed handle.
 
@@ -376,6 +387,7 @@ def resume_sandbox(
         name=name,
         project_id=project_id,
         include_system_routes=include_system_routes,
+        private_parameters=extract_private_parameters(private_parameters),
     )
 
 

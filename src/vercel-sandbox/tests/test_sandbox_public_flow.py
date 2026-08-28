@@ -110,6 +110,35 @@ def _sandbox_response(
     }
 
 
+@respx.mock
+async def test_public_create_forwards_private_parameters(mock_env_clear: None) -> None:
+    route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        await sandbox.create_sandbox(__networkId="network_123")
+
+    assert json.loads(route.calls.last.request.content)["__networkId"] == "network_123"
+
+
+@respx.mock
+def test_sync_get_forwards_private_parameters(mock_env_clear: None) -> None:
+    route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    with session(service_options=_session_options()):
+        sandbox_sync.get_sandbox(name="preview", __includeSystemRoutes=True)
+
+    assert route.calls.last.request.url.params["__includeSystemRoutes"] == "true"
+
+
+def test_public_sandbox_functions_reject_unknown_parameters() -> None:
+    with pytest.raises(TypeError, match="Unexpected sandbox parameter: 'typo'"):
+        sandbox.create_sandbox(typo=True)
+
+
 def _image_sandbox_response(
     *,
     image: str = "my-repository@sha256:resolved",

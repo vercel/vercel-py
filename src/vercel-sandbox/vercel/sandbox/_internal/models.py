@@ -27,6 +27,14 @@ _MAX_SNAPSHOT_EXPIRATION = timedelta(days=365 * 10)
 _ZERO_DELTA = timedelta(0)
 
 
+def extract_private_parameters(parameters: Mapping[str, JSONValue]) -> JSONObject:
+    """Validate and return private Sandbox API parameters."""
+    for name in parameters:
+        if not name.startswith("__"):
+            raise TypeError(f"Unexpected sandbox parameter: {name!r}")
+    return dict(parameters)
+
+
 def normalize_failover_regions(regions: FailoverRegionsInput) -> tuple[str, ...] | None:
     """Normalize sandbox failover regions while preserving explicit emptiness."""
     if regions is None:
