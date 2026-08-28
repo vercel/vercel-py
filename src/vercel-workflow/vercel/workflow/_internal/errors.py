@@ -29,6 +29,15 @@ class StepNotRegisteredError(FatalError):
         self.step_name = step_name
 
 
+class StepCancelledError(FatalError):
+    """A cancellable step stopped by its workflow's cancellation request.
+
+    Recorded as the step's terminal failure. A workflow awaiting the step does
+    not see this error: replay delivers it by cancelling the step's future, so
+    the body gets a plain ``asyncio.CancelledError`` with the same message.
+    """
+
+
 class HookConflictError(Exception):
     """A hook token already owned by another active workflow run."""
 
