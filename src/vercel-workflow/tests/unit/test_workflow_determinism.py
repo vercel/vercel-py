@@ -320,8 +320,8 @@ async def test_nondeterminism_fails_the_run() -> None:
 
     # The error is raised out of the body's own await, so its traceback shows
     # where in the workflow the divergence happened.
-    frames = traceback.extract_tb(excinfo.value.__traceback__)
-    assert any(frame.name == "_diverging" for frame in frames)
+    formatted_traceback = "".join(traceback.format_exception(excinfo.value))
+    assert 'return await _record(name="b")' in formatted_traceback
 
 
 async def test_nondeterminism_cannot_be_suppressed_by_the_body() -> None:
@@ -331,17 +331,6 @@ async def test_nondeterminism_cannot_be_suppressed_by_the_body() -> None:
 
     with pytest.raises(runtime.NondeterminismError):
         ctx.run_workflow(_running_run(_suppressing.workflow_id))
-
-
-async def test_nondeterminism_surfaced_by_the_body_wins() -> None:
-    """A body that lets (or re-raises) the divergence error out keeps its own
-    instance -- and with it the traceback -- over the stashed one."""
-    ctx = runtime.WorkflowOrchestratorContext(
-        _diverged_log(), run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
-    )
-
-    with pytest.raises(runtime.NondeterminismError, match="surfaced by the body"):
-        ctx.run_workflow(_running_run(_reraising.workflow_id))
 
 
 # --- now(): deterministic clock anchored to replay progress, not list tail ------

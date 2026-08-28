@@ -703,10 +703,10 @@ class WorkflowOrchestratorContext:
             # If the task is blocked on a future that has already
             # finished with an exception, skip cancelling it.
             #
-            # The goal here is to give the raised-on-a-task version of
-            # resume_exception a chance to bring down the workflow
-            # itself, so that the final exception has a useful
-            # traceback.
+            # The goal here is to give resume_exception a chance to
+            # bring down the workflow itself, so that a useful
+            # traceback gets attached to it.
+            #
             # If it doesn't work, the task will get cancelled the
             # next time through the resume() loop.
             fut: asyncio.Future[object] | None = task._fut_waiter  # type: ignore[attr-defined]
@@ -758,10 +758,9 @@ class WorkflowOrchestratorContext:
                 )
             except BaseException as ex:
                 if self.resume_exception is not None:
-                    # If the body surfaced the error itself, keep its
-                    # traceback.
-                    if type(ex) is type(self.resume_exception):
-                        raise
+                    # Since resume_exception actually got raised on a
+                    # future, hopefully it has picked up a useful
+                    # traceback!
                     raise self.resume_exception from None
                 # Turn suspended into a None return regardless of what the
                 # task actually did with it.
