@@ -228,6 +228,12 @@ class HookEvent(Generic[T]):
 
         return await ctx.run_hook(correlation_id=self._correlation_id)
 
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.dispose()
+
     def dispose(self) -> None:
         if self._disposed:
             return
