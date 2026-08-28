@@ -131,7 +131,7 @@ class Approval(BaseHook):
 @app.workflow
 async def wait_for_approval() -> bool:
     approval = await Approval.wait()
-    return bool(approval and approval.approved)
+    return approval.approved
 ```
 
 `BaseHook` supports dataclasses and Pydantic models for external resume events.
@@ -142,7 +142,7 @@ Pass `metadata` to record data on the hook itself, for whoever resumes it:
 @app.workflow
 async def wait_for_approval(order_id: str) -> bool:
     approval = await Approval.wait(token=f"order:{order_id}", metadata={"order": order_id})
-    return bool(approval and approval.approved)
+    return approval.approved
 ```
 
 Metadata is written once, when the hook is registered, and is not part of the

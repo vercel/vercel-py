@@ -15,6 +15,7 @@ from vercel._internal.core.polyfills import Self
 
 from . import py_sandbox, signature_codec, world as w
 from .duration import DurationParam
+from .errors import HookDisposedError
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -206,14 +207,14 @@ class HookEvent(Generic[T]):
         self._token = token
         self._disposed = False
 
-    def __await__(self) -> Generator[Any, None, T | None]:
-        async def next_or_none() -> T | None:
+    def __await__(self) -> Generator[Any, None, T]:
+        async def next_or_raise() -> T:
             try:
                 return await self.__anext__()
             except StopAsyncIteration:
-                return None
+                raise HookDisposedError(self._token) from None
 
-        return next_or_none().__await__()
+        return next_or_raise().__await__()
 
     def __aiter__(self) -> AsyncIterator[T]:
         return self
