@@ -332,6 +332,55 @@ async def test_fork_sandbox_encodes_source_query_and_overrides() -> None:
     }
 
 
+async def test_private_parameters_are_forwarded_to_sandbox_api() -> None:
+    response = {
+        "sandbox": {
+            "name": "preview",
+            "currentSessionId": "sbx_123",
+            "status": "running",
+        },
+        "session": {
+            "id": "sbx_123",
+            "sourceSandboxName": "preview",
+            "projectId": "prj_123",
+            "status": "running",
+        },
+    }
+    transport = RecordingJsonTransport(response)
+    client = _sandbox_client(transport)
+
+    await client.create_sandbox(private_parameters={"__networkId": "network_123"})
+
+    assert transport.request is not None
+    body = transport.request[4]
+    assert isinstance(body, JSONBody)
+    assert body.data["__networkId"] == "network_123"
+
+    await client.fork_sandbox(
+        source_sandbox="preview",
+        private_parameters={"__privateFeature": {"enabled": True}},
+    )
+
+    assert transport.request is not None
+    body = transport.request[4]
+    assert isinstance(body, JSONBody)
+    assert body.data["__privateFeature"] == {"enabled": True}
+
+    await client.get_sandbox(
+        name="preview",
+        private_parameters={"__includeSystemRoutes": True},
+    )
+
+    assert transport.request is not None
+    params = transport.request[3]
+    assert params == {
+        "teamId": "team_123",
+        "projectId": "prj_123",
+        "resume": "false",
+        "__includeSystemRoutes": True,
+    }
+
+
 async def test_stop_runtime_session_retains_sparse_sandbox_metadata() -> None:
     client = _sandbox_client(
         JsonTransport(

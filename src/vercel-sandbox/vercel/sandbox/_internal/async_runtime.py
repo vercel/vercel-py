@@ -5,7 +5,7 @@ import subprocess
 import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
 from typing import Any, Literal, TextIO, overload
@@ -39,11 +39,13 @@ from vercel.sandbox._internal.filesystem_handle_core import (
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
+    NO_PRIVATE_PARAMETERS,
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
     FailoverRegionsInput,
     NetworkPolicy,
+    PrivateSandboxParameters,
     ProcessLog,
     SandboxQuery,
     SandboxResources,
@@ -1427,6 +1429,9 @@ class _CreateSandboxParams:
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
+    private_parameters: PrivateSandboxParameters = field(
+        default_factory=lambda: NO_PRIVATE_PARAMETERS
+    )
 
 
 class CreateSandboxOperation:
@@ -1475,6 +1480,7 @@ class CreateSandboxOperation:
             snapshot_retention=self._params.snapshot_retention,
             region=self._params.region,
             failover_regions=self._params.failover_regions,
+            private_parameters=self._params.private_parameters,
         )
 
     def __await__(self) -> Generator[Any, None, Sandbox]:
@@ -1523,6 +1529,9 @@ class _ForkSandboxParams:
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
     failover_regions: tuple[str, ...] | None = None
+    private_parameters: PrivateSandboxParameters = field(
+        default_factory=lambda: NO_PRIVATE_PARAMETERS
+    )
 
 
 class ForkSandboxOperation:
@@ -1570,6 +1579,7 @@ class ForkSandboxOperation:
             snapshot_retention=self._params.snapshot_retention,
             region=self._params.region,
             failover_regions=self._params.failover_regions,
+            private_parameters=self._params.private_parameters,
         )
 
     def __await__(self) -> Generator[Any, None, Sandbox]:
@@ -1606,6 +1616,9 @@ class _ResumeSandboxParams:
     name: str
     project_id: str | None = None
     include_system_routes: bool | None = None
+    private_parameters: PrivateSandboxParameters = field(
+        default_factory=lambda: NO_PRIVATE_PARAMETERS
+    )
 
 
 class ResumeSandboxOperation:
@@ -1635,6 +1648,7 @@ class ResumeSandboxOperation:
             name=self._params.name,
             project_id=self._params.project_id,
             include_system_routes=self._params.include_system_routes,
+            private_parameters=self._params.private_parameters,
         )
 
     def __await__(self) -> Generator[Any, None, Sandbox]:
@@ -1722,6 +1736,7 @@ def create_sandbox_operation(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> CreateSandboxOperation:
     return CreateSandboxOperation(
         service=service,
@@ -1741,6 +1756,7 @@ def create_sandbox_operation(
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=normalize_failover_regions(failover_regions),
+            private_parameters=private_parameters,
         ),
         destroy=destroy,
     )
@@ -1765,6 +1781,7 @@ def fork_sandbox_operation(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> ForkSandboxOperation:
     return ForkSandboxOperation(
         service=service,
@@ -1784,6 +1801,7 @@ def fork_sandbox_operation(
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=normalize_failover_regions(failover_regions),
+            private_parameters=private_parameters,
         ),
         destroy=destroy,
     )
@@ -1796,6 +1814,7 @@ async def get_sandbox(
     project_id: str | None = None,
     resume: bool = False,
     include_system_routes: bool | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> Sandbox:
     return Sandbox(
         payload=await service.get_sandbox(
@@ -1803,6 +1822,7 @@ async def get_sandbox(
             project_id=project_id,
             resume=resume,
             include_system_routes=include_system_routes,
+            private_parameters=private_parameters,
         ),
         service=service,
         include_system_routes=include_system_routes,
@@ -1829,6 +1849,7 @@ async def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[Sandbox, bool]:
     try:
         state, created = await service.get_or_create_sandbox(
@@ -1849,6 +1870,7 @@ async def get_or_create_sandbox(
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=normalize_failover_regions(failover_regions),
+            private_parameters=private_parameters,
         )
         return (
             Sandbox(
@@ -1875,12 +1897,14 @@ async def resume_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> Sandbox:
     return Sandbox(
         payload=await service.resume_sandbox(
             name=name,
             project_id=project_id,
             include_system_routes=include_system_routes,
+            private_parameters=private_parameters,
         ),
         service=service,
         include_system_routes=include_system_routes,
@@ -1893,6 +1917,7 @@ def resume_sandbox_operation(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> ResumeSandboxOperation:
     return ResumeSandboxOperation(
         service=service,
@@ -1900,6 +1925,7 @@ def resume_sandbox_operation(
             name=name,
             project_id=project_id,
             include_system_routes=include_system_routes,
+            private_parameters=private_parameters,
         ),
     )
 
