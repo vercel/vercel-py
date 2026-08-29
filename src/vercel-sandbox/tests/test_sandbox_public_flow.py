@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
-from threading import Event
+from threading import Condition, Event
 from typing import Any
 
 import anyio
@@ -3579,9 +3579,18 @@ async def test_async_cancellation_with_cleanup_failure_warns_structured_error(
 
 
 @respx.mock
-def test_sync_session_acquisition_shares_implicit_resume(mock_env_clear: None) -> None:
+def test_sync_session_acquisition_shares_implicit_resume(
+    mock_env_clear: None,
+) -> None:
     resume_started = Event()
+    acquire_joined = Event()
     release_resume = Event()
+
+    class ObservedCondition(Condition):
+        def wait(self, timeout: float | None = None) -> bool:
+            acquire_joined.set()
+            return super().wait(timeout)
+
     respx.get("https://sandbox.test/v2/sandboxes/preview", params={"resume": "false"}).mock(
         return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
     )
@@ -3606,10 +3615,12 @@ def test_sync_session_acquisition_shares_implicit_resume(mock_env_clear: None) -
 
     with session(service_options=_session_options()):
         box = sandbox_sync.get_sandbox(name="preview")
+        box._recovery_condition = ObservedCondition()
         with ThreadPoolExecutor(max_workers=2) as executor:
             implicit = executor.submit(box.query_processes)
             assert resume_started.wait(timeout=5)
             explicit = executor.submit(box.session)
+            assert acquire_joined.wait(timeout=5)
             release_resume.set()
             assert implicit.result(timeout=5) == []
             acquired = explicit.result(timeout=5)
