@@ -7,7 +7,7 @@ import functools
 import inspect
 import random as _random
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator
-from typing import Any, Generic, ParamSpec, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
 
 import pydantic
 
@@ -15,6 +15,9 @@ from vercel._internal.core.polyfills import Self
 
 from . import py_sandbox, signature_codec, world as w
 from .duration import DurationParam
+
+if TYPE_CHECKING:
+    from .runtime import Run
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -227,6 +230,22 @@ class HookEvent(Generic[T]):
             raise RuntimeError("cannot iterate HookEvent outside workflow") from None
 
         return await ctx.run_hook(correlation_id=self._correlation_id)
+
+    async def get_conflict(self) -> Run[Any] | None:
+        """Return the run already using this hook's token, if there is one.
+
+        Awaiting this method commits the hook registration without waiting for
+        payload data. A successful registration returns ``None``; a conflict
+        returns a handle for the run that owns the token.
+        """
+        from . import runtime
+
+        try:
+            ctx = runtime.WorkflowOrchestratorContext.current()
+        except LookupError:
+            raise RuntimeError("cannot call get_conflict() outside workflow") from None
+
+        return await ctx.run_hook_conflict(correlation_id=self._correlation_id)
 
     def dispose(self) -> None:
         if self._disposed:

@@ -804,6 +804,10 @@ class HookDisposedEvent(BaseEvent):
 
 class HookConflictEventData(BaseModel):
     token: str
+    conflicting_run_id: str | None = pydantic.Field(
+        default=None,
+        alias="conflictingRunId",
+    )
 
 
 class HookConflictEvent(BaseEvent):
