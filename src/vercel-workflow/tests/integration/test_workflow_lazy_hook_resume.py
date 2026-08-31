@@ -40,6 +40,7 @@ RUN_DEADLINE_SECONDS = 30
 TOKEN = "resume-token"
 FINALLY_TOKEN = "finally-resume-token"
 FINALLY_STEP_TOKEN = "finally-step-resume-token"
+SCOPED_TOKEN = "scoped-resume-token"
 CANCELLED_ERROR_TOKEN = "cancelled-error-token"
 REPLACED_CANCELLED_ERROR_TOKEN = "replaced-cancelled-error-token"
 
@@ -97,6 +98,16 @@ async def receive_one_with_finally_step() -> int:
         return payload.n
     finally:
         await double(n=21)
+
+
+@registry.workflow
+async def receive_one_scoped() -> int:
+    """The step after the block matters: it suspends the run again, so the
+    disposal is flushed durably rather than absorbed by run completion."""
+    async with Ping.wait(token=SCOPED_TOKEN) as hook:
+        payload = await hook
+    assert payload is not None and payload.n is not None
+    return await double(n=payload.n)
 
 
 @registry.workflow
@@ -347,6 +358,20 @@ async def test_a_step_in_finally_runs_after_the_hook_resumes(tmp_path, monkeypat
 
         assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
         assert (await event_types(world, run.run_id)).count("step_completed") == 1
+
+
+async def test_exiting_an_async_with_block_disposes_the_hook(tmp_path, monkeypatch) -> None:
+    """`async with SomeHook.wait(...)` is the try/finally-dispose pattern above:
+    suspending inside the block leaves the hook resumable (the resume landing at
+    all proves that), and leaving it writes `hook_disposed`."""
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(receive_one_scoped)
+        hook = await wait_for_hook(world, SCOPED_TOKEN)
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 14
+        assert "hook_disposed" in await event_types(world, run.run_id)
 
 
 async def test_catching_cancelled_error_cannot_complete_a_suspended_workflow(
