@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.8.1 - 2026-08-26
+## 0.8.1 - 2026-08-31
+
+### Bug Fixes
+
+- Force embedded development servers to exit when graceful shutdown stalls. (#351)
 
 ### Documentation
 

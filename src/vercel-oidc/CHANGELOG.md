@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1 - 2026-08-31
+
+- Update dependencies.
+
 ## 0.8.0 - 2026-08-07
 
 ### Features
