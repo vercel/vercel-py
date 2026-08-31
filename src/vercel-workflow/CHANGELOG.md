@@ -4,6 +4,8 @@
 
 ### Breaking Changes
 
+- Make `await hook` never return `None`
+- Raises a new `HookDisposedError` instead of returning `None` when the hook has been disposed. It is now typed to return `T` instead of `T | None`. `async for` over a hook will stop iterating on disposal, still.
 - Make sleep() and retry delays treat numbers as seconds, not ms (#346)
 - This matches Python standard library APIs. (#346)
 - Use type annotations on workflows and step to allow passing Pydantic models and dataclasses. (#317)
@@ -16,6 +18,8 @@
 - This enables use of `asyncio.sleep()` as well as `asyncio.timeout` and the `timeout` parameter of `asyncio.wait_for`. (#343)
 - `get_workflow_metadata()` returns the current run's `WorkflowInfo` (run id, workflow name, start time, deployment URL, and feature flags), callable from a workflow body or a step body — mirroring the JS SDK's `getWorkflowMetadata()`. (#320)
 - One current limitation is that `started_at` is `None` from inside a step. (#320)
+- Make `HookEvent` an async context manager
+- This matches TS, which supports `using`. ``` # disposes the hook on block exit async with SomeHook.wait(...) as hook: res = await hook ```
 - `BaseHook.wait()` accepts `metadata` to record on the hook, and `get_hook_by_token()` reads it back for a resumer. (#301)
 - A step can raise `RetryableError` to control when its next attempt runs. (#302)
 - Accept `specVersion` 7 sealed noop event logs. (#319)

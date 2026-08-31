@@ -37,7 +37,7 @@ class Approval(BaseHook, pydantic.BaseModel):
 async def approvals() -> str:
     """Module level, because the sandbox re-imports the body by qualname."""
     approval = await Approval.wait(token=TOKEN, metadata=METADATA)
-    return approval.decision if approval is not None else "disposed"
+    return approval.decision
 
 
 class _RecordingLocalWorld(local_mod.LocalWorld):

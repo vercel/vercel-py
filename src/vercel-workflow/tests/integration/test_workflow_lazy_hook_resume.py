@@ -33,6 +33,7 @@ import pytest
 
 import vercel.queue as vqs
 from vercel.queue.testing import clear_subscriptions
+from vercel.workflow import WorkflowRunFailedError
 from vercel.workflow._internal import core, runtime, serialization as ser, ulid, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -40,6 +41,7 @@ RUN_DEADLINE_SECONDS = 30
 TOKEN = "resume-token"
 FINALLY_TOKEN = "finally-resume-token"
 FINALLY_STEP_TOKEN = "finally-step-resume-token"
+SCOPED_TOKEN = "scoped-resume-token"
 CANCELLED_ERROR_TOKEN = "cancelled-error-token"
 REPLACED_CANCELLED_ERROR_TOKEN = "replaced-cancelled-error-token"
 
@@ -82,7 +84,7 @@ async def receive_one_with_finally() -> int:
     hook = Ping.wait(token=FINALLY_TOKEN)
     try:
         payload = await hook
-        assert payload is not None and payload.n is not None
+        assert payload.n is not None
         return payload.n
     finally:
         hook.dispose()
@@ -93,10 +95,27 @@ async def receive_one_with_finally_step() -> int:
     hook = Ping.wait(token=FINALLY_STEP_TOKEN)
     try:
         payload = await hook
-        assert payload is not None and payload.n is not None
+        assert payload.n is not None
         return payload.n
     finally:
         await double(n=21)
+
+
+@registry.workflow
+async def receive_one_scoped() -> int:
+    """The step after the block matters: it suspends the run again, so the
+    disposal is flushed durably rather than absorbed by run completion."""
+    async with Ping.wait(token=SCOPED_TOKEN) as hook:
+        payload = await hook
+    assert payload is not None and payload.n is not None
+    return await double(n=payload.n)
+
+
+@registry.workflow
+async def await_after_dispose() -> None:
+    hook = Ping.wait(token="await-after-dispose")
+    hook.dispose()
+    await hook
 
 
 @registry.workflow
@@ -106,7 +125,7 @@ async def catch_cancelled_error() -> int:
         payload = await hook
     except asyncio.CancelledError:
         return -1
-    assert payload is not None and payload.n is not None
+    assert payload.n is not None
     return payload.n
 
 
@@ -117,7 +136,7 @@ async def replace_cancelled_error() -> int:
         payload = await hook
     except asyncio.CancelledError:
         raise RuntimeError("replaced workflow cancellation") from None
-    assert payload is not None and payload.n is not None
+    assert payload.n is not None
     return payload.n
 
 
@@ -125,20 +144,20 @@ async def replace_cancelled_error() -> int:
 async def wait_for_abab() -> list[int]:
     hook_a = Ping.wait(token="a")
     first_a = await hook_a
-    assert first_a is not None and first_a.n is not None
+    assert first_a.n is not None
 
     hook_b = Ping.wait(token="b")
     first_b = await hook_b
-    assert first_b is not None and first_b.n is not None
+    assert first_b.n is not None
 
     hook_c = Ping.wait(token="c")
     c = await hook_c
-    assert c is not None and c.n is not None
+    assert c.n is not None
 
     second_a = await hook_a
-    assert second_a is not None and second_a.n is not None
+    assert second_a.n is not None
     second_b = await hook_b
-    assert second_b is not None and second_b.n is not None
+    assert second_b.n is not None
     return [first_a.n, first_b.n, c.n, second_a.n, second_b.n]
 
 
@@ -347,6 +366,32 @@ async def test_a_step_in_finally_runs_after_the_hook_resumes(tmp_path, monkeypat
 
         assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 7
         assert (await event_types(world, run.run_id)).count("step_completed") == 1
+
+
+async def test_exiting_an_async_with_block_disposes_the_hook(tmp_path, monkeypatch) -> None:
+    """`async with SomeHook.wait(...)` is the try/finally-dispose pattern above:
+    suspending inside the block leaves the hook resumable (the resume landing at
+    all proves that), and leaving it writes `hook_disposed`."""
+    async with running_world(tmp_path, monkeypatch) as world:
+        run = await runtime.start(receive_one_scoped)
+        hook = await wait_for_hook(world, SCOPED_TOKEN)
+
+        await publish(world, Resume.of(hook, {"n": 7}))
+
+        assert await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS) == 14
+        assert "hook_disposed" in await event_types(world, run.run_id)
+
+
+async def test_awaiting_a_disposed_hook_fails_the_run(tmp_path, monkeypatch) -> None:
+    """No payload can ever arrive, so the await could never complete: it raises
+    HookDisposedError instead of stalling the run forever (which is what
+    upstream TypeScript does with this shape)."""
+    async with running_world(tmp_path, monkeypatch):
+        run = await runtime.start(await_after_dispose)
+
+        with pytest.raises(WorkflowRunFailedError) as exc_info:
+            await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
+        assert 'Hook token "await-after-dispose" has been disposed' in str(exc_info.value)
 
 
 async def test_catching_cancelled_error_cannot_complete_a_suspended_workflow(
