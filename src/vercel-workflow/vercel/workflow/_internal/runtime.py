@@ -1,3 +1,4 @@
+import abc
 import asyncio
 import contextlib
 import contextvars
@@ -96,29 +97,39 @@ def classify_run_error(error: Exception) -> str:
 
 
 @dataclasses.dataclass(kw_only=True)
-class BaseSuspension:
+class BaseSuspension(abc.ABC):
     correlation_id: str
     has_created_event: bool = False
 
+    @abc.abstractmethod
+    def fail(self, exc: Exception) -> None:
+        """Resume this suspension by raising ``exc`` in its awaiter."""
+
 
 @dataclasses.dataclass(kw_only=True)
-class Suspension(BaseSuspension, Generic[T]):
-    step: core.Step[Any, T]
-    input: bytes
+class FutureSuspension(BaseSuspension, Generic[T]):
     future: asyncio.Future[T] = dataclasses.field(default_factory=asyncio.Future)
 
+    def fail(self, exc: Exception) -> None:
+        if not self.future.done():
+            self.future.set_exception(exc)
+
 
 @dataclasses.dataclass(kw_only=True)
-class Wait(BaseSuspension):
+class Suspension(FutureSuspension[T], Generic[T]):
+    step: core.Step[Any, T]
+    input: bytes
+
+
+@dataclasses.dataclass(kw_only=True)
+class Wait(FutureSuspension[None]):
     resume_at: datetime
-    future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
 
 
 @dataclasses.dataclass(kw_only=True)
-class Attributes(BaseSuspension):
+class Attributes(FutureSuspension[None]):
     changes: list[w.AttributeChange]
     allow_reserved: bool = False
-    future: asyncio.Future[None] = dataclasses.field(default_factory=asyncio.Future)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -126,9 +137,25 @@ class Hook(BaseSuspension, Generic[T]):
     token: str
     disposed: bool = False
     has_dispose_event: bool = False
+    has_conflict_awaiter: bool = False
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
+    conflict_futures: deque[asyncio.Future["Run[Any] | None"]] = dataclasses.field(
+        default_factory=deque
+    )
+    conflict_error: errors.HookConflictError | None = None
+    conflicting_run: "Run[Any] | None" = None
     hook_cls: type[T]
     metadata: bytes | None = None
+
+    def fail(self, exc: Exception) -> None:
+        while self.futures:
+            future = self.futures.popleft()
+            if not future.done():
+                future.set_exception(exc)
+        while self.conflict_futures:
+            conflict_future = self.conflict_futures.popleft()
+            if not conflict_future.done():
+                conflict_future.set_exception(exc)
 
     def set_result(self, raw_data: Any) -> None:
         res: T
@@ -856,10 +883,33 @@ class WorkflowOrchestratorContext:
         hook = self.hooks[correlation_id]
         if hook.disposed:
             raise StopAsyncIteration
+        if hook.conflict_error is not None:
+            raise hook.conflict_error
         self.suspensions[hook.correlation_id] = hook
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
         return fut
+
+    def run_hook_conflict(self, *, correlation_id: str) -> asyncio.Future["Run[Any] | None"]:
+        hook = self.hooks[correlation_id]
+        if hook.has_created_event:
+            future = asyncio.Future[Run[Any] | None]()
+            future.set_result(None)
+            return future
+        if hook.conflict_error is not None:
+            if hook.conflicting_run is not None:
+                future = asyncio.Future[Run[Any] | None]()
+                future.set_result(hook.conflicting_run)
+                return future
+            raise hook.conflict_error
+        if hook.disposed:
+            raise RuntimeError("cannot call get_conflict() on a disposed hook")
+
+        hook.has_conflict_awaiter = True
+        self.suspensions[hook.correlation_id] = hook
+        future = asyncio.Future[Run[Any] | None]()
+        hook.conflict_futures.append(future)
+        return future
 
     def dispose_hook(self, *, correlation_id: str) -> None:
         hook = self.hooks[correlation_id]
@@ -870,16 +920,6 @@ class WorkflowOrchestratorContext:
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
 
-    def _fail_suspension(self, sus: BaseSuspension, exc: Exception) -> None:
-        """Surface ``exc`` on whichever future(s) a suspension is awaiting."""
-        if isinstance(sus, Hook):
-            while sus.futures:
-                fut = sus.futures.popleft()
-                if not fut.done():
-                    fut.set_exception(exc)
-        elif isinstance(sus, (Suspension, Wait, Attributes)) and not sus.future.done():
-            sus.future.set_exception(exc)
-
     def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
 
@@ -889,7 +929,7 @@ class WorkflowOrchestratorContext:
         also stashed for ``run_workflow`` to raise, and the run is suspended
         so nothing else executes.
         """
-        self._fail_suspension(sus, exc)
+        sus.fail(exc)
         self.resume_exception = exc
         self.suspend()
 
@@ -951,6 +991,7 @@ class WorkflowOrchestratorContext:
                     case (
                         w.StepCreatedEvent(correlation_id=str() as slot_id)
                         | w.HookCreatedEvent(correlation_id=str() as slot_id)
+                        | w.HookConflictEvent(correlation_id=str() as slot_id)
                         | w.WaitCreatedEvent(correlation_id=str() as slot_id)
                         | w.AttrSetEvent(correlation_id=str() as slot_id)
                     ):
@@ -1013,7 +1054,16 @@ class WorkflowOrchestratorContext:
                     return
                 sus.has_created_event = True
 
-            case w.HookCreatedEvent() | w.WaitCreatedEvent():
+            case w.HookCreatedEvent():
+                hook = self.suspensions[event.correlation_id]
+                assert isinstance(hook, Hook)
+                hook.has_created_event = True
+                while hook.conflict_futures:
+                    future = hook.conflict_futures.popleft()
+                    if not future.cancelled():
+                        future.set_result(None)
+
+            case w.WaitCreatedEvent():
                 self.suspensions[event.correlation_id].has_created_event = True
 
             case w.AttrSetEvent(
@@ -1068,14 +1118,35 @@ class WorkflowOrchestratorContext:
                 if not sus.future.cancelled():
                     sus.future.set_exception(failure)
 
-            case w.HookConflictEvent(event_data=w.HookConflictEventData(token=token)):
-                hook = self.suspensions.pop(event.correlation_id, None)
-                if hook is not None:
-                    assert isinstance(hook, Hook)
-                    while hook.futures:
-                        future = hook.futures.popleft()
+            case w.HookConflictEvent(
+                event_data=w.HookConflictEventData(
+                    token=token,
+                    conflicting_run_id=conflicting_run_id,
+                )
+            ):
+                conflicting_hook = self.suspensions.get(event.correlation_id)
+                if conflicting_hook is not None:
+                    self.suspensions.pop(event.correlation_id)
+                    assert isinstance(conflicting_hook, Hook)
+                    conflict_error = errors.HookConflictError(token, conflicting_run_id)
+                    conflicting_hook.conflict_error = conflict_error
+                    conflicting_hook.conflicting_run = (
+                        Run(conflicting_run_id) if conflicting_run_id else None
+                    )
+                    while conflicting_hook.futures:
+                        future = conflicting_hook.futures.popleft()
                         if not future.cancelled():
-                            future.set_exception(errors.HookConflictError(token))
+                            future.set_exception(conflict_error)
+                    while conflicting_hook.conflict_futures:
+                        future = conflicting_hook.conflict_futures.popleft()
+                        if future.cancelled():
+                            continue
+                        if conflicting_hook.conflicting_run is not None:
+                            future.set_result(conflicting_hook.conflicting_run)
+                        else:
+                            # Older conflict events do not identify the owning run, so preserve the
+                            # previous HookConflictError behavior when a Run cannot be constructed.
+                            future.set_exception(conflict_error)
 
             case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
                 hook = self.suspensions[event.correlation_id]
@@ -1565,9 +1636,13 @@ async def _workflow_replay_pass(
                         )
                     except w.EntityConflictError:
                         logger.debug(f"Workflow hook {s.correlation_id!r} has already been created")
+                        if s.has_conflict_awaiter:
+                            immediate_replay_reasons.add("hook_created")
                     else:
                         if isinstance(result.event, w.HookConflictEvent):
                             immediate_replay_reasons.add("hook_conflict")
+                        elif s.has_conflict_awaiter:
+                            immediate_replay_reasons.add("hook_created")
 
                 tg.start_soon(create_hook)
                 events_created = True

@@ -1,8 +1,8 @@
-"""LocalWorld hook-token conflict semantics.
+"""Hook-token conflict behavior across worlds and workflow replay.
 
-A hook's token is claimed exclusively the first time its ``hook_created`` event
-is issued. A second issue can mean two different things, and the world must tell
-them apart:
+In LocalWorld, a hook's token is claimed exclusively the first time its
+``hook_created`` event is issued. A second issue can mean two different things,
+and the world must tell them apart:
 
 - the *same* hook (same correlation id) re-claiming its token -- a replay
   re-issue or an overlapping/retried invocation of the same run. This is
@@ -13,12 +13,15 @@ them apart:
 
 The handler tests also pin the replay boundary around that conflict: a returned
 ``hook_conflict`` replays immediately, while a successful registration does not.
+The VercelWorld tests pin the corresponding lazy event-result boundary: a hook
+conflict must be materialized for the runtime to inspect, while successful lazy
+results stay opaque.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -26,7 +29,12 @@ from vercel.workflow import HookConflictError, WorkflowRunFailedError, sleep
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
+if TYPE_CHECKING:
+    from vercel.workflow._internal.worlds.vercel import VercelWorld
+
 RUN_ID = "wrun_test"
+VERCEL_RUN_ID = "wrun_loser"
+OWNER_RUN_ID = "wrun_owner"
 TOKEN = "shared-token"
 
 registry = core.Workflows(as_vercel_job=False)
@@ -42,6 +50,30 @@ async def wait_for_claim() -> str:
     return "received"
 
 
+@registry.workflow
+async def register_claim() -> dict[str, str | None]:
+    conflict = await Claim.wait(token=TOKEN).get_conflict()
+    return {"conflicting_run_id": None if conflict is None else conflict.run_id}
+
+
+@registry.workflow
+async def inspect_claim_conflict() -> dict[str, str | bool]:
+    hook = Claim.wait(token=TOKEN)
+    first = await hook.get_conflict()
+    second = await hook.get_conflict()
+    assert first is not None
+
+    try:
+        await hook
+    except HookConflictError as error:
+        return {
+            "conflicting_run_id": first.run_id,
+            "same_run": first is second,
+            "error_run_id": error.conflicting_run_id or "",
+        }
+    raise AssertionError("awaiting a conflicting hook should fail")
+
+
 @registry.step
 async def pending_step() -> str:
     return "done"
@@ -50,6 +82,18 @@ async def pending_step() -> str:
 @registry.workflow
 async def wait_for_step() -> str:
     return await pending_step()
+
+
+@registry.workflow
+async def register_claim_with_step() -> dict[str, str | None]:
+    conflict, step_result = await asyncio.gather(
+        Claim.wait(token=TOKEN).get_conflict(),
+        pending_step(),
+    )
+    return {
+        "conflicting_run_id": None if conflict is None else conflict.run_id,
+        "step_result": step_result,
+    }
 
 
 @registry.workflow
@@ -86,6 +130,20 @@ class RecordingLocalWorld(local_mod.LocalWorld):
 def _world(tmp_path, monkeypatch) -> RecordingLocalWorld:
     monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
     return RecordingLocalWorld()
+
+
+def _vercel_route(world: VercelWorld, response: object):
+    import cbor2
+    import httpx
+    import respx
+
+    return respx.post(f"{world._base_url}/v3/runs/{VERCEL_RUN_ID}/events").mock(
+        return_value=httpx.Response(
+            200,
+            content=cbor2.dumps(response),
+            headers={"content-type": "application/cbor"},
+        )
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -145,6 +203,17 @@ async def test_different_hook_same_token_conflicts(tmp_path, monkeypatch) -> Non
 
     assert isinstance(result.event, w.HookConflictEvent)
     assert result.event.event_data.token == TOKEN
+    assert result.event.event_data.conflicting_run_id == RUN_ID
+
+
+def test_hook_conflict_owner_id_round_trips_on_the_wire() -> None:
+    data = w.HookConflictEventData.from_wire({"token": TOKEN, "conflictingRunId": "wrun_owner"})
+
+    assert data.conflicting_run_id == "wrun_owner"
+    assert data.model_dump() == {
+        "token": TOKEN,
+        "conflictingRunId": "wrun_owner",
+    }
 
 
 async def test_hook_conflict_replays_and_fails_the_losing_run(tmp_path, monkeypatch) -> None:
@@ -173,7 +242,127 @@ async def test_hook_conflict_replays_and_fails_the_losing_run(tmp_path, monkeypa
     cause = exc_info.value.__cause__
     assert isinstance(cause, HookConflictError)
     assert cause.token == TOKEN
-    assert cause.conflicting_run_id is None
+    assert cause.conflicting_run_id == winner
+
+
+async def test_get_conflict_registers_without_waiting_for_payload(tmp_path, monkeypatch) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world, register_claim.workflow_id)
+
+    await _invoke(run_id, register_claim.workflow_id)
+
+    assert world.event_list_calls == 2
+    assert (await world.runs_get(run_id)).status == "completed"
+    assert [event.event_type for event in (await world.events_list(run_id)).data] == [
+        "run_created",
+        "run_started",
+        "hook_created",
+        "run_completed",
+    ]
+    assert await runtime.Run(run_id).return_value() == {"conflicting_run_id": None}
+
+
+async def test_get_conflict_returns_the_owner_but_awaiting_payload_fails(
+    tmp_path, monkeypatch
+) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    winner = await _create_run(world)
+    loser = await _create_run(world, inspect_claim_conflict.workflow_id)
+
+    await _invoke(winner)
+    await _invoke(loser, inspect_claim_conflict.workflow_id)
+
+    assert (await world.runs_get(loser)).status == "completed"
+    assert await runtime.Run(loser).return_value() == {
+        "conflicting_run_id": winner,
+        "same_run": True,
+        "error_run_id": winner,
+    }
+    assert [event.event_type for event in (await world.events_list(loser)).data] == [
+        "run_created",
+        "run_started",
+        "hook_conflict",
+        "run_completed",
+    ]
+
+
+async def test_get_conflict_rejects_an_old_event_without_an_owner() -> None:
+    context = runtime.WorkflowOrchestratorContext(
+        [],
+        run_id=RUN_ID,
+        seed="seed",
+        started_at=0,
+        registry=registry,
+    )
+    token = context._ctx.set(context)
+    try:
+        hook_event = context.create_hook(TOKEN, Claim)
+        context.events.append(
+            w.HookConflictEvent(
+                correlation_id=hook_event._correlation_id,
+                event_data=w.HookConflictEventData(token=TOKEN),
+            )
+        )
+        pending = asyncio.create_task(hook_event.get_conflict())
+        await asyncio.sleep(0)
+        context.resume()
+
+        with pytest.raises(HookConflictError) as exc_info:
+            await pending
+        assert exc_info.value.conflicting_run_id is None
+        with pytest.raises(HookConflictError):
+            await hook_event.get_conflict()
+        with pytest.raises(HookConflictError):
+            await hook_event
+    finally:
+        context._ctx.reset(token)
+
+
+async def test_get_conflict_rejects_a_disposed_unregistered_hook() -> None:
+    context = runtime.WorkflowOrchestratorContext(
+        [],
+        run_id=RUN_ID,
+        seed="seed",
+        started_at=0,
+        registry=registry,
+    )
+    token = context._ctx.set(context)
+    try:
+        hook_event = context.create_hook(TOKEN, Claim)
+        hook_event.dispose()
+
+        with pytest.raises(RuntimeError, match="disposed hook"):
+            await hook_event.get_conflict()
+        assert not context.suspensions
+    finally:
+        context._ctx.reset(token)
+
+
+async def test_get_conflict_continues_while_a_parallel_step_runs(tmp_path, monkeypatch) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world, register_claim_with_step.workflow_id)
+
+    await _invoke(run_id, register_claim_with_step.workflow_id)
+
+    assert world.event_list_calls == 2
+    assert (await world.runs_get(run_id)).status == "running"
+    assert len(world.queued) == 1
+    queued = world.queued[0][1]
+    assert isinstance(queued, w.WorkflowInvokePayload)
+    await runtime._execute_step(
+        queued,
+        queue_name=w.get_queue_name(register_claim_with_step.workflow_id),
+        registry=registry,
+    )
+    await _invoke(run_id, register_claim_with_step.workflow_id)
+
+    assert await runtime.Run(run_id).return_value() == {
+        "conflicting_run_id": None,
+        "step_result": "done",
+    }
 
 
 async def test_hook_conflict_replays_even_with_a_pending_wait(tmp_path, monkeypatch) -> None:
@@ -214,3 +403,63 @@ async def test_step_creation_waits_for_its_result_instead_of_replaying(
     queued = world.queued[0][1]
     assert isinstance(queued, w.WorkflowInvokePayload)
     assert queued.step_id is not None
+
+
+async def test_vercel_lazy_hook_conflict_result_is_returned_as_typed_event() -> None:
+    import cbor2
+    import respx
+
+    from vercel.workflow._internal.worlds.vercel import VercelWorld
+
+    with respx.mock:
+        world = VercelWorld(token="test-token")
+        route = _vercel_route(
+            world,
+            {
+                "event": {
+                    "eventType": "hook_conflict",
+                    "specVersion": 7,
+                    "correlationId": "hook_loser",
+                    "eventData": {
+                        "token": TOKEN,
+                        "conflictingRunId": OWNER_RUN_ID,
+                    },
+                }
+            },
+        )
+
+        result = await world.events_create(
+            VERCEL_RUN_ID,
+            w.HookCreatedEventData(token=TOKEN).into_event("hook_loser"),
+        )
+
+        request = cbor2.loads(route.calls.last.request.content)
+        assert request["remoteRefBehavior"] == "lazy"
+        assert isinstance(result.event, w.HookConflictEvent)
+        assert result.event.event_data.conflicting_run_id == OWNER_RUN_ID
+
+
+async def test_vercel_successful_lazy_hook_result_stays_opaque() -> None:
+    import respx
+
+    from vercel.workflow._internal.worlds.vercel import VercelWorld
+
+    with respx.mock:
+        world = VercelWorld(token="test-token")
+        event = {
+            "eventType": "hook_created",
+            "specVersion": 2,
+            "correlationId": "hook_loser",
+            "eventData": {
+                "token": TOKEN,
+                "metadata": {"_type": "RemoteRef", "_ref": "s3rf:payload"},
+            },
+        }
+        _vercel_route(world, {"event": event})
+
+        result = await world.events_create(
+            VERCEL_RUN_ID,
+            w.HookCreatedEventData(token=TOKEN).into_event("hook_loser"),
+        )
+
+        assert result.event == event

@@ -1145,7 +1145,10 @@ class LocalWorld(w.World):
                     )
                 conflict_event = w.HookConflictEvent(
                     correlation_id=data.correlation_id,
-                    event_data=w.HookConflictEventData(token=hook_data.token),
+                    event_data=w.HookConflictEventData(
+                        token=hook_data.token,
+                        conflicting_run_id=existing_claim["runId"],
+                    ),
                     server_props=w.ServerProps(
                         run_id=effective_run_id,
                         event_id=event_id,
