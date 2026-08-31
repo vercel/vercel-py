@@ -19,6 +19,7 @@ project that deploys needs no arguments here.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -232,7 +233,7 @@ def test_the_command_line_works_as_a_command_line(tmp_path) -> None:
         text=True,
         timeout=120,
         env={
-            "PATH": "/usr/bin:/bin",
+            **os.environ,
             "WORKFLOW_TARGET_WORLD": "local",
             "PYTHONPATH": str(tmp_path),
         },
