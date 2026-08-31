@@ -28,6 +28,21 @@ class HookConflictError(Exception):
         self.conflicting_run_id = conflicting_run_id
 
 
+class HookDisposedError(Exception):
+    """A hook awaited after the workflow disposed it.
+
+    Only a bare ``await hook`` raises this: no payload can ever arrive, so the
+    await could never complete. ``async for`` over the hook ends its iteration
+    at disposal instead.
+    """
+
+    token: str
+
+    def __init__(self, token: str) -> None:
+        super().__init__(f'Hook token "{token}" has been disposed')
+        self.token = token
+
+
 class RemoteError(Exception):
     """An error whose class is unavailable in Python."""
 

@@ -1,6 +1,7 @@
 from vercel.workflow._internal.errors import (
     FatalError,
     HookConflictError,
+    HookDisposedError,
     RemoteError,
     RetryableError,
     WorkflowRunFailedError,
@@ -20,6 +21,7 @@ __all__ = [
     "EntityConflictError",
     "FatalError",
     "HookConflictError",
+    "HookDisposedError",
     "HookNotFoundError",
     "RemoteError",
     "RetryableError",
