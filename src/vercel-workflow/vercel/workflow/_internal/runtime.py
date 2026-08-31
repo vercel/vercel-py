@@ -131,14 +131,16 @@ class Cancellation(BaseSuspension):
     """
 
     token: str
-    step: Suspension[Any]
+    step_id: str
     reason: str | None = None
     # Has a cancellation been requested ever? Prevents repeat cancellations
     # from being sent.
     requested: bool = False
 
     def fail(self, exc: Exception) -> None:
-        self.step.fail(exc)
+        # Cancellation suspensions have no direct awaiter. The orchestrator
+        # raises replay-divergence failures separately via ``resume_exception``.
+        pass
 
 
 class CallbackCancelFuture(asyncio.Future[T]):
@@ -874,13 +876,14 @@ class WorkflowOrchestratorContext:
         bound_args, bound_kwargs = step.bind_arguments(args, kwargs)
         dumped_args, dumped_kwargs = step.codec.dump_arguments(bound_args, bound_kwargs)
         input_data = ser.dehydrate(ser.step_arguments(dumped_args, dumped_kwargs))
-        sus = Suspension(correlation_id=f"step_{self.generate_ulid()}", step=step, input=input_data)
+        ulid = self.generate_ulid()
+        sus = Suspension(correlation_id=f"step_{ulid}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
         if step.cancellable:
             cancellation = Cancellation(
                 correlation_id=f"hook_{self.generate_ulid()}",
-                token=f"abrt_{_correlation_ulid(sus.correlation_id)}",
-                step=sus,
+                token=f"abrt_{ulid}",
+                step_id=sus.correlation_id,
             )
             sus.future = CallbackCancelFuture(
                 on_cancel=functools.partial(self._on_step_cancel, cancellation)
@@ -895,7 +898,7 @@ class WorkflowOrchestratorContext:
         when the run suspends and turned into a cancellation.
 
         We suppress the *actual* cancellation of the future, because
-        we anything waiting on the step to still wait until it has
+        we want anything waiting on the step to still wait until it has
         actually stopped (just like waiting on a task).
 
         If the loop is suspended, though, we aren't doing side effects
@@ -906,7 +909,7 @@ class WorkflowOrchestratorContext:
             return True
         if not cancellation.requested:
             cancellation.requested = True
-            cancellation.reason = str(msg) if msg else None
+            cancellation.reason = str(msg) if msg is not None else None
             self.suspensions[cancellation.correlation_id] = cancellation
         return False
 
@@ -1551,7 +1554,7 @@ async def _send_cancellation(world: w.World, run_id: str, cancellation: Cancella
     # Signal the running step first. A failure other than a direct
     # error from streams (because the stream is already closed) is an
     # actual failure, so that we fail and the run will get retried.
-    stream_name = _abort_stream_name(cancellation.step.correlation_id)
+    stream_name = _abort_stream_name(cancellation.step_id)
     try:
         await world.streams_write(run_id, stream_name, streams.encode_frame(payload))
         await world.streams_close(run_id, stream_name)
@@ -1704,8 +1707,6 @@ async def _workflow_replay_pass(
     except Exception as e:
         error_message = "".join(traceback.format_exception_only(type(e), e)).strip()
         logger.exception("[Workflows] '%s' - workflow run failed: %s", run_id, error_message)
-        # Before the terminal event, which would reject them; a failure here
-        # fails the delivery, so the whole pass is retried.
         await _send_cancellations(context)
         try:
             await world.events_create(
@@ -1719,8 +1720,9 @@ async def _workflow_replay_pass(
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
 
+    await _send_cancellations(context)
+
     if output is not None:
-        await _send_cancellations(context)
         try:
             await world.events_create(
                 run_id,
@@ -1729,8 +1731,6 @@ async def _workflow_replay_pass(
         except w.EntityConflictError:
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
-
-    await _send_cancellations(context)
 
     events_created = False
     immediate_replay_reasons: set[str] = set()
@@ -1930,7 +1930,7 @@ async def _run_cancellable_step(
                 except ser.SerializationError:
                     pass
                 else:
-                    if isinstance(data, dict) and data.get("reason"):
+                    if isinstance(data, dict) and data.get("reason") is not None:
                         reason = str(data["reason"])
                 break
         except Exception as error:
@@ -1953,7 +1953,9 @@ async def _run_cancellable_step(
             if not cancelled:
                 raise
 
-            step_error = errors.StepCancelledError(reason or "step cancelled by its workflow")
+            step_error = errors.StepCancelledError(
+                reason if reason is not None else "step cancelled by its workflow"
+            )
         except Exception as error:
             # Save the error to avoid ExceptionGroup wrapping
             step_error = error
