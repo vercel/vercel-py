@@ -1576,10 +1576,32 @@ async def _workflow_replay_pass(
             logger.warning(f"Workflow run {run_id} was already completed")
         return None
 
-    # Now that the workflow is fully suspended, we can create all pending events in parallel
     events_created = False
     immediate_replay_reasons: set[str] = set()
 
+    # A hook token is not released until its disposal event is durable. Flush
+    # disposals before creating new hooks so a workflow can reuse a token in the
+    # same suspension without conflicting with its own previous hook.
+    async with anyio.create_task_group() as tg:
+        for hook in context.hooks.values():
+            if hook.disposed and not hook.has_dispose_event:
+
+                async def dispose_hook(h=hook):
+                    try:
+                        await world.events_create(
+                            run_id,
+                            w.HookDisposedEvent(correlation_id=h.correlation_id),
+                        )
+                    except (w.EntityConflictError, w.HookNotFoundError):
+                        logger.debug(
+                            f"Workflow hook {h.correlation_id!r} has already been disposed"
+                        )
+
+                tg.start_soon(dispose_hook)
+                events_created = True
+
+    # Now that the workflow is fully suspended and old hook tokens have been
+    # released, create all pending events in parallel.
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
             if sus.has_created_event:
@@ -1664,23 +1686,6 @@ async def _workflow_replay_pass(
                     immediate_replay_reasons.add("attr_set")
 
                 tg.start_soon(set_attr)
-                events_created = True
-
-        for hook in context.hooks.values():
-            if hook.disposed and not hook.has_dispose_event:
-
-                async def dispose_hook(h=hook):
-                    try:
-                        await world.events_create(
-                            run_id,
-                            w.HookDisposedEvent(correlation_id=h.correlation_id),
-                        )
-                    except (w.EntityConflictError, w.HookNotFoundError):
-                        logger.debug(
-                            f"Workflow hook {h.correlation_id!r} has already been disposed"
-                        )
-
-                tg.start_soon(dispose_hook)
                 events_created = True
 
     if not context.suspensions and events_created:
