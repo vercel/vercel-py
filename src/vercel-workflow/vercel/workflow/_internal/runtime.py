@@ -1755,7 +1755,6 @@ async def _execute_step(
         raise ValueError(f"Step invocation for run '{req.run_id}' is missing 'stepId'")
     if req.step_name is None:
         raise ValueError(f"Step invocation for '{req.step_id}' is missing 'stepName'")
-    step = registry._get_step(req.step_name)
 
     # step_started validates state (terminal -> EntityConflictError, retryAfter
     # not reached -> TooEarlyError), increments the attempt, and returns the
@@ -1771,7 +1770,7 @@ async def _execute_step(
         logger.debug(
             "[Workflows] '%s' - step '%s' retryAfter not reached, deferring %ds",
             req.run_id,
-            step.name,
+            req.step_name,
             timeout_seconds,
         )
         return w.QueueContinuation(delay_seconds=timeout_seconds)
@@ -1797,6 +1796,27 @@ async def _execute_step(
     current_attempt = step_run.attempt
     if not step_run.started_at:
         raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
+
+    try:
+        step = registry._get_step(req.step_name)
+    except errors.StepNotRegisteredError as missing_error:
+        logger.error(
+            "[Workflows] '%s' - step '%s' is not registered, failing step",
+            req.run_id,
+            req.step_name,
+        )
+        await world.events_create(
+            req.run_id,
+            w.StepFailedEventData(error=ser.dehydrate_error(missing_error)).into_event(req.step_id),
+        )
+        await world.queue(
+            queue_name,
+            w.WorkflowInvokePayload(
+                run_id=req.run_id,
+                requested_at=datetime.now(UTC),
+            ),
+        )
+        return None
 
     # Check max retries AFTER step_started (the attempt was just incremented).
     # Use > here (not >=) because this guards re-invocation AFTER all attempts are used.

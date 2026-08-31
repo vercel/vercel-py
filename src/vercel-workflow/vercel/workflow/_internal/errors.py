@@ -15,6 +15,20 @@ class FatalError(Exception):
     fatal = True
 
 
+class StepNotRegisteredError(FatalError):
+    """A step function is missing from the current deployment."""
+
+    step_name: str
+
+    def __init__(self, step_name: str) -> None:
+        super().__init__(
+            f'Step "{step_name}" is not registered with this Workflows instance. '
+            "Ensure the module defining it is imported and registers the step "
+            "when this deployment starts."
+        )
+        self.step_name = step_name
+
+
 class HookConflictError(Exception):
     """A hook token already owned by another active workflow run."""
 

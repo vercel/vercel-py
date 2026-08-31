@@ -13,7 +13,7 @@ import pydantic
 
 from vercel._internal.core.polyfills import Self
 
-from . import py_sandbox, signature_codec, world as w
+from . import errors, py_sandbox, signature_codec, world as w
 from .duration import DurationParam
 from .errors import HookDisposedError
 
@@ -399,4 +399,7 @@ class Workflows:
         return register(func)
 
     def _get_step(self, step_name: str) -> Step[Any, Any]:
-        return self._steps[step_name]
+        try:
+            return self._steps[step_name]
+        except KeyError:
+            raise errors.StepNotRegisteredError(step_name) from None
