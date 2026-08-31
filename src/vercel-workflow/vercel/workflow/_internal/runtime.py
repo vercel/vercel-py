@@ -1144,6 +1144,8 @@ class WorkflowOrchestratorContext:
                         if conflicting_hook.conflicting_run is not None:
                             future.set_result(conflicting_hook.conflicting_run)
                         else:
+                            # Older conflict events do not identify the owning run, so preserve the
+                            # previous HookConflictError behavior when a Run cannot be constructed.
                             future.set_exception(conflict_error)
 
             case w.HookReceivedEvent(event_data=w.HookReceivedEventData(payload=data)):
