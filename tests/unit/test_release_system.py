@@ -486,19 +486,8 @@ def test_render_changelog_entry_does_not_duplicate_pr_number(tmp_path: Path) -> 
     assert entry.count("#42") == 1
 
 
-def test_render_changelog_entry_treats_paragraphs_as_items(tmp_path: Path) -> None:
-    fragment = release.Fragment(
-        package="pkg",
-        path=tmp_path / "123.bugfix.md",
-        kind="bugfix",
-        text=(
-            "Remember the last live Runtime Cache client process-wide and fall back to it\n"
-            "on threads that have no request context, and make strict=True raise\n"
-            "RuntimeCacheError when no cache is available.\n"
-            "\n"
-            "Prime the cache while request context is still visible.\n"
-        ),
-    )
+def _bugfix_changelog_entry(text: str, *, path: Path, pr_number: int | None = None) -> str:
+    fragment = release.Fragment(package="pkg", path=path, kind="bugfix", text=text)
     item = release.Release(
         package="pkg",
         old_version="0.6.0",
@@ -506,16 +495,108 @@ def test_render_changelog_entry_treats_paragraphs_as_items(tmp_path: Path) -> No
         bump="patch",
         fragments=(fragment,),
     )
+    return release._render_changelog_entry(
+        item, pr_numbers={} if pr_number is None else {path: pr_number}
+    )
 
-    entry = release._render_changelog_entry(item, pr_numbers={fragment.path: 178})
 
-    assert (
-        "- Remember the last live Runtime Cache client process-wide and fall back to it "
-        "on threads that have no request context, and make strict=True raise "
-        "RuntimeCacheError when no cache is available. (#178)"
-    ) in entry
-    assert "- Prime the cache while request context is still visible. (#178)" in entry
-    assert entry.count("#178") == 2
+def test_render_changelog_entry_keeps_a_multi_line_fragment_as_one_bullet(tmp_path: Path) -> None:
+    entry = _bugfix_changelog_entry(
+        "Remember the last live Runtime Cache client process-wide and fall back to it\n"
+        "on threads that have no request context, and make strict=True raise\n"
+        "RuntimeCacheError when no cache is available.\n"
+        "\n"
+        "Prime the cache while request context is still visible.\n",
+        path=tmp_path / "123.bugfix.md",
+        pr_number=178,
+    )
+
+    assert entry.endswith(
+        "- Remember the last live Runtime Cache client process-wide and fall back to it\n"
+        "  on threads that have no request context, and make strict=True raise\n"
+        "  RuntimeCacheError when no cache is available. (#178)\n"
+        "\n"
+        "  Prime the cache while request context is still visible.\n"
+    )
+    assert entry.count("#178") == 1
+
+
+def test_render_changelog_entry_preserves_fenced_code_blocks(tmp_path: Path) -> None:
+    entry = _bugfix_changelog_entry(
+        "Make `HookEvent` an async context manager.\n"
+        "\n"
+        "```python\n"
+        "# disposes the hook on block exit\n"
+        "async with SomeHook.wait(...) as hook:\n"
+        "    res = await hook\n"
+        "```\n",
+        path=tmp_path / "123.bugfix.md",
+        pr_number=42,
+    )
+
+    assert entry.endswith(
+        "- Make `HookEvent` an async context manager. (#42)\n"
+        "\n"
+        "  ```python\n"
+        "  # disposes the hook on block exit\n"
+        "  async with SomeHook.wait(...) as hook:\n"
+        "      res = await hook\n"
+        "  ```\n"
+    )
+
+
+def test_render_changelog_entry_ignores_bullets_inside_code_blocks(tmp_path: Path) -> None:
+    entry = _bugfix_changelog_entry(
+        "Reject manifests that repeat a step name.\n\n```yaml\n- name: build\n- name: build\n```\n",
+        path=tmp_path / "123.bugfix.md",
+        pr_number=42,
+    )
+
+    assert [line for line in entry.splitlines() if line.startswith("- ")] == [
+        "- Reject manifests that repeat a step name. (#42)"
+    ]
+    assert entry.count("  - name: build") == 2
+
+
+def test_render_changelog_entry_splits_on_explicit_bullets(tmp_path: Path) -> None:
+    entry = _bugfix_changelog_entry(
+        "- Drop the managed Redis backend.\n- Derive the scheduler id from the subscriber id.\n",
+        path=tmp_path / "123.bugfix.md",
+        pr_number=42,
+    )
+
+    assert entry.endswith(
+        "- Drop the managed Redis backend. (#42)\n"
+        "- Derive the scheduler id from the subscriber id. (#42)\n"
+    )
+
+
+def test_render_changelog_entry_pads_multi_line_bullets_only(tmp_path: Path) -> None:
+    texts = ["Fix the first thing.", "Fix the second thing.\n\nIt was subtle.", "Fix the third."]
+    item = release.Release(
+        package="pkg",
+        old_version="0.6.0",
+        new_version="0.6.1",
+        bump="patch",
+        fragments=tuple(
+            release.Fragment(
+                package="pkg", path=tmp_path / f"{index}.bugfix.md", kind="bugfix", text=text
+            )
+            for index, text in enumerate(texts)
+        ),
+    )
+
+    entry = release._render_changelog_entry(item, pr_numbers={})
+
+    assert entry.endswith(
+        "- Fix the first thing.\n"
+        "\n"
+        "- Fix the second thing.\n"
+        "\n"
+        "  It was subtle.\n"
+        "\n"
+        "- Fix the third.\n"
+    )
 
 
 def test_dependency_only_changelog_omits_pr_number() -> None:
@@ -576,6 +657,36 @@ def test_write_changelog_separates_prepended_entry(tmp_path: Path) -> None:
     content = changelog.read_text(encoding="utf-8")
     assert "- Fix cache cleanup.\n## 0.6.0" not in content
     assert "- Fix cache cleanup.\n\n## 0.6.0" in content
+
+
+def test_latest_changelog_entry_keeps_a_multi_line_bullet_whole(tmp_path: Path) -> None:
+    package_path = tmp_path / "pkg"
+    package_path.mkdir()
+    (package_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## 0.6.0 - 2026-01-01\n\n- Previous release.\n", encoding="utf-8"
+    )
+    item = release.Release(
+        package="pkg",
+        old_version="0.6.0",
+        new_version="0.6.1",
+        bump="patch",
+        fragments=(
+            release.Fragment(
+                package="pkg",
+                path=tmp_path / "123.bugfix.md",
+                kind="bugfix",
+                text="Fix cache cleanup.\n\n## Not a release heading\n\nIt leaked entries.",
+            ),
+        ),
+    )
+
+    release.write_changelog(package_path, item, pr_numbers={tmp_path / "123.bugfix.md": 42})
+    latest = release._latest_changelog_entry(package_path)
+
+    assert latest.endswith(
+        "- Fix cache cleanup. (#42)\n\n  ## Not a release heading\n\n  It leaked entries."
+    )
+    assert "Previous release" not in latest
 
 
 def test_release_commit_body_uses_latest_changelog_entries(tmp_path: Path) -> None:
@@ -1100,10 +1211,22 @@ def test_packages_for_paths_detects_package_code(tmp_path: Path) -> None:
     )
 
 
-def test_clean_news_fragment_text_strips_blank_and_comment_lines() -> None:
+def test_clean_news_fragment_text_strips_comment_and_edge_blank_lines() -> None:
     assert release.clean_news_fragment_text(
         "# template\n\nAdd thing.  \n  # ignored\n- Fix thing.\n"
     ) == ("Add thing.\n- Fix thing.")
+
+
+def test_clean_news_fragment_text_keeps_paragraph_breaks() -> None:
+    assert release.clean_news_fragment_text(
+        "# template\n\nAdd thing.\n\n\nIt replaces the old thing.\n\n"
+    ) == ("Add thing.\n\nIt replaces the old thing.")
+
+
+def test_clean_news_fragment_text_keeps_comments_inside_code_blocks() -> None:
+    assert release.clean_news_fragment_text(
+        "# template\nAdd thing.\n\n```python\n# not a comment on the fragment\n\nrun()\n```\n"
+    ) == ("Add thing.\n\n```python\n# not a comment on the fragment\n\nrun()\n```")
 
 
 def test_clean_news_fragment_text_ignores_cutoff_section() -> None:

@@ -48,10 +48,21 @@ FRAGMENT_GUIDANCE = """
 
 # Write a concise news fragment for {package}.
 #
-# Each non-empty, non-comment line becomes changelog text.
-# The release script adds '- ' when a line does not already start with a bullet.
+# The whole fragment becomes one changelog entry: a summary, then any detail
+# paragraphs or code blocks. Blank lines and indentation are preserved.
+# The release script adds '- ' and appends the pull request number.
+# Start a line with '- ' to add a second entry. Comment lines outside code
+# blocks are ignored.
 {package_diff_section}
 """
+# A list marker in column zero, which is the only way to ask for a second
+# changelog entry from one news fragment.
+BULLET_RE = re.compile(r"[-*+]\s")
+# Up to three leading spaces then a run of at least three backticks or tildes,
+# per CommonMark fenced code blocks.
+FENCE_RE = re.compile(r" {0,3}(?P<marker>`{3,}|~{3,})")
+# Two spaces put a continuation line inside the Markdown list item it follows.
+CONTINUATION_INDENT = "  "
 
 
 @dataclass(frozen=True)
@@ -191,35 +202,120 @@ def _render_changelog_entry(release: Release, *, pr_numbers: dict[Path, int] | N
         if not fragments:
             continue
         lines.extend([f"### {title}", ""])
+        bullets: list[list[str]] = []
         for fragment in fragments:
             pr_number = pr_numbers.get(fragment.path) if pr_numbers is not None else None
-            for item in _fragment_changelog_items(fragment.text):
-                lines.append(_render_changelog_bullet(item, pr_number=pr_number))
+            bullets.extend(
+                _render_changelog_bullet(entry, pr_number=pr_number)
+                for entry in _fragment_changelog_entries(fragment.text)
+            )
+        lines.extend(_join_changelog_bullets(bullets))
         lines.append("")
     return "\n".join(lines)
 
 
-def _fragment_changelog_items(text: str) -> list[str]:
-    items: list[str] = []
+def _fragment_changelog_entries(text: str) -> list[list[str]]:
+    """Split news fragment text into changelog entries, as lists of lines.
+
+    A fragment is one changelog entry, even when it spans several lines: a
+    summary that may be hard wrapped, followed by detail paragraphs and code
+    blocks. Blank lines separate the parts of that one entry, so they must not
+    split it into separate bullets. Only an explicit list marker in column zero
+    starts another entry, and one inside a fenced code block is sample text.
+    """
+    lines = [line.rstrip() for line in text.splitlines()]
+    entries: list[list[str]] = []
     current: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            if current:
-                items.append(" ".join(current))
-                current = []
+
+    def flush() -> None:
+        entry = _trim_blank_lines(current)
+        if entry:
+            entries.append(entry)
+        current.clear()
+
+    for line, in_fence in zip(lines, _fence_states(lines), strict=True):
+        if not in_fence and BULLET_RE.match(line):
+            flush()
+        current.append(line)
+    flush()
+    return entries
+
+
+def _fence_states(lines: Sequence[str]) -> list[bool]:
+    """Return, per line, whether it belongs to a fenced code block.
+
+    The delimiters count as part of the block, so nothing on a fence line is
+    mistaken for changelog markup either.
+    """
+    states: list[bool] = []
+    fence: str | None = None
+    for line in lines:
+        match = FENCE_RE.match(line)
+        marker = None if match is None else match.group("marker")
+        if fence is None:
+            states.append(marker is not None)
+            fence = marker
             continue
-        current.append(stripped)
-    if current:
-        items.append(" ".join(current))
-    return items
+        states.append(True)
+        if marker is not None and marker[0] == fence[0] and len(marker) >= len(fence):
+            fence = None
+    return states
 
 
-def _render_changelog_bullet(item: str, *, pr_number: int | None) -> str:
-    bullet = item if item.startswith("- ") else f"- {item}"
-    if pr_number is None or _mentions_pr(bullet, pr_number):
-        return bullet
-    return f"{bullet} (#{pr_number})"
+def _trim_blank_lines(lines: Sequence[str]) -> list[str]:
+    result = list(lines)
+    while result and not result[0]:
+        result.pop(0)
+    while result and not result[-1]:
+        result.pop()
+    return result
+
+
+def _render_changelog_bullet(entry: Sequence[str], *, pr_number: int | None) -> list[str]:
+    """Render one changelog entry as the lines of a single Markdown list item."""
+    lines = list(entry)
+    if pr_number is not None and not _mentions_pr("\n".join(lines), pr_number):
+        index = _pr_reference_index(lines)
+        lines[index] = f"{lines[index]} (#{pr_number})"
+    first, *rest = lines
+    bullet = first if BULLET_RE.match(first) else f"- {first}"
+    return [bullet, *(f"{CONTINUATION_INDENT}{line}" if line else "" for line in rest)]
+
+
+def _pr_reference_index(lines: Sequence[str]) -> int:
+    """Index of the line that should carry the ``(#123)`` reference.
+
+    The reference belongs at the end of the entry's summary, which may be hard
+    wrapped over several lines, rather than mid-sentence on the first one or
+    trailing the detail paragraphs. It never lands inside a fenced code block,
+    where Markdown would render it literally.
+    """
+    summary_end: int | None = None
+    for index, (line, in_fence) in enumerate(zip(lines, _fence_states(lines), strict=True)):
+        if in_fence:
+            continue
+        if not line:
+            if summary_end is not None:
+                return summary_end
+            continue
+        summary_end = index
+    return len(lines) - 1 if summary_end is None else summary_end
+
+
+def _join_changelog_bullets(bullets: Sequence[Sequence[str]]) -> list[str]:
+    """Concatenate rendered bullets, keeping multi-line ones visually separate.
+
+    A bullet that starts immediately after an indented detail paragraph is hard
+    to pick out, so multi-line bullets get a blank line on either side. Runs of
+    one-line bullets stay tight, leaving simple changelog sections unchanged.
+    """
+    lines: list[str] = []
+    for index, bullet in enumerate(bullets):
+        needs_gap = len(bullet) > 1 or (index > 0 and len(bullets[index - 1]) > 1)
+        if lines and needs_gap:
+            lines.append("")
+        lines.extend(bullet)
+    return lines
 
 
 def _mentions_pr(text: str, pr_number: int) -> bool:
@@ -683,13 +779,27 @@ def _select_editor() -> list[str]:
 
 
 def clean_news_fragment_text(text: str) -> str:
-    text = text.split(CUTOFF_MARKER, 1)[0]
-    lines = [
-        line.rstrip()
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    return "\n".join(lines).strip()
+    """Turn editor buffer contents into the text stored in a news fragment.
+
+    Comment lines and everything below the cutoff marker are dropped. Blank
+    lines between paragraphs survive, because a fragment is one changelog entry
+    and those breaks are part of it; runs of them collapse to one. Code blocks
+    are kept verbatim, so a ``#`` comment in a sample is not read as a comment
+    on the fragment.
+    """
+    body = text.split(CUTOFF_MARKER, 1)[0]
+    lines = [line.rstrip() for line in body.splitlines()]
+    kept: list[str] = []
+    for line, in_fence in zip(lines, _fence_states(lines), strict=True):
+        if in_fence:
+            kept.append(line)
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        if not line and (not kept or not kept[-1]):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def validate_fragment_kind(kind: str) -> None:
