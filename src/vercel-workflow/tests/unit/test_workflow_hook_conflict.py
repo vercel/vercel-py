@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+import pydantic
 import pytest
 
 from vercel.workflow import HookConflictError, WorkflowRunFailedError, sleep
@@ -40,7 +41,7 @@ TOKEN = "shared-token"
 registry = core.Workflows(as_vercel_job=False)
 
 
-class Claim(core.BaseHook):
+class Claim(core.BaseHook, pydantic.BaseModel):
     pass
 
 
@@ -48,6 +49,15 @@ class Claim(core.BaseHook):
 async def wait_for_claim() -> str:
     await Claim.wait(token=TOKEN)
     return "received"
+
+
+@registry.workflow
+async def reuse_claim_after_dispose() -> str:
+    first = Claim.wait(token=TOKEN)
+    await first
+    first.dispose()
+    conflict = await Claim.wait(token=TOKEN).get_conflict()
+    return "available" if conflict is None else "conflict"
 
 
 @registry.workflow
@@ -204,6 +214,37 @@ async def test_different_hook_same_token_conflicts(tmp_path, monkeypatch) -> Non
     assert isinstance(result.event, w.HookConflictEvent)
     assert result.event.event_data.token == TOKEN
     assert result.event.event_data.conflicting_run_id == RUN_ID
+
+
+async def test_disposal_is_flushed_before_reusing_a_hook_token(tmp_path, monkeypatch) -> None:
+    world = _world(tmp_path, monkeypatch)
+    w.set_world(world)
+    run_id = await _create_run(world, reuse_claim_after_dispose.workflow_id)
+
+    await _invoke(run_id, reuse_claim_after_dispose.workflow_id)
+    events = (await world.events_list(run_id)).data
+    first_hook = next(event for event in events if isinstance(event, w.HookCreatedEvent))
+    assert first_hook.correlation_id is not None
+    await world.events_create(
+        run_id,
+        w.HookReceivedEventData(payload=ser.dehydrate({}), token=TOKEN).into_event(
+            first_hook.correlation_id
+        ),
+    )
+
+    await _invoke(run_id, reuse_claim_after_dispose.workflow_id)
+
+    events = (await world.events_list(run_id)).data
+    assert [event.event_type for event in events] == [
+        "run_created",
+        "run_started",
+        "hook_created",
+        "hook_received",
+        "hook_disposed",
+        "hook_created",
+        "run_completed",
+    ]
+    assert await runtime.Run(run_id).return_value() == "available"
 
 
 def test_hook_conflict_owner_id_round_trips_on_the_wire() -> None:
