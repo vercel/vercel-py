@@ -15,6 +15,7 @@ from vercel._internal.core.polyfills import Self
 
 from . import py_sandbox, signature_codec, world as w
 from .duration import DurationParam
+from .errors import HookDisposedError
 
 if TYPE_CHECKING:
     from .runtime import Run
@@ -209,14 +210,14 @@ class HookEvent(Generic[T]):
         self._token = token
         self._disposed = False
 
-    def __await__(self) -> Generator[Any, None, T | None]:
-        async def next_or_none() -> T | None:
+    def __await__(self) -> Generator[Any, None, T]:
+        async def next_or_raise() -> T:
             try:
                 return await self.__anext__()
             except StopAsyncIteration:
-                return None
+                raise HookDisposedError(self._token) from None
 
-        return next_or_none().__await__()
+        return next_or_raise().__await__()
 
     def __aiter__(self) -> AsyncIterator[T]:
         return self
@@ -230,6 +231,12 @@ class HookEvent(Generic[T]):
             raise RuntimeError("cannot iterate HookEvent outside workflow") from None
 
         return await ctx.run_hook(correlation_id=self._correlation_id)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.dispose()
 
     async def get_conflict(self) -> Run[Any] | None:
         """Return the run already using this hook's token, if there is one.
