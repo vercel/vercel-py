@@ -3,6 +3,7 @@ from vercel.workflow._internal.errors import (
     HookConflictError,
     RemoteError,
     RetryableError,
+    StepNotRegisteredError,
     WorkflowRunFailedError,
 )
 from vercel.workflow._internal.serialization import SerializationError
@@ -25,6 +26,7 @@ __all__ = [
     "RetryableError",
     "RunExpiredError",
     "SerializationError",
+    "StepNotRegisteredError",
     "ThrottleError",
     "TooEarlyError",
     "TypeValidationError",
