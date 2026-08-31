@@ -238,8 +238,8 @@ When changing this system, verify all shell code with system's default bash
 (helps catching new bash-isms on macOS).
 
 ```sh
-shellcheck -x scripts/build.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
-/bin/bash -n scripts/build.sh scripts/poe/tasks/poe scripts/poe/tasks/tool
+shellcheck -x scripts/build.sh
+/bin/bash -n scripts/build.sh
 python3 -m py_compile scripts/poe/workspace_poe.py scripts/poe/workspace_poe_resolve.py scripts/workspace-task.sh scripts/qa.sh scripts/workspace-root-task.sh
 ```
 

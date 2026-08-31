@@ -105,6 +105,7 @@ def test_scope_command_lograil_name_includes_task_and_package() -> None:
 
 
 def test_example_scope_command_maps_root_to_internal_task(monkeypatch) -> None:
+    monkeypatch.delenv("FORCE_PYTEST", raising=False)
     monkeypatch.setattr(
         workspace_poe.shutil,
         "which",
@@ -131,6 +132,7 @@ def test_example_scope_command_maps_root_to_internal_task(monkeypatch) -> None:
 
 
 def test_example_scope_command_preserves_package_passthrough(monkeypatch) -> None:
+    monkeypatch.delenv("FORCE_PYTEST", raising=False)
     monkeypatch.setattr(
         workspace_poe.shutil,
         "which",
@@ -150,6 +152,28 @@ def test_example_scope_command_preserves_package_passthrough(monkeypatch) -> Non
 
     assert command.argv[-3:] == ("test-examples", "-k", "sessions_and_resume")
     assert command.parser == "generic"
+
+
+def test_root_test_builds_native_pytest_wrapper_argv(monkeypatch) -> None:
+    recorded = []
+    monkeypatch.setenv("PYTEST", "python scripts/poe/tasks/tool pytest")
+    monkeypatch.delenv("POE_EXTRA_ARGS", raising=False)
+    monkeypatch.delenv("WORKSPACE_POE_SCOPE_ARGS", raising=False)
+
+    def run_command(command):
+        recorded.append(command)
+        return 0
+
+    monkeypatch.setattr(workspace_poe, "run_command", run_command)
+
+    assert workspace_poe.run_root_task("test-root", ()) == 0
+
+    assert recorded[0].argv[:4] == (
+        sys.executable,
+        str(workspace_poe.SCRIPT_DIR / "tasks" / "tool"),
+        "pytest",
+        "tests/unit",
+    )
 
 
 def test_test_scope_uses_pytest_parser_for_pytest_fallback(monkeypatch) -> None:
@@ -240,6 +264,48 @@ def test_run_group_requests_progress_layout_for_tests(monkeypatch) -> None:
     assert "lograil.progress.process" not in mapped
     assert "lograil.progress.subject" not in mapped
     assert mapped["lograil.progress.description"] == "tests/test_api.py::test_get"
+
+
+def test_ggt_remap_retains_failure_after_later_passes() -> None:
+    remap = workspace_poe._ggt_entry_remap()
+    entries = [
+        remap(
+            {
+                "levelname": "ERROR",
+                "message": "ERROR test_verify.test_refresh: RuntimeError: refresh failed",
+            }
+        )
+    ]
+    entries.extend(
+        remap({"levelname": "INFO", "message": f"PASSED test_verify.test_{index}"})
+        for index in range(60)
+    )
+
+    lines = workspace_poe.failure_tail_lines(entries[-50:])
+
+    assert lines == ["ERROR test_verify.test_refresh: RuntimeError: refresh failed"]
+    assert workspace_poe.failure_tail_lines(entries) == lines
+
+
+def test_ggt_remap_retains_teardown_traceback_without_a_message() -> None:
+    remap = workspace_poe._ggt_entry_remap()
+    entries = [
+        remap(
+            {
+                "levelname": "ERROR",
+                "ggt.detail": {
+                    "kind": "error",
+                    "error_message": "fixture teardown failed\nRuntimeError: cleanup failed",
+                },
+            }
+        ),
+        remap({"levelname": "INFO", "message": "FAILURE: 85 tests, 1 errors"}),
+    ]
+
+    assert workspace_poe.failure_tail_lines(entries) == [
+        "fixture teardown failed\nRuntimeError: cleanup failed",
+        "FAILURE: 85 tests, 1 errors",
+    ]
 
 
 def test_run_sequential_can_stop_after_first_failure(monkeypatch) -> None:

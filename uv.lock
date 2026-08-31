@@ -40,7 +40,7 @@ dev = [
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "django-stubs", specifier = ">=6.0.6,<7" },
     { name = "fastapi", specifier = ">=0.115.0,<1" },
-    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = ">=1.5.5" },
+    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = ">=1.5.6" },
     { name = "hatchling", specifier = ">=1.27.0,<2" },
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
     { name = "lograil", specifier = "~=0.7.0" },
@@ -60,7 +60,7 @@ dev = [
     { name = "twine", specifier = "<7" },
     { name = "ty", specifier = "==0.0.55" },
     { name = "uvicorn", specifier = ">=0.30.0,<1" },
-    { name = "uvloop", specifier = "<1" },
+    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = "<1" },
     { name = "vendoring", specifier = ">=1,<2" },
     { name = "zizmor", specifier = ">=1.24.1,<2" },
 ]
@@ -729,14 +729,14 @@ wheels = [
 
 [[package]]
 name = "ggt"
-version = "1.5.5"
+version = "1.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dc/ca/4fe1070242edd6f1981ca53ebe6c0175f32eaa72e046462c0cc84ce1cfb4/ggt-1.5.5.tar.gz", hash = "sha256:20a671444ee1b26aadb623ab951ac1ea4f17023b333dff7cbb4feed75227a903", size = 199433, upload-time = "2026-08-26T16:46:34.585Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/40/f4943f0de73a99c98595f23b0127ae56acb75d076671af171946d474d5be/ggt-1.5.6.tar.gz", hash = "sha256:7a43ed482b1b1741bbdeb798e8379b0d0cda189889ed354220363df0531bb475", size = 199752, upload-time = "2026-08-26T19:22:40.21Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/2f/15d2f9bea4df60080ff19bf7ae7c16d4e82c5cbe8338f46d829a260e5632/ggt-1.5.5-py3-none-any.whl", hash = "sha256:0b0d9beec4290f382ac210c2479bb6782c66082d40ff23d17582e9e1f57f7ddc", size = 124216, upload-time = "2026-08-26T16:46:33.353Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/87/12027320cf0a6f7017f87b6a4c02c3532bf51b03d8e281f7f64aa20009e5/ggt-1.5.6-py3-none-any.whl", hash = "sha256:a39a01ac509438573cbdff3a13528d059183d7b485e9ccd25e04f2a979690ff4", size = 124283, upload-time = "2026-08-26T19:22:38.997Z" },
 ]
 
 [[package]]

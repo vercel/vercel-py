@@ -14,7 +14,7 @@ dev = [
     "hypothesis>=6.0.0,<7",
     "respx>=0.21.0,<1",
     "cryptography>=48.0.1",
-    "uvloop<1",
+    "uvloop<1; sys_platform != 'win32'",
     "mypy>=1.20.2,<2",
     "django-stubs>=6.0.6,<7",
     "build<2",
@@ -31,7 +31,7 @@ dev = [
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
     "lograil~=0.7.0",
-    "ggt>=1.5.5; python_version >= '3.11'",
+    "ggt>=1.5.6; python_version >= '3.11'",
 ]
 
 [tool.uv]
