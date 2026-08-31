@@ -41,9 +41,11 @@ from vercel.sandbox._internal.errors import (
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
+    NO_PRIVATE_PARAMETERS,
     JSONObject,
     JSONValue,
     NetworkPolicy,
+    PrivateSandboxParameters,
     ProcessLog,
     ProcessLogStream,
     SandboxResources,
@@ -939,6 +941,7 @@ class SandboxApiClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         request = _CreateSandboxRequest(
@@ -958,9 +961,9 @@ class SandboxApiClient:
             region=region,
             failover_regions=None if failover_regions is None else list(failover_regions),
         )
-        data = await self._request_json(
-            "POST", "v3/sandboxes", credentials=credentials, body=request.to_api_dict()
-        )
+        body = request.to_api_dict()
+        body.update(private_parameters)
+        data = await self._request_json("POST", "v3/sandboxes", credentials=credentials, body=body)
         return _validate_response(_SandboxResponse, data).to_sandbox()
 
     async def fork_sandbox(
@@ -981,6 +984,7 @@ class SandboxApiClient:
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         request = _ForkSandboxRequest(
@@ -1003,7 +1007,7 @@ class SandboxApiClient:
             format_url_path("v2/sandboxes/{source_sandbox}/fork", source_sandbox=source_sandbox),
             credentials=credentials,
             params={"projectId": project_id or credentials.project_id},
-            body=request.to_api_dict(),
+            body={**request.to_api_dict(), **(private_parameters)},
         )
         return _validate_response(_SandboxResponse, data).to_sandbox()
 
@@ -1014,6 +1018,7 @@ class SandboxApiClient:
         project_id: str | None = None,
         resume: bool = False,
         include_system_routes: bool | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         request = _GetSandboxRequest(
@@ -1025,7 +1030,7 @@ class SandboxApiClient:
             "GET",
             format_url_path("v2/sandboxes/{name}", name=name),
             credentials=credentials,
-            params=request.to_api_dict(),
+            params={**request.to_api_dict(), **(private_parameters)},
         )
         return _validate_response(_SandboxResponse, data).to_sandbox()
 
@@ -1137,12 +1142,14 @@ class SandboxApiClient:
         name: str,
         project_id: str | None = None,
         include_system_routes: bool | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         return await self.get_sandbox(
             name=name,
             project_id=project_id,
             resume=True,
             include_system_routes=include_system_routes,
+            private_parameters=private_parameters,
         )
 
     async def stop_runtime_session(self, *, session_id: str) -> RuntimeSessionStopState:

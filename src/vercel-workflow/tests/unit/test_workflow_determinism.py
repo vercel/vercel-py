@@ -6,6 +6,8 @@ results matched onto the wrong calls. ``resume()`` must detect this and fail
 loudly rather than silently returning the wrong value.
 """
 
+import asyncio
+import traceback
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,6 +48,22 @@ def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:
     return runtime.Suspension(correlation_id=correlation_id, step=core.Step(_greet), input=args)
 
 
+def _resume_isolated(ctx: runtime.WorkflowOrchestratorContext) -> None:
+    """One resume() pass in a throwaway loop.
+
+    A nondeterminism failure suspends the run, which cancels every task in the
+    running loop -- including the test's own task, were resume() called in it.
+    """
+
+    async def body() -> None:
+        ctx.resume()
+
+    try:
+        runtime._run_isolated(body(), loop_factory=asyncio.new_event_loop)
+    except asyncio.CancelledError:
+        pass
+
+
 async def test_reordered_step_args_raise_nondeterminism() -> None:
     """Recorded step input "a" but the body now calls the same step with "b"
     on replay -> NondeterminismError."""
@@ -58,28 +76,14 @@ async def test_reordered_step_args_raise_nondeterminism() -> None:
     sus = _suspension(cid, _args(name="b"))
     ctx.suspensions[cid] = sus
 
-    ctx.resume()
+    _resume_isolated(ctx)
 
     assert sus.future.done()
     assert isinstance(sus.future.exception(), runtime.NondeterminismError)
-
-
-async def test_matching_step_parks_without_nondeterminism() -> None:
-    """Same step + same input -> suspension is replayed, then the run parks."""
-    step = core.Step(_greet)
-    cid = "step_1"
-    events: list[w.Event] = [
-        w.StepCreatedEventData(step_name=step.name, input=_args(name="a")).into_event(cid)
-    ]
-    ctx = _context(events)
-    sus = _suspension(cid, _args(name="a"))
-    ctx.suspensions[cid] = sus
-
-    with pytest.raises(runtime._SuspendException):
-        ctx.resume()
-
-    assert not sus.future.done()
-    assert sus.has_created_event
+    # Stashed for run_workflow() to raise, and the run is suspended, so the
+    # failure holds even if the body never awaits (or catches) the future.
+    assert ctx.resume_exception is sus.future.exception()
+    assert ctx.suspended
 
 
 async def test_wait_step_swap_raises_nondeterminism() -> None:
@@ -100,13 +104,24 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
     )
     ctx.suspensions["wait_1"] = wait
 
-    ctx.resume()
+    _resume_isolated(ctx)
 
     assert wait.future.done()
     assert isinstance(wait.future.exception(), runtime.NondeterminismError)
+    assert ctx.resume_exception is wait.future.exception()
+    assert ctx.suspended
 
 
-# --- concurrent delivery: the loop idle hook + resume single-step ----------------
+async def test_created_event_without_suspension_raises_runtime_error() -> None:
+    """A creation event cannot precede the body's matching suspension."""
+    step = core.Step(_greet)
+    ctx = _context([_created(step, "step_1")])
+
+    with pytest.raises(RuntimeError, match="has not registered its suspension"):
+        ctx.resume()
+
+
+# --- concurrent delivery: the loop workflow + resume single-step -----------------
 #
 # When a body issues several calls from concurrent coroutines, recorded
 # completions must be delivered ONE AT A TIME, each only once the body has fully
@@ -114,7 +129,8 @@ async def test_wait_step_swap_raises_nondeterminism() -> None:
 # still-running one and the two issue their next calls in a different order than
 # at record time -> the positional correlation IDs no longer line up ->
 # NondeterminismError. Two pieces cooperate:
-#   * WorkflowLoop calls resume() only when its ready queue is empty (quiescent).
+#   * WorkflowLoop calls workflow.resume() only when its ready queue is empty
+#     (quiescent).
 #   * resume() applies at most one recorded event (single-step), or parks.
 
 _ARGS = _args(name="a")
@@ -129,25 +145,17 @@ def _completed(cid: str, result: Any) -> w.Event:
 
 
 async def test_cancelled_step_ignores_later_completion() -> None:
-    """A launched step can be cancelled before its completion is replayed.
+    """A step can be cancelled before its completion is replayed.
 
     The completion event still needs to be consumed, but setting a result on
     the cancelled future would raise ``InvalidStateError``.
     """
-    step = core.Step(_greet)
-    events: list[w.Event] = [_created(step, "step_1")]
+    events: list[w.Event] = [_completed("step_1", "one")]
     ctx = _context(events)
     sus = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus
 
-    # Replay the launch, then model the workflow task being cancelled while
-    # the step is in flight. The completion arrives in a later event batch.
-    with pytest.raises(runtime._SuspendException):
-        ctx.resume()
-    assert sus.has_created_event
     assert sus.future.cancel()
-
-    events.append(_completed("step_1", "one"))
     ctx.resume()
 
     assert sus.future.cancelled()
@@ -157,10 +165,7 @@ async def test_cancelled_step_ignores_later_completion() -> None:
 async def test_single_step_delivers_one_completion_per_pass() -> None:
     """Two concurrently-issued steps both have results in the log, but a single
     resume() pass resolves only the first; the rest is left for the next pass."""
-    step = core.Step(_greet)
     events: list[w.Event] = [
-        _created(step, "step_1"),
-        _created(step, "step_2"),
         _completed("step_1", "one"),
         _completed("step_2", "two"),
     ]
@@ -183,9 +188,7 @@ async def test_single_step_delivers_one_completion_per_pass() -> None:
 
 async def test_workflow_loop_runs_pending_work_before_resume() -> None:
     """The idle hook runs only after the body's pending callbacks are drained."""
-    step = core.Step(_greet)
     events: list[w.Event] = [
-        _created(step, "step_1"),
         _completed("step_1", "one"),
     ]
     ctx = _context(events)
@@ -202,30 +205,24 @@ async def test_workflow_loop_runs_pending_work_before_resume() -> None:
         assert pending_ran
         ctx.resume()
 
-    loop = workflow_loop.WorkflowLoop(idle_hook=resume)
+    class Workflow:
+        def resume(self) -> None:
+            resume()
+
+        def time(self) -> float:
+            raise NotImplementedError
+
+        def check_suspended(self) -> None:
+            pass
+
+        def run_wait(self, param: Any) -> asyncio.Future[None]:
+            raise NotImplementedError
+
+    loop = workflow_loop.WorkflowLoop(workflow=Workflow())
     try:
         loop.call_soon(pending)
         loop._run_once()
 
-        assert sus1.future.done() and sus1.future.result() == "one"
-    finally:
-        loop.close()
-
-
-async def test_workflow_loop_runs_resume_when_quiescent() -> None:
-    """With the ready queue empty, the idle hook delivers one completion."""
-    step = core.Step(_greet)
-    events: list[w.Event] = [
-        _created(step, "step_1"),
-        _completed("step_1", "one"),
-    ]
-    ctx = _context(events)
-    sus1 = _suspension("step_1", _ARGS)
-    ctx.suspensions["step_1"] = sus1
-
-    loop = workflow_loop.WorkflowLoop(idle_hook=ctx.resume)
-    try:
-        loop._run_once()
         assert sus1.future.done() and sus1.future.result() == "one"
     finally:
         loop.close()
@@ -240,15 +237,100 @@ async def test_idle_resume_parks_when_nothing_to_deliver() -> None:
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
 
-    loop = workflow_loop.WorkflowLoop(idle_hook=ctx.resume)
-    try:
-        with pytest.raises(runtime._SuspendException):
-            loop._run_once()
+    async def wait_forever() -> None:
+        await asyncio.Future()
 
-        assert sus1.has_created_event
-        assert not sus1.future.done()
-    finally:
-        loop.close()
+    with pytest.raises(asyncio.CancelledError):
+        runtime._run_isolated(
+            wait_forever(),
+            loop_factory=lambda: workflow_loop.WorkflowLoop(workflow=ctx),
+        )
+
+    assert ctx.suspended
+    assert sus1.has_created_event
+    assert not sus1.future.done()
+
+
+# --- nondeterminism fails the run whatever the body does -------------------------
+#
+# Failing the diverged suspension's future is not enough on its own: the body
+# may not be blocked on that future, and even when it is, user code can catch
+# the error. run_workflow() must fail the run either way.
+
+_run_registry = core.Workflows(as_vercel_job=False)
+
+
+@_run_registry.step
+async def _record(*, name: str) -> str:
+    return name
+
+
+@_run_registry.workflow
+async def _diverging() -> str:
+    return await _record(name="b")
+
+
+@_run_registry.workflow
+async def _suppressing() -> str:
+    try:
+        return await _record(name="b")
+    except BaseException:  # noqa: B036
+        return "swallowed"
+
+
+@_run_registry.workflow
+async def _reraising() -> str:
+    try:
+        return await _record(name="b")
+    except BaseException:  # noqa: B036
+        raise runtime.NondeterminismError("surfaced by the body") from None
+
+
+def _running_run(workflow_id: str) -> w.WorkflowRun:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return w.NonFinalWorkflowRun(
+        run_id="wrun_test",
+        status="running",
+        deployment_id="",
+        workflow_name=workflow_id,
+        input=ser.dehydrate(ser.argument_array((), {})),
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+    )
+
+
+def _diverged_log() -> list[w.Event]:
+    """A recorded first step whose input differs from what the body issues.
+
+    The probe context shares the run's seed, so its first ULID is the one the
+    body's first call will be assigned.
+    """
+    cid = f"step_{_context([]).generate_ulid()}"
+    return [w.StepCreatedEventData(step_name=_record.name, input=_args(name="a")).into_event(cid)]
+
+
+async def test_nondeterminism_fails_the_run() -> None:
+    ctx = runtime.WorkflowOrchestratorContext(
+        _diverged_log(), run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+
+    with pytest.raises(runtime.NondeterminismError) as excinfo:
+        ctx.run_workflow(_running_run(_diverging.workflow_id))
+
+    # The error is raised out of the body's own await, so its traceback shows
+    # where in the workflow the divergence happened.
+    formatted_traceback = "".join(traceback.format_exception(excinfo.value))
+    assert 'return await _record(name="b")' in formatted_traceback
+
+
+async def test_nondeterminism_cannot_be_suppressed_by_the_body() -> None:
+    ctx = runtime.WorkflowOrchestratorContext(
+        _diverged_log(), run_id="wrun_test", seed="wrun_test", started_at=0, registry=_run_registry
+    )
+
+    with pytest.raises(runtime.NondeterminismError):
+        ctx.run_workflow(_running_run(_suppressing.workflow_id))
 
 
 # --- now(): deterministic clock anchored to replay progress, not list tail ------
@@ -294,7 +376,10 @@ async def test_now_advances_with_replay_index() -> None:
     sus1 = _suspension("step_1", _ARGS)
     ctx.suspensions["step_1"] = sus1
 
-    ctx.resume()
+    for _ in events:
+        ctx.resume()
+        if sus1.future.done():
+            break
 
     assert sus1.future.done() and sus1.future.result() == "one"
     assert ctx.now() == t1

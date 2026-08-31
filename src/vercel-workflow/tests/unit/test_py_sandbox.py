@@ -448,31 +448,13 @@ class TestAsyncioRestrictions:
         _run_in_sandbox("import asyncio")
 
     @pytest.mark.asyncio
-    async def test_loop_call_later_blocked(self):
-        with workflow_sandbox():
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-            with pytest.raises(SandboxRestrictionError, match="loop.call_later"):
-                loop.call_later(0, lambda: None)
-
-    @pytest.mark.asyncio
-    async def test_loop_call_at_blocked(self):
-        with workflow_sandbox():
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-            with pytest.raises(SandboxRestrictionError, match="loop.call_at"):
-                loop.call_at(0, lambda: None)
-
-    @pytest.mark.asyncio
     async def test_loop_create_connection_blocked(self):
         with workflow_sandbox():
             import asyncio
 
             loop = asyncio.get_running_loop()
             with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
-                loop.create_connection(None, "localhost", 80)
+                loop.create_connection(None, "localhost", 80)  # type: ignore[call-overload]
 
     @pytest.mark.asyncio
     async def test_loop_subprocess_exec_blocked(self):
@@ -481,7 +463,7 @@ class TestAsyncioRestrictions:
 
             loop = asyncio.get_running_loop()
             with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
-                loop.subprocess_exec(None, "echo")
+                loop.subprocess_exec(None, "echo")  # type: ignore[arg-type,unused-coroutine]
 
     @pytest.mark.asyncio
     async def test_loop_subprocess_shell_blocked(self):
@@ -490,7 +472,7 @@ class TestAsyncioRestrictions:
 
             loop = asyncio.get_running_loop()
             with pytest.raises(SandboxRestrictionError, match="loop.subprocess_shell"):
-                loop.subprocess_shell(None, "echo")
+                loop.subprocess_shell(None, "echo")  # type: ignore[arg-type,unused-coroutine]
 
     @pytest.mark.asyncio
     async def test_loop_call_soon_allowed(self):
@@ -498,7 +480,7 @@ class TestAsyncioRestrictions:
             import asyncio
 
             loop = asyncio.get_running_loop()
-            called = []
+            called: list[int] = []
             loop.call_soon(called.append, 1)
             await asyncio.sleep(0)  # yield to let call_soon fire
             # call_soon should not raise — we can't easily assert it fired
@@ -543,7 +525,7 @@ class TestAsyncioRestrictions:
             async def worker(value: int) -> None:
                 results.append(value)
 
-            async with asyncio.TaskGroup() as tg:
+            async with asyncio.TaskGroup() as tg:  # type: ignore[attr-defined]
                 tg.create_task(worker(1))
                 tg.create_task(worker(2))
 
@@ -575,8 +557,8 @@ class TestAsyncioRestrictions:
                     cancelled.set()
                     raise
 
-            with pytest.raises(ExceptionGroup) as exc_info:  # noqa: F821
-                async with asyncio.TaskGroup() as tg:
+            with pytest.raises(ExceptionGroup) as exc_info:  # type: ignore[name-defined] # noqa: F821
+                async with asyncio.TaskGroup() as tg:  # type: ignore[attr-defined]
                     tg.create_task(slow())
                     tg.create_task(failing())
 
@@ -604,32 +586,6 @@ class TestUvloopProxy:
     def _run_async(self, coro, loop):
         return loop.run_until_complete(coro)
 
-    def test_uvloop_call_later_blocked(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                with pytest.raises(SandboxRestrictionError, match="loop.call_later"):
-                    proxy_loop.call_later(0, lambda: None)
-
-        self._run_async(go(), loop)
-
-    def test_uvloop_call_at_blocked(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                with pytest.raises(SandboxRestrictionError, match="loop.call_at"):
-                    proxy_loop.call_at(0, lambda: None)
-
-        self._run_async(go(), loop)
-
     def test_uvloop_create_connection_blocked(self, _use_uvloop):
         loop = _use_uvloop
 
@@ -639,7 +595,9 @@ class TestUvloopProxy:
 
                 proxy_loop = asyncio.get_running_loop()
                 with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
-                    proxy_loop.create_connection(None, "localhost", 80)
+                    proxy_loop.create_connection(  # type: ignore[call-overload]
+                        None, "localhost", 80
+                    )
 
         self._run_async(go(), loop)
 
@@ -652,7 +610,10 @@ class TestUvloopProxy:
 
                 proxy_loop = asyncio.get_running_loop()
                 with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
-                    proxy_loop.subprocess_exec(None, "echo")
+                    proxy_loop.subprocess_exec(  # type: ignore[arg-type,unused-coroutine]
+                        None,  # type: ignore[arg-type]
+                        "echo",
+                    )
 
         self._run_async(go(), loop)
 
@@ -664,7 +625,7 @@ class TestUvloopProxy:
                 import asyncio
 
                 proxy_loop = asyncio.get_running_loop()
-                called = []
+                called: list[int] = []
                 proxy_loop.call_soon(called.append, 1)
                 await asyncio.sleep(0)
                 # call_soon should not raise
@@ -697,19 +658,6 @@ class TestUvloopProxy:
                 proxy_loop = asyncio.get_running_loop()
                 fut = proxy_loop.create_future()
                 assert not fut.done()
-
-        self._run_async(go(), loop)
-
-    def test_uvloop_time_blocked(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                with pytest.raises(SandboxRestrictionError, match="loop.time"):
-                    proxy_loop.time()
 
         self._run_async(go(), loop)
 

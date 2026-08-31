@@ -16,6 +16,7 @@ from vercel.sandbox._internal.errors import SandboxResponseError
 from vercel.sandbox._internal.models import (
     JSONObject,
     NetworkPolicy,
+    ProcessSignal,
     ProcessStatus,
     SandboxStatus,
     _WriteFile,
@@ -173,19 +174,20 @@ def _validate_file_mode(mode: object) -> int | None:
     return mode
 
 
-def _signal_number(value: int | str | signal_module.Signals | None) -> int:
+def _signal_number(value: int | str | signal_module.Signals | ProcessSignal | None) -> int:
     if value is None:
-        return int(signal_module.Signals.SIGTERM)
-    if isinstance(value, signal_module.Signals):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    normalized = value.upper()
-    if not normalized.startswith("SIG"):
-        normalized = f"SIG{normalized}"
+        return int(ProcessSignal.SIGTERM)
+    if isinstance(value, str):
+        normalized = value.upper()
+        if not normalized.startswith("SIG"):
+            normalized = f"SIG{normalized}"
+        try:
+            return int(ProcessSignal[normalized])
+        except KeyError as exc:
+            raise ValueError(f"Unknown signal: {value!r}") from exc
     try:
-        return int(signal_module.Signals[normalized])
-    except KeyError as exc:
+        return int(ProcessSignal(value))
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"Unknown signal: {value!r}") from exc
 
 

@@ -39,16 +39,6 @@ def is_step_terminal(status: str) -> bool:
     return status in ["completed", "failed"]
 
 
-def _error_message(error: Any) -> str:
-    if isinstance(error, str):
-        return error
-    if isinstance(error, dict) and "message" in error:
-        message = error["message"]
-        return message if isinstance(message, str) else str(message)
-    message = getattr(error, "message", None)
-    return message if isinstance(message, str) else "Unknown error"
-
-
 # Marker the TypeScript `world-local` package uses to smuggle binary payloads
 # through JSON. See its `jsonReplacer` / `jsonReviver`.
 UINT8ARRAY_TYPE_TAG = "Uint8Array"
@@ -956,20 +946,6 @@ class LocalWorld(w.World):
 
         elif data.event_type == "run_failed":
             failed_data = data.event_data
-            if isinstance(failed_data.error, str):
-                error_msg = failed_data.error
-            elif isinstance(failed_data.error, dict) and "message" in failed_data.error:
-                error_msg = failed_data.error["message"]
-            elif hasattr(failed_data.error, "message"):
-                error_msg = failed_data.error.message
-            else:
-                error_msg = "Unknown error"
-            if isinstance(failed_data.error, dict) and "stack" in failed_data.error:
-                error_stack = failed_data.error["stack"]
-            elif hasattr(failed_data.error, "stack"):
-                error_stack = failed_data.error.stack
-            else:
-                error_stack = None
             if current_run:
                 run = w.FailedWorkflowRun(
                     run_id=current_run.run_id,
@@ -984,11 +960,8 @@ class LocalWorld(w.World):
                     expired_at=current_run.expired_at,
                     started_at=current_run.started_at,
                     status="failed",
-                    error=w.StructuredError(
-                        message=error_msg,
-                        stack=error_stack,
-                        code=failed_data.code,
-                    ),
+                    error=failed_data.error,
+                    error_code=failed_data.error_code,
                     completed_at=now,
                     updated_at=now,
                 )
@@ -1117,10 +1090,7 @@ class LocalWorld(w.World):
                     validated_step.model_dump()
                     | {
                         "status": "pending",
-                        "error": w.StructuredError(
-                            message=_error_message(retrying_data.error),
-                            stack=retrying_data.stack,
-                        ),
+                        "error": retrying_data.error,
                         "retryAfter": retrying_data.retry_after,
                         "updatedAt": now,
                     }
@@ -1132,22 +1102,11 @@ class LocalWorld(w.World):
             if validated_step:
                 step_composite_key = f"{effective_run_id}-{data.correlation_id}"
                 step_path = self.data_dir / "steps" / f"{step_composite_key}.json"
-                error_msg = _error_message(step_failed_data.error)
-                if isinstance(step_failed_data.error, dict) and "stack" in step_failed_data.error:
-                    error_stack = step_failed_data.error["stack"]
-                elif hasattr(step_failed_data.error, "stack"):
-                    error_stack = step_failed_data.error.stack
-                else:
-                    error_stack = None
-                error = w.StructuredError(
-                    message=error_msg,
-                    stack=error_stack,
-                )
                 step = w.FailedWorkflowStep.from_wire(
                     validated_step.model_dump()
                     | {
                         "status": "failed",
-                        "error": error,
+                        "error": step_failed_data.error,
                         "completedAt": now,
                         "updatedAt": now,
                     }

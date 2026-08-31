@@ -8,14 +8,29 @@ the outer task is still current.
 """
 
 import asyncio
+from typing import Any
 
 import pytest
 
 from vercel.workflow._internal import loop, runtime
 
 
+class _Workflow:
+    def resume(self) -> None:
+        pass
+
+    def time(self) -> float:
+        raise NotImplementedError
+
+    def check_suspended(self) -> None:
+        pass
+
+    def run_wait(self, param: Any) -> asyncio.Future[None]:
+        raise NotImplementedError
+
+
 def _loop_factory() -> asyncio.AbstractEventLoop:
-    return loop.WorkflowLoop()
+    return loop.WorkflowLoop(workflow=_Workflow())
 
 
 def test_run_in_loop_cleans_up_tasks() -> None:

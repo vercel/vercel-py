@@ -68,7 +68,8 @@ class _HeadersLike(Protocol):
 
 
 class _RequestLike(Protocol):
-    headers: _HeadersLike
+    @property
+    def headers(self) -> _HeadersLike: ...
 
 
 class Geo(TypedDict, total=False):

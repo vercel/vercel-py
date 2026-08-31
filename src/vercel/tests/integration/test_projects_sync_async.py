@@ -477,7 +477,9 @@ class TestProjectsAPI:
             mock_client_class.return_value = mock_client
 
             project_id = "test_project_123"
-            result = delete_project(project_id, token=mock_token)
+            result = delete_project(  # type: ignore[func-returns-value]
+                project_id, token=mock_token
+            )
 
             # Validate response
             assert result is None
@@ -506,7 +508,9 @@ class TestProjectsAPI:
             mock_client_class.return_value = mock_client
 
             project_id = "test_project_123"
-            result = await delete_project_async(project_id, token=mock_token)
+            result = await delete_project_async(  # type: ignore[func-returns-value]
+                project_id, token=mock_token
+            )
 
             # Validate response
             assert result is None

@@ -22,8 +22,10 @@ from vercel.sandbox._internal.errors import (
 from vercel.sandbox._internal.log_stream import _parse_command_log_record
 from vercel.sandbox._internal.models import (
     _OMITTED,
+    NO_PRIVATE_PARAMETERS,
     DirectoryEntry,
     NetworkPolicy,
+    PrivateSandboxParameters,
     ProcessLog,
     SandboxQuery,
     SandboxQueryByCreatedAt,
@@ -266,6 +268,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         self._ensure_open()
         sandbox = await self._api_client.create_sandbox(
@@ -284,6 +287,7 @@ class SandboxService:
             snapshot_retention=snapshot_retention,
             region=region or self._options.region,
             failover_regions=failover_regions,
+            private_parameters=private_parameters,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
 
@@ -305,6 +309,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         self._ensure_open()
         sandbox = await self._api_client.fork_sandbox(
@@ -323,6 +328,7 @@ class SandboxService:
             snapshot_retention=snapshot_retention,
             region=region or self._options.region,
             failover_regions=failover_regions,
+            private_parameters=private_parameters,
         )
         return await self._wait_for_ready_sandbox(sandbox, project_id=project_id)
 
@@ -333,6 +339,7 @@ class SandboxService:
         project_id: str | None = None,
         resume: bool = False,
         include_system_routes: bool | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         self._ensure_open()
         return await self._api_client.get_sandbox(
@@ -340,6 +347,7 @@ class SandboxService:
             project_id=project_id,
             resume=resume,
             include_system_routes=include_system_routes,
+            private_parameters=private_parameters,
         )
 
     async def get_or_create_sandbox(
@@ -362,6 +370,7 @@ class SandboxService:
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> tuple[SandboxState, bool]:
         """Return a named sandbox and whether it had to be created."""
         try:
@@ -370,6 +379,7 @@ class SandboxService:
                 project_id=project_id,
                 resume=resume,
                 include_system_routes=include_system_routes,
+                private_parameters=private_parameters,
             )
         except SandboxApiError as error:
             if error.status_code == 404:
@@ -401,6 +411,7 @@ class SandboxService:
             snapshot_retention=snapshot_retention,
             region=region,
             failover_regions=failover_regions,
+            private_parameters=private_parameters,
         )
         return sandbox, True
 
@@ -470,12 +481,14 @@ class SandboxService:
         name: str,
         project_id: str | None = None,
         include_system_routes: bool | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         self._ensure_open()
         sandbox = await self._api_client.resume_sandbox(
             name=name,
             project_id=project_id,
             include_system_routes=include_system_routes,
+            private_parameters=private_parameters,
         )
         if sandbox.current_session is None:
             raise SandboxResponseError(

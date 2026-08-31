@@ -31,7 +31,10 @@ duration_units = {
 }
 
 
-def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
+DurationParam = int | float | timedelta | datetime | str
+
+
+def parse_duration_to_date(param: DurationParam) -> datetime:
     if isinstance(param, str):
         items = [float(v) * duration_units[u] for v, u in duration_re.findall(param)]
         if not items:
@@ -44,7 +47,12 @@ def parse_duration_to_date(param: int | float | datetime | str) -> datetime:
     elif isinstance(param, (int, float)):
         if param < 0:
             raise RuntimeError(f"Duration parameter must be non-negative: {param}")
-        return datetime.now(UTC) + timedelta(milliseconds=param)
+        return datetime.now(UTC) + timedelta(seconds=param)
+
+    elif isinstance(param, timedelta):
+        if param < timedelta(0):
+            raise RuntimeError(f"Duration parameter must be non-negative: {param}")
+        return datetime.now(UTC) + param
 
     elif isinstance(param, datetime):
         if param.tzinfo is None:

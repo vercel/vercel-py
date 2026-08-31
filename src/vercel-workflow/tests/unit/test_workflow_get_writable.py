@@ -261,7 +261,8 @@ async def test_a_stream_write_failure_fails_the_step(registry) -> None:
     assert _kinds(fake) == ["step_retrying"]
     assert result == w.QueueContinuation(delay_seconds=1.0)
     ((_, event),) = fake.log
-    assert "stream unavailable" in event.event_data.error
+    failure = ser.hydrate_error(event.event_data.error, what="the recorded error")
+    assert "stream unavailable" in str(failure)
 
 
 async def test_a_failing_step_still_flushes_what_it_wrote(registry) -> None:

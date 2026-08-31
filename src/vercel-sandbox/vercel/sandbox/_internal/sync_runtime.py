@@ -33,12 +33,15 @@ from vercel.sandbox._internal.filesystem_handle_core import (
 )
 from vercel.sandbox._internal.models import (
     _OMITTED,
+    NO_PRIVATE_PARAMETERS,
     CompletedProcess,
     DirectoryEntry,
     DurationInput,
     FailoverRegionsInput,
     NetworkPolicy,
+    PrivateSandboxParameters,
     ProcessLog,
+    ProcessSignal,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -184,12 +187,17 @@ class SyncProcess(_ProcessHandleState):
         self.wait()
         return stdout, stderr
 
-    def send_signal(self, signal: int | str | signal_module.Signals) -> None:
+    def send_signal(self, signal: int | str | signal_module.Signals | ProcessSignal) -> None:
         """Send a signal to the running process.
 
         Args:
-            signal: Numeric signal, ``Signals`` member, or name such as
+            signal: Numeric signal, ``ProcessSignal`` member, or name such as
                 ``"TERM"`` or ``"SIGTERM"``.
+
+        Note:
+            Passing ``signal.Signals`` directly is deprecated. Use
+            ``ProcessSignal`` so signal availability does not depend on the
+            SDK host platform.
         """
         payload = iter_coroutine(
             self._service.send_process_signal(
@@ -202,11 +210,11 @@ class SyncProcess(_ProcessHandleState):
 
     def terminate(self) -> None:
         """Request graceful process termination with ``SIGTERM``."""
-        self.send_signal(signal_module.SIGTERM)
+        self.send_signal(ProcessSignal.SIGTERM)
 
     def kill(self) -> None:
         """Terminate the process immediately with ``SIGKILL``."""
-        self.send_signal(signal_module.SIGKILL)
+        self.send_signal(ProcessSignal.SIGKILL)
 
 
 class SyncSnapshot(SnapshotHandleBase):
@@ -1516,6 +1524,7 @@ def create_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> _ManagedSyncSandbox:
     try:
         state = iter_coroutine(
@@ -1535,6 +1544,7 @@ def create_sandbox(
                 snapshot_retention=snapshot_retention,
                 region=region,
                 failover_regions=normalize_failover_regions(failover_regions),
+                private_parameters=private_parameters,
             )
         )
         return _ManagedSyncSandbox(
@@ -1565,6 +1575,7 @@ def fork_sandbox(
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
     destroy: bool = True,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> _ManagedSyncSandbox:
     try:
         state = iter_coroutine(
@@ -1584,6 +1595,7 @@ def fork_sandbox(
                 snapshot_retention=snapshot_retention,
                 region=region,
                 failover_regions=normalize_failover_regions(failover_regions),
+                private_parameters=private_parameters,
             )
         )
         return _ManagedSyncSandbox(
@@ -1602,6 +1614,7 @@ def get_sandbox(
     project_id: str | None = None,
     resume: bool = False,
     include_system_routes: bool | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> SyncSandbox:
     return SyncSandbox(
         payload=iter_coroutine(
@@ -1610,6 +1623,7 @@ def get_sandbox(
                 project_id=project_id,
                 resume=resume,
                 include_system_routes=include_system_routes,
+                private_parameters=private_parameters,
             )
         ),
         service=service,
@@ -1637,6 +1651,7 @@ def get_or_create_sandbox(
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
     failover_regions: FailoverRegionsInput = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> tuple[SyncSandbox, bool]:
     try:
         state, created = iter_coroutine(
@@ -1658,6 +1673,7 @@ def get_or_create_sandbox(
                 snapshot_retention=snapshot_retention,
                 region=region,
                 failover_regions=normalize_failover_regions(failover_regions),
+                private_parameters=private_parameters,
             )
         )
         return (
@@ -1685,6 +1701,7 @@ def resume_sandbox(
     name: str,
     project_id: str | None = None,
     include_system_routes: bool | None = None,
+    private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
 ) -> _ManagedSyncSandbox:
     return _ManagedSyncSandbox(
         payload=iter_coroutine(
@@ -1692,6 +1709,7 @@ def resume_sandbox(
                 name=name,
                 project_id=project_id,
                 include_system_routes=include_system_routes,
+                private_parameters=private_parameters,
             )
         ),
         service=service,
