@@ -564,6 +564,7 @@ def interop(devalue_entry: Path) -> dict[str, _Outcome]:
         input=json.dumps(payload),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
         check=False,
         env={**os.environ, "DEVALUE_ENTRY": str(devalue_entry)},
@@ -775,7 +776,7 @@ def _load_upstream_cases(test_file: Path) -> list[_UpstreamCase]:
             )
         pending.clear()
 
-    for line in test_file.read_text().split("\n"):
+    for line in test_file.read_text(encoding="utf-8").split("\n"):
         match = field.match(line)
         if match is None:
             continue
@@ -862,6 +863,7 @@ def corpus_results(
         input=json.dumps(pairs),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
         check=False,
         env={**os.environ, "DEVALUE_ENTRY": str(devalue_entry)},

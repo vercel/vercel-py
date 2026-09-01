@@ -8,6 +8,7 @@ import importlib
 import logging
 import os
 import random
+import struct
 import sys
 import threading
 import types
@@ -426,6 +427,10 @@ _PASSTHROUGHS: set[str] = {
     "math",
     "numbers",
     "operator",
+    # Wrap the initialized host module with the restrictions above. Re-running
+    # os.py would duplicate its platform-specific initialization in every
+    # sandbox and can expose a different ``os.path`` module object.
+    "os",
     "posixpath",
     "pprint",
     "quopri",
@@ -571,11 +576,11 @@ class _SandboxFinder(MetaPathFinder):
 
     For every ``import X`` inside the sandbox:
 
-    1. If ``X`` **has restrictions** — return a ``_ProxyModule`` that
+    1. If ``X`` **has restrictions**, return a ``_ProxyModule`` that
        intercepts the restricted attributes.
-    2. If ``X`` **matches the passthrough set** — return the host module
+    2. If ``X`` **matches the passthrough set**, return the host module
        as-is (importing it into the host first if needed).
-    3. Otherwise — return ``None`` for a fresh re-import.
+    3. Otherwise, return ``None`` for a fresh re-import.
     """
 
     def __init__(
@@ -655,12 +660,27 @@ class _SandboxFinder(MetaPathFinder):
         path: Sequence[str] | None,
         target: types.ModuleType | None,
     ) -> ModuleSpec | None:
-        if self in sys.meta_path:
-            for finder in sys.meta_path[sys.meta_path.index(self) + 1 :]:
-                if hasattr(finder, "find_spec"):
-                    spec = finder.find_spec(fullname, path, target)
-                    if spec is not None:
-                        return spec
+        """Ask the remaining finders for a spec in the host import context.
+
+        Third-party finders may import their own support modules during spec
+        discovery. If those imports saw the sandbox module table, they could
+        re-enter this finder recursively. Only discovery runs against the host:
+        after the context variables are restored, ``_RestrictedLoader`` uses
+        the returned loader to execute the module inside the sandbox and then
+        applies its restrictions.
+        """
+        table_token = _sandbox_sys_modules.set(None)
+        sandbox_token = _in_sandbox.set(False)
+        try:
+            if self in sys.meta_path:
+                for finder in sys.meta_path[sys.meta_path.index(self) + 1 :]:
+                    if hasattr(finder, "find_spec"):
+                        spec = finder.find_spec(fullname, path, target)
+                        if spec is not None:
+                            return spec
+        finally:
+            _in_sandbox.reset(sandbox_token)
+            _sandbox_sys_modules.reset(table_token)
         return None
 
 
@@ -816,6 +836,15 @@ def _install_import_hook() -> None:
     ) -> types.ModuleType:
         if not _in_sandbox.get(False):
             return real_import(name, globals, locals, fromlist or (), level)
+        table = _sandbox_sys_modules.get()
+        if level == 0 and table is not None and name in table:
+            module = table[name]
+            if fromlist and all(item == "*" or hasattr(module, item) for item in fromlist):
+                return module
+            if not fromlist:
+                top_level = table.get(name.partition(".")[0])
+                if top_level is not None:
+                    return top_level
         return importlib.__import__(name, globals, locals, fromlist or (), level)
 
     builtins.__import__ = _sandbox_import
@@ -858,7 +887,18 @@ def _new_sandbox_table() -> dict[str, types.ModuleType]:
     """
     _ensure_installed()
 
-    table: dict[str, types.ModuleType] = {"sys": sys}
+    table: dict[str, types.ModuleType] = {
+        "sys": sys,
+        # Python 3.13+'s frozen zipimport imports struct lazily while probing
+        # ZIP64 entries. Windows console-script executables are zip candidates,
+        # so resolving struct through the sandbox finder can recursively probe
+        # the same executable before zipimport has cached its directory.
+        "struct": struct,
+        # os.py normally installs this alias while it initializes. The sandbox
+        # wraps the initialized host module, so copy its host-native path alias
+        # into every fresh module table.
+        "os.path": os.path,
+    }
     # Snapshot atomically (list() over the view is a single C op) so a
     # concurrent import in another thread can't trip "dict changed size".
     for key, mod in list(_real_sys_modules.items()):

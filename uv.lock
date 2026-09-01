@@ -13,8 +13,8 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P2D"
 
 [options.exclude-newer-package]
-ggt = "2026-08-27T00:00:00Z"
-lograil = "2026-08-10T21:20:07.442Z"
+ggt = "2026-09-01T00:00:00Z"
+lograil = "2026-08-21T00:00:00Z"
 
 [manifest]
 members = [
@@ -40,10 +40,10 @@ dev = [
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "django-stubs", specifier = ">=6.0.6,<7" },
     { name = "fastapi", specifier = ">=0.115.0,<1" },
-    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = ">=1.5.5" },
+    { name = "ggt", marker = "python_full_version >= '3.11'", specifier = ">=1.6.0" },
     { name = "hatchling", specifier = ">=1.27.0,<2" },
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
-    { name = "lograil", specifier = "~=0.7.0" },
+    { name = "lograil", specifier = "~=0.8.1" },
     { name = "mypy", specifier = ">=1.20.2,<2" },
     { name = "poethepoet", specifier = ">=0.48.0" },
     { name = "pytest", specifier = ">=7.0.0,<10" },
@@ -60,7 +60,7 @@ dev = [
     { name = "twine", specifier = "<7" },
     { name = "ty", specifier = "==0.0.55" },
     { name = "uvicorn", specifier = ">=0.30.0,<1" },
-    { name = "uvloop", specifier = "<1" },
+    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = "<1" },
     { name = "vendoring", specifier = ">=1,<2" },
     { name = "zizmor", specifier = ">=1.24.1,<2" },
 ]
@@ -729,14 +729,14 @@ wheels = [
 
 [[package]]
 name = "ggt"
-version = "1.5.5"
+version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dc/ca/4fe1070242edd6f1981ca53ebe6c0175f32eaa72e046462c0cc84ce1cfb4/ggt-1.5.5.tar.gz", hash = "sha256:20a671444ee1b26aadb623ab951ac1ea4f17023b333dff7cbb4feed75227a903", size = 199433, upload-time = "2026-08-26T16:46:34.585Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/e5/b125686afaed90b803c91a4394d6fb3520df53734bcd1cea3410645c1265/ggt-1.6.0.tar.gz", hash = "sha256:c2bee3eeeb847da985bdf4a41a0c90220d76c69126c88ba0bcf6d5b6e9d57505", size = 206975, upload-time = "2026-08-31T21:54:03.482Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/2f/15d2f9bea4df60080ff19bf7ae7c16d4e82c5cbe8338f46d829a260e5632/ggt-1.5.5-py3-none-any.whl", hash = "sha256:0b0d9beec4290f382ac210c2479bb6782c66082d40ff23d17582e9e1f57f7ddc", size = 124216, upload-time = "2026-08-26T16:46:33.353Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/0f/800b548512e16082abe157e74e00c9f3f4fdbec41cb9cb553fbe80a5c9a3/ggt-1.6.0-py3-none-any.whl", hash = "sha256:52fe480fd2ace23a6c4f3964e7c6f29342ebdbb60de758f43ed204d7e6e1fe96", size = 129008, upload-time = "2026-08-31T21:54:02.334Z" },
 ]
 
 [[package]]
@@ -1088,16 +1088,16 @@ wheels = [
 
 [[package]]
 name = "lograil"
-version = "0.7.0"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "rich" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/89/07/a0f6999275bfa35112cd9714943a2baebc21397231ad495740aba7827e83/lograil-0.7.0.tar.gz", hash = "sha256:d3b2b0d84830f8dfa1f0d14126babec6531339aa183f181eba25dfdede19c900", size = 171478, upload-time = "2026-08-10T21:20:08.8Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/25/037be528d2ee78b5b3083dd1cbb9ee1fae4a00b58ca91dd6db0d702ce0dd/lograil-0.8.1.tar.gz", hash = "sha256:d21712e6d03af7b9c5f04616e0f2a45c06111e5fdc5d6c6783b59a790d220afc", size = 180055, upload-time = "2026-08-20T17:53:46.74Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/e6/f821850bb8c05bf64aa016b44dce4d41850abfd390fdcb56ee2aed5e9df7/lograil-0.7.0-py3-none-any.whl", hash = "sha256:1f7635d7195555b4feef7b9b1e0608206de537c49be99af9d685060f1855ce76", size = 75025, upload-time = "2026-08-10T21:20:07.441Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/71/4dd387bbe304ff39631df386655eae39f695ed3c44b590d3b35e7f7a8c70/lograil-0.8.1-py3-none-any.whl", hash = "sha256:5031c6775865a10bfb2b3c4f81b7f8d931497dfbe18e27e52d0fbc8d7d5706b4", size = 82665, upload-time = "2026-08-20T17:53:45.366Z" },
 ]
 
 [[package]]

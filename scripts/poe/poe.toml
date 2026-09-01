@@ -1,12 +1,12 @@
 [tool.poe.env]
-POE = { default = "${POE_CONF_DIR}/tasks/poe" }
-PYTEST = { default = "${POE_CONF_DIR}/tasks/pytest" }
-RUFF_CHECK = { default = "${POE_CONF_DIR}/tasks/ruff-check" }
-RUFF_CHECK_FIX = { default = "${POE_CONF_DIR}/tasks/ruff-check-fix" }
-RUFF_FORMAT = { default = "${POE_CONF_DIR}/tasks/ruff-format" }
-RUFF_FORMAT_FIX = { default = "${POE_CONF_DIR}/tasks/ruff-format-fix" }
-TY = { default = "${POE_CONF_DIR}/tasks/ty" }
-MYPY = { default = "${POE_CONF_DIR}/tasks/mypy" }
+POE = { default = "python ${POE_CONF_DIR}/tasks/poe" }
+PYTEST = { default = "python ${POE_CONF_DIR}/tasks/tool pytest" }
+RUFF_CHECK = { default = "python ${POE_CONF_DIR}/tasks/tool ruff-check" }
+RUFF_CHECK_FIX = { default = "python ${POE_CONF_DIR}/tasks/tool ruff-check-fix" }
+RUFF_FORMAT = { default = "python ${POE_CONF_DIR}/tasks/tool ruff-format" }
+RUFF_FORMAT_FIX = { default = "python ${POE_CONF_DIR}/tasks/tool ruff-format-fix" }
+TY = { default = "python ${POE_CONF_DIR}/tasks/tool ty" }
+MYPY = { default = "python ${POE_CONF_DIR}/tasks/tool mypy" }
 
 [tool.poe.tasks.fix]
 cmd = "$POE_CONF_DIR/workspace_poe.py tool-group fix"

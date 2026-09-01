@@ -39,11 +39,22 @@ Example:
 changes/vercel-cache/123.bugfix.md
 ```
 
-News fragment content should be one or more concise changelog bullets. The
-release script adds `- ` when a line does not already start with a bullet.
+One news fragment is exactly one changelog entry. It may span several lines: a
+concise summary, optionally followed by blank-line-separated detail paragraphs,
+nested lists, or fenced code blocks. All of it belongs to that one entry.
+
+The release script renders the fragment as a single bullet, adding `- ` to the
+first line and indenting the rest so Markdown keeps them inside that bullet.
+Paragraph breaks and code blocks are preserved. Nothing in the fragment splits
+it into more entries; write a second fragment for a second entry.
 
 Dependency-only cascade releases do not need handwritten news fragments. The
 release script writes `Update dependencies.` for those changelog entries.
+
+Packages at `0.0.0` are unpublished and exempt from news-fragment enforcement
+and dependency-only cascades. Add a fragment deliberately when such a package
+is ready to publish; its first release is promoted to `0.1.0` regardless of the
+fragment type.
 
 ## Release Prep
 
@@ -77,7 +88,9 @@ uv run poe release
 News-fragment-backed changelog bullets include PR numbers when Git history for
 the news fragment contains GitHub squash subjects like
 `pkg: fix cache cleanup (#123)` or merge subjects like
-`Merge pull request #123 from user/branch`.
+`Merge pull request #123 from user/branch`. Each fragment gets the number once,
+at the end of its summary, so a multi-line entry does not repeat the link on its
+detail paragraphs.
 Dependency-only cascade entries still render as `Update dependencies.` without a
 PR suffix.
 
@@ -165,7 +178,8 @@ For broader confidence, run:
 types, and non-empty news fragment content. The Git `pre-push-news-fragments`
 hook generated from `scripts/githooks/pre-push.news-fragments.sh` runs `uv run
 poe check-news-fragments` to require news fragments for changed package code
-without maintaining a hard-coded package registry. `sync-githooks` installs
+except for unpublished `0.0.0` packages, without maintaining a hard-coded
+package registry. `sync-githooks` installs
 pre-push hooks with `WORKSPACE_POE_GIT_SCOPE=commit`, so this check runs against
 the commit tree being pushed. The news fragment format is Towncrier-style, but
 enforcement is repo-local because stock Towncrier does not support

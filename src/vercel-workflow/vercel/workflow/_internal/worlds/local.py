@@ -1145,7 +1145,10 @@ class LocalWorld(w.World):
                     )
                 conflict_event = w.HookConflictEvent(
                     correlation_id=data.correlation_id,
-                    event_data=w.HookConflictEventData(token=hook_data.token),
+                    event_data=w.HookConflictEventData(
+                        token=hook_data.token,
+                        conflicting_run_id=existing_claim["runId"],
+                    ),
                     server_props=w.ServerProps(
                         run_id=effective_run_id,
                         event_id=event_id,
@@ -1173,7 +1176,7 @@ class LocalWorld(w.World):
                 created_at=now,
                 spec_version=data.spec_version,
                 is_webhook=False,
-                is_system=False,
+                is_system=bool(hook_data.is_system),
             )
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"
             write_json(hook_path, hook)

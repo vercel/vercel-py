@@ -25,6 +25,7 @@ CHANGES = ROOT / "changes"
 IGNORED_FRAGMENT_FILES = {".gitignore", ".gitkeep", ".keep"}
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 BUMP_NAMES = {value: key for key, value in BUMP_ORDER.items()}
+UNPUBLISHED_VERSION = "0.0.0"
 FRAGMENT_TYPES = {
     "breaking": "Breaking Changes",
     "feature": "Features",
@@ -48,10 +49,20 @@ FRAGMENT_GUIDANCE = """
 
 # Write a concise news fragment for {package}.
 #
-# Each non-empty, non-comment line becomes changelog text.
-# The release script adds '- ' when a line does not already start with a bullet.
+# The whole fragment becomes one changelog entry: a summary, then any detail
+# paragraphs or code blocks. Blank lines and indentation are preserved.
+# The release script adds '- ' and appends the pull request number.
+# Comment lines outside code blocks are ignored.
 {package_diff_section}
 """
+# A list marker the fragment already opens with, so its entry is not given a
+# second one.
+LIST_MARKER_RE = re.compile(r"[-*+]\s")
+# Up to three leading spaces then a run of at least three backticks or tildes,
+# per CommonMark fenced code blocks.
+FENCE_RE = re.compile(r" {0,3}(?P<marker>`{3,}|~{3,})")
+# Two spaces put a continuation line inside the Markdown list item it follows.
+CONTINUATION_INDENT = "  "
 
 
 @dataclass(frozen=True)
@@ -111,6 +122,8 @@ def parse_fragments(packages: set[str]) -> list[Fragment]:
 
 
 def _bump_for_fragment(kind: str, version: str) -> str:
+    if version == UNPUBLISHED_VERSION:
+        return "minor"
     bump = TYPE_BUMPS[kind]
     major = int(version.split(".", 1)[0])
     if major == 0 and bump == "major":
@@ -147,6 +160,8 @@ def compute_releases(*, force_bump: str | None = None) -> list[Release]:
 
     if force_bump:
         for name in packages_by_name:
+            if versions[name] == UNPUBLISHED_VERSION:
+                continue
             bumps[name] = _larger(bumps.get(name, "patch"), force_bump)
 
     reverse_edges = workspace.reverse_dependencies(packages_by_name)
@@ -154,7 +169,7 @@ def compute_releases(*, force_bump: str | None = None) -> list[Release]:
     while queue:
         package = queue.pop(0)
         for dependent in sorted(reverse_edges[package]):
-            if dependent not in bumps:
+            if dependent not in bumps and versions[dependent] != UNPUBLISHED_VERSION:
                 bumps[dependent] = "patch"
                 queue.append(dependent)
 
@@ -191,35 +206,98 @@ def _render_changelog_entry(release: Release, *, pr_numbers: dict[Path, int] | N
         if not fragments:
             continue
         lines.extend([f"### {title}", ""])
+        bullets: list[list[str]] = []
         for fragment in fragments:
             pr_number = pr_numbers.get(fragment.path) if pr_numbers is not None else None
-            for item in _fragment_changelog_items(fragment.text):
-                lines.append(_render_changelog_bullet(item, pr_number=pr_number))
+            bullets.append(_render_changelog_bullet(fragment.text, pr_number=pr_number))
+        lines.extend(_join_changelog_bullets(bullets))
         lines.append("")
     return "\n".join(lines)
 
 
-def _fragment_changelog_items(text: str) -> list[str]:
-    items: list[str] = []
-    current: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            if current:
-                items.append(" ".join(current))
-                current = []
+def _fence_states(lines: Sequence[str]) -> list[bool]:
+    """Return, per line, whether it belongs to a fenced code block.
+
+    The delimiters count as part of the block, so a fence line is never treated
+    as prose that could take the pull request reference or a comment marker.
+    """
+    states: list[bool] = []
+    fence: str | None = None
+    for line in lines:
+        match = FENCE_RE.match(line)
+        marker = None if match is None else match.group("marker")
+        if fence is None:
+            states.append(marker is not None)
+            fence = marker
             continue
-        current.append(stripped)
-    if current:
-        items.append(" ".join(current))
-    return items
+        states.append(True)
+        if marker is not None and marker[0] == fence[0] and len(marker) >= len(fence):
+            fence = None
+    return states
 
 
-def _render_changelog_bullet(item: str, *, pr_number: int | None) -> str:
-    bullet = item if item.startswith("- ") else f"- {item}"
-    if pr_number is None or _mentions_pr(bullet, pr_number):
-        return bullet
-    return f"{bullet} (#{pr_number})"
+def _trim_blank_lines(lines: Sequence[str]) -> list[str]:
+    result = list(lines)
+    while result and not result[0]:
+        result.pop(0)
+    while result and not result[-1]:
+        result.pop()
+    return result
+
+
+def _render_changelog_bullet(text: str, *, pr_number: int | None) -> list[str]:
+    """Render one news fragment as the lines of a single Markdown list item.
+
+    A fragment is one changelog entry, however many lines it spans: a summary
+    that may be hard wrapped, followed by detail paragraphs, nested lists, and
+    code blocks. All of it belongs to that one entry, so the line structure is
+    kept and the continuation lines are indented to stay inside the bullet.
+    """
+    lines = _trim_blank_lines([line.rstrip() for line in text.splitlines()])
+    if not lines:
+        return []
+    if pr_number is not None and not _mentions_pr(text, pr_number):
+        index = _pr_reference_index(lines)
+        lines[index] = f"{lines[index]} (#{pr_number})"
+    first, *rest = lines
+    bullet = first if LIST_MARKER_RE.match(first) else f"- {first}"
+    return [bullet, *(f"{CONTINUATION_INDENT}{line}" if line else "" for line in rest)]
+
+
+def _pr_reference_index(lines: Sequence[str]) -> int:
+    """Index of the line that should carry the ``(#123)`` reference.
+
+    The reference belongs at the end of the entry's summary, which may be hard
+    wrapped over several lines, rather than mid-sentence on the first one or
+    trailing the detail paragraphs. It never lands inside a fenced code block,
+    where Markdown would render it literally.
+    """
+    summary_end: int | None = None
+    for index, (line, in_fence) in enumerate(zip(lines, _fence_states(lines), strict=True)):
+        if in_fence:
+            continue
+        if not line:
+            if summary_end is not None:
+                return summary_end
+            continue
+        summary_end = index
+    return len(lines) - 1 if summary_end is None else summary_end
+
+
+def _join_changelog_bullets(bullets: Sequence[Sequence[str]]) -> list[str]:
+    """Concatenate rendered bullets, keeping multi-line ones visually separate.
+
+    A bullet that starts immediately after an indented detail paragraph is hard
+    to pick out, so multi-line bullets get a blank line on either side. Runs of
+    one-line bullets stay tight, leaving simple changelog sections unchanged.
+    """
+    lines: list[str] = []
+    for index, bullet in enumerate(bullets):
+        needs_gap = len(bullet) > 1 or (index > 0 and len(bullets[index - 1]) > 1)
+        if lines and needs_gap:
+            lines.append("")
+        lines.extend(bullet)
+    return lines
 
 
 def _mentions_pr(text: str, pr_number: int) -> bool:
@@ -431,7 +509,14 @@ def _release_pr_numbers(releases: list[Release]) -> dict[Path, int]:
 def _fragment_pr_number(path: Path) -> int | None:
     try:
         log = subprocess.check_output(
-            ["git", "log", "--full-history", "--format=%s", "--", str(path.relative_to(ROOT))],
+            [
+                "git",
+                "log",
+                "--full-history",
+                "--format=%s",
+                "--",
+                path.relative_to(ROOT).as_posix(),
+            ],
             cwd=ROOT,
             text=True,
         )
@@ -683,13 +768,27 @@ def _select_editor() -> list[str]:
 
 
 def clean_news_fragment_text(text: str) -> str:
-    text = text.split(CUTOFF_MARKER, 1)[0]
-    lines = [
-        line.rstrip()
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    return "\n".join(lines).strip()
+    """Turn editor buffer contents into the text stored in a news fragment.
+
+    Comment lines and everything below the cutoff marker are dropped. Blank
+    lines between paragraphs survive, because a fragment is one changelog entry
+    and those breaks are part of it; runs of them collapse to one. Code blocks
+    are kept verbatim, so a ``#`` comment in a sample is not read as a comment
+    on the fragment.
+    """
+    body = text.split(CUTOFF_MARKER, 1)[0]
+    lines = [line.rstrip() for line in body.splitlines()]
+    kept: list[str] = []
+    for line, in_fence in zip(lines, _fence_states(lines), strict=True):
+        if in_fence:
+            kept.append(line)
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        if not line and (not kept or not kept[-1]):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def validate_fragment_kind(kind: str) -> None:
@@ -738,6 +837,7 @@ def check_fragments(base: str | None = None) -> int:
     changed -= {
         name for name, package in packages_by_name.items() if package.version_file in changed_paths
     }
+    changed = set(publishable_packages(changed, packages_by_name=packages_by_name))
     packages_with_fragments = {
         fragment.package for fragment in fragments if fragment.path in changed_paths
     }
@@ -753,14 +853,61 @@ def check_fragments(base: str | None = None) -> int:
     return 0
 
 
+def check_new_package_versions(base: str | None = None) -> int:
+    packages_by_name = workspace.packages()
+    head = os.environ.get("WORKSPACE_POE_GIT_COMMIT")
+    if base is None:
+        base = os.environ.get("WORKSPACE_POE_GIT_BASE") or _default_base_ref()
+    if base is None:
+        print("Could not detect a base branch for new package version enforcement.")
+        return 1
+
+    added_paths = _added_paths(base=base, head=head)
+    invalid: list[tuple[str, str]] = []
+    for name, package in sorted(packages_by_name.items()):
+        if package.path / "pyproject.toml" not in added_paths:
+            continue
+        version = workspace.read_version(package.version_file)
+        if version != UNPUBLISHED_VERSION:
+            invalid.append((name, version))
+    if invalid:
+        packages = ", ".join(f"{name} ({version})" for name, version in invalid)
+        print(f"New packages must start at {UNPUBLISHED_VERSION}: {packages}")
+        print("The release workflow assigns the first publishable version.")
+        return 1
+    return 0
+
+
 def changed_packages(base: str = "HEAD^", head: str = "HEAD") -> list[str]:
     packages_by_name = workspace.packages()
     changed = _changed_packages(packages_by_name, base=base, head=head, code_only=False)
-    return [name for name in workspace.topological_names(packages_by_name) if name in changed]
+    return publishable_packages(changed, packages_by_name=packages_by_name)
+
+
+def publishable_packages(
+    names: Iterable[str] | None = None,
+    *,
+    packages_by_name: dict[str, workspace.Package] | None = None,
+) -> list[str]:
+    if packages_by_name is None:
+        packages_by_name = workspace.packages()
+    selected = set(packages_by_name) if names is None else set(names)
+    return [
+        name
+        for name in workspace.topological_names(packages_by_name)
+        if name in selected
+        and workspace.read_version(packages_by_name[name].version_file) != UNPUBLISHED_VERSION
+    ]
 
 
 def print_changed_packages(args: argparse.Namespace) -> int:
     for name in changed_packages(base=args.base, head=args.head):
+        print(name)
+    return 0
+
+
+def print_publishable_packages(_args: argparse.Namespace) -> int:
+    for name in publishable_packages():
         print(name)
     return 0
 
@@ -783,6 +930,14 @@ def _changed_paths(*, base: str, head: str | None) -> set[Path]:
     diff_range = [f"{base}..{head}"] if head is not None else [base]
     output = subprocess.check_output(
         ["git", "diff", "--name-only", *diff_range], cwd=ROOT, text=True
+    )
+    return {ROOT / line for line in output.splitlines() if line}
+
+
+def _added_paths(*, base: str, head: str | None) -> set[Path]:
+    diff_range = [f"{base}..{head}"] if head is not None else [base]
+    output = subprocess.check_output(
+        ["git", "diff", "--diff-filter=A", "--name-only", *diff_range], cwd=ROOT, text=True
     )
     return {ROOT / line for line in output.splitlines() if line}
 
@@ -827,6 +982,7 @@ def main(argv: list[str] | None = None) -> int:
     changed_parser.add_argument("--base", default="HEAD^")
     changed_parser.add_argument("--head", default="HEAD")
     changed_parser.set_defaults(func=print_changed_packages)
+    subparsers.add_parser("publishable").set_defaults(func=print_publishable_packages)
 
     github_release_body_parser = subparsers.add_parser("github-release-body")
     github_release_body_parser.add_argument("package")
@@ -844,6 +1000,10 @@ def main(argv: list[str] | None = None) -> int:
     check_parser = subparsers.add_parser("check-news-fragments")
     check_parser.add_argument("--base")
     check_parser.set_defaults(func=lambda args: check_fragments(args.base))
+
+    package_versions_parser = subparsers.add_parser("check-new-package-versions")
+    package_versions_parser.add_argument("--base")
+    package_versions_parser.set_defaults(func=lambda args: check_new_package_versions(args.base))
 
     subparsers.add_parser("lint-towncrier").set_defaults(func=lambda _args: lint_towncrier())
     args = parser.parse_args(argv)

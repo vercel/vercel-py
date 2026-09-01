@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
+import time_machine
 
 from django.conf import settings
 
@@ -365,10 +366,11 @@ def test_enqueue_normalizes_transport_topic_but_preserves_logical_queue() -> Non
     assert sent["payload"]["queue"] == "emails.high"
 
 
+@time_machine.travel(datetime(2026, 1, 1, tzinfo=UTC), tick=False)
 def test_enqueue_maps_run_after_to_delay() -> None:
     add_one.using(run_after=datetime.now(UTC) + timedelta(seconds=90)).enqueue(1)
 
-    assert FakeSyncQueueClient.instances[0].sent[0]["kwargs"]["delay"] in {89, 90}
+    assert FakeSyncQueueClient.instances[0].sent[0]["kwargs"]["delay"] == 90
 
 
 def test_enqueue_reuses_sync_client_and_close_clears_both_clients() -> None:

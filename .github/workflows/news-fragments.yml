@@ -27,3 +27,8 @@ jobs:
         run: uv run --locked poe check-news-fragments
         env:
           WORKSPACE_POE_GIT_BASE: ${{ github.event.pull_request.base.sha }}
+
+      - name: Check new package versions
+        run: uv run --locked poe check-new-package-versions
+        env:
+          WORKSPACE_POE_GIT_BASE: ${{ github.event.pull_request.base.sha }}

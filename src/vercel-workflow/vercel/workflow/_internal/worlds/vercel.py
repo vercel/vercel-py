@@ -11,6 +11,7 @@ from typing import Any, TypeVar, overload
 
 import cbor2
 import httpx
+import pydantic
 
 import vercel.queue as vqs
 from vercel._internal.core.polyfills import UTC
@@ -204,6 +205,15 @@ class _LazyEventResult(w.EventResult):
     events: Any = None  # type: ignore[assignment]
     run: _LazyWorkflowRun | None = None  # type: ignore[assignment]
     step: Any = None  # type: ignore[assignment]
+
+    @pydantic.field_validator("event", mode="before")
+    @classmethod
+    def materialize_hook_conflict(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and value.get("eventType") == "hook_conflict":
+            # HookConflict events have no lazy payload references, so materializing
+            # one is safe and required to let the runtime trigger an immediate replay
+            return w.EventAdaptor.from_wire(value)
+        return value
 
 
 class VercelWorld(w.World):

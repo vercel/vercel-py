@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.11.0 - 2026-08-31
+## 0.11.0 - 2026-09-01
 
 ### Features
 
@@ -11,11 +11,15 @@
 ### Bug Fixes
 
 - Remove upper bounds on aggregate Sandbox and Workflow dependencies so sibling releases cannot make the `vercel` package un-installable. (#334)
-- Start a workflow run even when its queue message arrives before the `run_created` event has landed. (#284)
+
+- Start a workflow run even when its queue message arrives before the
+  `run_created` event has landed. (#284)
 
 ### Internal
 
-- The Workflows implementation now ships in the separate `vercel-workflow` distribution, which `vercel` depends on, so `vercel.workflow` imports keep working without installing anything extra. (#299)
+- The Workflows implementation now ships in the separate `vercel-workflow`
+  distribution, which `vercel` depends on, so `vercel.workflow` imports keep
+  working without installing anything extra. (#299)
 
 ## 0.10.0 - 2026-08-12
 

@@ -10,7 +10,7 @@ from typing import Any, TypedDict, cast
 
 from vercel._internal.core.polyfills import UTC
 
-from .errors import FatalError, HookConflictError, RemoteError, RetryableError
+from .errors import FatalError, HookConflictError, RemoteError, RetryableError, StepCancelledError
 
 
 class _OptionalErrorFields(TypedDict, total=False):
@@ -39,6 +39,8 @@ class HookConflictErrorPayload(ErrorPayload, _OptionalHookConflictFields):
 
 
 _ERROR_CLASS_BY_TAG: dict[str, type[Exception]] = {
+    # Before FatalError, whose reducer claims its subclasses.
+    "StepCancelledError": StepCancelledError,
     "FatalError": FatalError,
     "TypeError": TypeError,
     "SyntaxError": SyntaxError,

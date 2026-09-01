@@ -12,12 +12,16 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import platform
+import struct
 import sys
+import time
 from contextlib import contextmanager
 
 import pytest
 
+from vercel.workflow._internal import py_sandbox
 from vercel.workflow._internal.py_sandbox import Sandbox, SandboxRestrictionError
 from vercel.workflow.sandbox import (
     ALL_CLEANUPS,
@@ -133,15 +137,20 @@ class TestDatetimeRestrictions:
 class TestOsRestrictions:
     def test_os_path_allowed(self):
         ns = _run_in_sandbox("import os; result = os.path.join('a', 'b')")
-        assert ns["result"] == "a/b"
+        assert ns["result"] == os.path.join("a", "b")
+
+    def test_os_path_alias_allowed(self):
+        path = os.path.join("a", "b")
+        ns = _run_in_sandbox(f"from os.path import dirname; result = dirname({path!r})")
+        assert ns["result"] == os.path.dirname(path)
 
     def test_os_sep_allowed(self):
         ns = _run_in_sandbox("import os; result = os.sep")
-        assert ns["result"] == "/"
+        assert ns["result"] == os.sep
 
     def test_os_name_allowed(self):
         ns = _run_in_sandbox("import os; result = os.name")
-        assert isinstance(ns["result"], str)
+        assert ns["result"] == os.name
 
     def test_os_fspath_allowed(self):
         ns = _run_in_sandbox("import os; result = os.fspath('/tmp')")
@@ -277,7 +286,16 @@ class TestTimeRestrictions:
         _run_in_sandbox("import time; _ = time.struct_time")
 
     def test_time_constants_allowed(self):
-        _run_in_sandbox("import time; _ = time.CLOCK_MONOTONIC")
+        for name in (
+            "CLOCK_REALTIME",
+            "CLOCK_MONOTONIC",
+            "CLOCK_PROCESS_CPUTIME_ID",
+            "CLOCK_THREAD_CPUTIME_ID",
+        ):
+            ns = _run_in_sandbox(
+                f"import time; result = (hasattr(time, {name!r}), getattr(time, {name!r}, None))"
+            )
+            assert ns["result"] == (hasattr(time, name), getattr(time, name, None))
 
     @pytest.mark.asyncio
     async def test_concurrent_coroutine_not_affected_by_sandbox(self):
@@ -768,8 +786,41 @@ class TestPassthroughModules:
         ns = _run_in_sandbox("import math; result = math.sqrt(16)")
         assert ns["result"] == 4.0
 
+    def test_zipimport_bootstrap_module_bypasses_finders(self, monkeypatch: pytest.MonkeyPatch):
+        sandbox = Sandbox()
+        assert sandbox.table["struct"] is struct
+
+        def unexpected_import(*args, **kwargs):
+            pytest.fail(f"preloaded module reached importlib: {args!r} {kwargs!r}")
+
+        monkeypatch.setattr(py_sandbox.importlib, "__import__", unexpected_import)
+        with sandbox.enter():
+            assert __import__("struct") is struct
+
+    def test_real_spec_finders_run_against_host_modules(self, monkeypatch: pytest.MonkeyPatch):
+        sandbox = Sandbox()
+        sandbox.table.pop("struct")
+        finder = next(f for f in sys.meta_path if isinstance(f, py_sandbox._SandboxFinder))
+        seen: list[object] = []
+
+        class RecordingFinder:
+            @staticmethod
+            def find_spec(fullname, path, target):
+                import struct as finder_struct
+
+                assert not py_sandbox.in_sandbox()
+                seen.append(finder_struct)
+                return None
+
+        index = sys.meta_path.index(finder)
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path[: index + 1], RecordingFinder()])
+        with sandbox.enter():
+            assert finder._find_real_spec("missing", None, None) is None
+
+        assert seen == [struct]
+        assert "struct" not in sandbox.table
+
     def test_shutil_works(self):
-        _run_in_sandbox("import os; lurr = os.supports_dir_fd")
         _run_in_sandbox("import shutil")
 
     def test_pathlib_works(self):

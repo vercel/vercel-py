@@ -14,7 +14,7 @@ dev = [
     "hypothesis>=6.0.0,<7",
     "respx>=0.21.0,<1",
     "cryptography>=48.0.1",
-    "uvloop<1",
+    "uvloop<1; sys_platform != 'win32'",
     "mypy>=1.20.2,<2",
     "django-stubs>=6.0.6,<7",
     "build<2",
@@ -30,15 +30,15 @@ dev = [
     "tox-uv-bare",
     "tomli>=2.0.0,<3; python_version < '3.11'",
     "vendoring>=1,<2",
-    "lograil~=0.7.0",
-    "ggt>=1.5.5; python_version >= '3.11'",
+    "lograil~=0.8.1",
+    "ggt>=1.6.0; python_version >= '3.11'",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
 package = false
 exclude-newer = "2 days"
-exclude-newer-package = { ggt = "2026-08-27T00:00:00Z", lograil = "2026-08-10T21:20:07.442Z" }
+exclude-newer-package = { ggt = "2026-09-01T00:00:00Z", lograil = "2026-08-21T00:00:00Z" }
 
 [tool.uv.workspace]
 members = ["src/*", "integrations/*"]
@@ -130,6 +130,12 @@ cmd = "scripts/poe/workspace_poe.py root-task check-news-fragments-root"
 
 [tool.poe.tasks.check-news-fragments-root]
 cmd = "python scripts/release.py check-news-fragments"
+
+[tool.poe.tasks.check-new-package-versions]
+cmd = "scripts/poe/workspace_poe.py root-task check-new-package-versions-root"
+
+[tool.poe.tasks.check-new-package-versions-root]
+cmd = "python scripts/release.py check-new-package-versions"
 
 [tool.poe.tasks.fix]
 cmd = "scripts/poe/workspace_poe.py workspace fix --poe-verbose ${verbose:-false} ${scopes}"

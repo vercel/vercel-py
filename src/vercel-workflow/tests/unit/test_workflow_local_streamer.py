@@ -121,20 +121,33 @@ class TestLiveRead:
 
         assert await _drain(world) == [b"a", b"b"]
 
-    async def test_waits_for_chunks_that_have_not_been_written_yet(self, world) -> None:
+    async def test_waits_for_chunks_that_have_not_been_written_yet(
+        self, world, monkeypatch
+    ) -> None:
         """The defining property: a read tails, it does not stop at the tail."""
         received: list[bytes] = []
+        reader_started = asyncio.Event()
+        chunk_received = asyncio.Event()
+        real_chunk_files = world._chunk_files
+
+        def observed_chunk_files(name):
+            files = real_chunk_files(name)
+            reader_started.set()
+            return files
+
+        monkeypatch.setattr(world, "_chunk_files", observed_chunk_files)
 
         async def reader() -> None:
             async for chunk in world.streams_get(RUN_ID, NAME):
                 received.append(chunk)
+                chunk_received.set()
 
         task = asyncio.ensure_future(reader())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(reader_started.wait(), timeout=5)
         assert received == [], "nothing written yet"
 
         await world.streams_write(RUN_ID, NAME, b"late")
-        await asyncio.sleep(0.3)
+        await asyncio.wait_for(chunk_received.wait(), timeout=5)
         assert received == [b"late"], "a chunk written after the read started"
 
         await world.streams_close(RUN_ID, NAME)
@@ -144,8 +157,14 @@ class TestLiveRead:
         # Nothing closes a stream implicitly, which is exactly why a workflow
         # that forgets to close leaves its readers hanging.
         await world.streams_write(RUN_ID, NAME, b"a")
-        task = asyncio.ensure_future(_drain(world))
-        await asyncio.sleep(0.3)
+        chunk_received = asyncio.Event()
+
+        async def reader() -> None:
+            async for _chunk in world.streams_get(RUN_ID, NAME):
+                chunk_received.set()
+
+        task = asyncio.ensure_future(reader())
+        await asyncio.wait_for(chunk_received.wait(), timeout=5)
         assert not task.done()
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -188,7 +207,9 @@ class TestLiveRead:
 
         assert await _drain(world, start_index=50) == []
 
-    async def test_skipped_chunks_are_not_re_delivered_by_the_poll(self, world) -> None:
+    async def test_skipped_chunks_are_not_re_delivered_by_the_poll(
+        self, world, monkeypatch
+    ) -> None:
         """A resumed read must not replay history once it starts polling.
 
         The poll re-lists the whole directory, so anything the caller asked to
@@ -198,15 +219,31 @@ class TestLiveRead:
             await world.streams_write(RUN_ID, NAME, str(i).encode())
 
         received: list[bytes] = []
+        polling = asyncio.Event()
+        new_chunk_received = asyncio.Event()
+        real_chunk_files = world._chunk_files
+        scans = 0
+
+        def observed_chunk_files(name):
+            nonlocal scans
+            files = real_chunk_files(name)
+            scans += 1
+            if scans == 2:
+                polling.set()
+            return files
+
+        monkeypatch.setattr(world, "_chunk_files", observed_chunk_files)
 
         async def reader() -> None:
             async for chunk in world.streams_get(RUN_ID, NAME, 2):
                 received.append(chunk)
+                if chunk == b"new":
+                    new_chunk_received.set()
 
         task = asyncio.ensure_future(reader())
-        await asyncio.sleep(0.3)
+        await asyncio.wait_for(polling.wait(), timeout=5)
         await world.streams_write(RUN_ID, NAME, b"new")
-        await asyncio.sleep(0.3)
+        await asyncio.wait_for(new_chunk_received.wait(), timeout=5)
         await world.streams_close(RUN_ID, NAME)
         await asyncio.wait_for(task, timeout=5)
 

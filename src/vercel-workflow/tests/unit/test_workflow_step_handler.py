@@ -23,7 +23,7 @@ import pytest
 import respx
 
 from vercel._internal.core.polyfills import UTC
-from vercel.workflow import FatalError
+from vercel.workflow import FatalError, StepNotRegisteredError
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 
 from ..world_stubs import NoStreams
@@ -255,6 +255,37 @@ async def test_happy_path_completes_and_reenqueues(registry: core.Workflows) -> 
     assert result is None
     assert _event_types(fake) == ["step_completed"]
     assert len(_workflow_enqueues(fake)) == 1
+
+
+async def test_unregistered_step_fails_without_retrying(registry: core.Workflows) -> None:
+    step_name = "step//tests.non_existent_step"
+    fake = FakeWorld(started_step=_running_step(step_name, attempt=1))
+    w.set_world(fake)
+
+    result = await _invoke(registry, step_name)
+
+    assert result is None
+    assert _event_types(fake) == ["step_failed"]
+    assert len(_workflow_enqueues(fake)) == 1
+    (failed,) = fake.events
+    recorded = ser.hydrate_error(failed.event_data.error, what="the recorded error")
+    assert isinstance(recorded, FatalError)
+    assert "is not registered with this Workflows instance" in str(recorded)
+
+
+def test_missing_step_lookup_raises_named_error(registry: core.Workflows) -> None:
+    step_name = "step//tests.non_existent_step"
+
+    with pytest.raises(StepNotRegisteredError) as exc_info:
+        registry._get_step(step_name)
+
+    assert exc_info.value.step_name == step_name
+    assert isinstance(exc_info.value, FatalError)
+    assert str(exc_info.value) == (
+        f'Step "{step_name}" is not registered with this Workflows instance. '
+        "Ensure the module defining it is imported and registers the step "
+        "when this deployment starts."
+    )
 
 
 async def test_an_ordinary_failure_below_max_retries_asks_for_a_retry(

@@ -1,13 +1,28 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python
+from __future__ import annotations
 
-if (($# == 0)); then
-  echo "usage: $0 <poe-task> [args ...]" >&2
-  exit 2
-fi
+import subprocess
+import sys
+from collections.abc import Sequence
 
-task="$1"
-shift
 
-poe --dry-run "$task" "$@" 2>&1 | sed 's/^Poe => //'
-exec poe -q "$task" "$@"
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(argv if argv is not None else sys.argv[1:])
+    if not args:
+        raise SystemExit(f"usage: {sys.argv[0]} <poe-task> [args ...]")
+
+    preview = subprocess.run(
+        ("poe", "--dry-run", *args),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    sys.stdout.write(preview.stdout.replace("Poe => ", "", 1))
+    if preview.returncode:
+        return preview.returncode
+    return subprocess.call(("poe", "-q", *args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
