@@ -644,6 +644,7 @@ def test_refetch_throttle_engages_before_the_claim_is_released(
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
+    from contextvars import ContextVar
 
     from vercel.oidc import verify as oidc_verify
 
@@ -653,8 +654,12 @@ def test_refetch_throttle_engages_before_the_claim_is_released(
     assert route.call_count == 1
 
     original_select = oidc_verify._select_key
+    original_claim_fetch = oidc_verify._claim_fetch
     outcome_pending = threading.Event()
+    second_claim_checked = threading.Event()
     record_outcome = threading.Event()
+    caller_kid: ContextVar[str | None] = ContextVar("caller_kid", default=None)
+    second_claim_results: list[bool] = []
     first_kid_selections = 0
 
     def paused_select(document: Mapping[str, Any], kid: str) -> Any:
@@ -670,16 +675,30 @@ def test_refetch_throttle_engages_before_the_claim_is_released(
 
     monkeypatch.setattr(oidc_verify, "_select_key", paused_select)
 
+    def observed_claim_fetch(url: str) -> bool:
+        claimed = original_claim_fetch(url)
+        if caller_kid.get() == "forged-second":
+            second_claim_results.append(claimed)
+            second_claim_checked.set()
+        return claimed
+
+    monkeypatch.setattr(oidc_verify, "_claim_fetch", observed_claim_fetch)
+
     def attempt(kid: str) -> None:
-        with pytest.raises(VercelOidcVerificationError):
-            verify_vercel_oidc_token(sign(signing_key, kid=kid), **EXPECTATIONS)
+        token = caller_kid.set(kid)
+        try:
+            with pytest.raises(VercelOidcVerificationError):
+                verify_vercel_oidc_token(sign(signing_key, kid=kid), **EXPECTATIONS)
+        finally:
+            caller_kid.reset(token)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(attempt, "forged-first")
         assert outcome_pending.wait(timeout=5)
         second = pool.submit(attempt, "forged-second")
-        time.sleep(0.25)  # let the second caller reach the fetch claim
+        assert second_claim_checked.wait(timeout=5)
         record_outcome.set()
+        assert second_claim_results == [False]
         first.result(timeout=10)
         second.result(timeout=10)
 

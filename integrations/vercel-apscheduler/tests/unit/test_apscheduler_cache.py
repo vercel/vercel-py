@@ -16,6 +16,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+import time_machine
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -523,10 +524,13 @@ def test_cache_pause_publishes_control_message_and_subscriber_applies_it() -> No
     scheduler, adapter, _payload = started_cache_scheduler()
     start_subscription = get_subscriptions()[0]
 
-    with patch(
-        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-        return_value="msg_ctl",
-    ) as send:
+    with (
+        time_machine.travel(datetime.now(UTC), tick=False),
+        patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg_ctl",
+        ) as send,
+    ):
         scheduler.pause()
 
     send.assert_called_once()
@@ -553,9 +557,12 @@ def test_cache_pause_publishes_control_message_and_subscriber_applies_it() -> No
     # A resume elsewhere arrives as a start message minting generation 2; a
     # late redelivery of the generation-1 pause must not settle the chain
     # back to paused.
-    with patch(
-        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
-        return_value="msg_wake_after_resume",
+    with (
+        time_machine.travel(control.issued_at + timedelta(seconds=1), tick=False),
+        patch(
+            "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+            return_value="msg_wake_after_resume",
+        ),
     ):
         start_subscription.func(
             message(

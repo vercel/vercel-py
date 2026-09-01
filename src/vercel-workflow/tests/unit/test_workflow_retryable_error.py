@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+import time_machine
 
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow import RetryableError
@@ -40,11 +41,11 @@ WORKFLOW_QUEUE = f"__wkf_workflow_{WORKFLOW_NAME}"
 # ── the error ──────────────────────────────────────────────────────────────
 
 
+@time_machine.travel(NOW, tick=False)
 def test_retry_after_defaults_to_a_second() -> None:
-    before = datetime.now(UTC)
     err = RetryableError("later")
 
-    assert timedelta(seconds=1) <= err.retry_at - before <= timedelta(seconds=2)
+    assert err.retry_at == NOW + timedelta(seconds=1)
 
 
 @pytest.mark.parametrize(
@@ -59,10 +60,10 @@ def test_retry_after_defaults_to_a_second() -> None:
 def test_retry_after_takes_the_durations_sleep_takes(
     retry_after: str | int | float | timedelta, expected: timedelta
 ) -> None:
-    before = datetime.now(UTC)
-    err = RetryableError("later", retry_after=retry_after)
+    with time_machine.travel(NOW, tick=False):
+        err = RetryableError("later", retry_after=retry_after)
 
-    assert expected <= err.retry_at - before <= expected + timedelta(seconds=1)
+    assert err.retry_at == NOW + expected
 
 
 def test_retry_after_takes_an_absolute_datetime() -> None:
@@ -159,6 +160,7 @@ async def _invoke(registry: core.Workflows, step_name: str) -> w.QueueContinuati
     )
 
 
+@time_machine.travel(NOW, tick=False)
 async def test_retryable_error_carries_its_deadline_to_the_event(
     registry: core.Workflows,
 ) -> None:
@@ -174,12 +176,10 @@ async def test_retryable_error_carries_its_deadline_to_the_event(
     assert [e.event_type for e in fake.events] == ["step_retrying"]
     retry_after = fake.events[0].event_data.retry_after
     assert retry_after is not None
-    assert timedelta(seconds=9) <= retry_after - datetime.now(UTC) <= timedelta(seconds=10)
-    # The continuation asks the queue for the same wait, rounded up. Bounded
-    # rather than exact because it is measured against the clock: the second
-    # spent getting here counts against the ten.
+    assert retry_after == NOW + timedelta(seconds=10)
+    # The continuation asks the queue for the same wait, rounded up.
     assert result is not None
-    assert 9 <= result.delay_seconds <= 10
+    assert result.delay_seconds == 10
 
 
 async def test_a_plain_error_keeps_the_one_second_retry(registry: core.Workflows) -> None:
