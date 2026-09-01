@@ -138,8 +138,7 @@ class Cancellation(BaseSuspension):
     requested: bool = False
 
     def fail(self, exc: Exception) -> None:
-        # Cancellation suspensions have no direct awaiter. The orchestrator
-        # raises replay-divergence failures separately via ``resume_exception``.
+        # Cancellation suspensions have no awaiter.
         pass
 
 
@@ -1149,12 +1148,14 @@ class WorkflowOrchestratorContext:
 
             case w.HookCreatedEvent():
                 hook = self.suspensions[event.correlation_id]
-                assert isinstance(hook, Hook)
                 hook.has_created_event = True
-                while hook.conflict_futures:
-                    future = hook.conflict_futures.popleft()
-                    if not future.cancelled():
-                        future.set_result(None)
+                if isinstance(hook, Hook):
+                    while hook.conflict_futures:
+                        future = hook.conflict_futures.popleft()
+                        if not future.cancelled():
+                            future.set_result(None)
+                else:
+                    assert isinstance(hook, Cancellation)
 
             case w.WaitCreatedEvent():
                 self.suspensions[event.correlation_id].has_created_event = True
