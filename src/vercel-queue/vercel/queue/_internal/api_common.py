@@ -10,7 +10,13 @@ from . import (
     types as _types,
 )
 from .errors import *
-from .subscribers import QueueSubscriber, Subscription, get_subscriptions, subscribe
+from .subscribers import (
+    MaxDuration,
+    QueueSubscriber,
+    Subscription,
+    get_subscriptions,
+    subscribe,
+)
 
 ALL_DEPLOYMENTS = _config.ALL_DEPLOYMENTS
 CURRENT_DEPLOYMENT = _config.CURRENT_DEPLOYMENT
@@ -63,6 +69,7 @@ __all__ = (
     "Handoff",
     "InternalServerError",
     "InvalidLimitError",
+    "MaxDuration",
     "Message",
     "MessageAlreadyProcessedError",
     "MessageCorruptedError",
