@@ -131,11 +131,16 @@ class Workflow(Generic[P, T]):
 
 class Step(Generic[P, T]):
     def __init__(
-        self, func: Callable[P, Coroutine[Any, Any, T]], *, max_retries: int = DEFAULT_MAX_RETRIES
+        self,
+        func: Callable[P, Coroutine[Any, Any, T]],
+        *,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        cancellable: bool = False,
     ):
         self.func = func
         self.name = f"step//{func.__module__}//{func.__qualname__}"
         self.max_retries = max_retries
+        self.cancellable = cancellable
         self._signature = inspect.signature(func)
         functools.update_wrapper(self, func)
         # After update_wrapper, which copies the wrapped function's __dict__
@@ -379,7 +384,7 @@ class Workflows:
 
     @overload
     def step(
-        self, *, max_retries: int = ...
+        self, *, max_retries: int = ..., cancellable: bool = ...
     ) -> Callable[[Callable[P, Coroutine[Any, Any, T]]], Step[P, T]]: ...
 
     def step(
@@ -387,9 +392,10 @@ class Workflows:
         func: Callable[P, Coroutine[Any, Any, T]] | None = None,
         *,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        cancellable: bool = False,
     ) -> Step[P, T] | Callable[[Callable[P, Coroutine[Any, Any, T]]], Step[P, T]]:
         def register(f: Callable[P, Coroutine[Any, Any, T]]) -> Step[P, T]:
-            rv = Step(f, max_retries=max_retries)
+            rv = Step(f, max_retries=max_retries, cancellable=cancellable)
             assert rv.name not in self._steps, f"Duplicate step name: {rv.name}"
             self._steps[rv.name] = rv
             return rv
