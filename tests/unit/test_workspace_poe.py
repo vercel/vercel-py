@@ -356,6 +356,30 @@ def test_hook_commands_are_verbose_and_not_suppressed(monkeypatch) -> None:
     assert [command.subject for command in commands] == ["root", "vercel-celery"]
 
 
+def test_pre_push_runs_new_package_version_check(monkeypatch) -> None:
+    runner = object.__new__(workspace_poe.WorkspaceRunner)
+    runner.root = Path.cwd()
+    runner.project_root = None
+    tasks = []
+
+    monkeypatch.setattr(runner, "enter_tree", lambda: None)
+
+    def top_level_poe_command(task, scopes, poe_flags):
+        tasks.append(task)
+        return workspace_poe.CommandSpec(task, (task,), Path.cwd(), {})
+
+    monkeypatch.setattr(
+        runner,
+        "top_level_poe_command",
+        top_level_poe_command,
+    )
+    monkeypatch.setattr(runner, "workspace_commands", lambda task, scopes, args: [])
+    monkeypatch.setattr(workspace_poe, "run_group", lambda commands, **kwargs: 0)
+
+    assert runner.run_hook("pre-push") == 0
+    assert tasks == ["check-news-fragments", "check-new-package-versions"]
+
+
 def test_failure_tail_lines_filter_progress_noise() -> None:
     entries = [
         {"message": "[gw0] [ 10%] PASSED tests/unit/test_ok.py::test_ok"},

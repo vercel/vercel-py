@@ -50,10 +50,8 @@ jobs:
               packages = subprocess.check_output(
                   [
                       "python",
-                      "scripts/workspace.py",
-                      "list",
-                      "--names",
-                      "--topological",
+                      "scripts/release.py",
+                      "publishable",
                   ],
                   text=True,
               ).splitlines()
@@ -153,6 +151,10 @@ jobs:
             else
               version=$(python scripts/get-version.py "$package")
               publish_shared_vendored_deps=false
+            fi
+            if [ "$is_shared_vendored_deps" != "true" ] && [ "$version" = "0.0.0" ]; then
+              echo "$package is at the unpublished sentinel version, skipping publish"
+              continue
             fi
             tag="$package-v$version"
             if [ "$is_shared_vendored_deps" != "true" ] || [ "$publish_shared_vendored_deps" = "true" ]; then

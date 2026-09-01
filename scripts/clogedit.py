@@ -410,13 +410,16 @@ def initial_changelog_selection(
     packages_by_name: dict[str, workspace.Package], changed: set[str], covered: set[str]
 ) -> ChangelogSelection:
     ordered = workspace.topological_names(packages_by_name)
+    publishable_changed = set(
+        release.publishable_packages(changed, packages_by_name=packages_by_name)
+    )
     return ChangelogSelection(
         {
             name: PackageNewsState(
                 name=name,
                 changed=name in changed,
                 covered=name in covered,
-                selected=name in changed and name not in covered,
+                selected=name in publishable_changed and name not in covered,
             )
             for name in ordered
         }

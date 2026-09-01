@@ -187,9 +187,15 @@ class WorkspaceRunner:
         if name == "pre-commit":
             tasks = ("lint", "typecheck")
         else:
-            tasks = ("check-news-fragments", "lint", "typecheck", "test")
+            tasks = (
+                "check-news-fragments",
+                "check-new-package-versions",
+                "lint",
+                "typecheck",
+                "test",
+            )
         for task in tasks:
-            if task == "check-news-fragments":
+            if task in {"check-news-fragments", "check-new-package-versions"}:
                 commands.append(self.top_level_poe_command(task, (), ()))
             else:
                 commands.extend(self.workspace_commands(task, (), ()))
@@ -377,6 +383,8 @@ def run_tool_group(task: str) -> int:
 def run_root_task(task: str, argv: Sequence[str]) -> int:
     if task == "check-news-fragments-root":
         return subprocess.call((sys.executable, "scripts/release.py", "check-news-fragments"))
+    if task == "check-new-package-versions-root":
+        return subprocess.call((sys.executable, "scripts/release.py", "check-new-package-versions"))
     if task == "fix-root":
         return run_tool_group("fix")
     if task == "lint-root":
