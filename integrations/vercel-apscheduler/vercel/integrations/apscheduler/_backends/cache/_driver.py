@@ -60,7 +60,6 @@ class CacheDriver:
         self.deployment = deployment
         self.key = f"aps:{scope}:{scheduler_id}:driver"
         self.tag = f"aps:{scope}:{scheduler_id}"
-        self._store: Any = None
 
     def _read(self) -> dict[str, Any]:
         doc = get_cache().get(self.key)
@@ -575,28 +574,6 @@ class CacheDriver:
     def owner_deployment(self) -> str | None:
         value = self._read().get("owner_deployment")
         return value if isinstance(value, str) and value else None
-
-    def attach_store(self, store: Any) -> None:
-        self._store = store
-
-    def reconciled_deployment(self) -> str | None:
-        if self._store is None:
-            return None
-        value = self._store._load().get("reconciled_deployment")
-        return value if isinstance(value, str) and value else None
-
-    def mark_reconciled(self, deployment: str, now: datetime) -> bool:
-        del now
-        # Owner fence, best-effort: a demoted straggler must not stamp the
-        # marker. The marker is written into the jobs document so eviction
-        # clears them together and the next wake re-runs reconciliation
-        # instead of trusting a reaped store.
-        if self._store is None or self._read().get("owner_deployment") != deployment:
-            return False
-        doc = self._store._load()
-        doc["reconciled_deployment"] = deployment
-        self._store._store(doc)
-        return True
 
     def renew(self, owner: str, now: datetime) -> bool:
         return True

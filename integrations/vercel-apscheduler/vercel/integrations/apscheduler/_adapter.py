@@ -27,7 +27,6 @@ from ._imports import (
     STATE_RUNNING,
     STATE_STOPPED,
     BaseScheduler,
-    IntervalTrigger,
     JobEvent,
     JobSubmissionEvent,
     MaxInstancesReachedError,
@@ -59,11 +58,6 @@ WAKEUP_KEY_PREFIX = "aps"
 # Queue delivery rounds wake delays up to whole seconds and adds dispatch
 # latency, so a grace below this cannot be met and skips occurrences.
 MIN_QUEUE_MISFIRE_GRACE_SECONDS = 5
-# A reconciliation pass can lose a revision race to a concurrent owner write;
-# rerunning with fresh state converges. Bounded so a mutation storm defers to
-# the next activation instead of spinning.
-RECONCILE_PASS_LIMIT = 3
-
 # One live adapter per durable identity. Two schedulers whose stores collapse
 # to the same identity would interleave one namespace, so the second claim
 # fails loudly instead.
@@ -151,25 +145,6 @@ def get_adapter(scheduler: Any) -> SchedulerAdapter | None:
     return cast("SchedulerAdapter | None", getattr(scheduler, ADAPTER_ATTR, None))
 
 
-def _trigger_fingerprint(trigger: Any) -> tuple[str, str, str]:
-    """Digest a trigger into its user-declared, comparable schedule.
-
-    ``IntervalTrigger`` without an explicit ``start_date`` auto-anchors at
-    declaration time, so that field would look changed on every deployment
-    and re-anchor unchanged schedules; it is excluded from the digest.
-    """
-    state: Any = trigger.__getstate__()
-    if isinstance(state, dict) and type(trigger) is IntervalTrigger:
-        state = {key: value for key, value in state.items() if key != "start_date"}
-    return (
-        type(trigger).__module__,
-        type(trigger).__qualname__,
-        repr(sorted(state.items(), key=lambda item: str(item[0])))
-        if isinstance(state, dict)
-        else repr(state),
-    )
-
-
 class SchedulerAdapter:
     """Turns one durable APScheduler instance into one fenced Queue driver."""
 
@@ -185,7 +160,6 @@ class SchedulerAdapter:
         self._scope: str | None = None
         self._registration_deferred = False
         self._declared_jobs: dict[str, Any] = {}
-        self._reconciled = False
         self._driver: Driver | None = None
         self._coordinator: JobCoordinator | None = None
         self._backend: Backend | None = None
@@ -271,8 +245,8 @@ class SchedulerAdapter:
     def _scope_outlives_deployments(self) -> bool:
         """Whether the namespace can outlive this code's view of it.
 
-        Always true on the cache backend: its documents are evictable in
-        every scope, so reconciliation-from-code is the durability story
+        Always true on the cache backend: its records are evictable in
+        every scope, so read-repair-from-code is the durability story
         regardless of scoping. A future durable backend would return
         ``self._scope != self._deployment`` here.
         """
@@ -325,7 +299,6 @@ class SchedulerAdapter:
             now,
             idle_timeout_seconds=self._preview_idle_timeout_seconds(),
         )
-        self._reconcile_takeover(now)
         self._publish_start_if_needed(decision, now=now)
         if not decision.changed and decision.start_status == "active":
             self._rearm_wake_from_stores(now)
@@ -360,7 +333,6 @@ class SchedulerAdapter:
         )
         if not decision.owned:
             return False
-        self._reconcile_takeover(now)
         if decision.state != "running":
             self._pause_local()
             return True
@@ -590,7 +562,6 @@ class SchedulerAdapter:
         self._bind_runtime()
         self._validate_durable_configuration()
         if self.scheduler.state != STATE_STOPPED:
-            self._reconcile_takeover(datetime.now(UTC))
             return
         self._inject_inline_executor()
         previous = self._suppress_wakeup
@@ -604,7 +575,6 @@ class SchedulerAdapter:
             raise
         finally:
             self._suppress_wakeup = previous
-        self._reconcile_takeover(datetime.now(UTC))
 
     def _pause_local(self) -> None:
         if self.scheduler.state != STATE_RUNNING:
@@ -759,7 +729,10 @@ class SchedulerAdapter:
                 MIN_QUEUE_MISFIRE_GRACE_SECONDS,
             )
         if not (self.is_runtime_mutation or self.is_wake_mutation):
-            # Cold-start declarations are the reconciliation input on takeover.
+            # Cold-start declarations are the store's read-repair index, and
+            # repair may serialize them at any read, so complete the defaults
+            # upstream _real_add_job would otherwise fill later.
+            self._fill_declaration_defaults(job, jobstore_alias)
             self._declared_jobs[str(job.id)] = job
         if job.executor != "default":
             raise APSchedulerConfigurationError(
@@ -767,9 +740,8 @@ class SchedulerAdapter:
             )
         if not (self.is_runtime_mutation or self.is_wake_mutation) and not self._owns_namespace():
             # A stale deployment's cold start must not write declarations into
-            # a namespace another deployment drives; taking ownership runs the
-            # reconciliation that writes them instead.
-            self._fill_declaration_defaults(job, jobstore_alias)
+            # a namespace another deployment drives; read-repair writes them
+            # once ownership arrives.
             return False
         existing = jobstore.lookup_job(job.id)
         if existing is None:
@@ -779,16 +751,13 @@ class SchedulerAdapter:
                 f'job "{job.id}" already exists in the durable store; '
                 "declare it with replace_existing=True"
             )
-        if self.is_runtime_mutation or self.is_wake_mutation:
-            return True
-        self._fill_declaration_defaults(job, jobstore_alias)
-        return False
+        return self.is_runtime_mutation or self.is_wake_mutation
 
     def _fill_declaration_defaults(self, job: Any, jobstore_alias: str) -> None:
-        """Complete a declared job whose store write was skipped.
+        """Complete a declared job the way upstream ``_real_add_job`` would.
 
-        The skipped write leaves the object without the defaults upstream
-        ``_real_add_job`` would fill; reconciliation may persist it later.
+        Declarations serve as the store's read-repair input, which can
+        serialize them before upstream fills their defaults.
         """
         replacements: dict[str, Any] = {
             key: value
@@ -893,129 +862,9 @@ class SchedulerAdapter:
                         f'job "{job.id}" in "default" must use the default executor'
                     )
 
-    def _reconcile_takeover(self, now: datetime) -> None:
-        """Sync code-declared jobs into a namespace another deployment wrote.
-
-        Environment-scoped stores outlive deployments, so on the first touch
-        by a new deployment the code's declarations win: removed declarations
-        are deleted before any due planning, changed triggers restart their
-        schedule, unchanged jobs keep their progress, and a record that no
-        longer loads is rewritten from its declaration when the code still
-        declares it and removed when it does not.
-        """
-        if not self._scope_outlives_deployments:
-            return
-        if not self._owns_namespace():
-            return
-        # The durable marker is the authority; the in-process flag is only a
-        # cache of it. Consulting the marker first means a rollback onto a
-        # warm instance re-reconciles, and an evicted cache document heals.
-        if self.driver.reconciled_deployment() == self.deployment:
-            self._reconciled = True
-            return
-        self._reconciled = False
-        try:
-            for _ in range(RECONCILE_PASS_LIMIT):
-                if not self._reconcile_pass(now):
-                    continue
-                if self.driver.mark_reconciled(self.deployment, now):
-                    self._reconciled = True
-                return
-        except NamespaceFencedError:
-            # Ownership moved mid-reconciliation; the marker stays unset and
-            # the current owner reconciles instead.
-            self._logger.info(
-                'Deployment "%s" lost the scheduler while reconciling; '
-                "leaving the sync to the current owner",
-                self.deployment,
-            )
-            return
-        self._logger.warning(
-            "Reconciliation kept losing revision races to concurrent writes; "
-            "it stays unfinished and retries on the next activation"
-        )
-
-    def _reconcile_pass(self, now: datetime) -> bool:
-        """Run one full declaration sync; False when a revision race dirtied it.
-
-        A lost compare-and-set means a concurrent owner write moved a job
-        after this pass read it; the caller reruns against fresh state so the
-        sync always reflects the store it actually saw.
-        """
-        clean = True
-        missing = dict(self._declared_jobs)
-        with self.scheduler._jobstores_lock:
-            jobs, undecodable = self.coordinator.get_all_jobs_with_revisions()
-            clean &= self._reconcile_undecodable(undecodable, missing, now)
-            for job, revision in jobs:
-                missing.pop(str(job.id), None)
-                declared = self._declared_jobs.get(str(job.id))
-                if declared is None:
-                    if self.coordinator.cas_remove_job(job.id, revision):
-                        self._logger.info(
-                            'Removed job "%s": this deployment no longer declares it',
-                            job.id,
-                        )
-                    else:
-                        clean = False
-                    continue
-                if _trigger_fingerprint(declared.trigger) == _trigger_fingerprint(job.trigger):
-                    next_run_time = job.next_run_time
-                else:
-                    next_run_time = declared.trigger.get_next_fire_time(
-                        None,
-                        now.astimezone(self.scheduler.timezone),
-                    )
-                declared._modify(next_run_time=next_run_time)
-                if not self.coordinator.cas_update_job(declared, revision):
-                    clean = False
-            for declared in missing.values():
-                # Declared before this deployment owned the namespace, so the
-                # cold-start materialization deliberately did not write it.
-                self.coordinator.add_job(declared)
-        return clean
-
-    def _reconcile_undecodable(
-        self,
-        undecodable: list[tuple[str, int]],
-        missing: dict[str, Any],
-        now: datetime,
-    ) -> bool:
-        """Repair or remove records this deployment's code cannot load."""
-        clean = True
-        for job_id, revision in undecodable:
-            declared = missing.pop(job_id, None)
-            if declared is None:
-                if self.coordinator.cas_remove_job(job_id, revision):
-                    self._logger.info(
-                        'Removed job "%s": this deployment no longer declares it',
-                        job_id,
-                    )
-                else:
-                    clean = False
-                continue
-            # The code still declares this job but its persisted record no
-            # longer loads (typically its function moved). The declaration is
-            # authoritative; restart its schedule under the new code.
-            declared._modify(
-                next_run_time=declared.trigger.get_next_fire_time(
-                    None,
-                    now.astimezone(self.scheduler.timezone),
-                )
-            )
-            if self.coordinator.cas_update_job(declared, revision):
-                self._logger.info(
-                    'Rewrote job "%s" from its declaration: the persisted '
-                    "definition no longer loads under this deployment",
-                    job_id,
-                )
-            else:
-                clean = False
-        return clean
-
     def _rebase_before(self, activation_time: datetime) -> None:
         with self.scheduler._jobstores_lock:
-            jobs, _undecodable = self.coordinator.get_all_jobs_with_revisions()
+            jobs = self.coordinator.get_all_jobs_with_revisions()
             for job, revision in jobs:
                 next_run_time = job.next_run_time
                 if next_run_time is None or next_run_time >= activation_time:
