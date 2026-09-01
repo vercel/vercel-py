@@ -70,7 +70,17 @@ class Driver(Protocol):
         generation: int,
         owner: str,
         now: datetime,
-    ) -> ClaimResult: ...
+        *,
+        idle_bounded: bool = False,
+    ) -> ClaimResult:
+        """Claim a start delivery.
+
+        ``idle_bounded`` is the message's statement that this chain is
+        subject to a preview idle deadline; adopting such a chain into a
+        document that carries no deadline must fail stale instead of
+        resurrecting an unbounded chain.
+        """
+        ...
 
     def finish_start(
         self,
@@ -87,7 +97,16 @@ class Driver(Protocol):
         now: datetime,
     ) -> None: ...
 
-    def claim_wake(self, token: WakeToken, owner: str, now: datetime) -> ClaimResult: ...
+    def claim_wake(
+        self,
+        token: WakeToken,
+        owner: str,
+        now: datetime,
+        *,
+        idle_bounded: bool = False,
+    ) -> ClaimResult:
+        """Claim a wake delivery; see ``claim_start`` for ``idle_bounded``."""
+        ...
 
     def finish_wake(
         self,
