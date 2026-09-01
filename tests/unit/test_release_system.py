@@ -545,29 +545,30 @@ def test_render_changelog_entry_preserves_fenced_code_blocks(tmp_path: Path) -> 
     )
 
 
-def test_render_changelog_entry_ignores_bullets_inside_code_blocks(tmp_path: Path) -> None:
+def test_render_changelog_entry_keeps_the_pr_reference_out_of_code_blocks(tmp_path: Path) -> None:
     entry = _bugfix_changelog_entry(
-        "Reject manifests that repeat a step name.\n\n```yaml\n- name: build\n- name: build\n```\n",
-        path=tmp_path / "123.bugfix.md",
-        pr_number=42,
-    )
-
-    assert [line for line in entry.splitlines() if line.startswith("- ")] == [
-        "- Reject manifests that repeat a step name. (#42)"
-    ]
-    assert entry.count("  - name: build") == 2
-
-
-def test_render_changelog_entry_splits_on_explicit_bullets(tmp_path: Path) -> None:
-    entry = _bugfix_changelog_entry(
-        "- Drop the managed Redis backend.\n- Derive the scheduler id from the subscriber id.\n",
+        "```python\nrun()\n```\n\nCall `run()` directly instead of through the shim.\n",
         path=tmp_path / "123.bugfix.md",
         pr_number=42,
     )
 
     assert entry.endswith(
-        "- Drop the managed Redis backend. (#42)\n"
-        "- Derive the scheduler id from the subscriber id. (#42)\n"
+        "- ```python\n"
+        "  run()\n"
+        "  ```\n"
+        "\n"
+        "  Call `run()` directly instead of through the shim. (#42)\n"
+    )
+
+
+def test_render_changelog_entry_keeps_bullet_lines_inside_one_entry(tmp_path: Path) -> None:
+    entry = _bugfix_changelog_entry(
+        "- Drop the managed Redis backend.\n- Derive the scheduler id from the subscriber id.\n",
+        path=tmp_path / "123.bugfix.md",
+    )
+
+    assert entry.endswith(
+        "- Drop the managed Redis backend.\n  - Derive the scheduler id from the subscriber id.\n"
     )
 
 

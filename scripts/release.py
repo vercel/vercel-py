@@ -51,13 +51,12 @@ FRAGMENT_GUIDANCE = """
 # The whole fragment becomes one changelog entry: a summary, then any detail
 # paragraphs or code blocks. Blank lines and indentation are preserved.
 # The release script adds '- ' and appends the pull request number.
-# Start a line with '- ' to add a second entry. Comment lines outside code
-# blocks are ignored.
+# Comment lines outside code blocks are ignored.
 {package_diff_section}
 """
-# A list marker in column zero, which is the only way to ask for a second
-# changelog entry from one news fragment.
-BULLET_RE = re.compile(r"[-*+]\s")
+# A list marker the fragment already opens with, so its entry is not given a
+# second one.
+LIST_MARKER_RE = re.compile(r"[-*+]\s")
 # Up to three leading spaces then a run of at least three backticks or tildes,
 # per CommonMark fenced code blocks.
 FENCE_RE = re.compile(r" {0,3}(?P<marker>`{3,}|~{3,})")
@@ -205,47 +204,17 @@ def _render_changelog_entry(release: Release, *, pr_numbers: dict[Path, int] | N
         bullets: list[list[str]] = []
         for fragment in fragments:
             pr_number = pr_numbers.get(fragment.path) if pr_numbers is not None else None
-            bullets.extend(
-                _render_changelog_bullet(entry, pr_number=pr_number)
-                for entry in _fragment_changelog_entries(fragment.text)
-            )
+            bullets.append(_render_changelog_bullet(fragment.text, pr_number=pr_number))
         lines.extend(_join_changelog_bullets(bullets))
         lines.append("")
     return "\n".join(lines)
 
 
-def _fragment_changelog_entries(text: str) -> list[list[str]]:
-    """Split news fragment text into changelog entries, as lists of lines.
-
-    A fragment is one changelog entry, even when it spans several lines: a
-    summary that may be hard wrapped, followed by detail paragraphs and code
-    blocks. Blank lines separate the parts of that one entry, so they must not
-    split it into separate bullets. Only an explicit list marker in column zero
-    starts another entry, and one inside a fenced code block is sample text.
-    """
-    lines = [line.rstrip() for line in text.splitlines()]
-    entries: list[list[str]] = []
-    current: list[str] = []
-
-    def flush() -> None:
-        entry = _trim_blank_lines(current)
-        if entry:
-            entries.append(entry)
-        current.clear()
-
-    for line, in_fence in zip(lines, _fence_states(lines), strict=True):
-        if not in_fence and BULLET_RE.match(line):
-            flush()
-        current.append(line)
-    flush()
-    return entries
-
-
 def _fence_states(lines: Sequence[str]) -> list[bool]:
     """Return, per line, whether it belongs to a fenced code block.
 
-    The delimiters count as part of the block, so nothing on a fence line is
-    mistaken for changelog markup either.
+    The delimiters count as part of the block, so a fence line is never treated
+    as prose that could take the pull request reference or a comment marker.
     """
     states: list[bool] = []
     fence: str | None = None
@@ -271,14 +240,22 @@ def _trim_blank_lines(lines: Sequence[str]) -> list[str]:
     return result
 
 
-def _render_changelog_bullet(entry: Sequence[str], *, pr_number: int | None) -> list[str]:
-    """Render one changelog entry as the lines of a single Markdown list item."""
-    lines = list(entry)
-    if pr_number is not None and not _mentions_pr("\n".join(lines), pr_number):
+def _render_changelog_bullet(text: str, *, pr_number: int | None) -> list[str]:
+    """Render one news fragment as the lines of a single Markdown list item.
+
+    A fragment is one changelog entry, however many lines it spans: a summary
+    that may be hard wrapped, followed by detail paragraphs, nested lists, and
+    code blocks. All of it belongs to that one entry, so the line structure is
+    kept and the continuation lines are indented to stay inside the bullet.
+    """
+    lines = _trim_blank_lines([line.rstrip() for line in text.splitlines()])
+    if not lines:
+        return []
+    if pr_number is not None and not _mentions_pr(text, pr_number):
         index = _pr_reference_index(lines)
         lines[index] = f"{lines[index]} (#{pr_number})"
     first, *rest = lines
-    bullet = first if BULLET_RE.match(first) else f"- {first}"
+    bullet = first if LIST_MARKER_RE.match(first) else f"- {first}"
     return [bullet, *(f"{CONTINUATION_INDENT}{line}" if line else "" for line in rest)]
 
 
