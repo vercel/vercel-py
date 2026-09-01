@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, ClassVar, cast
 from typing_extensions import Self
 
+import gc
 import logging
 import threading
 import time
@@ -14,8 +15,9 @@ import dramatiq
 import dramatiq.broker as dramatiq_broker
 import pytest
 from dramatiq.broker import MessageProxy, Middleware
-from dramatiq.errors import QueueNotFound
+from dramatiq.errors import ActorNotFound, QueueNotFound
 from dramatiq.message import Message as DramatiqMessage
+from dramatiq.middleware import TimeLimit
 from dramatiq.results import Results
 
 import vercel.integrations.dramatiq._broker as vqs_dramatiq
@@ -27,6 +29,7 @@ class FakeSubscription:
     topic: object
     consumer_group: str
     callback: Any
+    max_duration: Any = None
 
 
 @dataclass
@@ -64,6 +67,7 @@ class FakeSyncQueueClient:
         self.sent: list[dict[str, Any]] = []
         self.message_batches: list[list[Message[bytes]]] = []
         self.acknowledged: list[MessageMetadata] = []
+        self.polls: list[dict[str, Any]] = []
         self.visibility_changes: list[tuple[MessageMetadata, Duration]] = []
         self.lease_renewals: list[FakeLeaseRenewal] = []
         self.closed = False
@@ -79,6 +83,7 @@ class FakeSyncQueueClient:
         **kwargs: Any,
     ) -> Iterator[FakeDelivery]:
         self.last_poll = {"topic": topic, "consumer_group": consumer_group, "kwargs": kwargs}
+        self.polls.append(self.last_poll)
         for message in self.message_batches.pop(0) if self.message_batches else []:
             yield FakeDelivery(message)
 
@@ -180,12 +185,13 @@ def fake_queue_subscribe(monkeypatch: pytest.MonkeyPatch) -> list[FakeSubscripti
         *,
         topic: object = None,
         consumer_group: str = "dramatiq",
+        max_duration: Any = None,
         **kwargs: Any,
     ) -> Any:
         def decorator(callback: Any) -> Any:
-            subscriptions.append(FakeSubscription(topic, consumer_group, callback))
+            subscriptions.append(FakeSubscription(topic, consumer_group, callback, max_duration))
             FakeSyncQueueClient.subscriptions.append(
-                FakeSubscription(topic, consumer_group, callback)
+                FakeSubscription(topic, consumer_group, callback, max_duration)
             )
             return callback
 
@@ -199,10 +205,25 @@ def broker(**kwargs: Any) -> vqs_dramatiq.VercelQueueBroker:
     return vqs_dramatiq.VercelQueueBroker(**kwargs)
 
 
-def dramatiq_message(queue_name: str = "emails") -> DramatiqMessage[Any]:
+def declare_worker_queue(
+    subject: vqs_dramatiq.VercelQueueBroker,
+    queue_name: str,
+    **actor_options: Any,
+) -> None:
+    def handle() -> None:
+        pass
+
+    handle.__name__ = f"handle_{queue_name}_{len(subject.actors)}"
+    dramatiq.actor(queue_name=queue_name, broker=subject, **actor_options)(handle)
+
+
+def dramatiq_message(
+    queue_name: str = "emails",
+    actor_name: str = "send_email",
+) -> DramatiqMessage[Any]:
     return DramatiqMessage(
         queue_name=queue_name,
-        actor_name="send_email",
+        actor_name=actor_name,
         args=("user_1",),
         kwargs={},
         options={},
@@ -473,7 +494,8 @@ def test_declare_queue_registers_mapped_topic_callbacks_once(
     fake_queue_subscribe: list[FakeSubscription],
 ) -> None:
     subject = broker(consumer_group="workers")
-    subject.declare_queue("emails.high")
+    declare_worker_queue(subject, "emails.high")
+    declare_worker_queue(subject, "emails.high")
     subject.declare_queue("emails.high")
 
     assert [(topic_name(sub.topic), sub.consumer_group) for sub in fake_queue_subscribe] == [
@@ -483,12 +505,446 @@ def test_declare_queue_registers_mapped_topic_callbacks_once(
     assert len(subject._registered_callbacks) == 2
 
 
+def test_declare_queue_without_actors_registers_no_callbacks(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(consumer_group="workers")
+    subject.declare_queue("emails")
+
+    # A queue with no actors has no group to serve; the subscription appears
+    # once the first actor is declared.
+    assert fake_queue_subscribe == []
+
+    declare_worker_queue(subject, "emails")
+    assert [topic_name(sub.topic) for sub in fake_queue_subscribe] == [
+        "emails",
+        "emails_DDQ",
+    ]
+
+
+def resolved_max_duration(subscriptions: list[FakeSubscription], topic: str) -> object:
+    for subscription in subscriptions:
+        if topic_name(subscription.topic) == topic:
+            # Default groups defer resolution; shards carry a static limit.
+            value = subscription.max_duration
+            return value() if callable(value) else value
+    raise AssertionError(f"no subscription registered for topic {topic!r}")
+
+
+def test_max_duration_defaults_to_none(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+
+    @dramatiq.actor(queue_name="emails", broker=subject)
+    def send_email(user_id: str) -> None:
+        del user_id
+
+    # Dramatiq's built-in TimeLimit default is not user intent.
+    assert resolved_max_duration(fake_queue_subscribe, "emails") is None
+    assert resolved_max_duration(fake_queue_subscribe, "emails_DDQ") is None
+
+
+def test_max_duration_scalar_option_applies_to_default_groups(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(max_duration=900)
+    declare_worker_queue(subject, "emails")
+    declare_worker_queue(subject, "reports")
+
+    assert resolved_max_duration(fake_queue_subscribe, "emails") == 900
+    assert resolved_max_duration(fake_queue_subscribe, "emails_DDQ") == 900
+    assert resolved_max_duration(fake_queue_subscribe, "reports") == 900
+
+
+def test_max_duration_mapping_option_covers_default_groups(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(max_duration={"reports": timedelta(minutes=30)})
+    declare_worker_queue(subject, "reports")
+    declare_worker_queue(subject, "emails")
+
+    # The mapping configures the queue's default group in place — no topic
+    # renames — and covers the delay queue.
+    assert resolved_max_duration(fake_queue_subscribe, "reports") == timedelta(minutes=30)
+    assert resolved_max_duration(fake_queue_subscribe, "reports_DDQ") == timedelta(minutes=30)
+    # Queues not covered by the mapping keep the platform default.
+    assert resolved_max_duration(fake_queue_subscribe, "emails") is None
+
+
+def test_explicit_actor_time_limits_shard_queue_topics(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_500_000)
+    def build_report() -> None:
+        pass
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_500_000)
+    def rebuild_report() -> None:
+        pass
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=90_500)
+    def summarize_report() -> None:
+        pass
+
+    @dramatiq.actor(queue_name="reports", broker=subject)
+    def cleanup_report() -> None:
+        pass
+
+    # One subscription per (queue, limit group): the default group keeps the
+    # base topic; explicit limits shard into per-limit topics (ms, rounded up
+    # to whole seconds) shared by actors with equal limits. Delay queues
+    # shard the same way.
+    assert sorted(topic_name(sub.topic) for sub in fake_queue_subscribe) == sorted([
+        "reports",
+        "reports_DDQ",
+        "reports_d1500",
+        "reports_DDQ_d1500",
+        "reports_d91",
+        "reports_DDQ_d91",
+    ])
+    assert resolved_max_duration(fake_queue_subscribe, "reports") is None
+    assert resolved_max_duration(fake_queue_subscribe, "reports_d1500") == 1500
+    assert resolved_max_duration(fake_queue_subscribe, "reports_DDQ_d1500") == 1500
+    assert resolved_max_duration(fake_queue_subscribe, "reports_d91") == 91
+
+
+def test_base_topic_is_not_registered_without_default_group_actors(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_800_000)
+    def build_report() -> None:
+        pass
+
+    assert sorted(topic_name(sub.topic) for sub in fake_queue_subscribe) == sorted([
+        "reports_d1800",
+        "reports_DDQ_d1800",
+    ])
+
+
+def test_enqueue_routes_messages_to_actor_shard_topics(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_800_000)
+    def build_report() -> None:
+        pass
+
+    @dramatiq.actor(queue_name="reports", broker=subject)
+    def cleanup_report() -> None:
+        pass
+
+    subject.enqueue(dramatiq_message("reports", actor_name="build_report"))
+    subject.enqueue(dramatiq_message("reports", actor_name="cleanup_report"))
+    subject.enqueue(
+        dramatiq_message("reports", actor_name="build_report"),
+        delay=2_000,
+    )
+
+    sent_topics = [str(sent["topic"].name) for sent in queue_client().sent]
+    assert sent_topics == ["reports_d1800", "reports", "reports_DDQ_d1800"]
+
+
+def test_enqueue_falls_back_to_base_topic_for_unknown_actors(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+    declare_worker_queue(subject, "reports")
+
+    subject.enqueue(dramatiq_message("reports", actor_name="not_declared"))
+
+    assert [str(sent["topic"].name) for sent in queue_client().sent] == ["reports"]
+
+
+def test_enqueue_unknown_actor_raises_when_queue_has_no_default_group(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+    declare_worker_queue(subject, "reports", time_limit=1_800_000)
+
+    # Every actor on the queue is sharded, so nothing consumes the base
+    # topic; publishing there would strand the message until retention.
+    with pytest.raises(ActorNotFound):
+        subject.enqueue(dramatiq_message("reports", actor_name="not_declared"))
+
+    assert queue_client().sent == []
+
+
+def test_actor_time_limit_above_platform_cap_warns_and_clamps(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+
+    with pytest.warns(UserWarning, match=r"handle_slow.*3600000.*capping max_duration at 1800s"):
+
+        @dramatiq.actor(queue_name="reports", broker=subject, time_limit=3_600_000)
+        def handle_slow() -> None:
+            pass
+
+    # The actor shards at the platform maximum and routing follows.
+    assert [topic_name(sub.topic) for sub in fake_queue_subscribe] == [
+        "reports_d1800",
+        "reports_DDQ_d1800",
+    ]
+    subject.enqueue(dramatiq_message("reports", actor_name="handle_slow"))
+    assert [str(sent["topic"].name) for sent in queue_client().sent] == ["reports_d1800"]
+
+
+def test_time_limit_middleware_above_platform_cap_warns_and_clamps(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(middleware=[TimeLimit(time_limit=7_200_000)])
+    declare_worker_queue(subject, "reports")
+
+    with pytest.warns(UserWarning, match=r"TimeLimit middleware.*capping max_duration at 1800s"):
+        assert subject.max_duration_for_queue("reports") == 1800
+
+
+def test_max_duration_option_out_of_range_is_rejected() -> None:
+    with pytest.raises(ValueError, match="max_duration must be a number"):
+        broker(max_duration=3600)
+
+    with pytest.raises(ValueError, match="max_duration for queue 'reports'"):
+        broker(max_duration={"reports": 0})
+
+
+def test_actor_redeclaration_with_new_limit_prunes_stale_shard(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(poll=True)
+
+    @dramatiq.actor(
+        actor_name="build_report",
+        queue_name="reports",
+        broker=subject,
+        time_limit=900_000,
+    )
+    def build_report_v1() -> None:
+        pass
+
+    # The decorator refuses duplicate actor names, so a changed limit can
+    # only arrive through declare_actor directly (e.g. replacing an actor
+    # built elsewhere).
+    @dramatiq.actor(
+        actor_name="build_report",
+        queue_name="reports",
+        broker=broker(),
+        time_limit=1_800_000,
+    )
+    def build_report_v2() -> None:
+        pass
+
+    subject.declare_actor(build_report_v2)
+
+    # The abandoned shard is no longer polled...
+    for _ in range(2):
+        list(subject.poll_messages("reports", prefetch=1))
+    polled = {str(poll["topic"].name) for poll in queue_client().polls}
+    assert polled == {"reports_d1800"}
+
+    # ...and publishing routes to the new shard.
+    subject.enqueue(dramatiq_message("reports", actor_name="build_report"))
+    assert [str(sent["topic"].name) for sent in queue_client().sent] == ["reports_d1800"]
+
+
+def test_poll_covers_queue_shard_topics(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(poll=True)
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_800_000)
+    def build_report() -> None:
+        pass
+
+    @dramatiq.actor(queue_name="reports", broker=subject)
+    def cleanup_report() -> None:
+        pass
+
+    list(subject.poll_messages("reports", prefetch=1))
+
+    polled = [str(poll["topic"].name) for poll in queue_client().polls]
+    assert sorted(polled) == ["reports", "reports_d1800"]
+
+
+def test_poll_rotates_starting_topic_so_shards_are_not_starved(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(poll=True)
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_800_000)
+    def build_report() -> None:
+        pass
+
+    @dramatiq.actor(queue_name="reports", broker=subject)
+    def cleanup_report() -> None:
+        pass
+
+    # A message is always available, so each call stops at its first topic;
+    # rotation must still give every topic a turn.
+    client = queue_client()
+    for _ in range(2):
+        client.message_batches.append([fake_vqs_message(dramatiq_message("reports").encode())])
+        list(subject.poll_messages("reports", prefetch=1))
+
+    first_polled = [str(poll["topic"].name) for poll in client.polls]
+    assert first_polled[0] != first_polled[-1]
+    assert set(first_polled) == {"reports", "reports_d1800"}
+
+
+def test_push_delivery_on_shard_topic_maps_back_to_queue(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(poll=False, push_handoff_wait_seconds=1)
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_800_000)
+    def build_report() -> None:
+        pass
+
+    consumer = subject.consume("reports", prefetch=1, timeout=1000)
+    received: list[MessageProxy] = []
+    ready = threading.Event()
+
+    def worker() -> None:
+        ready.set()
+        message = consumer.__next__()
+        assert message is not None
+        received.append(message)
+        consumer.ack(message)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert ready.wait(timeout=1)
+    try:
+        shard_callback = next(
+            sub.callback for sub in fake_queue_subscribe if topic_name(sub.topic) == "reports_d1800"
+        )
+        with pytest.raises(Handoff):
+            shard_callback(
+                fake_vqs_message(
+                    dramatiq_message("reports", actor_name="build_report").encode(),
+                    topic="reports_d1800",
+                )
+            )
+    finally:
+        thread.join(timeout=1)
+
+    assert received
+    assert received[0].queue_name == "reports"
+    assert len(queue_client().acknowledged) == 1
+
+
+def test_max_duration_honors_user_time_limit_middleware(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(middleware=[TimeLimit(time_limit=600_000)])
+
+    @dramatiq.actor(queue_name="emails", broker=subject)
+    def send_email(user_id: str) -> None:
+        del user_id
+
+    # A user-supplied middleware list is explicit configuration, even when
+    # the value matches dramatiq's built-in default.
+    assert resolved_max_duration(fake_queue_subscribe, "emails") == 600
+
+
+def test_explicit_actor_limits_shard_while_user_global_covers_default_group(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(middleware=[TimeLimit(time_limit=600_000)])
+
+    @dramatiq.actor(queue_name="emails", broker=subject, time_limit=60_000)
+    def send_email(user_id: str) -> None:
+        del user_id
+
+    @dramatiq.actor(queue_name="emails", broker=subject)
+    def send_digest() -> None:
+        pass
+
+    # The explicitly limited actor gets its own shard; the actor without an
+    # explicit limit stays on the base topic configured by the user global.
+    assert resolved_max_duration(fake_queue_subscribe, "emails_d60") == 60
+    assert resolved_max_duration(fake_queue_subscribe, "emails") == 600
+
+
+def test_max_duration_honors_mutated_default_time_limit(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+    time_limit = next(entry for entry in subject.middleware if isinstance(entry, TimeLimit))
+    time_limit.time_limit = 1_800_000
+
+    @dramatiq.actor(queue_name="emails", broker=subject)
+    def send_email(user_id: str) -> None:
+        del user_id
+
+    assert resolved_max_duration(fake_queue_subscribe, "emails") == 1800
+
+
+def test_max_duration_honors_time_limit_added_later(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+    subject.add_middleware(TimeLimit(time_limit=600_000))
+
+    @dramatiq.actor(queue_name="emails", broker=subject)
+    def send_email(user_id: str) -> None:
+        del user_id
+
+    assert resolved_max_duration(fake_queue_subscribe, "emails") == 600
+
+
+def test_unbounded_actor_stays_in_default_group(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker()
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=float("inf"))
+    def build_report() -> None:
+        pass
+
+    @dramatiq.actor(queue_name="reports", broker=subject, time_limit=1_800_000)
+    def summarize_report() -> None:
+        pass
+
+    # An explicitly unlimited actor has no bound to shard on: it stays on
+    # the base topic with no max_duration, while the limited actor shards.
+    assert resolved_max_duration(fake_queue_subscribe, "reports") is None
+    assert resolved_max_duration(fake_queue_subscribe, "reports_d1800") == 1800
+
+
+def test_max_duration_resolver_does_not_keep_broker_alive(
+    fake_queue_subscribe: list[FakeSubscription],
+) -> None:
+    subject = broker(max_duration=900)
+    declare_worker_queue(subject, "emails")
+    resolver = next(
+        subscription.max_duration
+        for subscription in fake_queue_subscribe
+        if topic_name(subscription.topic) == "emails"
+    )
+    assert resolver() == 900
+
+    # The fake registries hold the callbacks (and through their bound broker
+    # default, the broker) strongly; the real registry does not.
+    fake_queue_subscribe.clear()
+    FakeSyncQueueClient.subscriptions.clear()
+    del subject
+    gc.collect()
+
+    assert resolver() is None
+
+
 def test_registered_callback_hands_push_to_consumer_and_waits_for_ack(
     fake_queue_subscribe: list[FakeSubscription],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     subject = broker(poll=False, push_handoff_wait_seconds=1)
-    subject.declare_queue("emails")
+    declare_worker_queue(subject, "emails")
     consumer = subject.consume("emails", prefetch=1, timeout=1000)
     received: list[MessageProxy] = []
     primed = 0
@@ -525,7 +981,7 @@ def test_push_callback_waits_for_settlement_before_handoff(
     fake_queue_subscribe: list[FakeSubscription],
 ) -> None:
     subject = broker(poll=False, push_handoff_wait_seconds=1)
-    subject.declare_queue("emails")
+    declare_worker_queue(subject, "emails")
     consumer = subject.consume("emails", prefetch=1, timeout=1000)
     received: list[MessageProxy] = []
     ready = threading.Event()
@@ -556,7 +1012,7 @@ def test_push_settlement_wait_is_not_handoff_deadline_bounded(
     fake_queue_subscribe: list[FakeSubscription],
 ) -> None:
     subject = broker(poll=False, push_handoff_wait_seconds=0.01)
-    subject.declare_queue("emails")
+    declare_worker_queue(subject, "emails")
     consumer = subject.consume("emails", prefetch=1, timeout=1000)
     release = threading.Event()
     received: list[MessageProxy] = []
@@ -603,7 +1059,7 @@ def test_push_callback_retries_when_no_consumer_or_prefetch_full(
     fake_queue_subscribe: list[FakeSubscription],
 ) -> None:
     subject = broker(requeue_delay_seconds=4, push_handoff_wait_seconds=0)
-    subject.declare_queue("emails")
+    declare_worker_queue(subject, "emails")
 
     with pytest.raises(RetryAfter) as no_consumer:
         fake_queue_subscribe[0].callback(
