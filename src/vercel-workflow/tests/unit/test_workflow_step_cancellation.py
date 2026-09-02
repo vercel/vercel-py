@@ -288,8 +288,9 @@ class _FlakyStreamWorld(RecordingLocalWorld):
         await super().streams_write(run_id, name, chunk)
 
 
+@pytest.mark.parametrize("status", [400, 503])
 async def test_lost_cancellation_signal_fails_the_pass_and_is_retried(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, status
 ) -> None:
     """The stream packet is the only way a running step learns of the
     cancellation, so losing it must fail the pass -- and, since nothing
@@ -303,6 +304,7 @@ async def test_lost_cancellation_signal_fails_the_pass_and_is_retried(
     await _invoke_step(_queued_step(world, quick_step.name), cancel_and_wait.workflow_id)
 
     world.fail_stream_writes = 1
+    world.stream_write_status = status
     with pytest.raises(Exception) as excinfo:
         await _invoke(run_id, cancel_and_wait.workflow_id)
     assert "stream write lost" in repr(excinfo.value)
