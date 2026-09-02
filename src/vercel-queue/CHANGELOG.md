@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1 - 2026-09-01
+
+### Bug Fixes
+
+- Force embedded development servers to exit when graceful shutdown stalls. (#351)
+
+### Documentation
+
+- Remove documentation and examples for `asgi_app` in preparation for its removal. (#309)
+
 ## 0.8.0 - 2026-08-12
 
 ### Features
