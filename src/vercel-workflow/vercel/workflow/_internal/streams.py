@@ -126,6 +126,7 @@ class _LocalReadableStream(ReadableStream[T]):
         self.descriptor = _ReadableDescriptor(descriptor)
         self.bound_run_id: str | None = None
         self.pump_registered = False
+        self.owner: _ReadablePump | None = None
 
     def __aiter__(self) -> AsyncIterator[T]:
         if self.pump_registered:
@@ -133,6 +134,8 @@ class _LocalReadableStream(ReadableStream[T]):
         return aiter(self.source)
 
     async def aclose(self) -> None:
+        if self.owner is not None:
+            self.owner.cancel()
         close = getattr(self.source, "aclose", None)
         if close is not None:
             await close()
@@ -184,6 +187,10 @@ class _WorldReadableStream(ReadableStream[Any]):
                             what=f"chunk {index} of stream {self.descriptor.name}",
                         )
                     index += 1
+            owner = _readable_pump(self._world, self._run_id, self.descriptor.name)
+            if owner is not None and owner.error is not None:
+                _readable_pumps.pop((self._world, self._run_id, self.descriptor.name), None)
+                raise owner.error
 
         self._iterator = values()
         return self._iterator
@@ -191,6 +198,11 @@ class _WorldReadableStream(ReadableStream[Any]):
     async def aclose(self) -> None:
         if self._iterator is not None:
             await self._iterator.aclose()
+        owner = _readable_pumps.get((self._world, self._run_id, self.descriptor.name))
+        if owner is not None:
+            owner.cancel()
+            if owner.done:
+                _readable_pumps.pop((self._world, self._run_id, self.descriptor.name), None)
 
 
 @overload
@@ -306,6 +318,26 @@ _background_tasks_ctx: contextvars.ContextVar[Callable[[Awaitable[object]], None
 )
 
 
+@dataclasses.dataclass
+class _ReadablePump:
+    cancel_scope: anyio.CancelScope | None = None
+    cancel_requested: bool = False
+    done: bool = False
+    error: BaseException | None = None
+
+    def cancel(self) -> None:
+        self.cancel_requested = True
+        if self.cancel_scope is not None:
+            self.cancel_scope.cancel()
+
+
+_readable_pumps: dict[tuple[w.World, str, str], _ReadablePump] = {}
+
+
+def _readable_pump(world: w.World, run_id: str, name: str) -> _ReadablePump | None:
+    return _readable_pumps.get((world, run_id, name))
+
+
 @contextlib.contextmanager
 def readable_background_tasks(
     register: Callable[[Awaitable[object]], None],
@@ -342,28 +374,60 @@ def _background_task_registrar() -> Callable[[Awaitable[object]], None]:
 
 
 async def _pump_local_stream(
-    stream: _LocalReadableStream[Any], *, world: w.World, run_id: str
+    stream: _LocalReadableStream[Any],
+    *,
+    world: w.World,
+    run_id: str,
+    owner: _ReadablePump,
 ) -> None:
+    cancelled = False
     try:
-        async with anyio.create_task_group() as task_group:
-            writer = WorkflowStreamWriter(
-                world=world,
-                run_id=run_id,
-                name=stream.descriptor.name,
-                task_group=task_group,
-            )
-            if stream.mode != "objects":
-                raise ser.SerializationError("byte ReadableStream support is not available")
-            async for value in stream.source:
-                await writer.write(value)
-            await writer.close()
-    except BaseException:
+        with anyio.CancelScope() as cancel_scope:
+            owner.cancel_scope = cancel_scope
+            if owner.cancel_requested:
+                cancel_scope.cancel()
+            async with anyio.create_task_group() as task_group:
+                writer = WorkflowStreamWriter(
+                    world=world,
+                    run_id=run_id,
+                    name=stream.descriptor.name,
+                    task_group=task_group,
+                )
+                if stream.mode != "objects":
+                    raise ser.SerializationError("byte ReadableStream support is not available")
+                source_error: Exception | None = None
+                try:
+                    async for value in stream.source:
+                        await writer.write(value)
+                except Exception as error:
+                    source_error = error
+                    await writer.drain()
+                else:
+                    await writer.close()
+            if source_error is not None:
+                raise source_error
+        cancelled = cancel_scope.cancel_called
+    except BaseException as error:
+        owner.error = error
         # The World API has no failed-stream operation. Closing is the only way
         # to guarantee a reader is not left hanging; the background owner still
         # observes and reports the producer exception.
         with anyio.CancelScope(shield=True):
             await world.streams_close(run_id, stream.descriptor.name)
         raise
+    finally:
+        owner.done = True
+        owner.cancel_scope = None
+        close = getattr(stream.source, "aclose", None)
+        if close is not None:
+            with anyio.CancelScope(shield=True):
+                await close()
+
+    if cancelled:
+        with anyio.CancelScope(shield=True):
+            await world.streams_close(run_id, stream.descriptor.name)
+    if owner.error is None:
+        _readable_pumps.pop((world, run_id, stream.descriptor.name), None)
 
 
 def bind_readable_sources(state: _ReadableSerialization, *, world: w.World, run_id: str) -> None:
@@ -380,11 +444,17 @@ def bind_readable_sources(state: _ReadableSerialization, *, world: w.World, run_
         if stream.pump_registered:
             continue
         stream.bound_run_id = run_id
-        pump = _pump_local_stream(stream, world=world, run_id=run_id)
+        owner = _ReadablePump()
+        stream.owner = owner
+        key = (world, run_id, stream.descriptor.name)
+        _readable_pumps[key] = owner
+        pump = _pump_local_stream(stream, world=world, run_id=run_id, owner=owner)
         try:
             register(pump)
         except BaseException:
             pump.close()
+            _readable_pumps.pop(key, None)
+            stream.owner = None
             stream.bound_run_id = None
             raise
         stream.pump_registered = True
