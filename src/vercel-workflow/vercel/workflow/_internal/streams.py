@@ -137,6 +137,10 @@ class _LocalReadableStream(ReadableStream[T]):
     async def aclose(self) -> None:
         if self.owner is not None:
             self.owner.cancel()
+            # The pump owns the active iteration and closes the source from
+            # its ``finally`` block. Calling ``aclose`` here as well can race
+            # an async generator that is currently suspended in ``__anext__``.
+            return
         close = getattr(self.source, "aclose", None)
         if close is not None:
             await close()
@@ -440,7 +444,8 @@ async def _pump_local_stream(
         # to guarantee a reader is not left hanging; the background owner still
         # observes and reports the producer exception.
         with anyio.CancelScope(shield=True):
-            await world.streams_close(run_id, stream.descriptor.name)
+            with contextlib.suppress(Exception):
+                await world.streams_close(run_id, stream.descriptor.name)
         raise
     finally:
         owner.done = True
