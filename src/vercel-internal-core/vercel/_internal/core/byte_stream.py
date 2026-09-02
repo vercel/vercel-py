@@ -9,7 +9,6 @@ appropriate.
 
 import inspect
 import io
-import sys
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -17,10 +16,7 @@ from typing import Protocol, TypeAlias, cast
 
 import anyio
 
-if sys.version_info >= (3, 12):
-    from collections.abc import Buffer
-else:
-    from typing_extensions import Buffer
+from vercel._internal.core.polyfills import Buffer
 
 
 class SyncByteReader(Protocol):
