@@ -340,6 +340,22 @@ async def test_throttled_cancellation_signal_is_not_recorded(tmp_path, monkeypat
     assert len(_of_type(await _events(world, run_id), w.HookReceivedEvent)) == 1
 
 
+async def test_closed_cancellation_stream_is_still_recorded(tmp_path, monkeypatch) -> None:
+    """Concurrent Vercel replays can find the abort stream already closed."""
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    world = _FlakyStreamWorld()
+    w.set_world(world)
+    run_id = await _create_run(world, cancel_and_wait.workflow_id)
+
+    await _invoke(run_id, cancel_and_wait.workflow_id)
+    await _invoke_step(_queued_step(world, quick_step.name), cancel_and_wait.workflow_id)
+
+    world.fail_stream_writes = 1
+    world.stream_write_status = 409
+    await _invoke(run_id, cancel_and_wait.workflow_id)
+    assert len(_of_type(await _events(world, run_id), w.HookReceivedEvent)) == 1
+
+
 @pytest.mark.skipif(
     sys.version_info[:2] == (3, 10),
     reason="Python 3.10 drops CancelledError messages propagated through tasks",

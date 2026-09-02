@@ -1560,7 +1560,7 @@ async def _send_cancellation(world: w.World, run_id: str, cancellation: Cancella
         await world.streams_write(run_id, stream_name, streams.encode_frame(payload))
         await world.streams_close(run_id, stream_name)
     except w.WorkflowWorldError as error:
-        if error.status != 400:
+        if error.status not in (400, 409):
             raise
         logger.debug(f"Cancellation stream {stream_name!r} rejected the signal: {error}")
 
