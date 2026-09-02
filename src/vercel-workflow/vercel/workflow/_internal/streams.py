@@ -378,6 +378,9 @@ class WorkflowStreamWriter(WorkflowWritable):
     The group therefore has to outlive every write and the final
     :meth:`drain` -- the step handler owns one for exactly that span.
 
+    The buffer and the dispatch live in a :class:`_StreamSink`, which deals in
+    encoded frames; this class is the part that knows what a frame means.
+
     Not safe to use from more than one event loop; within one loop, concurrent
     writers are fine and their chunks land in call order.
     """
@@ -391,11 +394,74 @@ class WorkflowStreamWriter(WorkflowWritable):
         task_group: TaskGroup,
         reentrant_ctx_on_err: bool = True,
     ) -> None:
+        self._sink = _StreamSink(world=world, run_id=run_id, name=name, task_group=task_group)
+        self._reentrant_ctx_on_err = reentrant_ctx_on_err
+
+    @property
+    def name(self) -> str:
+        """The stream this writer appends to."""
+        return self._sink.name
+
+    @property
+    def run_id(self) -> str:
+        """The run that owns the stream."""
+        return self._sink.run_id
+
+    async def write(self, value: Any) -> None:
+        """Append *value* as one chunk.
+
+        Returns once the chunk is buffered and ordered, which is not yet
+        durable; await :meth:`drain` or :meth:`close` for that. Blocks while
+        the buffer is full, so a fast producer cannot grow it without bound.
+        """
+        await self._sink.enqueue(encode_value(value))
+
+    async def write_from(self, source: AsyncIterable[Any]) -> None:
+        """Append every item *source* yields, in order.
+
+        This is simply a shortcut for a manual loop + :meth:`write` for
+        forwarding an upstream async iterator (e.g. LLM tokens, HTTP body).
+        """
+        async for value in source:
+            await self.write(value)
+
+    async def drain(self) -> None:
+        """Wait until every accepted chunk is durably written.
+
+        Raises the sink's error if any request failed -- including one whose
+        ``write()`` had already returned.
+        """
+        await self._sink.drain()
+
+    async def close(self) -> None:
+        """Drain, then mark the stream complete so readers see the end.
+
+        Idempotent. Nothing closes a run's stream implicitly -- not the end of
+        a step, not the end of the run -- so a stream a workflow never closes
+        leaves its readers waiting until the run expires.
+        """
+        await self._sink.close()
+
+    async def __aenter__(self) -> WorkflowStreamWriter:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if exc_type is None or not self._reentrant_ctx_on_err:
+            await self.close()
+
+
+class _StreamSink:
+    """The buffer and dispatch behind every writer over one stream.
+
+    Deals in encoded frames only; what a frame means is the writer's business.
+    """
+
+    def __init__(self, *, world: w.World, run_id: str, name: str, task_group: TaskGroup) -> None:
         if not name:
             raise ValueError(f'"name" is required, got {name!r}')
         self._world = world
-        self._run_id = run_id
-        self._name = name
+        self.run_id = run_id
+        self.name = name
         self._task_group = task_group
 
         self._buffer: list[bytes] = []
@@ -432,37 +498,7 @@ class WorkflowStreamWriter(WorkflowWritable):
             "WORKFLOW_STREAM_MAX_BYTES_PER_BATCH", MAX_BYTES_PER_BATCH
         )
 
-        self._reentrant_ctx_on_err = reentrant_ctx_on_err
-
-    @property
-    def name(self) -> str:
-        """The stream this writer appends to."""
-        return self._name
-
-    @property
-    def run_id(self) -> str:
-        """The run that owns the stream."""
-        return self._run_id
-
-    async def write(self, value: Any) -> None:
-        """Append *value* as one chunk.
-
-        Returns once the chunk is buffered and ordered, which is not yet
-        durable; await :meth:`drain` or :meth:`close` for that. Blocks while
-        the buffer is full, so a fast producer cannot grow it without bound.
-        """
-        await self._enqueue(encode_value(value))
-
-    async def write_from(self, source: AsyncIterable[Any]) -> None:
-        """Append every item *source* yields, in order.
-
-        This is simply a shortcut for a manual loop + :meth:`write` for
-        forwarding an upstream async iterator (e.g. LLM tokens, HTTP body).
-        """
-        async for value in source:
-            await self.write(value)
-
-    async def _enqueue(self, frame: bytes) -> None:
+    async def enqueue(self, frame: bytes) -> None:
         async with self._condition:
             self._raise_if_unusable()
             while self._at_capacity():
@@ -476,7 +512,7 @@ class WorkflowStreamWriter(WorkflowWritable):
         if self._sink_error is not None:
             raise self._sink_error
         if self._closed:
-            raise ser.SerializationError(f"Stream {self._name!r} is closed")
+            raise ser.SerializationError(f"Stream {self.name!r} is closed")
 
     def _at_capacity(self) -> bool:
         chunks = len(self._buffer) + self._inflight_chunks
@@ -587,16 +623,11 @@ class WorkflowStreamWriter(WorkflowWritable):
 
     async def _send(self, group: Sequence[bytes]) -> None:
         if len(group) == 1:
-            await self._world.streams_write(self._run_id, self._name, group[0])
+            await self._world.streams_write(self.run_id, self.name, group[0])
         else:
-            await self._world.streams_write_multi(self._run_id, self._name, group)
+            await self._world.streams_write_multi(self.run_id, self.name, group)
 
     async def drain(self) -> None:
-        """Wait until every accepted chunk is durably written.
-
-        Raises the sink's error if any request failed -- including one whose
-        ``write()`` had already returned.
-        """
         async with self._condition:
             while True:
                 if self._sink_error is not None:
@@ -607,21 +638,8 @@ class WorkflowStreamWriter(WorkflowWritable):
                 await self._condition.wait()
 
     async def close(self) -> None:
-        """Drain, then mark the stream complete so readers see the end.
-
-        Idempotent. Nothing closes a run's stream implicitly -- not the end of
-        a step, not the end of the run -- so a stream a workflow never closes
-        leaves its readers waiting until the run expires.
-        """
         if self._closed and self._sink_error is None:
             return
         await self.drain()
-        await self._world.streams_close(self._run_id, self._name)
+        await self._world.streams_close(self.run_id, self.name)
         self._closed = True
-
-    async def __aenter__(self) -> WorkflowStreamWriter:
-        return self
-
-    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if exc_type is None or not self._reentrant_ctx_on_err:
-            await self.close()
