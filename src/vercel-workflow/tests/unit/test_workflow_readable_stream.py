@@ -7,7 +7,7 @@ from typing import Any
 import anyio
 import pytest
 
-from vercel._internal.core.polyfills import UTC
+from vercel._internal.core.polyfills import UTC, Buffer
 from vercel.workflow import ReadableStream, readable_stream
 from vercel.workflow._internal import core, runtime, serialization as ser, streams, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
@@ -117,7 +117,7 @@ async def test_step_returned_object_stream_is_recorded_before_its_pump_runs() ->
     registry = core.Workflows(as_vercel_job=False)
     started = False
 
-    async def values() -> AsyncIterator[object]:
+    async def values() -> AsyncIterator[Any]:
         nonlocal started
         started = True
         yield {"token": "hello"}
@@ -355,3 +355,72 @@ async def test_aclose_cancels_a_locally_owned_pump(tmp_path, monkeypatch) -> Non
 
     info = await world.streams_get_info(RUN_ID, next(iter(await world.streams_list(RUN_ID))))
     assert info.done
+
+
+async def test_step_returned_framed_byte_stream_preserves_user_chunks() -> None:
+    registry = core.Workflows(as_vercel_job=False)
+    mutable = bytearray(b"mutable")
+
+    async def values() -> AsyncIterator[Buffer]:
+        yield mutable
+        mutable[:] = b"changed"
+        yield memoryview(b"view")
+        yield b""
+
+    @registry.step
+    async def produce() -> ReadableStream[bytes]:
+        return readable_stream(values(), mode="bytes")
+
+    world = ReadableWorld()
+    w.set_world(world)
+    background: list[Awaitable[object]] = []
+    with streams.readable_background_tasks(background.append):
+        await _invoke(registry, produce.name)
+
+    completed = [event for event in world.events if event.event_type == "step_completed"]
+    payload = completed[0].event_data.result
+    assert b'"type"' in payload and b'"bytes"' in payload
+    assert b'"framing"' in payload and b'"framed-v1"' in payload
+    await background[0]
+
+    stored = next(iter(world.chunks.values()))
+    assert stored == [
+        streams.encode_frame(b"mutable"),
+        streams.encode_frame(b"view"),
+        streams.encode_frame(b""),
+    ]
+    assert all(ser.DEVALUE_V1 not in frame for frame in stored)
+
+    with streams.reviving_readable_streams(RUN_ID, world=world, live=True):
+        reader = ser.hydrate(payload, what="byte stream")
+    assert [chunk async for chunk in reader] == [b"mutable", b"view", b""]
+
+
+async def test_byte_stream_rejects_a_non_buffer_chunk() -> None:
+    async def values() -> AsyncIterator[Any]:
+        yield "not bytes"
+
+    source = readable_stream(values(), mode="bytes")
+    world = ReadableWorld()
+    background: list[Awaitable[object]] = []
+    with streams.collecting_readable_sources() as pending:
+        ser.dehydrate(source)
+    with streams.readable_background_tasks(background.append):
+        streams.bind_readable_sources(pending, world=world, run_id=RUN_ID)
+
+    with pytest.raises(
+        TypeError,
+        match="byte stream chunks must implement the buffer protocol; got str",
+    ):
+        await background[0]
+
+
+async def test_legacy_raw_byte_descriptor_reads_transport_chunks_without_framing() -> None:
+    payload = ser.DEVALUE_V1 + (b'[["ReadableStream",1],{"name":2,"type":3},"legacy","bytes"]')
+    world = ReadableWorld()
+    world.chunks["legacy"] = [b"raw ", b"transport"]
+    world.closed.add("legacy")
+
+    with streams.reviving_readable_streams(RUN_ID, world=world, live=True):
+        reader = ser.hydrate(payload, what="legacy stream")
+    assert [chunk async for chunk in reader] == [b"raw ", b"transport"]
