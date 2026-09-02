@@ -2527,17 +2527,8 @@ class Run(Generic[T]):
         A method rather than a property, because each call opens its own read:
         iterating a property twice would quietly start a second one.
         """
-
-        async def values() -> AsyncGenerator[Any, None]:
-            name = streams.workflow_run_stream_id(self._run_id, namespace)
-            frames = streams.reconnecting_frames(self._world, self._run_id, name, start_index)
-            async with contextlib.aclosing(frames):
-                index = start_index or 0
-                async for payload in frames:
-                    yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
-                    index += 1
-
-        return values()
+        name = streams.workflow_run_stream_id(self._run_id, namespace)
+        return _read_stream(self._world, self._run_id, name, start_index)
 
     def readable_bytes(
         self, *, namespace: str | None = None, start_index: int | None = None
@@ -2587,17 +2578,18 @@ def read_stream(
     verbatim, which is what :meth:`Run.list_streams` returns and what another
     SDK may have used.
     """
+    return _read_stream(w.get_world(), run_id, name, start_index)
 
-    async def values() -> AsyncGenerator[Any, None]:
-        world = w.get_world()
-        frames = streams.reconnecting_frames(world, run_id, name, start_index)
-        async with contextlib.aclosing(frames):
-            index = start_index or 0
-            async for payload in frames:
-                yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
-                index += 1
 
-    return values()
+async def _read_stream(
+    world: w.World, run_id: str, name: str, start_index: int | None
+) -> AsyncGenerator[Any, None]:
+    frames = streams.reconnecting_frames(world, run_id, name, start_index)
+    async with contextlib.aclosing(frames):
+        index = start_index or 0
+        async for payload in frames:
+            yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
+            index += 1
 
 
 async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
