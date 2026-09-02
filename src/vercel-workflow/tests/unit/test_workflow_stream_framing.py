@@ -19,6 +19,14 @@ def test_frame_is_a_four_byte_big_endian_length_then_the_payload() -> None:
     assert streams.encode_frame(b"") == b"\x00\x00\x00\x00"
 
 
+def test_framed_byte_encoder_snapshots_any_buffer_without_a_format_prefix() -> None:
+    source = bytearray(b"hello")
+    frame = streams.encode_framed_bytes(memoryview(source))
+    source[:] = b"other"
+    assert frame == b"\x00\x00\x00\x05hello"
+    assert ser.DEVALUE_V1 not in frame
+
+
 def test_value_frame_carries_a_devl_payload() -> None:
     # The payload is exactly what the run/step payload boundary writes, which
     # is what lets `getDeserializeStream` on the TS side read it.

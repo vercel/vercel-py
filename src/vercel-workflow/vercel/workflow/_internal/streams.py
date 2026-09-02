@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast, overload
 import anyio
 import pydantic
 
+from vercel._internal.core.byte_stream import buffer_to_bytes
 from vercel._internal.core.polyfills import Buffer
 
 from . import serialization as ser, ulid
@@ -168,25 +169,43 @@ class _WorldReadableStream(ReadableStream[Any]):
     def __aiter__(self) -> AsyncIterator[Any]:
         if self._iterator is not None:
             raise RuntimeError("a ReadableStream can only be iterated once")
-        if self.descriptor.data.get("type") == "bytes":
-            raise ser.SerializationError("byte ReadableStream support is not available")
 
         async def values() -> AsyncGenerator[Any, None]:
-            frames = reconnecting_frames(
-                self._world,
-                self._run_id,
-                self.descriptor.name,
-                self.descriptor.start_index,
-            )
-            async with contextlib.aclosing(frames):
-                index = self.descriptor.start_index or 0
-                async for payload in frames:
-                    with reviving_readable_streams(self._run_id, world=self._world, live=True):
-                        yield ser.hydrate(
-                            payload,
-                            what=f"chunk {index} of stream {self.descriptor.name}",
-                        )
-                    index += 1
+            stream_type = self.descriptor.data.get("type")
+            framing = self.descriptor.data.get("framing")
+            if stream_type == "bytes" and framing is None:
+                # Legacy descriptors name an unframed raw byte stream. The
+                # transport's reads are the only boundaries available, and a
+                # frame-index reconnect would be unsafe.
+                source = self._world.streams_get(
+                    self._run_id,
+                    self.descriptor.name,
+                    self.descriptor.start_index,
+                )
+                async with contextlib.aclosing(source):
+                    async for chunk in source:
+                        yield bytes(chunk)
+            else:
+                frames = reconnecting_frames(
+                    self._world,
+                    self._run_id,
+                    self.descriptor.name,
+                    self.descriptor.start_index,
+                )
+                async with contextlib.aclosing(frames):
+                    index = self.descriptor.start_index or 0
+                    async for payload in frames:
+                        if stream_type == "bytes":
+                            yield payload
+                        else:
+                            with reviving_readable_streams(
+                                self._run_id, world=self._world, live=True
+                            ):
+                                yield ser.hydrate(
+                                    payload,
+                                    what=f"chunk {index} of stream {self.descriptor.name}",
+                                )
+                        index += 1
             owner = _readable_pump(self._world, self._run_id, self.descriptor.name)
             if owner is not None and owner.error is not None:
                 _readable_pumps.pop((self._world, self._run_id, self.descriptor.name), None)
@@ -393,12 +412,20 @@ async def _pump_local_stream(
                     name=stream.descriptor.name,
                     task_group=task_group,
                 )
-                if stream.mode != "objects":
-                    raise ser.SerializationError("byte ReadableStream support is not available")
                 source_error: Exception | None = None
                 try:
                     async for value in stream.source:
-                        await writer.write(value)
+                        if stream.mode == "objects":
+                            await writer.write(value)
+                        else:
+                            try:
+                                frame = encode_framed_bytes(value)
+                            except TypeError:
+                                raise TypeError(
+                                    "byte stream chunks must implement the buffer protocol; "
+                                    f"got {type(value).__name__}"
+                                ) from None
+                            await writer.write_encoded(frame)
                 except Exception as error:
                     source_error = error
                     await writer.drain()
@@ -506,6 +533,11 @@ def encode_frame(payload: bytes) -> bytes:
             f"({MAX_FRAME_SIZE}); split the data into smaller chunks before writing"
         )
     return len(payload).to_bytes(FRAME_HEADER_SIZE, "big") + payload
+
+
+def encode_framed_bytes(value: Buffer, /) -> bytes:
+    """Snapshot and frame one user-provided byte-stream chunk."""
+    return encode_frame(buffer_to_bytes(value))
 
 
 def encode_value(value: Any) -> bytes:
@@ -859,6 +891,10 @@ class WorkflowStreamWriter(WorkflowWritable):
         the buffer is full, so a fast producer cannot grow it without bound.
         """
         await self._enqueue(encode_value(value))
+
+    async def write_encoded(self, frame: bytes) -> None:
+        """Enqueue one already encoded frame through the shared batching sink."""
+        await self._enqueue(frame)
 
     async def write_from(self, source: AsyncIterable[Any]) -> None:
         """Append every item *source* yields, in order.
