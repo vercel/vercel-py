@@ -414,7 +414,10 @@ class _StepStreams:
             raise error
 
     def writer(
-        self, namespace: str | None, *, reentrant_ctx_on_err: bool = True
+        self,
+        namespace: str | None,
+        *,
+        reentrant_ctx_on_err: bool = True,
     ) -> streams.WorkflowStreamWriter:
         """The writer for this run's *namespace* stream."""
         return self.writer_for(
@@ -424,7 +427,11 @@ class _StepStreams:
         )
 
     def writer_for(
-        self, run_id: str, name: str, *, reentrant_ctx_on_err: bool = True
+        self,
+        run_id: str,
+        name: str,
+        *,
+        reentrant_ctx_on_err: bool = True,
     ) -> streams.WorkflowStreamWriter:
         """The writer for one stream, created on first use.
 
@@ -2499,7 +2506,10 @@ class Run(Generic[T]):
                 await asyncio.sleep(1)
 
     def readable(
-        self, *, namespace: str | None = None, start_index: int | None = None
+        self,
+        *,
+        namespace: str | None = None,
+        start_index: int | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Read what the run's steps stream, as they stream it.
 
