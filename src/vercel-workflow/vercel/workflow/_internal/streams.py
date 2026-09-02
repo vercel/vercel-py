@@ -25,14 +25,26 @@ from __future__ import annotations
 import abc
 import base64
 import contextlib
+import contextvars
+import dataclasses
 import os
-from collections.abc import AsyncGenerator, AsyncIterable, Iterator, Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Sequence,
+)
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast, overload
 
 import anyio
 import pydantic
 
-from . import serialization as ser
+from vercel._internal.core.polyfills import Buffer
+
+from . import serialization as ser, ulid
 
 if TYPE_CHECKING:
     from anyio.abc import TaskGroup
@@ -49,6 +61,333 @@ A length header advertising more than this is refused rather than allocated:
 past a certain size the far more likely explanation is a misframed wire than a
 100 MB chunk.
 """
+
+T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
+
+
+class ReadableStream(AsyncIterable[T_co], Generic[T_co], abc.ABC):
+    """A serializable asynchronous stream of values.
+
+    The same public type represents a local source, an opaque workflow-side
+    reference and a live World-backed reader.  Execution context determines
+    which operations are available after a descriptor is revived.
+    """
+
+    @abc.abstractmethod
+    def __aiter__(self) -> AsyncIterator[T_co]: ...
+
+    @abc.abstractmethod
+    async def aclose(self) -> None:
+        """Stop this reader and cancel its locally owned producer when possible."""
+
+
+ReadableMode = Literal["objects", "bytes"]
+_new_stream_ulid = ulid.monotonic_factory()
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReadableDescriptor:
+    data: dict[str, Any]
+
+    @classmethod
+    def parse(cls, value: Any) -> _ReadableDescriptor:
+        if not isinstance(value, dict) or not isinstance(value.get("name"), str):
+            raise ValueError(f"malformed ReadableStream payload: {value!r}")
+        stream_type = value.get("type")
+        framing = value.get("framing")
+        if stream_type is not None and stream_type != "bytes":
+            raise ValueError(f"unknown ReadableStream type: {stream_type!r}")
+        if framing is not None and framing != "framed-v1":
+            raise ValueError(f"unknown ReadableStream framing: {framing!r}")
+        if framing is not None and stream_type != "bytes":
+            raise ValueError("ReadableStream framing requires type='bytes'")
+        return cls(dict(value))
+
+    @property
+    def name(self) -> str:
+        return cast(str, self.data["name"])
+
+    @property
+    def start_index(self) -> int | None:
+        value = self.data.get("startIndex")
+        if value is not None and not isinstance(value, int):
+            raise ValueError(f"malformed ReadableStream startIndex: {value!r}")
+        return value
+
+
+class _LocalReadableStream(ReadableStream[T]):
+    def __init__(self, source: AsyncIterable[T], mode: ReadableMode) -> None:
+        self.source = source
+        self.mode = mode
+        descriptor: dict[str, Any] = {"name": f"strm_{_new_stream_ulid()}"}
+        if mode == "bytes":
+            descriptor.update(type="bytes", framing="framed-v1")
+        self.descriptor = _ReadableDescriptor(descriptor)
+        self.bound_run_id: str | None = None
+        self.pump_registered = False
+
+    def __aiter__(self) -> AsyncIterator[T]:
+        if self.pump_registered:
+            raise RuntimeError("cannot consume a readable stream after its World pump has started")
+        return aiter(self.source)
+
+    async def aclose(self) -> None:
+        close = getattr(self.source, "aclose", None)
+        if close is not None:
+            await close()
+
+
+class _OpaqueReadableStream(ReadableStream[Any]):
+    def __init__(self, descriptor: _ReadableDescriptor) -> None:
+        self.descriptor = descriptor
+
+    def _refuse(self) -> RuntimeError:
+        return RuntimeError(
+            f"cannot consume stream {self.descriptor.name!r} inside a workflow: "
+            "workflow bodies replay in an I/O-free sandbox; forward or return the stream instead"
+        )
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        raise self._refuse()
+
+    async def aclose(self) -> None:
+        raise self._refuse()
+
+
+class _WorldReadableStream(ReadableStream[Any]):
+    def __init__(self, *, world: w.World, run_id: str, descriptor: _ReadableDescriptor) -> None:
+        self._world = world
+        self._run_id = run_id
+        self.descriptor = descriptor
+        self._iterator: AsyncGenerator[Any, None] | None = None
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        if self._iterator is not None:
+            raise RuntimeError("a ReadableStream can only be iterated once")
+        if self.descriptor.data.get("type") == "bytes":
+            raise ser.SerializationError("byte ReadableStream support is not available")
+
+        async def values() -> AsyncGenerator[Any, None]:
+            frames = reconnecting_frames(
+                self._world,
+                self._run_id,
+                self.descriptor.name,
+                self.descriptor.start_index,
+            )
+            async with contextlib.aclosing(frames):
+                index = self.descriptor.start_index or 0
+                async for payload in frames:
+                    with reviving_readable_streams(self._run_id, world=self._world, live=True):
+                        yield ser.hydrate(
+                            payload,
+                            what=f"chunk {index} of stream {self.descriptor.name}",
+                        )
+                    index += 1
+
+        self._iterator = values()
+        return self._iterator
+
+    async def aclose(self) -> None:
+        if self._iterator is not None:
+            await self._iterator.aclose()
+
+
+@overload
+def readable_stream(
+    source: AsyncIterable[T], *, mode: Literal["objects"] = "objects"
+) -> ReadableStream[T]: ...
+
+
+@overload
+def readable_stream(
+    source: AsyncIterable[Buffer], *, mode: Literal["bytes"]
+) -> ReadableStream[bytes]: ...
+
+
+def readable_stream(
+    source: AsyncIterable[Any], *, mode: ReadableMode = "objects"
+) -> ReadableStream[Any]:
+    """Make an asynchronous source serializable as a native ReadableStream."""
+    if mode not in ("objects", "bytes"):
+        raise ValueError(f"unknown readable stream mode: {mode!r}")
+    if not isinstance(source, AsyncIterable):
+        raise TypeError(
+            f"readable stream source must be an AsyncIterable, got {type(source).__name__}"
+        )
+    return _LocalReadableStream(source, mode)
+
+
+@dataclasses.dataclass
+class _ReadableSerialization:
+    allow_local: bool
+    local_sources: list[_LocalReadableStream[Any]] = dataclasses.field(default_factory=list)
+    _seen: set[int] = dataclasses.field(default_factory=set)
+
+    def add(self, stream: _LocalReadableStream[Any]) -> None:
+        if not self.allow_local:
+            raise RuntimeError(
+                "cannot create a readable stream inside a workflow: local sources need I/O; "
+                "create it in a caller, step, or hook resumer and forward its handle"
+            )
+        if id(stream) not in self._seen:
+            self._seen.add(id(stream))
+            self.local_sources.append(stream)
+
+
+_serialization_ctx: contextvars.ContextVar[_ReadableSerialization | None] = contextvars.ContextVar(
+    "WorkflowReadableSerialization", default=None
+)
+
+
+@contextlib.contextmanager
+def collecting_readable_sources(*, allow_local: bool = True) -> Iterator[_ReadableSerialization]:
+    state = _ReadableSerialization(allow_local=allow_local)
+    token = _serialization_ctx.set(state)
+    try:
+        yield state
+    finally:
+        _serialization_ctx.reset(token)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReadableRevival:
+    run_id: str
+    world: w.World | None = None
+    live: bool = False
+
+
+_revival_ctx: contextvars.ContextVar[_ReadableRevival | None] = contextvars.ContextVar(
+    "WorkflowReadableRevival", default=None
+)
+
+
+@contextlib.contextmanager
+def reviving_readable_streams(
+    run_id: str, *, world: w.World | None = None, live: bool = False
+) -> Iterator[None]:
+    token = _revival_ctx.set(_ReadableRevival(run_id=run_id, world=world, live=live))
+    try:
+        yield
+    finally:
+        _revival_ctx.reset(token)
+
+
+def reduce_readable_stream(value: Any) -> Any:
+    if isinstance(value, _LocalReadableStream):
+        state = _serialization_ctx.get()
+        if state is None:
+            raise RuntimeError(
+                "a local readable stream can only be serialized at a workflow execution boundary"
+            )
+        state.add(value)
+        return value.descriptor.data
+    if isinstance(value, _OpaqueReadableStream | _WorldReadableStream):
+        return value.descriptor.data
+    return False
+
+
+def revive_readable_stream(value: Any) -> ReadableStream[Any]:
+    descriptor = _ReadableDescriptor.parse(value)
+    context = _revival_ctx.get()
+    if context is not None and context.live:
+        if context.world is None:
+            raise RuntimeError("a live ReadableStream revival requires a World")
+        return _WorldReadableStream(
+            world=context.world,
+            run_id=context.run_id,
+            descriptor=descriptor,
+        )
+    return _OpaqueReadableStream(descriptor)
+
+
+_background_tasks_ctx: contextvars.ContextVar[Callable[[Awaitable[object]], None] | None] = (
+    contextvars.ContextVar("WorkflowReadableBackgroundTasks", default=None)
+)
+
+
+@contextlib.contextmanager
+def readable_background_tasks(
+    register: Callable[[Awaitable[object]], None],
+) -> Iterator[None]:
+    """Override invocation-owned background registration, primarily for hosts."""
+    token = _background_tasks_ctx.set(register)
+    try:
+        yield
+    finally:
+        _background_tasks_ctx.reset(token)
+
+
+def _background_task_registrar() -> Callable[[Awaitable[object]], None]:
+    register = _background_tasks_ctx.get()
+    if register is not None:
+        return register
+
+    # Vercel's Python Functions runtime installs this callback for the active
+    # invocation. Import lazily so `vercel-workflow` can still be imported as a
+    # standalone namespace package when the umbrella SDK is not installed.
+    try:
+        from vercel.cache.context import get_context
+    except ImportError:
+        pass
+    else:
+        register = get_context().wait_until
+        if register is not None:
+            return register
+
+    raise RuntimeError(
+        "serializing a local readable stream requires an invocation-owned background-task "
+        "facility (Vercel Functions wait_until is not available in this context)"
+    )
+
+
+async def _pump_local_stream(
+    stream: _LocalReadableStream[Any], *, world: w.World, run_id: str
+) -> None:
+    try:
+        async with anyio.create_task_group() as task_group:
+            writer = WorkflowStreamWriter(
+                world=world,
+                run_id=run_id,
+                name=stream.descriptor.name,
+                task_group=task_group,
+            )
+            if stream.mode != "objects":
+                raise ser.SerializationError("byte ReadableStream support is not available")
+            async for value in stream.source:
+                await writer.write(value)
+            await writer.close()
+    except BaseException:
+        # The World API has no failed-stream operation. Closing is the only way
+        # to guarantee a reader is not left hanging; the background owner still
+        # observes and reports the producer exception.
+        with anyio.CancelScope(shield=True):
+            await world.streams_close(run_id, stream.descriptor.name)
+        raise
+
+
+def bind_readable_sources(state: _ReadableSerialization, *, world: w.World, run_id: str) -> None:
+    """Bind newly serialized local sources to *run_id* and register their pumps."""
+    if not state.local_sources:
+        return
+    register = _background_task_registrar()
+    for stream in state.local_sources:
+        if stream.bound_run_id is not None and stream.bound_run_id != run_id:
+            raise RuntimeError(
+                f"readable stream {stream.descriptor.name!r} is already bound to "
+                f"run {stream.bound_run_id!r}"
+            )
+        if stream.pump_registered:
+            continue
+        stream.bound_run_id = run_id
+        pump = _pump_local_stream(stream, world=world, run_id=run_id)
+        try:
+            register(pump)
+        except BaseException:
+            pump.close()
+            stream.bound_run_id = None
+            raise
+        stream.pump_registered = True
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:

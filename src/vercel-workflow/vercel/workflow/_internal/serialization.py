@@ -73,17 +73,31 @@ def _revive_writable_stream(value: Any) -> Any:
     return runtime.open_writable(run_id if isinstance(run_id, str) else None, value["name"])
 
 
+def _reduce_readable_stream(value: Any) -> Any:
+    from . import streams
+
+    return streams.reduce_readable_stream(value)
+
+
+def _revive_readable_stream(value: Any) -> Any:
+    from . import streams
+
+    return streams.revive_readable_stream(value)
+
+
 # Instance must precede the error reducers so registered exception classes keep
 # their custom serialization. Streams do not overlap either group.
 REDUCERS: dict[str, Any] = {
     **serde.REDUCERS,
     **error_serde.REDUCERS,
     "WritableStream": _reduce_writable_stream,
+    "ReadableStream": _reduce_readable_stream,
 }
 REVIVERS: dict[str, Any] = {
     **serde.REVIVERS,
     **error_serde.REVIVERS,
     "WritableStream": _revive_writable_stream,
+    "ReadableStream": _revive_readable_stream,
 }
 
 
