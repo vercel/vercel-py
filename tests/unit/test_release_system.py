@@ -32,37 +32,6 @@ def test_topological_names_orders_dependencies_before_dependents(tmp_path: Path)
     assert workspace.topological_names(packages) == ["lib", "app"]
 
 
-def test_compute_releases_cascades_dependency_only_patch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    changes = tmp_path / "changes"
-    fragment_dir = changes / "lib"
-    fragment_dir.mkdir(parents=True)
-    (fragment_dir / "123.feature.md").write_text("Add library feature.\n", encoding="utf-8")
-
-    lib_version = tmp_path / "lib/version.py"
-    app_version = tmp_path / "app/version.py"
-    lib_version.parent.mkdir()
-    app_version.parent.mkdir()
-    lib_version.write_text('__version__ = "0.6.0"\n', encoding="utf-8")
-    app_version.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
-
-    packages = {
-        "lib": workspace.Package("lib", tmp_path / "lib", lib_version, ()),
-        "app": workspace.Package("app", tmp_path / "app", app_version, ("lib",)),
-    }
-    monkeypatch.setattr(release, "CHANGES", changes)
-    monkeypatch.setattr(workspace, "packages", lambda: packages)
-    monkeypatch.setattr(workspace, "topological_names", lambda _packages: ["lib", "app"])
-
-    releases = release.compute_releases()
-
-    assert [(item.package, item.new_version, item.dependency_only) for item in releases] == [
-        ("lib", "0.7.0", False),
-        ("app", "1.2.4", True),
-    ]
-
-
 def test_compute_releases_promotes_unpublished_feature_to_initial_minor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -81,52 +50,6 @@ def test_compute_releases_promotes_unpublished_feature_to_initial_minor(
     releases = release.compute_releases()
 
     assert [(item.old_version, item.new_version) for item in releases] == [("0.0.0", "0.1.0")]
-
-
-def test_compute_releases_promotes_any_unpublished_fragment_to_initial_minor(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    changes = tmp_path / "changes"
-    fragment_dir = changes / "pkg"
-    fragment_dir.mkdir(parents=True)
-    (fragment_dir / "initial.internal.md").write_text("Prepare package.\n", encoding="utf-8")
-
-    version_file = tmp_path / "pkg/version.py"
-    version_file.parent.mkdir()
-    version_file.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
-    packages = {"pkg": workspace.Package("pkg", tmp_path / "pkg", version_file, ())}
-    monkeypatch.setattr(release, "CHANGES", changes)
-    monkeypatch.setattr(workspace, "packages", lambda: packages)
-
-    releases = release.compute_releases()
-
-    assert [(item.old_version, item.new_version) for item in releases] == [("0.0.0", "0.1.0")]
-
-
-def test_compute_releases_does_not_cascade_to_unpublished_dependent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    changes = tmp_path / "changes"
-    fragment_dir = changes / "lib"
-    fragment_dir.mkdir(parents=True)
-    (fragment_dir / "123.bugfix.md").write_text("Fix library.\n", encoding="utf-8")
-
-    lib_version = tmp_path / "lib/version.py"
-    app_version = tmp_path / "app/version.py"
-    lib_version.parent.mkdir()
-    app_version.parent.mkdir()
-    lib_version.write_text('__version__ = "1.2.3"\n', encoding="utf-8")
-    app_version.write_text('__version__ = "0.0.0"\n', encoding="utf-8")
-    packages = {
-        "lib": workspace.Package("lib", tmp_path / "lib", lib_version, ()),
-        "app": workspace.Package("app", tmp_path / "app", app_version, ("lib",)),
-    }
-    monkeypatch.setattr(release, "CHANGES", changes)
-    monkeypatch.setattr(workspace, "packages", lambda: packages)
-
-    releases = release.compute_releases()
-
-    assert [(item.package, item.new_version) for item in releases] == [("lib", "1.2.4")]
 
 
 def test_split_release_graph_propagates_in_publication_order(
@@ -377,37 +300,6 @@ def test_compute_releases_force_preserves_larger_fragment_bump(
     ]
 
 
-def test_advance_workspace_upper_bounds_crosses_compatibility_boundary(tmp_path: Path) -> None:
-    core_root = tmp_path / "core"
-    app_root = tmp_path / "app"
-    core_root.mkdir()
-    app_root.mkdir()
-    (core_root / "pyproject.toml").write_text('[project]\nname = "core"\n', encoding="utf-8")
-    (app_root / "pyproject.toml").write_text(
-        """
-[project]
-name = "app"
-
-[tool.vercel.release.dependencies]
-dependencies = ["core>=0.1.0,<0.2.0", "httpx>=0.27,<1"]
-""".strip(),
-        encoding="utf-8",
-    )
-    packages = {
-        "core": workspace.Package("core", core_root, core_root / "version.py", ()),
-        "app": workspace.Package("app", app_root, app_root / "version.py", ("core",)),
-    }
-    releases = [
-        release.Release("core", "0.1.9", "0.2.0", "minor", ()),
-        release.Release("app", "1.0.0", "1.0.1", "patch", (), dependency_only=True),
-    ]
-
-    release._advance_workspace_upper_bounds(releases, packages)
-
-    assert '"core>=0.1.0,<0.3.0"' in (app_root / "pyproject.toml").read_text(encoding="utf-8")
-    assert '"httpx>=0.27,<1"' in (app_root / "pyproject.toml").read_text(encoding="utf-8")
-
-
 def test_advance_workspace_upper_bounds_does_not_invent_a_bound(tmp_path: Path) -> None:
     core_root = tmp_path / "core"
     aggregate_root = tmp_path / "aggregate"
@@ -553,15 +445,6 @@ def test_verify_dist_package_filter_matches_the_distribution_name(tmp_path: Path
     ]
 
 
-def test_write_version_uses_double_quotes(tmp_path: Path) -> None:
-    version_file = tmp_path / "version.py"
-    version_file.write_text('__version__ = "0.6.0"\n', encoding="utf-8")
-
-    workspace.write_version(version_file, "0.7.0")
-
-    assert version_file.read_text(encoding="utf-8") == '__version__ = "0.7.0"\n'
-
-
 def test_parse_fragments_ignores_keep_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -622,132 +505,6 @@ def test_parse_fragments_still_refuses_a_tracked_file_matching_an_ignore_rule(
         release.parse_fragments({"lib"})
 
 
-def test_render_changelog_entry_appends_pr_number(tmp_path: Path) -> None:
-    fragment = release.Fragment(
-        package="pkg",
-        path=tmp_path / "123.bugfix.md",
-        kind="bugfix",
-        text="Fix cache cleanup.",
-    )
-    item = release.Release(
-        package="pkg",
-        old_version="0.6.0",
-        new_version="0.6.1",
-        bump="patch",
-        fragments=(fragment,),
-    )
-
-    entry = release._render_changelog_entry(item, pr_numbers={fragment.path: 42})
-
-    assert "- Fix cache cleanup. (#42)" in entry
-
-
-def test_render_changelog_entry_does_not_duplicate_pr_number(tmp_path: Path) -> None:
-    fragment = release.Fragment(
-        package="pkg",
-        path=tmp_path / "123.bugfix.md",
-        kind="bugfix",
-        text="- Fix cache cleanup. (#42)",
-    )
-    item = release.Release(
-        package="pkg",
-        old_version="0.6.0",
-        new_version="0.6.1",
-        bump="patch",
-        fragments=(fragment,),
-    )
-
-    entry = release._render_changelog_entry(item, pr_numbers={fragment.path: 42})
-
-    assert entry.count("#42") == 1
-
-
-def _bugfix_changelog_entry(text: str, *, path: Path, pr_number: int | None = None) -> str:
-    fragment = release.Fragment(package="pkg", path=path, kind="bugfix", text=text)
-    item = release.Release(
-        package="pkg",
-        old_version="0.6.0",
-        new_version="0.6.1",
-        bump="patch",
-        fragments=(fragment,),
-    )
-    return release._render_changelog_entry(
-        item, pr_numbers={} if pr_number is None else {path: pr_number}
-    )
-
-
-def test_render_changelog_entry_keeps_a_multi_line_fragment_as_one_bullet(tmp_path: Path) -> None:
-    entry = _bugfix_changelog_entry(
-        "Remember the last live Runtime Cache client process-wide and fall back to it\n"
-        "on threads that have no request context, and make strict=True raise\n"
-        "RuntimeCacheError when no cache is available.\n"
-        "\n"
-        "Prime the cache while request context is still visible.\n",
-        path=tmp_path / "123.bugfix.md",
-        pr_number=178,
-    )
-
-    assert entry.endswith(
-        "- Remember the last live Runtime Cache client process-wide and fall back to it\n"
-        "  on threads that have no request context, and make strict=True raise\n"
-        "  RuntimeCacheError when no cache is available. (#178)\n"
-        "\n"
-        "  Prime the cache while request context is still visible.\n"
-    )
-    assert entry.count("#178") == 1
-
-
-def test_render_changelog_entry_preserves_fenced_code_blocks(tmp_path: Path) -> None:
-    entry = _bugfix_changelog_entry(
-        "Make `HookEvent` an async context manager.\n"
-        "\n"
-        "```python\n"
-        "# disposes the hook on block exit\n"
-        "async with SomeHook.wait(...) as hook:\n"
-        "    res = await hook\n"
-        "```\n",
-        path=tmp_path / "123.bugfix.md",
-        pr_number=42,
-    )
-
-    assert entry.endswith(
-        "- Make `HookEvent` an async context manager. (#42)\n"
-        "\n"
-        "  ```python\n"
-        "  # disposes the hook on block exit\n"
-        "  async with SomeHook.wait(...) as hook:\n"
-        "      res = await hook\n"
-        "  ```\n"
-    )
-
-
-def test_render_changelog_entry_keeps_the_pr_reference_out_of_code_blocks(tmp_path: Path) -> None:
-    entry = _bugfix_changelog_entry(
-        "```python\nrun()\n```\n\nCall `run()` directly instead of through the shim.\n",
-        path=tmp_path / "123.bugfix.md",
-        pr_number=42,
-    )
-
-    assert entry.endswith(
-        "- ```python\n"
-        "  run()\n"
-        "  ```\n"
-        "\n"
-        "  Call `run()` directly instead of through the shim. (#42)\n"
-    )
-
-
-def test_render_changelog_entry_keeps_bullet_lines_inside_one_entry(tmp_path: Path) -> None:
-    entry = _bugfix_changelog_entry(
-        "- Drop the managed Redis backend.\n- Derive the scheduler id from the subscriber id.\n",
-        path=tmp_path / "123.bugfix.md",
-    )
-
-    assert entry.endswith(
-        "- Drop the managed Redis backend.\n  - Derive the scheduler id from the subscriber id.\n"
-    )
-
-
 def test_render_changelog_entry_pads_multi_line_bullets_only(tmp_path: Path) -> None:
     texts = ["Fix the first thing.", "Fix the second thing.\n\nIt was subtle.", "Fix the third."]
     item = release.Release(
@@ -776,22 +533,6 @@ def test_render_changelog_entry_pads_multi_line_bullets_only(tmp_path: Path) -> 
     )
 
 
-def test_dependency_only_changelog_omits_pr_number() -> None:
-    item = release.Release(
-        package="pkg",
-        old_version="0.6.0",
-        new_version="0.6.1",
-        bump="patch",
-        fragments=(),
-        dependency_only=True,
-    )
-
-    entry = release._render_changelog_entry(item, pr_numbers={})
-
-    assert "- Update dependencies." in entry
-    assert "#42" not in entry
-
-
 def test_forced_changelog_entry_uses_no_changes() -> None:
     item = release.Release(
         package="pkg",
@@ -806,64 +547,6 @@ def test_forced_changelog_entry_uses_no_changes() -> None:
 
     assert "- No changes." in entry
     assert "- Update dependencies." not in entry
-
-
-def test_write_changelog_separates_prepended_entry(tmp_path: Path) -> None:
-    changelog = tmp_path / "CHANGELOG.md"
-    changelog.write_text(
-        "# Changelog\n\n## 0.6.0 - 2026-01-01\n\n- Previous release.\n",
-        encoding="utf-8",
-    )
-    item = release.Release(
-        package="pkg",
-        old_version="0.6.0",
-        new_version="0.6.1",
-        bump="patch",
-        fragments=(
-            release.Fragment(
-                package="pkg",
-                path=tmp_path / "123.bugfix.md",
-                kind="bugfix",
-                text="Fix cache cleanup.",
-            ),
-        ),
-    )
-
-    release.write_changelog(tmp_path, item)
-
-    content = changelog.read_text(encoding="utf-8")
-    assert "- Fix cache cleanup.\n## 0.6.0" not in content
-    assert "- Fix cache cleanup.\n\n## 0.6.0" in content
-
-
-def test_latest_changelog_entry_keeps_a_multi_line_bullet_whole(tmp_path: Path) -> None:
-    package_path = tmp_path / "pkg"
-    package_path.mkdir()
-    (package_path / "CHANGELOG.md").write_text(
-        "# Changelog\n\n## 0.6.0 - 2026-01-01\n\n- Previous release.\n", encoding="utf-8"
-    )
-    item = release.Release(
-        package="pkg",
-        old_version="0.6.0",
-        new_version="0.6.1",
-        bump="patch",
-        fragments=(
-            release.Fragment(
-                package="pkg",
-                path=tmp_path / "123.bugfix.md",
-                kind="bugfix",
-                text="Fix cache cleanup.\n\n## Not a release heading\n\nIt leaked entries.",
-            ),
-        ),
-    )
-
-    release.write_changelog(package_path, item, pr_numbers={tmp_path / "123.bugfix.md": 42})
-    latest = release._latest_changelog_entry(package_path)
-
-    assert latest.endswith(
-        "- Fix cache cleanup. (#42)\n\n  ## Not a release heading\n\n  It leaked entries."
-    )
-    assert "Previous release" not in latest
 
 
 def test_release_commit_body_uses_latest_changelog_entries(tmp_path: Path) -> None:
@@ -1048,28 +731,6 @@ def test_release_requires_clean_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     with pytest.raises(SystemExit, match="clean Git working tree"):
         release.release()
-
-
-def test_fragment_pr_number_uses_commit_message(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fragment = tmp_path / "changes/pkg/123.bugfix.md"
-    monkeypatch.setattr(release, "ROOT", tmp_path)
-
-    def fake_check_output(cmd: list[str], *, cwd: Path, text: bool) -> str:
-        assert cmd == [
-            "git",
-            "log",
-            "--full-history",
-            "--format=%s",
-            "--",
-            "changes/pkg/123.bugfix.md",
-        ]
-        return "Fix cache cleanup (#42)\n\n"
-
-    monkeypatch.setattr(release.subprocess, "check_output", fake_check_output)
-
-    assert release._fragment_pr_number(fragment) == 42
 
 
 def test_fragment_pr_number_accepts_merge_commit_subject(

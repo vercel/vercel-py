@@ -1,0 +1,12 @@
+[project]
+name = "app"
+version = "1.0.0"
+
+[tool.uv.sources]
+core = { workspace = true }
+
+[tool.vercel.release.dependencies]
+dependencies = ["core>=0.1.0,<0.2.0 ; python_version < '3.14'", "httpx>=0.27,<1"]
+
+[tool.hatch.version]
+path = "app_version.py"
