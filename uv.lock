@@ -45,6 +45,7 @@ dev = [
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
     { name = "lograil", specifier = "~=0.8.1" },
     { name = "mypy", specifier = ">=1.20.2,<2" },
+    { name = "packaging", specifier = ">=24,<27" },
     { name = "poethepoet", specifier = ">=0.48.0" },
     { name = "pytest", specifier = ">=7.0.0,<10" },
     { name = "pytest-asyncio", specifier = "<2" },
