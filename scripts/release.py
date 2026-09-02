@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import os
 import re
 import shlex
@@ -357,10 +358,10 @@ def _advance_workspace_upper_bounds(
                 item.package, parsed, dependency, version
             )
         for old, new in replacements.items():
-            quoted_old = f'"{old}"'
+            quoted_old = json.dumps(old)
             if text.count(quoted_old) != 1:
                 raise RuntimeError(f"could not uniquely update {old!r} in {pyproject_path}")
-            text = text.replace(quoted_old, f'"{new}"')
+            text = text.replace(quoted_old, json.dumps(new))
         if replacements:
             pyproject_path.write_text(text, encoding="utf-8")
 
