@@ -812,6 +812,8 @@ class WorkflowOrchestratorContext:
         with (
             self.registry._get_sandbox() as sandbox,
             sandbox.enter(),
+            streams.reviving_readable_streams(workflow_run.run_id),
+            streams.collecting_readable_sources(allow_local=False),
         ):
             # Hold a lock over the import, to avoid weird init races
             with sandbox.import_lock:
@@ -2115,9 +2117,10 @@ async def _execute_step(
             # No deployment id: the queue message routed this step to the deployment
             # that owns the run, so the key resolves against the current one.
             run_key = await world.run_key(req.run_id) if ser.is_encrypted(step_run.input) else None
-            args, kwargs = ser.step_call_arguments(
-                ser.hydrate(step_run.input, what=what, key=run_key), what=what
-            )
+            with streams.reviving_readable_streams(req.run_id, world=world, live=True):
+                args, kwargs = ser.step_call_arguments(
+                    ser.hydrate(step_run.input, what=what, key=run_key), what=what
+                )
             args, kwargs = step.codec.validate_arguments(args, kwargs)
 
             logger.debug(
@@ -2152,8 +2155,12 @@ async def _execute_step(
             # escape hatch.
             await step_streams.drain()
 
-        # Serialize the result
-        output = ser.dehydrate(step.codec.dump_return(result))
+        # Serialize the result and hand any local readable sources to the
+        # invocation's post-response background owner. The descriptor is
+        # recorded immediately; its pump is allowed to outlive this step.
+        with streams.collecting_readable_sources() as readable_sources:
+            output = ser.dehydrate(step.codec.dump_return(result))
+        streams.bind_readable_sources(readable_sources, world=world, run_id=req.run_id)
 
         # Complete the step via event
         await world.events_create(
@@ -2446,7 +2453,12 @@ class Run(Generic[T]):
                 key = None
                 if ser.is_encrypted(run.output):
                     key = await self._world.run_key(run.run_id, deployment_id=run.deployment_id)
-                output = ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
+                with streams.reviving_readable_streams(run.run_id, world=self._world, live=True):
+                    output = ser.hydrate(
+                        run.output,
+                        what=f"the output of run {run.run_id}",
+                        key=key,
+                    )
                 if self._codec is None:
                     return cast("T", output)
                 return cast("T", self._codec.validate_return(output))
@@ -2564,7 +2576,8 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = ser.dehydrate(ser.argument_array(dumped_args, dumped_kwargs))
+    with streams.collecting_readable_sources() as readable_sources:
+        input_data = ser.dehydrate(ser.argument_array(dumped_args, dumped_kwargs))
     execution_context: dict[str, Any] = {"hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION}
     if namespace is not None:
         execution_context["queueNamespace"] = namespace
@@ -2581,6 +2594,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
         raise RuntimeError("Missing 'run' in server response for 'run_created' event")
 
     run_id = result.run.run_id
+    streams.bind_readable_sources(readable_sources, world=world, run_id=run_id)
     await world.queue(
         w.get_queue_name(wf.workflow_id, namespace),
         w.WorkflowInvokePayload(run_id=run_id),
@@ -2624,7 +2638,10 @@ async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook
     else:
         hook = token_or_hook
         run = await world.runs_get(hook.run_id)
-    data = w.HookReceivedEventData(payload=ser.dehydrate(payload))
+    with streams.collecting_readable_sources() as readable_sources:
+        encoded_payload = ser.dehydrate(payload)
+    streams.bind_readable_sources(readable_sources, world=world, run_id=hook.run_id)
+    data = w.HookReceivedEventData(payload=encoded_payload)
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     execution_context = run.execution_context or {}
     namespace = execution_context.get("queueNamespace")

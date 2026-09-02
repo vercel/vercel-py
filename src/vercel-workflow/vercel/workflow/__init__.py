@@ -26,9 +26,11 @@ from vercel.workflow._internal.runtime import (
 )
 from vercel.workflow._internal.serde import register_serializable, serializable
 from vercel.workflow._internal.streams import (
+    ReadableStream,
     WorkflowStreamHandle,
     WorkflowStreamWriter,
     WorkflowWritable,
+    readable_stream,
 )
 from vercel.workflow._internal.world import HTTPHandler, HTTPRequest, HTTPResponse
 
@@ -75,6 +77,8 @@ __all__ = [
     "get_workflow_metadata",
     "get_writable",
     "read_stream",
+    "readable_stream",
+    "ReadableStream",
     "WorkflowWritable",
     "WorkflowStreamWriter",
     "WorkflowStreamHandle",

@@ -8,6 +8,7 @@ from vercel._internal.core.byte_stream import (
     AsyncByteStreamRuntime,
     StagingFileRuntime,
     SyncByteStreamRuntime,
+    buffer_to_bytes,
 )
 from vercel._internal.core.iter_coroutine import iter_coroutine
 
@@ -26,6 +27,13 @@ class _AsyncReader:
 
     async def read(self, size: int = -1, /) -> bytes:
         return self._source.read(size)
+
+
+def test_buffer_to_bytes_returns_an_immutable_snapshot() -> None:
+    source = bytearray(b"before")
+    snapshot = buffer_to_bytes(memoryview(source))
+    source[:] = b"after!"
+    assert snapshot == b"before"
 
 
 async def _assert_bytes_like_readers(runtime: SyncByteStreamRuntime) -> None:

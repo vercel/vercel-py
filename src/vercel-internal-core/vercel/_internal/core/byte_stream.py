@@ -41,6 +41,11 @@ AsyncByteSource: TypeAlias = AsyncByteReader
 RawByteSource: TypeAlias = SyncByteSource | AsyncByteSource
 
 
+def buffer_to_bytes(value: Buffer, /) -> bytes:
+    """Return an immutable snapshot of any buffer-protocol value."""
+    return memoryview(value).tobytes()
+
+
 class ReadableByteStream(Protocol):
     """Normalized readable stream consumed by shared internal workflows.
 
@@ -103,7 +108,7 @@ class _MemoryReader:
     """Give an immutable bytes snapshot a stateful, non-suspending read cursor."""
 
     def __init__(self, data: BytesLike) -> None:
-        self._data = memoryview(bytes(data))
+        self._data = memoryview(buffer_to_bytes(data))
         self._offset = 0
 
     async def read(self, size: int = -1, /) -> bytes:
@@ -243,6 +248,7 @@ __all__ = [
     "AsyncByteReader",
     "AsyncByteSource",
     "AsyncByteStreamRuntime",
+    "buffer_to_bytes",
     "BytesLike",
     "RawByteSource",
     "ReadableByteStream",
