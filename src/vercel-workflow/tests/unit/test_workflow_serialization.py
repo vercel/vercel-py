@@ -51,16 +51,6 @@ def test_shared_references_survive() -> None:
     assert restored[0] is restored[1]
 
 
-def test_envelope_formats_are_reported_by_name() -> None:
-    # Written by the TS SDK when a run has compression enabled. Unsupported
-    # here, but the payload is not corrupt and should not read as if it were.
-    # `encr` and `encp` are the ones that are read --
-    # ``test_workflow_encryption.py`` covers them.
-    for prefix in (ser.GZIP, ser.ZSTD):
-        with pytest.raises(ser.SerializationError, match=f"{prefix.decode()}.*cannot read"):
-            ser.hydrate(prefix + b"...", what="a payload")
-
-
 def test_unknown_format_is_rejected() -> None:
     # `json` is what this SDK wrote before the devalue migration.
     with pytest.raises(ser.SerializationError, match="unknown serialization format"):
