@@ -1,0 +1,6 @@
+[project]
+name = "core"
+version = "0.1.9"
+
+[tool.hatch.version]
+path = "core_version.py"

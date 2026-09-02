@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import os
 import re
 import shlex
@@ -13,6 +14,14 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.version import Version
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
 
 try:
     from scripts import workspace
@@ -321,6 +330,75 @@ def write_changelog(
     path.write_text(content, encoding="utf-8")
 
 
+def _advance_workspace_upper_bounds(
+    releases: list[Release], packages_by_name: dict[str, workspace.Package]
+) -> None:
+    planned_versions = {item.package: item.new_version for item in releases}
+    for item in releases:
+        package = packages_by_name[item.package]
+        pyproject_path = package.path / "pyproject.toml"
+        text = pyproject_path.read_text(encoding="utf-8")
+        with pyproject_path.open("rb") as file:
+            data = tomllib.load(file)
+        declared = (
+            data.get("tool", {})
+            .get("vercel", {})
+            .get("release", {})
+            .get("dependencies", {})
+            .get("dependencies", [])
+        )
+        replacements: dict[str, str] = {}
+        for dependency in declared:
+            parsed = Requirement(dependency)
+            name = parsed.name.lower().replace("_", "-")
+            version = planned_versions.get(name)
+            if version is None or parsed.specifier.contains(version, prereleases=True):
+                continue
+            replacements[dependency] = _advance_upper_bound(
+                item.package, parsed, dependency, version
+            )
+        for old, new in replacements.items():
+            quoted_old = json.dumps(old)
+            if text.count(quoted_old) != 1:
+                raise RuntimeError(f"could not uniquely update {old!r} in {pyproject_path}")
+            text = text.replace(quoted_old, json.dumps(new))
+        if replacements:
+            pyproject_path.write_text(text, encoding="utf-8")
+
+
+def _advance_upper_bound(
+    package: str, requirement: Requirement, declared: str, version: str
+) -> str:
+    upper_bounds = [item for item in requirement.specifier if item.operator == "<"]
+    if len(upper_bounds) != 1:
+        raise RuntimeError(
+            f"{package} declares {declared!r}, which excludes the planned {version} release; "
+            "advance its upper bound manually"
+        )
+    planned = Version(version)
+    next_boundary = _next_compatibility_boundary(planned)
+    extras = f"[{','.join(sorted(requirement.extras))}]" if requirement.extras else ""
+    specifiers = [
+        f"<{next_boundary}" if item == upper_bounds[0] else str(item)
+        for item in requirement.specifier
+    ]
+    marker = f" ; {requirement.marker}" if requirement.marker else ""
+    updated = f"{requirement.name}{extras}{','.join(specifiers)}{marker}"
+    if Requirement(updated).specifier.contains(version, prereleases=True):
+        return updated
+    raise RuntimeError(
+        f"{package} declares {declared!r}, which excludes the planned {version} release; "
+        "advance its constraint manually"
+    )
+
+
+def _next_compatibility_boundary(version: Version) -> str:
+    major, minor = version.release[:2]
+    if major == 0:
+        return f"0.{minor + 1}.0"
+    return f"{major + 1}.0.0"
+
+
 def prepare_release_files(
     *, force_bump: str | None = None
 ) -> tuple[list[Release], dict[Path, int]]:
@@ -330,6 +408,7 @@ def prepare_release_files(
         return [], {}
 
     packages_by_name = workspace.packages()
+    _advance_workspace_upper_bounds(releases, packages_by_name)
     pr_numbers = _release_pr_numbers(releases)
     for release in releases:
         package = packages_by_name[release.package]

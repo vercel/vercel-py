@@ -1,0 +1,12 @@
+[project]
+name = "unpublished-dependent"
+version = "0.0.0"
+
+[tool.uv.sources]
+core = { workspace = true }
+
+[tool.vercel.release.dependencies]
+dependencies = ["core>=0.1.0"]
+
+[tool.hatch.version]
+path = "unpublished_dependent_version.py"
