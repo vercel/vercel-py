@@ -121,7 +121,16 @@ class FakeWorld(NoStreams, w.World):
         raise NotImplementedError
 
     async def runs_get(self, run_id: str) -> w.WorkflowRun:
-        raise NotImplementedError
+        assert run_id == RUN_ID
+        return w.NonFinalWorkflowRun(
+            run_id=RUN_ID,
+            status="running",
+            deployment_id="dpl_test",
+            workflow_name=WORKFLOW_NAME,
+            spec_version=w.SPEC_VERSION_CURRENT,
+            created_at=NOW,
+            updated_at=NOW,
+        )
 
     async def steps_get(self, run_id: str, step_id: str) -> w.WorkflowStep:
         raise NotImplementedError

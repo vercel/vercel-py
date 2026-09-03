@@ -1,7 +1,7 @@
 """The `encr` and `encp` payload formats, as `@workflow/world-vercel` writes them.
 
 Decryption only, for now: writing either is not implemented, so the payloads
-this SDK produces are plain `devl`.
+this SDK produces are unencrypted `devl`, `gzip`, or `zstd` envelopes.
 
 Both envelopes are two nested layers, and both descend from the same per-run
 key material :func:`derive_run_key` produces::

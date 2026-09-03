@@ -5,7 +5,7 @@ import gzip
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from vercel.workflow._internal import serialization as ser
+from vercel.workflow._internal import compression, py_sandbox, serialization as ser, world as w
 
 # Produced by Node 24's node:zlib over b'devl["charged 42"]'.
 TS_GZIP = bytes.fromhex(
@@ -16,6 +16,7 @@ TS_GZIP = bytes.fromhex(
 TS_ZSTD_WITHOUT_CONTENT_SIZE = bytes.fromhex(
     "28b52ffd00009100006465766c5b2263686172676564203432225d"
 )
+COMPRESSING_ENCODER = ser.PayloadEncoder(compression=True)
 
 
 @pytest.mark.parametrize(
@@ -24,6 +25,68 @@ TS_ZSTD_WITHOUT_CONTENT_SIZE = bytes.fromhex(
 )
 def test_reads_a_typescript_compression_envelope(prefix: bytes, payload: bytes) -> None:
     assert ser.hydrate(prefix + payload, what="a payload") == "charged 42"
+
+
+def test_writes_zstd_by_default() -> None:
+    value = "charged " * 256
+
+    payload = COMPRESSING_ENCODER.encode(value)
+
+    assert payload.startswith(ser.ZSTD)
+    assert ser.hydrate(payload, what="a payload") == value
+
+
+def test_gzip_can_be_selected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORKFLOW_COMPRESSION_CODEC", "gzip")
+    value = "charged " * 256
+
+    payload = COMPRESSING_ENCODER.encode(value)
+
+    assert payload.startswith(ser.GZIP)
+    assert ser.hydrate(payload, what="a payload") == value
+
+
+def test_compression_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORKFLOW_DISABLE_COMPRESSION", "1")
+
+    payload = COMPRESSING_ENCODER.encode("charged " * 256)
+
+    assert payload.startswith(ser.DEVALUE_V1)
+
+
+def test_small_payloads_are_not_compressed() -> None:
+    assert compression.maybe_compress(b"x" * 1023, enabled=True) == b"x" * 1023
+
+
+def test_disabled_compression_leaves_large_payloads_alone() -> None:
+    data = b"x" * 2000
+
+    assert compression.maybe_compress(data, enabled=False) == data
+
+
+@pytest.mark.parametrize(
+    ("compressed_size", "prefix"),
+    [(1896, b"x"), (1895, ser.ZSTD)],
+)
+def test_compression_requires_five_percent_savings(
+    monkeypatch: pytest.MonkeyPatch, compressed_size: int, prefix: bytes
+) -> None:
+    monkeypatch.setattr(compression, "compress_zstd", lambda data: b"x" * compressed_size)
+
+    assert compression.maybe_compress(b"x" * 2000, enabled=True).startswith(prefix)
+
+
+def test_new_runs_advertise_compression_support() -> None:
+    assert w.SPEC_VERSION_CURRENT == w.SPEC_VERSION_SUPPORTS_COMPRESSION
+
+
+def test_compression_works_inside_the_workflow_sandbox() -> None:
+    value = "charged " * 256
+
+    with py_sandbox.Sandbox().enter():
+        payload = COMPRESSING_ENCODER.encode(value)
+
+    assert ser.hydrate(payload, what="a payload") == value
 
 
 def test_nested_compression_is_not_an_extra_protocol() -> None:

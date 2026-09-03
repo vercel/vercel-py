@@ -45,6 +45,16 @@ async def probe_workflow() -> dict[str, Any]:
     return {"workflow": body, "step": await probe_step()}
 
 
+@registry.step
+async def large_step() -> str:
+    return "charged " * 256
+
+
+@registry.workflow
+async def workflow_with_large_step() -> str:
+    return await large_step()
+
+
 class _RecordingLocalWorld(LocalWorld):
     """Real LocalWorld for storage; only the outbound (networked) queue is stubbed."""
 
@@ -61,6 +71,49 @@ class _RecordingLocalWorld(LocalWorld):
 def test_get_workflow_metadata_outside_any_context_raises() -> None:
     with pytest.raises(RuntimeError, match="inside a workflow or a step"):
         get_workflow_metadata()
+
+
+async def test_a_new_step_in_an_old_run_uses_the_run_format_policy(tmp_path, monkeypatch) -> None:
+    world = _RecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    old_version = w.SPEC_VERSION_SUPPORTS_COMPRESSION - 1
+    created = await world.events_create(
+        None,
+        w.RunCreatedEvent(
+            event_data=w.RunCreatedEventData(
+                deployment_id="dpl_1",
+                workflow_name=workflow_with_large_step.workflow_id,
+                input=PLAIN_ENCODER.encode(ser.argument_array((), {})),
+            ),
+            spec_version=old_version,
+        ),
+    )
+    assert created.run is not None
+    run_id = created.run.run_id
+    queue_name = w.get_queue_name(workflow_with_large_step.workflow_id)
+
+    async def deliver(payload: w.WorkflowInvokePayload) -> None:
+        await runtime.workflow_handler(
+            payload.model_dump(by_alias=True),
+            attempt=1,
+            queue_name=queue_name,
+            message_id="msg_1",
+            registry=registry,
+        )
+
+    await deliver(w.WorkflowInvokePayload(run_id=run_id))
+    (step_payload,) = [
+        payload
+        for _, payload in world.queued
+        if isinstance(payload, w.WorkflowInvokePayload) and payload.step_id is not None
+    ]
+    await deliver(step_payload)
+
+    assert step_payload.step_id is not None
+    step = await world.steps_get(run_id, step_payload.step_id)
+    assert step.spec_version == w.SPEC_VERSION_CURRENT
+    assert step.output is not None
+    assert step.output.startswith(ser.DEVALUE_V1)
 
 
 async def test_metadata_matches_between_body_and_step(tmp_path, monkeypatch) -> None:

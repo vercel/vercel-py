@@ -396,6 +396,7 @@ async def test_get_conflict_continues_while_a_parallel_step_runs(tmp_path, monke
     assert isinstance(queued, w.WorkflowInvokePayload)
     await runtime._execute_step(
         queued,
+        run=await world.runs_get(run_id),
         queue_name=w.get_queue_name(register_claim_with_step.workflow_id),
         registry=registry,
     )

@@ -283,6 +283,22 @@ async def test_start_normalizes_a_positional_call_on_a_named_parameter(
     assert positional.input == by_keyword.input == PLAIN_ENCODER.encode([{"value": 123}])
 
 
+async def test_start_compresses_large_inputs_for_new_runs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    registry = _registry()
+
+    @registry.workflow
+    async def echo(value: str, /) -> str:
+        return value
+
+    value = "charged " * 256
+    stored = await _start(echo, value)
+
+    assert stored.spec_version == w.SPEC_VERSION_SUPPORTS_COMPRESSION
+    assert stored.input.startswith(ser.ZSTD)
+    assert ser.hydrate(stored.input, what="the input") == [value]
+
+
 async def test_start_refuses_a_call_that_does_not_fit_the_signature(tmp_path, monkeypatch) -> None:
     """And refuses it before a run row exists, rather than after."""
     monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))

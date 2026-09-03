@@ -1498,7 +1498,13 @@ async def workflow_handler(
 
     req = w.WorkflowInvokePayload.from_wire(message)
     if req.step_id is not None:
-        return await _execute_step(req, queue_name=queue_name, registry=registry)
+        run = await world.runs_get(req.run_id)
+        return await _execute_step(
+            req,
+            run=run,
+            queue_name=queue_name,
+            registry=registry,
+        )
 
     run_id = req.run_id
     if refuse_cross_environment_delivery(world, req.run_input, run_id):
@@ -1716,7 +1722,7 @@ async def _workflow_replay_pass(
         started_at=workflow_started_at,
         registry=registry,
         run_key=await _resolve_run_key(world, workflow_run, events),
-        payload_encoder=ser.PayloadEncoder(),
+        payload_encoder=workflow_run.payload_encoder(),
         workflow_info=WorkflowInfo(
             run_id=run_id,
             workflow_name=workflow_run.workflow_name,
@@ -1991,6 +1997,7 @@ async def _run_cancellable_step(
 async def _execute_step(
     req: w.WorkflowInvokePayload,
     *,
+    run: w.WorkflowRun,
     queue_name: str,
     registry: core.Workflows,
 ) -> w.QueueContinuation | None:
@@ -2038,7 +2045,7 @@ async def _execute_step(
     if not start_result.step:
         raise RuntimeError(f"step_started event for '{req.step_id}' did not return step entity")
     step_run = start_result.step
-    payload_encoder = ser.PayloadEncoder()
+    payload_encoder = run.payload_encoder()
     current_attempt = step_run.attempt
     if not step_run.started_at:
         raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
@@ -2591,7 +2598,9 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = ser.PayloadEncoder().encode(ser.argument_array(dumped_args, dumped_kwargs))
+    input_data = ser.PayloadEncoder(compression=True).encode(
+        ser.argument_array(dumped_args, dumped_kwargs)
+    )
     execution_context: dict[str, Any] = {"hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION}
     if namespace is not None:
         execution_context["queueNamespace"] = namespace
@@ -2651,7 +2660,7 @@ async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook
     else:
         hook = token_or_hook
         run = await world.runs_get(hook.run_id)
-    payload_encoder = ser.PayloadEncoder()
+    payload_encoder = run.payload_encoder()
     data = w.HookReceivedEventData(payload=payload_encoder.encode(payload))
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     execution_context = run.execution_context or {}
