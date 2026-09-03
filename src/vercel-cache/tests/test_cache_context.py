@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Awaitable, Generator
 
 import pytest
 
 from vercel.cache import context as ctx
+from vercel.functions.context import get_wait_until, set_wait_until
 from vercel.headers import set_headers as set_shared_headers
 
 
 @pytest.fixture
 def isolated_context() -> Generator[None, None, None]:
-    ctx._cv_wait_until.set(None)
+    set_wait_until(None)
     ctx._cv_cache.set(None)
     ctx._cv_async_cache.set(None)
     ctx._cv_purge.set(None)
     set_shared_headers(None)
     yield
-    ctx._cv_wait_until.set(None)
+    set_wait_until(None)
     ctx._cv_cache.set(None)
     ctx._cv_async_cache.set(None)
     ctx._cv_purge.set(None)
@@ -24,6 +25,23 @@ def isolated_context() -> Generator[None, None, None]:
 
 
 class FakeCacheObject: ...
+
+
+def test_wait_until_uses_shared_invocation_context(isolated_context: None) -> None:
+    registered: list[Awaitable[object]] = []
+    cache = FakeCacheObject()
+
+    ctx.set_context(wait_until=registered.append, cache=cache)
+
+    assert ctx.get_context().wait_until == registered.append
+    assert get_wait_until() == registered.append
+    assert ctx.get_context().cache is cache
+
+    ctx.set_context(wait_until=None)
+
+    assert ctx.get_context().wait_until is None
+    assert get_wait_until() is None
+    assert ctx.get_context().cache is cache
 
 
 class TestSetContextSetsValues:

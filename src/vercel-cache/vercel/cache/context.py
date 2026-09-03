@@ -8,9 +8,6 @@ from vercel.headers import get_headers as _get_headers, set_headers as _set_head
 
 from .types import PurgeAPI
 
-_cv_wait_until: ContextVar[Callable[[Awaitable[object]], None] | None] = ContextVar(
-    "vercel_wait_until", default=None
-)
 _cv_cache: ContextVar[object | None] = ContextVar("vercel_cache", default=None)
 _cv_async_cache: ContextVar[object | None] = ContextVar("vercel_async_cache", default=None)
 _cv_purge: ContextVar[PurgeAPI | None] = ContextVar("vercel_purge", default=None)
@@ -32,8 +29,10 @@ class _ContextSnapshot:
 
 
 def get_context() -> _ContextSnapshot:
+    from vercel.functions.context import get_wait_until
+
     return _ContextSnapshot(
-        wait_until=_cv_wait_until.get(),
+        wait_until=get_wait_until(),
         cache=_cv_cache.get(),
         async_cache=_cv_async_cache.get(),
         purge=_cv_purge.get(),
@@ -50,7 +49,9 @@ def set_context(
     headers: Mapping[str, str] | None | _Unset = UNSET,
 ) -> None:
     if not isinstance(wait_until, _Unset):
-        _cv_wait_until.set(wait_until)
+        from vercel.functions.context import set_wait_until
+
+        set_wait_until(wait_until)
     if not isinstance(cache, _Unset):
         _cv_cache.set(cache)
     if not isinstance(async_cache, _Unset):

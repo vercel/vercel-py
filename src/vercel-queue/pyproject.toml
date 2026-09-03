@@ -21,7 +21,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "typing_extensions>=4.0.0",
     "vercel-headers>=0.6.0",
-    "vercel-internal-core>=0.1.0,<0.2.0",
+    "vercel-internal-core>=0.1.0,<0.3.0",
     "vercel-oidc>=0.6.0",
 ]
 
