@@ -32,9 +32,10 @@ from collections.abc import AsyncIterator
 import pytest
 
 import vercel.queue as vqs
+from tests.payloads import PLAIN_ENCODER
 from vercel.queue.testing import clear_subscriptions
 from vercel.workflow import WorkflowRunFailedError
-from vercel.workflow._internal import core, runtime, serialization as ser, ulid, world as w
+from vercel.workflow._internal import core, runtime, ulid, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
 RUN_DEADLINE_SECONDS = 30
@@ -232,7 +233,7 @@ class Resume:
 
     @classmethod
     def of(cls, hook: w.Hook, payload: dict) -> Resume:
-        dehydrated = ser.dehydrate(payload)
+        dehydrated = PLAIN_ENCODER.encode(payload)
         return cls(
             hook=hook,
             payload=dehydrated,

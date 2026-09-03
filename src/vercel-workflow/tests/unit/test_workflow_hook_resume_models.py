@@ -22,8 +22,9 @@ import httpx
 import pytest
 import respx
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
-from vercel.workflow._internal import core, runtime, serialization as ser, world as w
+from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 from vercel.workflow._internal.worlds.vercel import VercelWorld
 
@@ -168,9 +169,9 @@ def _carried(**overrides: Any) -> w.HookResumeInput:
 
 
 def _hook_received(carried: w.HookResumeInput | None = None) -> w.HookReceivedEvent:
-    event = w.HookReceivedEventData(payload=ser.dehydrate({"ok": True}), token=TOKEN).into_event(
-        "hook_1"
-    )
+    event = w.HookReceivedEventData(
+        payload=PLAIN_ENCODER.encode({"ok": True}), token=TOKEN
+    ).into_event("hook_1")
     if carried is not None:
         event._queue_input = carried
     return event

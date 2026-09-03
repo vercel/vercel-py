@@ -9,7 +9,8 @@ import json
 
 import pytest
 
-from vercel.workflow._internal import serialization as ser, world as w
+from tests.payloads import PLAIN_ENCODER
+from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
 RUN_ID = "wrun_resilient"
@@ -23,7 +24,7 @@ def _world(tmp_path, monkeypatch) -> local_mod.LocalWorld:
 def _run_input(**overrides) -> w.RunInput:
     return w.RunInput.from_wire(
         {
-            "input": ser.dehydrate([7]),
+            "input": PLAIN_ENCODER.encode([7]),
             "deploymentId": "dpl_1",
             "workflowName": "add_ten",
             "specVersion": 6,
@@ -129,20 +130,21 @@ async def test_existing_run_is_untouched_by_event_data(tmp_path, monkeypatch) ->
         w.RunCreatedEventData(
             deployment_id="dpl_real",
             workflow_name="add_ten",
-            input=ser.dehydrate([1]),
+            input=PLAIN_ENCODER.encode([1]),
         ).into_event(),
     )
     assert created.run is not None
     run_id = created.run.run_id
 
     await world.events_create(
-        run_id, _resilient_event(_run_input(deploymentId="dpl_bogus", input=ser.dehydrate([999])))
+        run_id,
+        _resilient_event(_run_input(deploymentId="dpl_bogus", input=PLAIN_ENCODER.encode([999]))),
     )
 
     run = await world.runs_get(run_id)
     assert run.status == "running"
     assert run.deployment_id == "dpl_real"
-    assert run.input == ser.dehydrate([1])
+    assert run.input == PLAIN_ENCODER.encode([1])
     # No second run_created invented on top of the real one.
     events = (await world.events_list(run_id)).data
     assert [e.event_type for e in events] == ["run_created", "run_started"]
@@ -156,7 +158,7 @@ async def test_concurrent_run_created_wins_the_row(tmp_path, monkeypatch) -> Non
     we look, present when we write, which is the whole window.
     """
     world = _world(tmp_path, monkeypatch)
-    real_input = ser.dehydrate([1])
+    real_input = PLAIN_ENCODER.encode([1])
     real_row = local_mod.dumps_js(
         w.NonFinalWorkflowRun(
             run_id=RUN_ID,
@@ -223,7 +225,7 @@ async def test_incomplete_event_data_creates_nothing(tmp_path, monkeypatch, fiel
     data = {
         "deploymentId": "dpl_1",
         "workflowName": "add_ten",
-        "input": ser.dehydrate([7]),
+        "input": PLAIN_ENCODER.encode([7]),
     }
     if how == "missing":
         del data[field]
@@ -248,14 +250,14 @@ async def test_terminal_run_still_conflicts(tmp_path, monkeypatch) -> None:
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deployment_id="dpl_1", workflow_name="add_ten", input=ser.dehydrate([1])
+            deployment_id="dpl_1", workflow_name="add_ten", input=PLAIN_ENCODER.encode([1])
         ).into_event(),
     )
     assert created.run is not None
     run_id = created.run.run_id
     await world.events_create(run_id, w.RunStartedEvent())
     await world.events_create(
-        run_id, w.RunCompletedEventData(output=ser.dehydrate(11)).into_event()
+        run_id, w.RunCompletedEventData(output=PLAIN_ENCODER.encode(11)).into_event()
     )
 
     with pytest.raises(w.EntityConflictError):
@@ -286,7 +288,7 @@ async def test_bare_run_started_on_a_running_run_appends_no_event(tmp_path, monk
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deployment_id="dpl_1", workflow_name="add_ten", input=ser.dehydrate([1])
+            deployment_id="dpl_1", workflow_name="add_ten", input=PLAIN_ENCODER.encode([1])
         ).into_event(),
     )
     assert created.run is not None
@@ -311,7 +313,7 @@ async def test_encryption_public_key_survives_the_lifecycle(tmp_path, monkeypatc
     )
 
     await world.events_create(
-        RUN_ID, w.RunCompletedEventData(output=ser.dehydrate(17)).into_event()
+        RUN_ID, w.RunCompletedEventData(output=PLAIN_ENCODER.encode(17)).into_event()
     )
 
     run = await world.runs_get(RUN_ID)

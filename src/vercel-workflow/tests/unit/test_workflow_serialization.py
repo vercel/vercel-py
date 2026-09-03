@@ -16,15 +16,16 @@ from typing import Any
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import devalue, serialization as ser, world as w
 
 
 def test_payload_is_devl_plus_devalue() -> None:
     # The exact bytes `@workflow/core`'s client codec produces:
     # `encodeWithFormatPrefix(DEVALUE_V1, encoder.encode(stringify(value)))`.
-    assert ser.dehydrate("charged 42") == b'devl["charged 42"]'
+    assert PLAIN_ENCODER.encode("charged 42") == b'devl["charged 42"]'
     value = [{"amount": 21}]
-    assert ser.dehydrate(value) == b"devl" + devalue.stringify(value).encode()
+    assert PLAIN_ENCODER.encode(value) == b"devl" + devalue.stringify(value).encode()
 
 
 @pytest.mark.parametrize(
@@ -40,14 +41,14 @@ def test_payload_is_devl_plus_devalue() -> None:
     ],
 )
 def test_round_trip(value) -> None:
-    assert ser.hydrate(ser.dehydrate(value), what="a payload") == value
+    assert ser.hydrate(PLAIN_ENCODER.encode(value), what="a payload") == value
 
 
 def test_shared_references_survive() -> None:
     # devalue's flattened form is what makes a repeated value one slot; the
     # JSON encoding this replaced silently duplicated it.
     shared = {"id": 1}
-    restored = ser.hydrate(ser.dehydrate([shared, shared]), what="a payload")
+    restored = ser.hydrate(PLAIN_ENCODER.encode([shared, shared]), what="a payload")
     assert restored[0] is restored[1]
 
 
@@ -95,7 +96,7 @@ def test_a_stored_payload_loads_as_binary_not_text() -> None:
     pydantic's lax coercion would happily put a payload in the ``str`` arm --
     where it fails much later, at the point of use, rather than here.
     """
-    payload = ser.dehydrate([{"amount": 21}])
+    payload = PLAIN_ENCODER.encode([{"amount": 21}])
 
     run = w.WorkflowRunAdaptor.from_wire(_run_row(input=payload))
 
@@ -128,7 +129,7 @@ CALLS: list[tuple[tuple[Any, ...], dict[str, Any], list[Any]]] = [
     (({"a": 1},), {"x": 2}, [{"a": 1}, {"x": 2}]),
     ((21, {"a": 1}), {}, [21, {"a": 1}, {}]),
     # A dict with a non-string key cannot be a JavaScript object, so it needs no
-    # disambiguation. (Python cannot write one -- `dehydrate` refuses it -- but a
+    # disambiguation. (Python's encoder refuses to write one, but a
     # devalue `Map` from a JavaScript caller arrives as one.)
     (({1: "x"},), {}, [{1: "x"}]),
 ]

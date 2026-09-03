@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import Workflows, get_workflow_metadata
 from vercel.workflow._internal import runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
@@ -71,7 +72,7 @@ async def test_metadata_matches_between_body_and_step(tmp_path, monkeypatch) -> 
         w.RunCreatedEventData(
             deployment_id="",
             workflow_name=probe_workflow.workflow_id,
-            input=ser.dehydrate(ser.argument_array((), {})),
+            input=PLAIN_ENCODER.encode(ser.argument_array((), {})),
         ).into_event(),
     )
     assert run_result.run is not None

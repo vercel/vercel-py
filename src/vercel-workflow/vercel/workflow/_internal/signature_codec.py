@@ -14,7 +14,7 @@ by the `serialization` module, which handles anything that has been
 passed through.
 
 ===========  ==========================================================
-outbound     caller -> SignatureCodec.dump -> serialization.dehydrate
+outbound     caller -> SignatureCodec.dump -> PayloadEncoder.encode
 inbound      serialization.hydrate -> SignatureCodec.validate -> callee
 ===========  ==========================================================
 

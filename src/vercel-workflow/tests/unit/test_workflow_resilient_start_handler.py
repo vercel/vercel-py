@@ -12,8 +12,9 @@ from typing import Any
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
-from vercel.workflow._internal import core, runtime, serialization as ser, world as w
+from vercel.workflow._internal import core, runtime, world as w
 
 from ..world_stubs import NoStreams
 
@@ -47,7 +48,7 @@ def _run(status: str = "running", **overrides: Any) -> w.WorkflowRun:
         "workflowName": WORKFLOW_NAME,
         "status": status,
         "specVersion": 6,
-        "input": ser.dehydrate([]),
+        "input": PLAIN_ENCODER.encode([]),
         "createdAt": NOW,
         "updatedAt": NOW,
         "startedAt": NOW,
@@ -57,7 +58,7 @@ def _run(status: str = "running", **overrides: Any) -> w.WorkflowRun:
 
 def _run_input(**overrides: Any) -> dict[str, Any]:
     return {
-        "input": ser.dehydrate([]),
+        "input": PLAIN_ENCODER.encode([]),
         "deploymentId": "dpl_1",
         "workflowName": WORKFLOW_NAME,
         "specVersion": 6,

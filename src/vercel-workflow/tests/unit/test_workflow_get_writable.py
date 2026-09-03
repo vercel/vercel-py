@@ -16,6 +16,7 @@ from typing import Any
 import anyio
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal import core, runtime, serialization as ser, streams, world as w
 
@@ -38,7 +39,7 @@ class FakeWorld(NoStreams, w.World):
     def __init__(self, *, fail_writes: bool = False, step_input: bytes | None = None) -> None:
         self.log: list[tuple[str, Any]] = []
         self.fail_writes = fail_writes
-        self.step_input = step_input or ser.dehydrate(ser.step_arguments((), {}))
+        self.step_input = step_input or PLAIN_ENCODER.encode(ser.step_arguments((), {}))
 
     async def get_deployment_id(self) -> str:
         return ""
@@ -346,7 +347,7 @@ class TestHandOff:
 
         dumped = many.codec.dump("out", [handle])
         assert dumped[0] is handle
-        assert b'"WritableStream"' in ser.dehydrate(dumped)
+        assert b'"WritableStream"' in PLAIN_ENCODER.encode(dumped)
 
     async def test_a_handle_survives_the_trip_into_a_step(self, registry) -> None:
         """The round trip that makes the feature work.
@@ -356,7 +357,7 @@ class TestHandOff:
         the step writes to the stream the workflow chose.
         """
         handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
-        payload = ser.dehydrate(ser.step_arguments((), {"out": handle}))
+        payload = PLAIN_ENCODER.encode(ser.step_arguments((), {"out": handle}))
 
         # The tag is the one a TypeScript peer already understands.
         assert b'"WritableStream"' in payload
@@ -386,7 +387,7 @@ class TestHandOff:
         a client reading a payload that happens to name a stream gets the
         handle back rather than a writer with nowhere to send from.
         """
-        payload = ser.dehydrate(
+        payload = PLAIN_ENCODER.encode(
             ser.step_arguments((), {"out": streams.WorkflowStreamHandle(RUN_ID, STREAM)})
         )
 
@@ -415,7 +416,7 @@ class TestHandOff:
             await seen[1].write("via get_writable")
 
         fake = FakeWorld(
-            step_input=ser.dehydrate(
+            step_input=PLAIN_ENCODER.encode(
                 ser.step_arguments((), {"out": streams.WorkflowStreamHandle(RUN_ID, STREAM)})
             )
         )
@@ -435,4 +436,4 @@ class TestHandOff:
                 world=world, run_id=RUN_ID, name=STREAM, task_group=task_group
             )
             handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
-            assert ser.dehydrate(writer) == ser.dehydrate(handle)
+            assert PLAIN_ENCODER.encode(writer) == PLAIN_ENCODER.encode(handle)

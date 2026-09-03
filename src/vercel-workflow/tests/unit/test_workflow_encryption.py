@@ -37,6 +37,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.oidc import VercelOidcTokenError
 from vercel.workflow._internal import (
     encryption,
@@ -306,7 +307,7 @@ def test_decryption_works_inside_the_workflow_sandbox() -> None:
     # A run input is hydrated inside the sandbox, so this is the path that
     # `test_cryptography_is_probed_once_at_import` protects, driven end to end.
     key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
-    payload = seal(key, ser.dehydrate([{"amount": 21}]))
+    payload = seal(key, PLAIN_ENCODER.encode([{"amount": 21}]))
 
     with py_sandbox.Sandbox().enter():
         assert ser.hydrate(payload, what="the input of run wrun_1", key=key) == [{"amount": 21}]
@@ -358,7 +359,7 @@ with py_sandbox.Sandbox().enter():
 
 
 def test_the_first_decrypt_of_a_process_can_be_the_one_inside_the_sandbox() -> None:
-    payload = seal(RUN_KEY, ser.dehydrate([{"amount": 21}]))
+    payload = seal(RUN_KEY, PLAIN_ENCODER.encode([{"amount": 21}]))
 
     assert _first_call_of_a_fresh_interpreter(_DECRYPT_IN_SANDBOX, payload) == "[{'amount': 21}]"
 
@@ -494,7 +495,7 @@ def test_x25519_is_bound_once_at_import(monkeypatch) -> None:
 
 
 def test_opening_a_sealed_payload_works_inside_the_workflow_sandbox() -> None:
-    payload = seal_to(RUN_KEY, ser.dehydrate({"type": "approve"}))
+    payload = seal_to(RUN_KEY, PLAIN_ENCODER.encode({"type": "approve"}))
 
     with py_sandbox.Sandbox().enter():
         assert ser.hydrate(payload, what="the payload of hook hook_1", key=RUN_KEY) == {
@@ -511,7 +512,7 @@ def test_an_encrypted_payload_hydrates_through_its_inner_prefix() -> None:
     # The plaintext's own prefix is dispatched like any other payload, which is
     # what would make a future `gzip`-inside-`encr` work without touching this.
     key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
-    payload = seal(key, ser.dehydrate([{"amount": 21}]))
+    payload = seal(key, PLAIN_ENCODER.encode([{"amount": 21}]))
 
     assert ser.hydrate(payload, what="the input of run wrun_1", key=key) == [{"amount": 21}]
 
@@ -527,7 +528,7 @@ def test_a_decrypted_payload_that_is_not_a_payload_is_reported() -> None:
 def test_a_sealed_payload_hydrates_through_its_inner_prefix() -> None:
     # The shape of every hook resume on the Vercel world: the payload comes
     # from outside the run, so it arrives sealed rather than encrypted.
-    payload = seal_to(RUN_KEY, ser.dehydrate({"type": "approve", "id": "1"}))
+    payload = seal_to(RUN_KEY, PLAIN_ENCODER.encode({"type": "approve", "id": "1"}))
 
     assert ser.hydrate(payload, what="the payload of hook hook_1", key=RUN_KEY) == {
         "type": "approve",
@@ -555,7 +556,7 @@ def test_a_sealed_payload_that_does_not_authenticate_names_the_payload() -> None
 
 def test_a_payload_that_does_not_authenticate_names_the_payload() -> None:
     key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
-    payload = seal(key, ser.dehydrate(42))
+    payload = seal(key, PLAIN_ENCODER.encode(42))
 
     with pytest.raises(ser.SerializationError, match="Cannot decrypt the input of run wrun_1"):
         ser.hydrate(payload, what="the input of run wrun_1", key=bytes(32))
@@ -567,7 +568,7 @@ def test_only_an_encrypted_payload_asks_for_a_key() -> None:
     # bytes -- its keypair derives from them -- so it belongs on that path too.
     assert ser.is_encrypted(ser.ENCRYPTED + bytes(28))
     assert ser.is_encrypted(ser.SEALED + bytes(60))
-    assert not ser.is_encrypted(ser.dehydrate(42))
+    assert not ser.is_encrypted(PLAIN_ENCODER.encode(42))
     # A run's `input` is `bytes | str`: `run_created` echoes back '[Circular]'.
     assert not ser.is_encrypted("[Circular]")
     assert not ser.is_encrypted(None)
@@ -867,12 +868,12 @@ async def test_a_plaintext_run_never_resolves_a_key() -> None:
     # No HKDF and no API request for a run that has nothing to decrypt -- and
     # so none of the ways resolving a key can fail, either.
     world = _CountingWorld(bytes(32))
-    run = _run(input=ser.dehydrate([]))
+    run = _run(input=PLAIN_ENCODER.encode([]))
     events: list[w.Event] = [
         w.StepCreatedEventData(
-            step_name="pay", input=ser.dehydrate(ser.step_arguments((), {}))
+            step_name="pay", input=PLAIN_ENCODER.encode(ser.step_arguments((), {}))
         ).into_event("step_0"),
-        w.StepCompletedEventData(result=ser.dehydrate(42)).into_event("step_0"),
+        w.StepCompletedEventData(result=PLAIN_ENCODER.encode(42)).into_event("step_0"),
         w.StepStartedEvent(correlation_id="step_0"),
         w.RunStartedEvent(),
     ]
@@ -891,25 +892,25 @@ async def test_one_encrypted_payload_anywhere_resolves_the_key_once(where: str) 
     # would stand the run, and only ever an encrypted one.
     key = bytes(range(32))
     world = _CountingWorld(key)
-    sealed = seal(key, ser.dehydrate(42))
+    sealed = seal(key, PLAIN_ENCODER.encode(42))
 
     def payload(field: str, plain: Any) -> Any:
         return sealed if where == field else plain
 
-    run = _run(input=payload("input", ser.dehydrate([])))
+    run = _run(input=payload("input", PLAIN_ENCODER.encode([])))
     events: list[w.Event] = [
         w.StepCreatedEventData(
-            step_name="pay", input=payload("step input", ser.dehydrate({"args": []}))
+            step_name="pay", input=payload("step input", PLAIN_ENCODER.encode({"args": []}))
         ).into_event("step_0"),
-        w.StepCompletedEventData(result=payload("step result", ser.dehydrate(42))).into_event(
-            "step_0"
-        ),
+        w.StepCompletedEventData(
+            result=payload("step result", PLAIN_ENCODER.encode(42))
+        ).into_event("step_0"),
         w.HookCreatedEventData(
-            token="tok", metadata=payload("hook metadata", ser.dehydrate({}))
+            token="tok", metadata=payload("hook metadata", PLAIN_ENCODER.encode({}))
         ).into_event("hook_0"),
-        w.HookReceivedEventData(payload=payload("hook payload", ser.dehydrate({}))).into_event(
-            "hook_0"
-        ),
+        w.HookReceivedEventData(
+            payload=payload("hook payload", PLAIN_ENCODER.encode({}))
+        ).into_event("hook_0"),
     ]
 
     assert await runtime._resolve_run_key(world, run, events) == key
@@ -922,8 +923,8 @@ async def test_a_sealed_hook_payload_resolves_the_key() -> None:
     # hook payload an outside resumer sealed to it, and a scan that skipped
     # `encp` would answer "this run is not encrypted" and then fail the run.
     world = _CountingWorld(RUN_KEY)
-    run = _run(input=ser.dehydrate([]))
-    payload = seal_to(RUN_KEY, ser.dehydrate({"type": "approve"}))
+    run = _run(input=PLAIN_ENCODER.encode([]))
+    payload = seal_to(RUN_KEY, PLAIN_ENCODER.encode({"type": "approve"}))
     events: list[w.Event] = [
         w.HookCreatedEventData(token="tok").into_event("hook_0"),
         w.HookReceivedEventData(payload=payload).into_event("hook_0"),

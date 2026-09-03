@@ -11,6 +11,7 @@ import base64
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import serialization as ser, streams
 
 
@@ -23,7 +24,7 @@ def test_value_frame_carries_a_devl_payload() -> None:
     # The payload is exactly what the run/step payload boundary writes, which
     # is what lets `getDeserializeStream` on the TS side read it.
     frame = streams.encode_value({"hi": 1})
-    payload = ser.dehydrate({"hi": 1})
+    payload = PLAIN_ENCODER.encode({"hi": 1})
     assert frame == len(payload).to_bytes(4, "big") + payload
     assert payload.startswith(b"devl")
 

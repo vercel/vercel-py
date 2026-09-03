@@ -31,6 +31,7 @@ from typing import Any
 import pydantic
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
@@ -146,7 +147,7 @@ async def test_a_sealed_slot_round_trips_through_the_local_world(tmp_path, monke
             event_data=w.RunCreatedEventData(
                 deployment_id="dpl_1",
                 workflow_name="workflow//./src/wf//main",
-                input=ser.dehydrate([]),
+                input=PLAIN_ENCODER.encode([]),
             ),
             spec_version=7,
         ),
@@ -318,7 +319,7 @@ def _run() -> w.WorkflowRun:
             "workflowName": WORKFLOW_NAME,
             "status": "running",
             "specVersion": 7,
-            "input": ser.dehydrate([]),
+            "input": PLAIN_ENCODER.encode([]),
             "createdAt": NOW,
             "updatedAt": NOW,
             "startedAt": NOW,
@@ -339,7 +340,7 @@ def _recorded_log() -> list[w.Event]:
             w.RunCreatedEventData(
                 deployment_id="dpl_1",
                 workflow_name=WORKFLOW_NAME,
-                input=ser.dehydrate([]),
+                input=PLAIN_ENCODER.encode([]),
             ).into_event(),
             1,
             created_at=NOW,

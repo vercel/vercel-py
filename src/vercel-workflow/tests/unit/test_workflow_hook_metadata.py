@@ -19,6 +19,7 @@ import os
 import pydantic
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import BaseHook, HookNotFoundError, get_hook_by_token
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
@@ -88,7 +89,7 @@ async def registered(tmp_path, monkeypatch) -> _RecordingLocalWorld:
         w.RunCreatedEventData(
             deployment_id="",
             workflow_name=approvals.workflow_id,
-            input=ser.dehydrate([]),
+            input=PLAIN_ENCODER.encode([]),
         ).into_event(),
     )
     assert created.run is not None
@@ -122,7 +123,7 @@ def test_metadata_is_encoded_when_the_hook_is_created() -> None:
     event = ctx.create_hook(TOKEN, Approval, metadata=METADATA)
 
     hook = ctx.hooks[event._correlation_id]
-    assert hook.metadata == ser.dehydrate(METADATA)
+    assert hook.metadata == PLAIN_ENCODER.encode(METADATA)
 
 
 def test_an_unserializable_value_fails_at_the_wait_call() -> None:
@@ -200,12 +201,14 @@ async def test_encrypted_metadata_is_opened_with_the_run_key(tmp_path, monkeypat
     world = _RecordingLocalWorld(run_key=key)
     w.set_world(world)
     nonce = os.urandom(12)
-    sealed = ser.ENCRYPTED + nonce + AESGCM(key).encrypt(nonce, ser.dehydrate(METADATA), None)
+    sealed = (
+        ser.ENCRYPTED + nonce + AESGCM(key).encrypt(nonce, PLAIN_ENCODER.encode(METADATA), None)
+    )
 
     created = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deployment_id="dpl_1", workflow_name="wf", input=ser.dehydrate([])
+            deployment_id="dpl_1", workflow_name="wf", input=PLAIN_ENCODER.encode([])
         ).into_event(),
     )
     assert created.run is not None

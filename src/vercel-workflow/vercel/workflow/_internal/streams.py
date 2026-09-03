@@ -34,6 +34,8 @@ import pydantic
 
 from . import serialization as ser
 
+_PAYLOAD_ENCODER = ser.PayloadEncoder()
+
 if TYPE_CHECKING:
     from anyio.abc import TaskGroup
 
@@ -101,7 +103,7 @@ def encode_frame(payload: bytes) -> bytes:
 
 def encode_value(value: Any) -> bytes:
     """The frame a single user write becomes."""
-    return encode_frame(ser.dehydrate(value))
+    return encode_frame(_PAYLOAD_ENCODER.encode(value))
 
 
 class FrameDecoder:

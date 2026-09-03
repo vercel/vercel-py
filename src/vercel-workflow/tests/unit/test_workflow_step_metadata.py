@@ -9,17 +9,18 @@ from __future__ import annotations
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import StepInfo, Workflows, get_step_metadata
 from vercel.workflow._internal import runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 
 
 def _run_input(**kwargs) -> bytes:
-    return ser.dehydrate(ser.argument_array((), kwargs))
+    return PLAIN_ENCODER.encode(ser.argument_array((), kwargs))
 
 
 def _step_input(**kwargs) -> bytes:
-    return ser.dehydrate(ser.step_arguments((), kwargs))
+    return PLAIN_ENCODER.encode(ser.step_arguments((), kwargs))
 
 
 class _RecordingLocalWorld(LocalWorld):

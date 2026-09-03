@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import pydantic
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow import FatalError, TypeValidationError, register_serializable
 from vercel.workflow._internal import (
@@ -96,14 +97,14 @@ def _round_trip(step: core.Step[Any, Any], *args: Any, **kwargs: Any) -> Any:
 
     The whole path `run_step` and `step_handler` split between them.
     """
-    data = ser.dehydrate(ser.step_arguments(*_dump_arguments(step, args, kwargs)))
+    data = PLAIN_ENCODER.encode(ser.step_arguments(*_dump_arguments(step, args, kwargs)))
     decoded = ser.step_call_arguments(ser.hydrate(data, what="the input"), what="the input")
     return step.codec.validate_arguments(*decoded)
 
 
 def _wire(step: core.Step[Any, Any], *args: Any, **kwargs: Any) -> Any:
     """What a step call records, hydrated but not yet validated."""
-    data = ser.dehydrate(ser.step_arguments(*_dump_arguments(step, args, kwargs)))
+    data = PLAIN_ENCODER.encode(ser.step_arguments(*_dump_arguments(step, args, kwargs)))
     return ser.hydrate(data, what="the input")["args"]
 
 
@@ -195,7 +196,7 @@ def test_a_return_annotation_works_the_same_way() -> None:
         return Order(sku=sku, quantity=1, total=decimal.Decimal("1.00"))
 
     order = Order(sku="abc", quantity=1, total=decimal.Decimal("1.00"))
-    output = ser.dehydrate(quote.codec.dump_return(order))
+    output = PLAIN_ENCODER.encode(quote.codec.dump_return(order))
 
     assert ser.hydrate(output, what="the result") == {
         "sku": "abc",
@@ -310,9 +311,9 @@ def test_an_annotation_that_devalue_already_handles_records_the_same_bytes(
 
     step = registry.step(body)
 
-    assert ser.dehydrate(ser.step_arguments(*_dump_arguments(step, (value,), {}))) == ser.dehydrate(
-        {"args": [{"value": value}]}
-    )
+    assert PLAIN_ENCODER.encode(
+        ser.step_arguments(*_dump_arguments(step, (value,), {}))
+    ) == PLAIN_ENCODER.encode({"args": [{"value": value}]})
 
 
 def test_an_object_argument_still_gets_the_sentinel_after_a_dump() -> None:
@@ -334,7 +335,7 @@ def test_an_object_argument_still_gets_the_sentinel_after_a_dump() -> None:
     ]
     _, kwargs = ser.step_call_arguments(
         ser.hydrate(
-            ser.dehydrate(ser.step_arguments(*_dump_arguments(ship, (order,), {}))),
+            PLAIN_ENCODER.encode(ser.step_arguments(*_dump_arguments(ship, (order,), {}))),
             what="the input",
         ),
         what="the input",
@@ -563,7 +564,7 @@ async def test_start_records_a_model_argument_as_an_object(tmp_path, monkeypatch
     finally:
         w.set_world(None)
 
-    assert stored.input == ser.dehydrate(
+    assert stored.input == PLAIN_ENCODER.encode(
         [{"order": {"sku": "abc", "quantity": 2, "total": decimal.Decimal("19.99")}}]
     )
 
@@ -587,7 +588,7 @@ async def test_return_value_validates_against_the_workflow_return(tmp_path, monk
         await world.events_create(
             run.run_id,
             w.RunCompletedEventData(
-                output=ser.dehydrate(
+                output=PLAIN_ENCODER.encode(
                     {"sku": "abc", "quantity": 1, "total": decimal.Decimal("1.00")}
                 )
             ).into_event(),
@@ -623,7 +624,7 @@ async def test_a_run_built_without_a_workflow_reads_the_raw_output(tmp_path, mon
         await world.events_create(
             started.run_id,
             w.RunCompletedEventData(
-                output=ser.dehydrate(
+                output=PLAIN_ENCODER.encode(
                     {"sku": "abc", "quantity": 1, "total": decimal.Decimal("1.00")}
                 )
             ).into_event(),

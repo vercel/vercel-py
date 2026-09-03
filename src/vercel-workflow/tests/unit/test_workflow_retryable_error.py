@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 import time_machine
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow import RetryableError
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
@@ -95,7 +96,7 @@ def _running_step(step_name: str, *, attempt: int) -> w.WorkflowStep:
         created_at=NOW,
         updated_at=NOW,
         started_at=NOW,
-        input=ser.dehydrate(ser.step_arguments((), {})),
+        input=PLAIN_ENCODER.encode(ser.step_arguments((), {})),
     )
 
 
@@ -249,7 +250,7 @@ async def _run_with_started_step(world: local_mod.LocalWorld) -> str:
         w.RunCreatedEventData(
             deployment_id="dpl_1",
             workflow_name=WORKFLOW_NAME,
-            input=ser.dehydrate(ser.argument_array((), {})),
+            input=PLAIN_ENCODER.encode(ser.argument_array((), {})),
         ).into_event(),
     )
     assert created.run is not None
@@ -257,7 +258,7 @@ async def _run_with_started_step(world: local_mod.LocalWorld) -> str:
     await world.events_create(
         run_id,
         w.StepCreatedEventData(
-            step_name="my_step", input=ser.dehydrate(ser.step_arguments((), {}))
+            step_name="my_step", input=PLAIN_ENCODER.encode(ser.step_arguments((), {}))
         ).into_event(STEP_ID),
     )
     await world.events_create(run_id, w.StepStartedEvent(correlation_id=STEP_ID))
@@ -275,7 +276,7 @@ async def test_local_world_parks_the_step_until_its_deadline(tmp_path, monkeypat
     await world.events_create(
         run_id,
         w.StepRetryingEventData(
-            error=ser.dehydrate_error(RuntimeError("boom")), retry_after=retry_after
+            error=PLAIN_ENCODER.encode_error(RuntimeError("boom")), retry_after=retry_after
         ).into_event(STEP_ID),
     )
 
