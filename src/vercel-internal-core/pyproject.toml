@@ -67,6 +67,8 @@ cache_dir = "../../.mypy_cache/vercel-internal-core"
 explicit_package_bases = true
 packages = [
     "vercel._internal.core",
+    "vercel.api",
+    "vercel.errors",
     "vercel.functions.context",
 ]
 
