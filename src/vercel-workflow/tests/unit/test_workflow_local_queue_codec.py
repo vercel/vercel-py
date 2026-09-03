@@ -17,13 +17,14 @@ import asyncio
 import json
 from typing import Any
 
-from vercel.workflow._internal import serialization as ser, world as w
+from tests.payloads import PLAIN_ENCODER
+from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
 RUN_ID = "wrun_codec"
 WORKFLOW = "add_ten"
-# What `dehydrate` produces, and what a TS producer base64s into the envelope.
-INPUT = ser.dehydrate([[1], 123])
+# What the plain encoder produces, and what a TS producer base64s into the envelope.
+INPUT = PLAIN_ENCODER.encode([[1], 123])
 
 
 def _payload() -> w.WorkflowInvokePayload:

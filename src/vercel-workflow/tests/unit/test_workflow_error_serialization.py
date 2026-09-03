@@ -6,6 +6,7 @@ from datetime import datetime
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow import (
     FatalError,
@@ -20,11 +21,11 @@ from vercel.workflow._internal import runtime, serialization as ser, world as w
 
 def _wire(error: Exception) -> str:
     """The devalue text an error payload carries, minus the format prefix."""
-    return ser.dehydrate_error(error)[len(ser.DEVALUE_V1) :].decode()
+    return PLAIN_ENCODER.encode_error(error)[len(ser.DEVALUE_V1) :].decode()
 
 
 def _round_trip(error: Exception) -> Exception:
-    return ser.hydrate_error(ser.dehydrate_error(error), what="a payload")
+    return ser.hydrate_error(PLAIN_ENCODER.encode_error(error), what="a payload")
 
 
 def _raised(error: Exception) -> Exception:
@@ -226,7 +227,7 @@ def test_legacy_python_errors_remain_readable() -> None:
 
 def test_non_exception_throw_is_wrapped_as_runtime_error() -> None:
     # JavaScript throws whatever it likes; Python has to raise an exception.
-    payload = ser.dehydrate({"kind": "business-rule-violation", "code": "INVOICE_LOCKED"})
+    payload = PLAIN_ENCODER.encode({"kind": "business-rule-violation", "code": "INVOICE_LOCKED"})
 
     error = ser.hydrate_error(payload, what="an error")
 

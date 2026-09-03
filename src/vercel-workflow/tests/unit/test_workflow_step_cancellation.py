@@ -21,6 +21,7 @@ from typing import Any, TypeVar
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import (
     core,
     errors,
@@ -178,7 +179,7 @@ async def _create_run(world: local_mod.LocalWorld, workflow_name: str) -> str:
         w.RunCreatedEventData(
             deployment_id="",
             workflow_name=workflow_name,
-            input=ser.dehydrate(ser.argument_array((), {})),
+            input=PLAIN_ENCODER.encode(ser.argument_array((), {})),
         ).into_event(),
     )
     assert result.run is not None
@@ -535,7 +536,7 @@ async def test_uncancelled_cancellable_step_runs_normally(tmp_path, monkeypatch)
 
 class _AbortListenerWorld:
     def __init__(self, reason: str, *, break_once: bool = False, split: bool = False) -> None:
-        payload = ser.dehydrate({"aborted": True, "reason": reason})
+        payload = PLAIN_ENCODER.encode({"aborted": True, "reason": reason})
         self.wire = streams.encode_frame(payload)
         self.break_once = break_once
         self.split = split

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 import pydantic
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -43,7 +44,7 @@ async def _populate(world) -> str:
         w.RunCreatedEventData(
             deployment_id="dpl_1",
             workflow_name="workflow//./src/wf//main",
-            input=ser.dehydrate([]),
+            input=PLAIN_ENCODER.encode([]),
             execution_context={"workflowCoreVersion": "5.0.0"},
         ).into_event(),
     )
@@ -53,25 +54,27 @@ async def _populate(world) -> str:
     await world.events_create(
         run_id,
         w.StepCreatedEventData(
-            step_name="step//./src/wf//pay", input=ser.dehydrate(ser.step_arguments((), {}))
+            step_name="step//./src/wf//pay",
+            input=PLAIN_ENCODER.encode(ser.step_arguments((), {})),
         ).into_event("step_0"),
     )
     await world.events_create(run_id, w.StepStartedEventData().into_event("step_0"))
     await world.events_create(
-        run_id, w.StepCompletedEventData(result=ser.dehydrate(42)).into_event("step_0")
+        run_id, w.StepCompletedEventData(result=PLAIN_ENCODER.encode(42)).into_event("step_0")
     )
     # Include a serialized error in the fixture rows.
     await world.events_create(
         run_id,
         w.StepCreatedEventData(
-            step_name="step//./src/wf//refund", input=ser.dehydrate(ser.step_arguments((), {}))
+            step_name="step//./src/wf//refund",
+            input=PLAIN_ENCODER.encode(ser.step_arguments((), {})),
         ).into_event("step_1"),
     )
     await world.events_create(run_id, w.StepStartedEventData().into_event("step_1"))
     await world.events_create(
         run_id,
         w.StepFailedEventData(
-            error=ser.dehydrate_error(RuntimeError("gateway said no"))
+            error=PLAIN_ENCODER.encode_error(RuntimeError("gateway said no"))
         ).into_event("step_1"),
     )
     await world.events_create(run_id, w.HookCreatedEventData(token="tok-abc").into_event("hook_0"))
@@ -188,7 +191,7 @@ async def test_run_row_always_carries_attributes(tmp_path, monkeypatch) -> None:
     stored["attributes"] = {"tier": "pro"}
     run_path.write_text(json.dumps(stored), encoding="utf-8")
     await world.events_create(
-        run_id, w.RunCompletedEventData(output=ser.dehydrate(42)).into_event()
+        run_id, w.RunCompletedEventData(output=PLAIN_ENCODER.encode(42)).into_event()
     )
     assert json.loads(run_path.read_text(encoding="utf-8"))["attributes"] == {"tier": "pro"}
 
@@ -198,7 +201,7 @@ async def test_a_failed_run_row_keeps_the_payload_and_the_category_apart(
 ) -> None:
     world = _world(tmp_path, monkeypatch)
     run_id = await _populate(world)
-    payload = ser.dehydrate_error(RuntimeError("intentional failure"))
+    payload = PLAIN_ENCODER.encode_error(RuntimeError("intentional failure"))
     await world.events_create(
         run_id, w.RunFailedEventData(error=payload, error_code="USER_ERROR").into_event()
     )
@@ -221,7 +224,9 @@ async def test_a_run_that_failed_without_a_category_omits_the_field(tmp_path, mo
     run_id = await _populate(world)
     await world.events_create(
         run_id,
-        w.RunFailedEventData(error=ser.dehydrate_error(RuntimeError("no code"))).into_event(),
+        w.RunFailedEventData(
+            error=PLAIN_ENCODER.encode_error(RuntimeError("no code"))
+        ).into_event(),
     )
 
     stored = json.loads((world.data_dir / "runs" / f"{run_id}.json").read_text(encoding="utf-8"))
@@ -238,7 +243,7 @@ async def test_timestamps_survive_the_round_trip(tmp_path, monkeypatch) -> None:
         w.RunCreatedEventData(
             deployment_id="dpl_1",
             workflow_name="workflow//./src/wf//main",
-            input=ser.dehydrate([]),
+            input=PLAIN_ENCODER.encode([]),
         ).into_event(),
     )
     assert result.run is not None
@@ -284,7 +289,7 @@ async def test_reads_a_log_written_at_a_newer_spec_version(tmp_path, monkeypatch
             event_data=w.RunCreatedEventData(
                 deployment_id="dpl_1",
                 workflow_name="workflow//./src/wf//main",
-                input=ser.dehydrate([]),
+                input=PLAIN_ENCODER.encode([]),
             ),
             spec_version=7,
         ),

@@ -22,7 +22,8 @@ import json
 
 import pytest
 
-from vercel.workflow._internal import serialization as ser, world as w
+from tests.payloads import PLAIN_ENCODER
+from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 
 RUN_ID = "wrun_test"
@@ -51,7 +52,7 @@ def _received(
     """A `hook_received`, by default carrying the queue input a lazy resume
     arrives with. `resume_id=None` is the plain sequential write, which takes
     none of this file's paths."""
-    dehydrated = ser.dehydrate({"n": 1} if payload is None else payload)
+    dehydrated = PLAIN_ENCODER.encode({"n": 1} if payload is None else payload)
     event = w.HookReceivedEventData(payload=dehydrated, token=TOKEN).into_event(hook)
     if resume_id is not None:
         event._queue_input = w.HookResumeInput(

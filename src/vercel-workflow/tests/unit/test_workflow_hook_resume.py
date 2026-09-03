@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import pydantic
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import BaseHook
 from vercel.workflow._internal import runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
@@ -66,7 +67,7 @@ async def _run_with_hook(world: _RecordingLocalWorld) -> str:
     result = await world.events_create(
         None,
         w.RunCreatedEventData(
-            deployment_id="dpl_1", workflow_name="test-wf", input=ser.dehydrate([])
+            deployment_id="dpl_1", workflow_name="test-wf", input=PLAIN_ENCODER.encode([])
         ).into_event(),
     )
     assert result.run is not None

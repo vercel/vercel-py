@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import pydantic
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import HookConflictError, WorkflowRunFailedError, sleep
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
@@ -170,7 +171,7 @@ async def _create_run(
         w.RunCreatedEventData(
             deployment_id="",
             workflow_name=workflow_name,
-            input=ser.dehydrate(ser.argument_array((), {})),
+            input=PLAIN_ENCODER.encode(ser.argument_array((), {})),
         ).into_event(),
     )
     assert result.run is not None
@@ -227,7 +228,7 @@ async def test_disposal_is_flushed_before_reusing_a_hook_token(tmp_path, monkeyp
     assert first_hook.correlation_id is not None
     await world.events_create(
         run_id,
-        w.HookReceivedEventData(payload=ser.dehydrate({}), token=TOKEN).into_event(
+        w.HookReceivedEventData(payload=PLAIN_ENCODER.encode({}), token=TOKEN).into_event(
             first_hook.correlation_id
         ),
     )

@@ -20,16 +20,17 @@ import uuid
 import pydantic
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import devalue, py_sandbox, serde, serialization as ser
 
 
 def _wire(value):
     """The devalue text a payload carries, minus the format prefix."""
-    return ser.dehydrate(value)[len(ser.DEVALUE_V1) :].decode()
+    return PLAIN_ENCODER.encode(value)[len(ser.DEVALUE_V1) :].decode()
 
 
 def _round_trip(value):
-    return ser.hydrate(ser.dehydrate(value), what="a payload")
+    return ser.hydrate(PLAIN_ENCODER.encode(value), what="a payload")
 
 
 def _sandbox_registry() -> serde.Registry:
@@ -206,21 +207,21 @@ def test_an_enum_needs_no_methods() -> None:
 
 def test_an_unregistered_enum_says_how_to_send_it() -> None:
     with pytest.raises(ser.SerializationError, match=r"Register Tier with @serializable"):
-        ser.dehydrate(Tier.PRO)
+        PLAIN_ENCODER.encode(Tier.PRO)
     with pytest.raises(ser.SerializationError, match=r"enum.StrEnum"):
-        ser.dehydrate(Tier.PRO)
+        PLAIN_ENCODER.encode(Tier.PRO)
 
 
 def test_an_unregistered_class_says_how_to_send_it() -> None:
     # The qualname is what you would pass to @serializable, so it is the name
     # worth printing even when it is a mouthful.
     with pytest.raises(ser.SerializationError, match=r"Register .*Ledger with @serializable"):
-        ser.dehydrate(_Ledger())
+        PLAIN_ENCODER.encode(_Ledger())
 
 
 def test_the_failing_field_is_named() -> None:
     with pytest.raises(ser.SerializationError, match=r"at \.book"):
-        ser.dehydrate({"book": _Ledger()})
+        PLAIN_ENCODER.encode({"book": _Ledger()})
 
 
 def test_a_class_id_can_be_pinned_for_a_typescript_peer() -> None:
@@ -308,7 +309,7 @@ def test_a_sandbox_registration_does_not_outlive_the_sandbox() -> None:
         assert type(_round_trip(sandboxed())) is sandboxed, "its own class applies inside"
         # The classId is the same on both sides, which is what lets a payload
         # cross: a step input is dehydrated here and revived by the host.
-        crossing = ser.dehydrate(sandboxed())
+        crossing = PLAIN_ENCODER.encode(sandboxed())
 
     assert type(_round_trip(host())) is host
     assert type(ser.hydrate(crossing, what="a payload")) is host, "each side revives its own"
@@ -321,7 +322,7 @@ def test_a_sandbox_registration_does_not_reach_the_host() -> None:
         serde.register_serializable(Point, class_id="class//sandbox-only//Point")
 
     with pytest.raises(ser.SerializationError, match="Register Point with @serializable"):
-        ser.dehydrate(Point(1, 2))
+        PLAIN_ENCODER.encode(Point(1, 2))
 
 
 def test_a_host_registration_is_not_visible_inside_a_sandbox() -> None:
@@ -333,7 +334,7 @@ def test_a_host_registration_is_not_visible_inside_a_sandbox() -> None:
     the sandbox exists to keep out of reach.
     """
     serde.register_serializable(Point)
-    payload = ser.dehydrate(Point(1, 2))
+    payload = PLAIN_ENCODER.encode(Point(1, 2))
 
     with serde.sandboxed_registrations(_sandbox_registry()):
         with pytest.raises(ser.SerializationError, match="unknown class"):
@@ -361,7 +362,7 @@ def test_a_restricted_stdlib_class_is_not_swapped_for_the_hosts() -> None:
     `date.today()` out of a workflow body. Handing back the host's class would
     undo that.
     """
-    payload = ser.dehydrate(datetime.date(2026, 8, 4))
+    payload = PLAIN_ENCODER.encode(datetime.date(2026, 8, 4))
 
     with py_sandbox.Sandbox().enter():
         import datetime as sandboxed  # noqa: PLC0415
@@ -455,7 +456,7 @@ def test_a_failing_serializer_names_the_class() -> None:
     serde.register_serializable(Broken)
 
     with pytest.raises(ser.SerializationError, match=r"Broken could not be written: boom"):
-        ser.dehydrate(Broken())
+        PLAIN_ENCODER.encode(Broken())
 
 
 def test_a_malformed_instance_payload_is_refused() -> None:

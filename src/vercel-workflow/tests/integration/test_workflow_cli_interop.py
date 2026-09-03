@@ -43,8 +43,9 @@ from typing import Any
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.queue.testing import clear_subscriptions
-from vercel.workflow._internal import core, runtime, serialization as ser, world as w
+from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.streams import workflow_run_stream_id as stream_id
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -317,7 +318,7 @@ async def py_run(tmp_path, monkeypatch) -> tuple[Path, str]:
         assert result == "charged 42", f"python run returned {result!r}"
         final = await world.runs_get(run.run_id)
         assert final.status == "completed", f"python run did not complete: {final.status}"
-        assert final.output == ser.dehydrate("charged 42")
+        assert final.output == PLAIN_ENCODER.encode("charged 42")
     finally:
         # Closed here, before the tests run, rather than in a teardown: the
         # embedded service's cancel scope has to be exited from the task that

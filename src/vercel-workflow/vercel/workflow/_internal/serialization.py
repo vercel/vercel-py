@@ -16,6 +16,7 @@ inner format is decoded.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from vercel.workflow._internal import devalue
@@ -84,8 +85,7 @@ REVIVERS: dict[str, Any] = {
 }
 
 
-def dehydrate(value: Any) -> bytes:
-    """Encode *value* as a ``devl``-prefixed devalue payload."""
+def _encode_devalue(value: Any) -> bytes:
     try:
         return DEVALUE_V1 + devalue.stringify(value, REDUCERS).encode()
     except devalue.DevalueError as error:
@@ -99,15 +99,23 @@ def dehydrate(value: Any) -> bytes:
         raise SerializationError(f"Cannot serialize value: {error}") from error
 
 
-def dehydrate_error(error: Exception) -> bytes:
-    """Encode an error, falling back to a serializable summary."""
-    try:
-        return dehydrate(error)
-    except Exception as encode_error:
-        name = type(error).__name__
-        return dehydrate(
-            errors.RemoteError(f"{name} could not be serialized: {encode_error}", name=name)
-        )
+@dataclass(frozen=True, slots=True)
+class PayloadEncoder:
+    """Encode workflow payload values and errors."""
+
+    def encode(self, value: Any) -> bytes:
+        return _encode_devalue(value)
+
+    def encode_error(self, error: Exception) -> bytes:
+        """Encode an error, falling back to a serializable summary."""
+        try:
+            encoded = _encode_devalue(error)
+        except Exception as encode_error:
+            name = type(error).__name__
+            encoded = _encode_devalue(
+                errors.RemoteError(f"{name} could not be serialized: {encode_error}", name=name)
+            )
+        return encoded
 
 
 def hydrate_error(data: Any, *, what: str, key: bytes | None = None) -> Exception:
@@ -204,8 +212,9 @@ def _is_argument_object(value: Any) -> bool:
     """Whether :func:`call_arguments` would read *value* as the kwargs object.
 
     A dict with a non-string key cannot be a JavaScript object — it is a
-    devalue `Map`, so a positional argument. `dehydrate` refuses to write one,
-    so that case only arises reading a payload a JavaScript caller wrote.
+    devalue `Map`, so a positional argument. :class:`PayloadEncoder` refuses
+    to write one, so that case only arises reading a payload a JavaScript
+    caller wrote.
     """
     return isinstance(value, dict) and all(isinstance(key, str) for key in value)
 

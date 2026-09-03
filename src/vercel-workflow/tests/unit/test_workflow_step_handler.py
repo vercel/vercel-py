@@ -22,6 +22,7 @@ import pydantic
 import pytest
 import respx
 
+from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow import FatalError, StepNotRegisteredError
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
@@ -49,7 +50,7 @@ def _running_step(step_name: str, *, attempt: int, input: bytes | None = None) -
         created_at=NOW,
         updated_at=NOW,
         started_at=NOW,
-        input=input if input is not None else ser.dehydrate(ser.step_arguments((), {})),
+        input=input if input is not None else PLAIN_ENCODER.encode(ser.step_arguments((), {})),
     )
 
 
@@ -396,7 +397,7 @@ async def test_input_that_does_not_match_the_annotation_is_fatal(
         started_step=_running_step(
             my_step.name,
             attempt=1,
-            input=ser.dehydrate(ser.step_arguments((), {"order": {"nope": 1}})),
+            input=PLAIN_ENCODER.encode(ser.step_arguments((), {"order": {"nope": 1}})),
         )
     )
     w.set_world(fake)
@@ -430,7 +431,7 @@ async def test_local_world_step_started_too_early_raises(tmp_path, monkeypatch) 
         created_at=NOW,
         updated_at=NOW,
         retry_after=future,
-        input=ser.dehydrate(ser.step_arguments((), {})),
+        input=PLAIN_ENCODER.encode(ser.step_arguments((), {})),
     )
     local_mod.write_json(world.data_dir / "steps" / f"{RUN_ID}-{STEP_ID}.json", step.model_dump())
 

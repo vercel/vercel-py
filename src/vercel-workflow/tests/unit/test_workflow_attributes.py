@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import FatalError, remove_attributes, set_attributes
 from vercel.workflow._internal import attributes as attrs, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
@@ -140,7 +141,7 @@ async def _running_run(world: local_mod.LocalWorld) -> str:
         w.RunCreatedEventData(
             deployment_id="dpl_1",
             workflow_name=WORKFLOW_NAME,
-            input=ser.dehydrate(ser.argument_array((), {})),
+            input=PLAIN_ENCODER.encode(ser.argument_array((), {})),
         ).into_event(),
     )
     assert created.run is not None
@@ -223,7 +224,7 @@ async def test_a_terminal_run_takes_no_more_attributes(tmp_path, monkeypatch) ->
     world = _world(tmp_path, monkeypatch)
     run_id = await _running_run(world)
     await world.events_create(
-        run_id, w.RunCompletedEventData(output=ser.dehydrate(None)).into_event()
+        run_id, w.RunCompletedEventData(output=PLAIN_ENCODER.encode(None)).into_event()
     )
 
     with pytest.raises(w.EntityConflictError, match="terminal state"):

@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import (
     core,
     loop as workflow_loop,
@@ -41,7 +42,7 @@ def _context(
 
 def _args(**kwargs: Any) -> bytes:
     """A step input payload, encoded the way the runtime encodes one."""
-    return ser.dehydrate(ser.step_arguments((), kwargs))
+    return PLAIN_ENCODER.encode(ser.step_arguments((), kwargs))
 
 
 def _suspension(correlation_id: str, args: bytes) -> runtime.Suspension:
@@ -141,7 +142,7 @@ def _created(step: "core.Step[Any, Any]", cid: str) -> w.Event:
 
 
 def _completed(cid: str, result: Any) -> w.Event:
-    return w.StepCompletedEventData(result=ser.dehydrate(result)).into_event(cid)
+    return w.StepCompletedEventData(result=PLAIN_ENCODER.encode(result)).into_event(cid)
 
 
 async def test_cancelled_step_ignores_later_completion() -> None:
@@ -293,7 +294,7 @@ def _running_run(workflow_id: str) -> w.WorkflowRun:
         status="running",
         deployment_id="",
         workflow_name=workflow_id,
-        input=ser.dehydrate(ser.argument_array((), {})),
+        input=PLAIN_ENCODER.encode(ser.argument_array((), {})),
         created_at=now,
         updated_at=now,
         started_at=now,

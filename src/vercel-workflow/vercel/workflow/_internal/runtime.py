@@ -723,12 +723,16 @@ class WorkflowOrchestratorContext:
         registry: core.Workflows,
         run_key: bytes | None = None,
         workflow_info: WorkflowInfo | None = None,
+        payload_encoder: ser.PayloadEncoder | None = None,
     ):
         self.run_id = run_id
         self.events = events
         # The key is per-run, so it is resolved once and reused for every
         # payload in the replay.
         self.run_key = run_key
+        self.payload_encoder = (
+            payload_encoder if payload_encoder is not None else ser.PayloadEncoder()
+        )
         # What get_workflow_metadata() returns inside the body; None only for
         # contexts built without a run entity (tests, tooling).
         self.workflow_info = workflow_info
@@ -834,7 +838,7 @@ class WorkflowOrchestratorContext:
 
             token = self._ctx.set(self)
             try:
-                result = ser.dehydrate(
+                result = self.payload_encoder.encode(
                     obj.codec.dump_return(
                         _run_isolated(
                             obj.func(*args, **kwargs),
@@ -874,7 +878,7 @@ class WorkflowOrchestratorContext:
         # `core._bind_arguments`, which the determinism check relies on.
         bound_args, bound_kwargs = step.bind_arguments(args, kwargs)
         dumped_args, dumped_kwargs = step.codec.dump_arguments(bound_args, bound_kwargs)
-        input_data = ser.dehydrate(ser.step_arguments(dumped_args, dumped_kwargs))
+        input_data = self.payload_encoder.encode(ser.step_arguments(dumped_args, dumped_kwargs))
         ulid = self.generate_ulid()
         sus = Suspension(correlation_id=f"step_{ulid}", step=step, input=input_data)
         self.suspensions[sus.correlation_id] = sus
@@ -966,7 +970,7 @@ class WorkflowOrchestratorContext:
             correlation_id=f"hook_{self.generate_ulid()}",
             token=token or self.generate_nanoid(),
             hook_cls=hook_cls,
-            metadata=None if metadata is None else ser.dehydrate(metadata),
+            metadata=None if metadata is None else self.payload_encoder.encode(metadata),
         )
         self.hooks[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
@@ -1549,8 +1553,14 @@ async def workflow_handler(
             return replay_result
 
 
-async def _send_cancellation(world: w.World, run_id: str, cancellation: Cancellation) -> None:
-    payload = ser.dehydrate({"aborted": True, "reason": cancellation.reason})
+async def _send_cancellation(
+    world: w.World,
+    run_id: str,
+    cancellation: Cancellation,
+    *,
+    payload_encoder: ser.PayloadEncoder,
+) -> None:
+    payload = payload_encoder.encode({"aborted": True, "reason": cancellation.reason})
 
     # Signal the running step first. A failure other than a direct
     # error from streams (because the stream is already closed) is an
@@ -1596,7 +1606,15 @@ async def _send_cancellations(context: WorkflowOrchestratorContext) -> None:
         return
     async with anyio.create_task_group() as tg:
         for cancellation in pending:
-            tg.start_soon(_send_cancellation, world, context.run_id, cancellation)
+            tg.start_soon(
+                functools.partial(
+                    _send_cancellation,
+                    world,
+                    context.run_id,
+                    cancellation,
+                    payload_encoder=context.payload_encoder,
+                )
+            )
 
 
 async def _workflow_replay_pass(
@@ -1698,6 +1716,7 @@ async def _workflow_replay_pass(
         started_at=workflow_started_at,
         registry=registry,
         run_key=await _resolve_run_key(world, workflow_run, events),
+        payload_encoder=ser.PayloadEncoder(),
         workflow_info=WorkflowInfo(
             run_id=run_id,
             workflow_name=workflow_run.workflow_name,
@@ -1716,7 +1735,7 @@ async def _workflow_replay_pass(
             await world.events_create(
                 run_id,
                 w.RunFailedEventData(
-                    error=ser.dehydrate_error(e),
+                    error=context.payload_encoder.encode_error(e),
                     error_code=classify_run_error(e),
                 ).into_event(),
             )
@@ -2019,6 +2038,7 @@ async def _execute_step(
     if not start_result.step:
         raise RuntimeError(f"step_started event for '{req.step_id}' did not return step entity")
     step_run = start_result.step
+    payload_encoder = ser.PayloadEncoder()
     current_attempt = step_run.attempt
     if not step_run.started_at:
         raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
@@ -2033,7 +2053,9 @@ async def _execute_step(
         )
         await world.events_create(
             req.run_id,
-            w.StepFailedEventData(error=ser.dehydrate_error(missing_error)).into_event(req.step_id),
+            w.StepFailedEventData(error=payload_encoder.encode_error(missing_error)).into_event(
+                req.step_id
+            ),
         )
         await world.queue(
             queue_name,
@@ -2058,7 +2080,7 @@ async def _execute_step(
         await world.events_create(
             req.run_id,
             w.StepFailedEventData(
-                error=ser.dehydrate_error(
+                error=payload_encoder.encode_error(
                     await _retries_exhausted(
                         error_message, step_run, world=world, run_id=req.run_id
                     )
@@ -2156,7 +2178,7 @@ async def _execute_step(
             await step_streams.drain()
 
         # Serialize the result
-        output = ser.dehydrate(step.codec.dump_return(result))
+        output = payload_encoder.encode(step.codec.dump_return(result))
 
         # Complete the step via event
         await world.events_create(
@@ -2205,7 +2227,9 @@ async def _execute_step(
             # Fail the step via event
             await world.events_create(
                 req.run_id,
-                w.StepFailedEventData(error=ser.dehydrate_error(failure)).into_event(req.step_id),
+                w.StepFailedEventData(error=payload_encoder.encode_error(failure)).into_event(
+                    req.step_id
+                ),
             )
         else:
             # Not at max retries yet - retry the step
@@ -2226,7 +2250,7 @@ async def _execute_step(
             await world.events_create(
                 req.run_id,
                 w.StepRetryingEventData(
-                    error=ser.dehydrate_error(e), retry_after=retry_at
+                    error=payload_encoder.encode_error(e), retry_after=retry_at
                 ).into_event(req.step_id),
             )
 
@@ -2567,7 +2591,7 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = ser.dehydrate(ser.argument_array(dumped_args, dumped_kwargs))
+    input_data = ser.PayloadEncoder().encode(ser.argument_array(dumped_args, dumped_kwargs))
     execution_context: dict[str, Any] = {"hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION}
     if namespace is not None:
         execution_context["queueNamespace"] = namespace
@@ -2627,7 +2651,8 @@ async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook
     else:
         hook = token_or_hook
         run = await world.runs_get(hook.run_id)
-    data = w.HookReceivedEventData(payload=ser.dehydrate(payload))
+    payload_encoder = ser.PayloadEncoder()
+    data = w.HookReceivedEventData(payload=payload_encoder.encode(payload))
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     execution_context = run.execution_context or {}
     namespace = execution_context.get("queueNamespace")

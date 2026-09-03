@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from tests.payloads import PLAIN_ENCODER
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 
@@ -248,7 +249,7 @@ async def test_start_records_the_positional_array_ts_writes(tmp_path, monkeypatc
 
     stored = await _start(add_ten, 123)
 
-    assert stored.input == ser.dehydrate([123])
+    assert stored.input == PLAIN_ENCODER.encode([123])
     assert ser.hydrate(stored.input, what="the input") == [123]
 
 
@@ -263,7 +264,7 @@ async def test_start_records_a_named_call_as_an_object(tmp_path, monkeypatch) ->
 
     stored = await _start(checkout, amount=21)
 
-    assert stored.input == ser.dehydrate([{"amount": 21}])
+    assert stored.input == PLAIN_ENCODER.encode([{"amount": 21}])
 
 
 async def test_start_normalizes_a_positional_call_on_a_named_parameter(
@@ -279,7 +280,7 @@ async def test_start_normalizes_a_positional_call_on_a_named_parameter(
     positional = await _start(add_ten, 123)
     by_keyword = await _start(add_ten, value=123)
 
-    assert positional.input == by_keyword.input == ser.dehydrate([{"value": 123}])
+    assert positional.input == by_keyword.input == PLAIN_ENCODER.encode([{"value": 123}])
 
 
 async def test_start_refuses_a_call_that_does_not_fit_the_signature(tmp_path, monkeypatch) -> None:
