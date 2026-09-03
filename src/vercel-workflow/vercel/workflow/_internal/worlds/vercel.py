@@ -457,10 +457,9 @@ class VercelWorld(w.World):
         # WORKFLOW_VERCEL_PROJECT and WORKFLOW_VERCEL_TEAM are both set.
         project_id = self._project_id or os.getenv("VERCEL_PROJECT_ID")
         if not project_id:
-            raise RuntimeError(
-                f"Cannot resolve the encryption key for run {run_id}: no project id. "
-                "Set VERCEL_PROJECT_ID, or pass one to the world."
-            )
+            # Matches world-vercel's optional getEncryptionKeyForRun: without
+            # a project id the World exposes no encryption-key capability.
+            return None
 
         current_deployment = os.getenv("VERCEL_DEPLOYMENT_ID")
         own_deployment = deployment_id is None or deployment_id == current_deployment

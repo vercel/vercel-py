@@ -45,6 +45,11 @@ async def probe_workflow() -> dict[str, Any]:
     return {"workflow": body, "step": await probe_step()}
 
 
+@registry.workflow
+async def probe_workflow_only() -> dict[str, Any]:
+    return _as_dict(get_workflow_metadata())
+
+
 @registry.step
 async def large_step() -> str:
     return "charged " * 256
@@ -175,6 +180,44 @@ async def test_metadata_matches_between_body_and_step(tmp_path, monkeypatch) -> 
     # The step's context is cleared once the step body returns.
     with pytest.raises(RuntimeError, match="inside a workflow or a step"):
         get_workflow_metadata()
+
+
+async def test_encryption_feature_uses_the_resolved_key_not_the_public_key(
+    tmp_path, monkeypatch
+) -> None:
+    key = bytes(range(32))
+
+    class EncryptedWorld(_RecordingLocalWorld):
+        async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
+            return key
+
+    world = EncryptedWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    created = await world.events_create(
+        None,
+        w.RunCreatedEventData(
+            deployment_id="dpl_1",
+            workflow_name=probe_workflow_only.workflow_id,
+            input=ser.PayloadEncoder(encryption_key=key).encode(ser.argument_array((), {})),
+            # Legacy encrypted runs have no published X25519 public key.
+            encryption_public_key=None,
+        ).into_event(),
+    )
+    assert created.run is not None
+    run_id = created.run.run_id
+
+    await runtime.workflow_handler(
+        w.WorkflowInvokePayload(run_id=run_id).model_dump(by_alias=True),
+        attempt=1,
+        queue_name=w.get_queue_name(probe_workflow_only.workflow_id),
+        message_id="msg_1",
+        registry=registry,
+    )
+
+    run = await world.runs_get(run_id)
+    assert run.output is not None
+    output = ser.hydrate(run.output, what="the run output", key=key)
+    assert output["encryption"] is True
 
 
 async def test_namespaced_queue_still_yields_the_workflow_name() -> None:

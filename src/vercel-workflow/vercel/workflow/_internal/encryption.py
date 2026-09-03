@@ -1,7 +1,4 @@
-"""The `encr` and `encp` payload formats, as `@workflow/world-vercel` writes them.
-
-Decryption only, for now: writing either is not implemented, so the payloads
-this SDK produces are unencrypted `devl`, `gzip`, or `zstd` envelopes.
+"""The `encr` and `encp` payload formats `@workflow/core` reads and writes.
 
 Both envelopes are two nested layers, and both descend from the same per-run
 key material :func:`derive_run_key` produces::
@@ -23,6 +20,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import os
 from typing import Any, NamedTuple
 
 from cryptography.exceptions import InvalidTag
@@ -55,6 +53,14 @@ def _aes_gcm_decrypt(key: bytes, nonce: bytes, sealed: bytes) -> bytes | None:
         return AESGCM(key).decrypt(nonce, sealed, None)
     except InvalidTag:
         return None
+
+
+def encrypt_envelope(key: bytes, plaintext: bytes) -> bytes:
+    """Seal *plaintext* with AES-256-GCM, returning ``nonce + ciphertext + tag``."""
+    if len(key) != KEY_LENGTH:
+        raise ValueError(f"A run key is {KEY_LENGTH} bytes, got {len(key)}")
+    nonce = os.urandom(NONCE_LENGTH)
+    return nonce + AESGCM(key).encrypt(nonce, plaintext, None)
 
 
 # Make `cryptography` do its internal imports now.
@@ -200,6 +206,11 @@ def derive_run_key_pair(run_key: bytes) -> RunKeyPair:
     return RunKeyPair(scalar, _x25519_public_key(scalar))
 
 
+def derive_run_public_key(run_key: bytes) -> str:
+    """Derive the Base64-encoded public key published for a run."""
+    return base64.b64encode(derive_run_key_pair(run_key).public_key).decode()
+
+
 def open_sealed_envelope(run_key: bytes, payload: bytes) -> bytes:
     """Open the X25519 sealed box an `encp` payload carries.
 
@@ -231,6 +242,28 @@ def open_sealed_envelope(run_key: bytes, payload: bytes) -> bytes:
         length=KEY_LENGTH,
     )
     return open_envelope(content_key, envelope)
+
+
+def seal_envelope(recipient_public_key: bytes, plaintext: bytes) -> bytes:
+    """Seal *plaintext* to a run's raw X25519 public key.
+
+    The returned bytes omit the outer ``encp`` prefix: they are the ephemeral
+    public key followed by a nonce-prefixed AES-GCM envelope.
+    """
+    if len(recipient_public_key) != KEY_LENGTH:
+        raise ValueError(f"A run public key is {KEY_LENGTH} bytes, got {len(recipient_public_key)}")
+    ephemeral_scalar = os.urandom(KEY_LENGTH)
+    ephemeral_public_key = _x25519_public_key(ephemeral_scalar)
+    shared = _x25519_exchange(ephemeral_scalar, recipient_public_key)
+    if shared is None:
+        raise ValueError("The run public key is not a valid curve point")
+    content_key = hkdf_sha256(
+        ikm=shared,
+        salt=bytes(32),
+        info=CONTENT_KEY_INFO + ephemeral_public_key + recipient_public_key,
+        length=KEY_LENGTH,
+    )
+    return ephemeral_public_key + encrypt_envelope(content_key, plaintext)
 
 
 def decode_key(encoded: str, *, what: str) -> bytes:

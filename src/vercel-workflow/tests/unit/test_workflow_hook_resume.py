@@ -9,6 +9,7 @@ way ``resume()`` in the runtime does it.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import decimal
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel.workflow import BaseHook
-from vercel.workflow._internal import runtime, serialization as ser, world as w
+from vercel.workflow._internal import encryption, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 
 TOKEN = "tok-abc"
@@ -63,14 +64,31 @@ class _RecordingLocalWorld(LocalWorld):
         return "msg_test"
 
 
+class _EncryptedRecordingLocalWorld(_RecordingLocalWorld):
+    async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
+        return bytes(range(32))
+
+
 async def _run_with_hook(
-    world: _RecordingLocalWorld, *, spec_version: int = w.SPEC_VERSION_CURRENT
+    world: _RecordingLocalWorld,
+    *,
+    spec_version: int = w.SPEC_VERSION_CURRENT,
+    encryption_public_key: str | None = None,
+    workflow_core_version: str | None = None,
 ) -> str:
     result = await world.events_create(
         None,
         w.RunCreatedEvent(
             event_data=w.RunCreatedEventData(
-                deployment_id="dpl_1", workflow_name="test-wf", input=PLAIN_ENCODER.encode([])
+                deployment_id="dpl_1",
+                workflow_name="test-wf",
+                input=PLAIN_ENCODER.encode([]),
+                encryption_public_key=encryption_public_key,
+                execution_context=(
+                    {"workflowCoreVersion": workflow_core_version}
+                    if workflow_core_version is not None
+                    else None
+                ),
             ),
             spec_version=spec_version,
         ),
@@ -133,7 +151,7 @@ async def test_dataclass_hook_round_trips_through_resume(tmp_path, monkeypatch) 
 async def test_resume_compresses_large_payloads_for_current_runs(tmp_path, monkeypatch) -> None:
     world = _RecordingLocalWorld(tmp_path)
     monkeypatch.setattr(w, "the_world", world)
-    run_id = await _run_with_hook(world)
+    run_id = await _run_with_hook(world, workflow_core_version="5.0.0-beta.18")
 
     await Signoff(approved=True, reviewer="ada" * 512).resume(TOKEN)
 
@@ -144,12 +162,70 @@ async def test_resume_compresses_large_payloads_for_current_runs(tmp_path, monke
 async def test_resume_keeps_large_payloads_plain_for_old_runs(tmp_path, monkeypatch) -> None:
     world = _RecordingLocalWorld(tmp_path)
     monkeypatch.setattr(w, "the_world", world)
-    run_id = await _run_with_hook(world, spec_version=w.SPEC_VERSION_SUPPORTS_COMPRESSION - 1)
+    run_id = await _run_with_hook(
+        world,
+        spec_version=w.SPEC_VERSION_SUPPORTS_COMPRESSION - 1,
+        workflow_core_version="5.0.0-beta.18",
+    )
 
     await Signoff(approved=True, reviewer="ada" * 512).resume(TOKEN)
 
     payload = _received_payload((await world.events_list(run_id)).data)
     assert payload.startswith(ser.DEVALUE_V1)
+
+
+async def test_resume_keeps_large_payloads_plain_for_old_deployments(tmp_path, monkeypatch) -> None:
+    world = _RecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    run_id = await _run_with_hook(world, workflow_core_version="5.0.0-beta.17")
+
+    await Signoff(approved=True, reviewer="ada" * 512).resume(TOKEN)
+
+    payload = _received_payload((await world.events_list(run_id)).data)
+    assert payload.startswith(ser.DEVALUE_V1)
+
+
+async def test_resume_seals_to_the_run_public_key(tmp_path, monkeypatch) -> None:
+    key = bytes(range(32))
+    public_key = encryption.derive_run_key_pair(key).public_key
+    world = _RecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    run_id = await _run_with_hook(
+        world, encryption_public_key=base64.b64encode(public_key).decode()
+    )
+
+    await Signoff(approved=True, reviewer="ada").resume(TOKEN)
+
+    payload = _received_payload((await world.events_list(run_id)).data)
+    assert payload.startswith(ser.SEALED)
+    assert ser.hydrate(payload, what="the payload", key=key) == {
+        "approved": True,
+        "reviewer": "ada",
+    }
+
+
+@pytest.mark.parametrize(
+    ("workflow_core_version", "expected_prefix"),
+    [
+        (None, ser.DEVALUE_V1),
+        ("not-semver", ser.DEVALUE_V1),
+        ("4.2.0-beta.63", ser.DEVALUE_V1),
+        ("4.2.0-beta.64", ser.ENCRYPTED),
+        ("v4.2.0-beta.64", ser.ENCRYPTED),
+        (w.WORKFLOW_CORE_COMPAT_VERSION, ser.ENCRYPTED),
+    ],
+)
+async def test_symmetric_resume_fallback_respects_target_capabilities(
+    tmp_path, monkeypatch, workflow_core_version, expected_prefix
+) -> None:
+    world = _EncryptedRecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    run_id = await _run_with_hook(world, workflow_core_version=workflow_core_version)
+
+    await Signoff(approved=True, reviewer="ada").resume(TOKEN)
+
+    payload = _received_payload((await world.events_list(run_id)).data)
+    assert payload.startswith(expected_prefix)
 
 
 async def test_json_mode_is_the_way_back_to_json_shaped_values(tmp_path, monkeypatch) -> None:

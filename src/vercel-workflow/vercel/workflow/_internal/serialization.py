@@ -105,6 +105,12 @@ class PayloadEncoder:
     """Encode workflow payload values and errors."""
 
     compression: bool = False
+    encryption_key: bytes | None = None
+    recipient_public_key: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.encryption_key is not None and self.recipient_public_key is not None:
+            raise ValueError("A payload encoder cannot both encrypt and seal")
 
     def encode(self, value: Any) -> bytes:
         return self._wrap(_encode_devalue(value))
@@ -121,7 +127,12 @@ class PayloadEncoder:
         return self._wrap(encoded)
 
     def _wrap(self, encoded: bytes) -> bytes:
-        return compression.maybe_compress(encoded, enabled=self.compression)
+        encoded = compression.maybe_compress(encoded, enabled=self.compression)
+        if self.recipient_public_key is not None:
+            return SEALED + encryption.seal_envelope(self.recipient_public_key, encoded)
+        if self.encryption_key is not None:
+            return ENCRYPTED + encryption.encrypt_envelope(self.encryption_key, encoded)
+        return encoded
 
 
 def hydrate_error(data: Any, *, what: str, key: bytes | None = None) -> Exception:
@@ -153,6 +164,27 @@ def is_encrypted(data: Any) -> bool:
     if not isinstance(data, bytes | bytearray | memoryview):
         return False
     return bytes(data[:FORMAT_PREFIX_LENGTH]) in ENCRYPTED_FORMATS
+
+
+def payloads_equal(left: Any, right: Any, *, key: bytes | None) -> bool:
+    """Compare serialized payloads without treating fresh encryption nonces as data."""
+    if left == right:
+        return True
+    if key is None or not isinstance(left, bytes) or not isinstance(right, bytes):
+        return False
+
+    def plaintext(data: bytes) -> bytes:
+        prefix, payload = _decode_format(data, what="a payload")
+        if prefix == ENCRYPTED:
+            return encryption.open_envelope(key, payload)
+        if prefix == SEALED:
+            return encryption.open_sealed_envelope(key, payload)
+        return data
+
+    try:
+        return plaintext(left) == plaintext(right)
+    except (encryption.DecryptionError, SerializationError, ValueError):
+        return False
 
 
 def _decode_format(data: bytes, *, what: str) -> tuple[bytes, bytes]:
