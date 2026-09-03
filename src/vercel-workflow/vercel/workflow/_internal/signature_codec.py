@@ -11,7 +11,8 @@ untouched.
 
 SignatureCodec is layered on top of the lower-level serialization done
 by the `serialization` module, which handles anything that has been
-passed through. TypeCodec is the per-annotation unit it is made of.
+passed through. TypeCodec is the per-annotation unit it is made of, and
+is also what a typed stream carries.
 
 ===========  ==========================================================
 outbound     caller -> SignatureCodec.dump -> PayloadEncoder.encode

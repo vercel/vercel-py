@@ -218,6 +218,26 @@ below) can be written, and a reader gets it back. A `bytes` chunk arrives on the
 TypeScript side as a `Uint8Array`, so a consumer there can pipe the stream
 straight into a `Response`.
 
+A stream can carry a type. `get_writable(type=Token)` returns a
+`WorkflowWritable[Token]`, and each write is dumped through pydantic the way a
+typed step argument is:
+
+```python
+class Token(pydantic.BaseModel):
+    text: str
+    index: int
+
+
+@app.step
+async def summarize(*, document: str) -> str:
+    writable = get_writable(type=Token)
+    index = 0
+    async for text in llm.stream(document):
+        await writable.write(Token(text=text, index=index))
+        index += 1
+    ...
+```
+
 Three things are worth knowing:
 
 - **Nothing closes a stream for you.** Not the end of a step, not the end of the
@@ -250,6 +270,15 @@ async for chunk in run.readable():
     print(chunk)
 ```
 
+`run.readable(type=Token)` validates each chunk against the type on the way back, so
+what a step wrote as a model is a model again, and a chunk that does not match
+raises `TypeValidationError`:
+
+```python
+async for token in run.readable(type=Token):
+    print(token.text)
+```
+
 `run.readable_bytes()` is the same thing narrowed to `bytes`, which is what an
 HTTP body wants — hand it to a streaming response as-is.
 
@@ -269,7 +298,8 @@ duplicated or skipped.
 
 `run.stream_info()` gives the last chunk index and whether the stream is closed
 (`tail_index` is `-1` before anything is written), `run.list_streams()` lists
-every stream the run has, and `read_stream(run_id, name)` reads one by name.
+every stream the run has, and `read_stream(run_id, name)` reads one by name,
+taking a type the same way `run.readable()` does.
 
 The same stream is readable from the TypeScript SDK (`run.readable`), the
 dashboard, and `workflow inspect stream <id> --run=<run-id>`.

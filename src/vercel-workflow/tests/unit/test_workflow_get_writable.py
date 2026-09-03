@@ -14,10 +14,12 @@ from datetime import datetime
 from typing import Any
 
 import anyio
+import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
+from vercel.workflow import TypeValidationError
 from vercel.workflow._internal import core, runtime, serialization as ser, streams, world as w
 
 from ..world_stubs import NoStreams
@@ -27,6 +29,11 @@ RUN_ID = "wrun_test"
 STEP_ID = "step_test"
 WORKFLOW_NAME = "workflow//tests.wf"
 STREAM = "strm_test_user"
+
+
+class Token(pydantic.BaseModel):
+    text: str
+    index: int
 
 
 class FakeWorld(NoStreams, w.World):
@@ -446,3 +453,217 @@ class TestHandOff:
             )
             handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
             assert PLAIN_ENCODER.encode(writer) == PLAIN_ENCODER.encode(handle)
+
+
+class TestTyped:
+    """A stream that carries a type, dumped on the way out like a step argument.
+
+    The type is a property of the writer, not of the stream on the wire: the
+    same `WritableStream` tag goes out, a reader that asks for the type gets
+    models, a reader that does not gets the dicts the format already carried.
+    """
+
+    async def test_a_typed_write_dumps_the_value_like_an_argument(self, registry) -> None:
+        @registry.step
+        async def emit() -> None:
+            writable: streams.WorkflowWritable[Token] = runtime.get_writable(type=Token)
+            await writable.write(Token(text="hi", index=0))
+
+        fake = FakeWorld()
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        # A plain dict on the wire -- which is what a TypeScript reader, or an
+        # untyped Python one, would see -- rather than a serialized instance.
+        assert _chunk_values(fake) == [{"text": "hi", "index": 0}]
+
+    async def test_typed_and_untyped_writers_share_one_sink(self, registry) -> None:
+        """The ordering guarantee has to hold across types.
+
+        A typed writer is another object over the same buffer, so a step mixing
+        `get_writable()` and `get_writable(type=Token)` still writes in call order,
+        and the typed one is cached so a loop does not rebuild its adapter.
+        """
+        seen: list[Any] = []
+
+        @registry.step
+        async def emit() -> None:
+            plain = runtime.get_writable()
+            typed = runtime.get_writable(type=Token)
+            seen.extend([plain, typed, runtime.get_writable(type=Token)])
+            await plain.write("first")
+            await typed.write(Token(text="second", index=1))
+            await plain.write("third")
+
+        fake = FakeWorld()
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        plain, typed, again = seen
+        assert isinstance(typed, streams.WorkflowStreamWriter)
+        assert typed is not plain
+        assert typed is again
+        assert typed._sink is plain._sink
+        assert typed.type is Token
+        assert plain.type is None
+        assert _chunk_values(fake) == ["first", {"text": "second", "index": 1}, "third"]
+
+    async def test_with_type_gives_a_typed_view_over_the_same_stream(self, registry) -> None:
+        seen: list[Any] = []
+
+        @registry.step
+        async def emit() -> None:
+            plain = runtime.get_writable()
+            typed: streams.WorkflowWritable[Token] = plain.with_type(Token)
+            seen.extend([plain, typed])
+            await plain.write("first")
+            await typed.write(Token(text="second", index=1))
+
+        fake = FakeWorld()
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        plain, typed = seen
+        assert isinstance(typed, streams.WorkflowStreamWriter)
+        assert typed._sink is plain._sink
+        assert typed.type is Token
+        assert _chunk_values(fake) == ["first", {"text": "second", "index": 1}]
+
+    async def test_closing_through_a_typed_writer_closes_the_stream(self, registry) -> None:
+        @registry.step
+        async def finish() -> None:
+            await runtime.get_writable().write("last")
+            await runtime.get_writable(type=Token).close()
+
+        fake = FakeWorld()
+        w.set_world(fake)
+        await _invoke(registry, finish.name)
+
+        assert _kinds(fake) == ["chunk", "close", "step_completed"]
+
+    async def test_a_type_pydantic_cannot_schematize_passes_through(self, registry) -> None:
+        class Opaque:
+            pass
+
+        @registry.step
+        async def emit() -> None:
+            writable: Any = runtime.get_writable(type=Opaque)
+            await writable.write("untouched")
+
+        fake = FakeWorld()
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        assert _chunk_values(fake) == ["untouched"]
+
+    async def test_a_workflow_body_gets_a_handle_for_a_typed_stream_too(self, registry) -> None:
+        ctx = runtime.WorkflowOrchestratorContext(
+            [], run_id=RUN_ID, seed=RUN_ID, started_at=0, registry=registry
+        )
+        token = ctx._ctx.set(ctx)
+        try:
+            handle = runtime.get_writable(type=Token)
+        finally:
+            ctx._ctx.reset(token)
+
+        assert isinstance(handle, streams.WorkflowStreamHandle)
+        # Same stream as the untyped handle: the type is not part of the name.
+        assert handle == ctx.stream_handle(None)
+
+    async def test_a_handle_arrives_typed_when_the_step_parameter_says_so(self, registry) -> None:
+        """The type crosses by annotation, since it is not on the wire.
+
+        `WorkflowWritable[Token]` on the step's parameter is what turns the
+        revived writer into a typed one, so the workflow can hand out a stream
+        and the step writes models to it without asking for the type again.
+        """
+        seen: list[Any] = []
+
+        @registry.step
+        async def emit(*, out: streams.WorkflowWritable[Token]) -> None:
+            seen.append(out)
+            await out.write(Token(text="typed", index=0))
+
+        fake = FakeWorld(
+            step_input=PLAIN_ENCODER.encode(
+                ser.step_arguments((), {"out": streams.WorkflowStreamHandle(RUN_ID, STREAM)})
+            )
+        )
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        (out,) = seen
+        assert isinstance(out, streams.WorkflowStreamWriter)
+        assert out.type is Token
+        assert _chunk_values(fake) == [{"text": "typed", "index": 0}]
+        assert _kinds(fake)[-1] == "step_completed"
+
+    async def test_the_concrete_writer_class_types_a_handle_too(self, registry) -> None:
+        """`WorkflowStreamWriter[Token]` is what a step actually holds, so it
+        has to work as an annotation as well as the interface does.
+
+        The adapter builder swallows every schema-generation failure, so a hook
+        that broke on this shape would not raise -- the writer would quietly
+        arrive untyped and unchecked.
+        """
+        seen: list[Any] = []
+
+        @registry.step
+        async def emit(*, out: streams.WorkflowStreamWriter[Token]) -> None:
+            seen.append(out)
+
+        fake = FakeWorld(
+            step_input=PLAIN_ENCODER.encode(
+                ser.step_arguments((), {"out": streams.WorkflowStreamHandle(RUN_ID, STREAM)})
+            )
+        )
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        (out,) = seen
+        assert isinstance(out, streams.WorkflowStreamWriter)
+        assert out.type is Token
+        with pytest.raises(TypeValidationError, match="argument 'out'"):
+            emit.codec.validate_arguments([], {"out": "not a stream"})
+
+    async def test_an_unparametrized_annotation_leaves_the_writer_untyped(self, registry) -> None:
+        seen: list[Any] = []
+
+        @registry.step
+        async def emit(*, out: streams.WorkflowWritable) -> None:
+            seen.append(out)
+
+        fake = FakeWorld(
+            step_input=PLAIN_ENCODER.encode(
+                ser.step_arguments((), {"out": streams.WorkflowStreamHandle(RUN_ID, STREAM)})
+            )
+        )
+        w.set_world(fake)
+        await _invoke(registry, emit.name)
+
+        (out,) = seen
+        assert isinstance(out, streams.WorkflowStreamWriter)
+        assert out.type is None
+
+    async def test_the_annotation_reaches_through_containers_and_unions(self, registry) -> None:
+        @registry.step
+        async def one(out: streams.WorkflowWritable[Token] | None) -> None: ...
+
+        @registry.step
+        async def many(outs: list[streams.WorkflowWritable[Token]]) -> None: ...
+
+        handle = streams.WorkflowStreamHandle(RUN_ID, STREAM)
+        # Dumping leaves the handle for the stream reducer, as before.
+        assert one.codec.dump("out", handle) is handle
+        assert many.codec.dump("outs", [handle])[0] is handle
+        # Validating a handle outside a step gives the handle back: there is
+        # no writer to type, and a handle carries no type.
+        _, kwargs = one.codec.validate_arguments([], {"out": handle})
+        assert kwargs["out"] is handle
+
+    async def test_something_that_is_not_a_stream_is_rejected(self, registry) -> None:
+        @registry.step
+        async def emit(out: streams.WorkflowWritable[Token]) -> None: ...
+
+        with pytest.raises(TypeValidationError, match="argument 'out'"):
+            emit.codec.validate_arguments([], {"out": "not a stream"})
