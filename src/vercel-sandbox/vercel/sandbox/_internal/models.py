@@ -719,13 +719,13 @@ class SnapshotRetention(_InputModel):
     """Configure automatic snapshot retention.
 
     Attributes:
-        count: Maximum number of retained snapshots, between 1 and 100.
+        count: Maximum number of retained snapshots, between 1 and 10.
         expiration: Lifetime applied to retained snapshots.
         delete_evicted: Whether snapshots removed from the retention window are
             deleted from the project.
     """
 
-    count: int
+    count: int = Field(ge=1, le=10)
     expiration: SnapshotExpirationInput = None
     delete_evicted: bool = Field(default=True, serialization_alias="deleteEvicted")
 
