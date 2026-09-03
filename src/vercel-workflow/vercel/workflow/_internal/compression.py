@@ -1,8 +1,9 @@
-"""Readers for workflow payload compression envelopes."""
+"""Readers and writers for workflow payload compression envelopes."""
 
 from __future__ import annotations
 
 import gzip
+import os
 import sys
 import zlib
 
@@ -11,9 +12,44 @@ if sys.version_info >= (3, 14):
 else:
     import zstandard as _zstd
 
+COMPRESSION_MIN_BYTES = 1024
+COMPRESSION_MIN_SAVINGS_RATIO = 0.05
+ZSTD_LEVEL = 3
+
+GZIP = b"gzip"
+ZSTD = b"zstd"
+
 
 class DecompressionError(Exception):
     """A compressed payload is invalid."""
+
+
+def maybe_compress(data: bytes, *, enabled: bool) -> bytes:
+    """Compress *data* when the target run supports it and doing so pays off."""
+    if (
+        not enabled
+        or len(data) < COMPRESSION_MIN_BYTES
+        or os.getenv("WORKFLOW_DISABLE_COMPRESSION") == "1"
+    ):
+        return data
+
+    if os.getenv("WORKFLOW_COMPRESSION_CODEC") == "gzip":
+        prefix = GZIP
+        compressed = gzip.compress(data, compresslevel=6, mtime=0)
+    else:
+        prefix = ZSTD
+        compressed = compress_zstd(data)
+
+    wrapped = prefix + compressed
+    if len(wrapped) >= len(data) * (1 - COMPRESSION_MIN_SAVINGS_RATIO):
+        return data
+    return wrapped
+
+
+def compress_zstd(data: bytes) -> bytes:
+    if sys.version_info >= (3, 14):
+        return _zstd.compress(data, level=ZSTD_LEVEL)
+    return _zstd.ZstdCompressor(level=ZSTD_LEVEL).compress(data)
 
 
 def decompress_gzip(data: bytes) -> bytes:

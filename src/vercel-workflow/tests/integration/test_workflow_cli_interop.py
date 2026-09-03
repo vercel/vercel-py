@@ -13,9 +13,9 @@ so the run goes through the real queue and the real handlers -- the same path
 ``vercel dev`` takes -- and every file the CLI reads was written by the
 implementation under test.
 
-Metadata *and* payloads are asserted: Python writes a single ``devl``-prefixed
-devalue payload, so the CLI's hydration pipeline reads the values Python
-recorded rather than failing soft to ``{}``.
+Metadata *and* payloads are asserted: Python writes format-prefixed devalue
+payloads, compressed when worthwhile, so the CLI's hydration pipeline reads
+the values Python recorded rather than failing soft to ``{}``.
 
 The suite needs Node. Following the precedent in ``tests/integration/
 test_devalue.py`` it is optional locally and mandatory on CI, so a developer
@@ -344,7 +344,7 @@ async def test_cli_lists_the_run_python_wrote(workflow_cli, py_run) -> None:
     (run,) = page["data"]
     assert run["status"] == "completed"
     assert run["workflowName"] == checkout.workflow_id
-    assert run["specVersion"] == 2
+    assert run["specVersion"] == w.SPEC_VERSION_CURRENT
     # Materialized by py's own `attr_set` handling, and read back through the
     # TS schema: both writers (the body and a step), and the key the body
     # removed is gone rather than present-and-null.
@@ -366,7 +366,7 @@ async def test_cli_lists_the_steps_python_wrote(workflow_cli, py_run) -> None:
         assert step["runId"] == run_id
         assert step["status"] == "completed"
         assert step["attempt"] == 1
-        assert step["specVersion"] == 2
+        assert step["specVersion"] == w.SPEC_VERSION_CURRENT
 
 
 async def test_cli_lists_the_event_log_python_wrote(workflow_cli, py_run) -> None:

@@ -1,15 +1,13 @@
-"""Tests for the step path's start-first control flow and too-early/terminal paths.
+"""Tests for the step path's run context and too-early/terminal paths.
 
 Steps arrive on the workflow topic as a ``WorkflowInvokePayload`` carrying a
 ``stepId``, and ``workflow_handler`` dispatches those to its step path instead
-of replaying. That path issues ``step_started`` first and lets the world surface
-state as typed errors — ``TooEarlyError`` (retryAfter not reached, HTTP 425) and
-``EntityConflictError`` (terminal step, HTTP 409) — instead of pre-reading the
+of replaying. The handler reads the parent run for its format policy, then
+issues ``step_started`` and lets the world surface state as typed errors —
+``TooEarlyError`` (retryAfter not reached, HTTP 425) and
+``EntityConflictError`` (terminal step, HTTP 409) — without pre-reading the
 step. A too-early step defers via a queue timeout; a terminal step re-enqueues
 the parent workflow and acks.
-
-``FakeWorld.runs_get`` raises, which also pins down the dispatch order: the step
-path must be taken before the run is ever read.
 """
 
 from __future__ import annotations
@@ -40,7 +38,12 @@ STEP_ID = "step_test"
 WORKFLOW_NAME = "workflow//tests.wf"
 
 
-def _running_step(step_name: str, *, attempt: int, input: bytes | None = None) -> w.WorkflowStep:
+def _running_step(
+    step_name: str,
+    *,
+    attempt: int,
+    input: bytes | None = None,
+) -> w.WorkflowStep:
     return w.NonFinalWorkflowStep(
         run_id=RUN_ID,
         step_id=STEP_ID,
@@ -51,6 +54,18 @@ def _running_step(step_name: str, *, attempt: int, input: bytes | None = None) -
         updated_at=NOW,
         started_at=NOW,
         input=input if input is not None else PLAIN_ENCODER.encode(ser.step_arguments((), {})),
+    )
+
+
+def _running_run(*, spec_version: int | None = w.SPEC_VERSION_CURRENT) -> w.WorkflowRun:
+    return w.NonFinalWorkflowRun(
+        run_id=RUN_ID,
+        status="running",
+        deployment_id="dpl_test",
+        workflow_name=WORKFLOW_NAME,
+        spec_version=spec_version,
+        created_at=NOW,
+        updated_at=NOW,
     )
 
 
@@ -69,10 +84,12 @@ class FakeWorld(NoStreams, w.World):
         step: w.WorkflowStep | None = None,
         started_step: w.WorkflowStep | None = None,
         start_error: Exception | None = None,
+        run_spec_version: int | None = w.SPEC_VERSION_CURRENT,
     ) -> None:
         self.step = step
         self.started_step = started_step
         self.start_error = start_error
+        self.run = _running_run(spec_version=run_spec_version)
         self.queued: list[tuple[str, Any]] = []
         self.events: list[Any] = []
 
@@ -89,7 +106,8 @@ class FakeWorld(NoStreams, w.World):
         raise NotImplementedError
 
     async def runs_get(self, run_id: str) -> w.WorkflowRun:
-        raise NotImplementedError
+        assert run_id == RUN_ID
+        return self.run
 
     async def steps_get(self, run_id: str, step_id: str) -> w.WorkflowStep:
         assert self.step is not None, "test did not set a persisted step"
@@ -256,6 +274,33 @@ async def test_happy_path_completes_and_reenqueues(registry: core.Workflows) -> 
     assert result is None
     assert _event_types(fake) == ["step_completed"]
     assert len(_workflow_enqueues(fake)) == 1
+
+
+@pytest.mark.parametrize(
+    ("spec_version", "prefix"),
+    [
+        (w.SPEC_VERSION_SUPPORTS_COMPRESSION - 1, ser.DEVALUE_V1),
+        (w.SPEC_VERSION_SUPPORTS_COMPRESSION, ser.ZSTD),
+    ],
+)
+async def test_step_output_compression_follows_the_run_version(
+    registry: core.Workflows, spec_version: int, prefix: bytes
+) -> None:
+    @registry.step
+    async def my_step() -> str:
+        return "charged " * 256
+
+    fake = FakeWorld(
+        started_step=_running_step(my_step.name, attempt=1),
+        run_spec_version=spec_version,
+    )
+    w.set_world(fake)
+
+    await _invoke(registry, my_step.name)
+
+    (completed,) = fake.events
+    assert isinstance(completed, w.StepCompletedEvent)
+    assert completed.event_data.result.startswith(prefix)
 
 
 async def test_unregistered_step_fails_without_retrying(registry: core.Workflows) -> None:

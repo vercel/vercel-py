@@ -2,15 +2,16 @@
 
 The wire format is the one `@workflow/core` defines in
 `src/serialization-format.ts`: a 4-byte ASCII format tag followed by the
-payload. The only format this SDK writes is ``devl`` — UTF-8
-`devalue.stringify` output — so a payload written here parses with
-`devalue.parse` in JavaScript and vice versa.
+payload. Values begin as ``devl`` — UTF-8 `devalue.stringify` output — and
+large values may then be wrapped in ``gzip`` or ``zstd``. Both forms parse in
+JavaScript and Python.
 
 ``encr`` — an encrypted payload — and ``encp`` — one sealed to the run's public
 key — are read too.
 
-`gzip`/`zstd`, which wrap another prefixed payload, are decompressed before the
-inner format is decoded.
+`gzip`/`zstd` wrap another prefixed payload. Writes use them only for runs that
+advertise spec version 5 or newer; reads decompress them before decoding the
+inner format.
 """
 
 from __future__ import annotations
@@ -103,8 +104,10 @@ def _encode_devalue(value: Any) -> bytes:
 class PayloadEncoder:
     """Encode workflow payload values and errors."""
 
+    compression: bool = False
+
     def encode(self, value: Any) -> bytes:
-        return _encode_devalue(value)
+        return self._wrap(_encode_devalue(value))
 
     def encode_error(self, error: Exception) -> bytes:
         """Encode an error, falling back to a serializable summary."""
@@ -115,7 +118,10 @@ class PayloadEncoder:
             encoded = _encode_devalue(
                 errors.RemoteError(f"{name} could not be serialized: {encode_error}", name=name)
             )
-        return encoded
+        return self._wrap(encoded)
+
+    def _wrap(self, encoded: bytes) -> bytes:
+        return compression.maybe_compress(encoded, enabled=self.compression)
 
 
 def hydrate_error(data: Any, *, what: str, key: bytes | None = None) -> Exception:

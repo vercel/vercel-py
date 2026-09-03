@@ -63,17 +63,29 @@ class _RecordingLocalWorld(LocalWorld):
         return "msg_test"
 
 
-async def _run_with_hook(world: _RecordingLocalWorld) -> str:
+async def _run_with_hook(
+    world: _RecordingLocalWorld, *, spec_version: int = w.SPEC_VERSION_CURRENT
+) -> str:
     result = await world.events_create(
         None,
-        w.RunCreatedEventData(
-            deployment_id="dpl_1", workflow_name="test-wf", input=PLAIN_ENCODER.encode([])
-        ).into_event(),
+        w.RunCreatedEvent(
+            event_data=w.RunCreatedEventData(
+                deployment_id="dpl_1", workflow_name="test-wf", input=PLAIN_ENCODER.encode([])
+            ),
+            spec_version=spec_version,
+        ),
     )
     assert result.run is not None
     run_id = result.run.run_id
-    await world.events_create(run_id, w.RunStartedEvent())
-    await world.events_create(run_id, w.HookCreatedEventData(token=TOKEN).into_event("hook_0"))
+    await world.events_create(run_id, w.RunStartedEvent(spec_version=spec_version))
+    await world.events_create(
+        run_id,
+        w.HookCreatedEvent(
+            correlation_id="hook_0",
+            event_data=w.HookCreatedEventData(token=TOKEN),
+            spec_version=spec_version,
+        ),
+    )
     return run_id
 
 
@@ -116,6 +128,28 @@ async def test_dataclass_hook_round_trips_through_resume(tmp_path, monkeypatch) 
     hook.futures.append(future := _future())
     hook.set_result(ser.hydrate(payload, what="the payload"))
     assert future.result() == Signoff(approved=False, reviewer="grace")
+
+
+async def test_resume_compresses_large_payloads_for_current_runs(tmp_path, monkeypatch) -> None:
+    world = _RecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    run_id = await _run_with_hook(world)
+
+    await Signoff(approved=True, reviewer="ada" * 512).resume(TOKEN)
+
+    payload = _received_payload((await world.events_list(run_id)).data)
+    assert payload.startswith(ser.ZSTD)
+
+
+async def test_resume_keeps_large_payloads_plain_for_old_runs(tmp_path, monkeypatch) -> None:
+    world = _RecordingLocalWorld(tmp_path)
+    monkeypatch.setattr(w, "the_world", world)
+    run_id = await _run_with_hook(world, spec_version=w.SPEC_VERSION_SUPPORTS_COMPRESSION - 1)
+
+    await Signoff(approved=True, reviewer="ada" * 512).resume(TOKEN)
+
+    payload = _received_payload((await world.events_list(run_id)).data)
+    assert payload.startswith(ser.DEVALUE_V1)
 
 
 async def test_json_mode_is_the_way_back_to_json_shaped_values(tmp_path, monkeypatch) -> None:

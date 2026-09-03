@@ -8,6 +8,7 @@ import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     Generic,
@@ -29,6 +30,9 @@ from vercel._internal.core.polyfills import UTC, Self
 from vercel.queue import SanitizedName
 
 from . import ulid
+
+if TYPE_CHECKING:
+    from .serialization import PayloadEncoder
 
 T = TypeVar("T")
 QueuePrefix: TypeAlias = str
@@ -108,7 +112,8 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 #
 # `CURRENT` is what we stamp on rows we create; `MAX_SUPPORTED` is the highest
 # version we accept when reading, mirroring the same split in TS.
-SPEC_VERSION_CURRENT: Literal[2] = 2
+SPEC_VERSION_SUPPORTS_COMPRESSION = 5
+SPEC_VERSION_CURRENT: Literal[5] = 5
 SPEC_VERSION_MAX_SUPPORTED = 7
 
 # Which version of "lazy hook resume" this SDK's queue consumer implements.
@@ -304,6 +309,13 @@ class BaseWorkflowRun(BaseModel):
     completed_at: datetime | None = pydantic.Field(default=None, alias="completedAt")
     created_at: datetime = pydantic.Field(alias="createdAt")
     updated_at: datetime = pydantic.Field(alias="updatedAt")
+
+    def payload_encoder(self) -> "PayloadEncoder":
+        from .serialization import PayloadEncoder
+
+        return PayloadEncoder(
+            compression=(self.spec_version or 0) >= SPEC_VERSION_SUPPORTS_COMPRESSION
+        )
 
 
 class NonFinalWorkflowRun(BaseWorkflowRun):
