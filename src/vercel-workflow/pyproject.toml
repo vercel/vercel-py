@@ -16,7 +16,7 @@ path = "hatch_build.py"
 
 [tool.vercel.release.dependencies]
 dependencies = [
-    "vercel-internal-core>=0.1.0,<0.2.0",
+    "vercel-internal-core>=0.1.0,<0.3.0",
     "vercel-oidc>=0.8.0",
     "vercel-queue>=0.8.0",
     "anyio>=4.0.0,<5",

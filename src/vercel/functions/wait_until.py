@@ -3,8 +3,6 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING
 
-from vercel.cache.context import get_context
-
 if TYPE_CHECKING:
     from collections.abc import Awaitable
 
@@ -28,7 +26,11 @@ def wait_until(awaitable: Awaitable[object]) -> None:
         )
         raise TypeError(msg)
 
-    callback = get_context().wait_until
+    # In the workspace, internal core joins vercel.functions.__path__ only
+    # after wait_until.py finishes importing, so resolve context at call time.
+    from .context import get_wait_until
+
+    callback = get_wait_until()
     if callback is not None:
         callback(awaitable)
     elif inspect.iscoroutine(awaitable):

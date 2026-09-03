@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from vercel.cache.context import set_context
 from vercel.functions import wait_until
+from vercel.functions.context import set_wait_until
 
 
 def sync_work() -> str:
@@ -15,9 +15,9 @@ def sync_work() -> str:
 
 @pytest.fixture(autouse=True)
 def clear_wait_until_context() -> Any:
-    set_context(wait_until=None)
+    set_wait_until(None)
     yield
-    set_context(wait_until=None)
+    set_wait_until(None)
 
 
 def test_wait_until_registers_awaitable_with_context() -> None:
@@ -27,7 +27,7 @@ def test_wait_until_registers_awaitable_with_context() -> None:
         return
 
     coroutine = work()
-    set_context(wait_until=registered.append)
+    set_wait_until(registered.append)
     wait_until(coroutine)
 
     assert registered == [coroutine]
@@ -56,7 +56,7 @@ def test_wait_until_rejects_uncalled_functions_with_a_hint(value: object) -> Non
 def test_wait_until_runs_synchronous_work_through_to_thread() -> None:
     registered: list[Any] = []
 
-    set_context(wait_until=registered.append)
+    set_wait_until(registered.append)
     wait_until(asyncio.to_thread(sync_work))
 
     assert len(registered) == 1

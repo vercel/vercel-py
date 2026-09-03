@@ -29,6 +29,7 @@ force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
 include = [
     "/vercel/api/**",
     "/vercel/errors/**",
+    "/vercel/functions/context/**",
     "/vercel/_internal/core/**",
     "/README.md",
     "/pyproject.toml",
@@ -44,6 +45,7 @@ dev-mode-dirs = ["."]
 only-include = [
     "/vercel/api",
     "/vercel/errors",
+    "/vercel/functions/context",
     "/vercel/_internal/core",
 ]
 exclude = [
@@ -63,7 +65,10 @@ verbosity = -1
 [tool.mypy]
 cache_dir = "../../.mypy_cache/vercel-internal-core"
 explicit_package_bases = true
-packages = ["vercel._internal.core"]
+packages = [
+    "vercel._internal.core",
+    "vercel.functions.context",
+]
 
 [tool.poe.tasks.typecheck]
 cmd = "$MYPY"
