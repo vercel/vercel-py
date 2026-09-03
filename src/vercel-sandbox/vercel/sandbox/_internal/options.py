@@ -28,6 +28,13 @@ class SyncSandboxCredentialsFactory(Protocol):
 
 
 def _resolve_default_sandbox_credentials() -> SandboxCredentials:
+    import os
+    if os.environ.get("VERCEL_SANDBOX_API_BASE_URL"):
+        return SandboxCredentials(
+            token=os.environ.get("VERCEL_OIDC_TOKEN", "local_token"),
+            team_id=os.environ.get("VERCEL_TEAM_ID", "local_team"),
+            project_id=os.environ.get("VERCEL_PROJECT_ID", "local_project"),
+        )
     try:
         from vercel.oidc.credentials import get_credentials
 
@@ -43,6 +50,13 @@ def _resolve_default_sandbox_credentials() -> SandboxCredentials:
 
 
 async def _default_sandbox_credentials_factory() -> SandboxCredentials:
+    import os
+    if os.environ.get("VERCEL_SANDBOX_API_BASE_URL"):
+        return SandboxCredentials(
+            token=os.environ.get("VERCEL_OIDC_TOKEN", "local_token"),
+            team_id=os.environ.get("VERCEL_TEAM_ID", "local_team"),
+            project_id=os.environ.get("VERCEL_PROJECT_ID", "local_project"),
+        )
     return _resolve_default_sandbox_credentials()
 
 
@@ -54,6 +68,11 @@ class _SandboxServiceOptionsKey(ServiceOptions):
     @classmethod
     def service_options_key(cls) -> type[ServiceOptions]:
         return _SandboxServiceOptionsKey
+
+
+def _default_sandbox_base_url() -> str:
+    import os
+    return os.environ.get("VERCEL_SANDBOX_API_BASE_URL") or DEFAULT_SANDBOX_API_BASE_URL
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -81,7 +100,7 @@ class SandboxServiceOptions(_SandboxServiceOptionsKey):
         object.__setattr__(
             self,
             "base_url",
-            base_url or DEFAULT_SANDBOX_API_BASE_URL,
+            base_url or _default_sandbox_base_url(),
         )
         object.__setattr__(
             self,
@@ -118,7 +137,7 @@ class SyncSandboxServiceOptions(_SandboxServiceOptionsKey):
         object.__setattr__(
             self,
             "base_url",
-            base_url or DEFAULT_SANDBOX_API_BASE_URL,
+            base_url or _default_sandbox_base_url(),
         )
         object.__setattr__(
             self,

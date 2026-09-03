@@ -128,3 +128,4 @@ venv.bak/
 **/*.env
 
 .claude
+/explore-local-sandbox/assets/
