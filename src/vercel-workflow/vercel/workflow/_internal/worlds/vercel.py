@@ -15,6 +15,7 @@ import pydantic
 
 import vercel.queue as vqs
 from vercel._internal.core.polyfills import UTC
+from vercel.headers import REQUEST_ID_HEADER_NAME, get_headers
 from vercel.oidc import VercelOidcTokenError
 from vercel.oidc.aio import get_vercel_oidc_token
 
@@ -28,6 +29,16 @@ T = TypeVar("T", bound=w.BaseModel)
 # A `TypeAdapter` can validate anything, not just a model -- the stream list
 # endpoint answers a bare array of names.
 U = TypeVar("U")
+
+
+def _vercel_request_id() -> str | None:
+    headers = get_headers()
+    if headers is None:
+        return None
+    request_id = headers.get(REQUEST_ID_HEADER_NAME)
+    if request_id is None:
+        return None
+    return request_id.strip() or None
 
 
 def _cbor_tag_hook(tag: cbor2.CBORTag, shareable: bool = False) -> Any:
@@ -661,6 +672,8 @@ class VercelWorld(w.World):
         run_id_path = "null" if run_id is None else run_id
         remote_ref_behavior = "resolve" if data.event_type in _EVENTS_NEEDING_RESOLVE else "lazy"
         body = data.model_dump() | {"remoteRefBehavior": remote_ref_behavior}
+        if (request_id := _vercel_request_id()) is not None:
+            body["vercelId"] = request_id
         if isinstance(data, w.HookReceivedEvent) and data._queue_input is not None:
             resume = data._queue_input
             body["resumeId"] = resume.resume_id
