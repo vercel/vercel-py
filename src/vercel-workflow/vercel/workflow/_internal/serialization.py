@@ -9,9 +9,8 @@ payload. The only format this SDK writes is ``devl`` — UTF-8
 ``encr`` — an encrypted payload — and ``encp`` — one sealed to the run's public
 key — are read too.
 
-`gzip`/`zstd`, which wrap another prefixed payload, are recognized so that an
-envelope written by the TypeScript SDK is reported as unsupported by name
-instead of as corrupt data.
+`gzip`/`zstd`, which wrap another prefixed payload, are decompressed before the
+inner format is decoded.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from typing import Any
 
 from vercel.workflow._internal import devalue
 
-from . import encryption, error_serde, errors, serde
+from . import compression, encryption, error_serde, errors, serde
 
 FORMAT_PREFIX_LENGTH = 4
 
@@ -36,8 +35,6 @@ SEALED = b"encp"
 
 GZIP = b"gzip"
 ZSTD = b"zstd"
-
-KNOWN_FORMATS = (DEVALUE_V1, ENCRYPTED, SEALED, GZIP, ZSTD)
 
 ENCRYPTED_FORMATS = (ENCRYPTED, SEALED)
 """The formats that need the run's key material. Both derive from the same 32 bytes."""
@@ -144,6 +141,12 @@ def is_encrypted(data: Any) -> bool:
     return bytes(data[:FORMAT_PREFIX_LENGTH]) in ENCRYPTED_FORMATS
 
 
+def _decode_format(data: bytes, *, what: str) -> tuple[bytes, bytes]:
+    if len(data) < FORMAT_PREFIX_LENGTH:
+        raise SerializationError(f"{what} is too short to carry a format prefix: {len(data)} bytes")
+    return data[:FORMAT_PREFIX_LENGTH], data[FORMAT_PREFIX_LENGTH:]
+
+
 def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
     """Decode a format-prefixed payload written by either SDK.
 
@@ -162,15 +165,7 @@ def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
     if not isinstance(data, bytes | bytearray | memoryview):
         raise SerializationError(f"{what} is not serialized data: {type(data).__name__}")
     data = bytes(data)
-    if len(data) < FORMAT_PREFIX_LENGTH:
-        raise SerializationError(f"{what} is too short to carry a format prefix: {len(data)} bytes")
-
-    prefix, payload = data[:FORMAT_PREFIX_LENGTH], data[FORMAT_PREFIX_LENGTH:]
-    if prefix == DEVALUE_V1:
-        try:
-            return devalue.parse(payload.decode(), REVIVERS)
-        except (devalue.DevalueError, ValueError, TypeError) as error:
-            raise SerializationError(f"Cannot deserialize {what}: {error}") from error
+    prefix, payload = _decode_format(data, what=what)
     if prefix in ENCRYPTED_FORMATS:
         if key is None:
             raise SerializationError(
@@ -186,12 +181,22 @@ def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
             )
         except (encryption.DecryptionError, ValueError) as error:
             raise SerializationError(f"Cannot decrypt {what}: {error}") from error
-        # The plaintext carries its own prefix, normally `devl`.
-        return hydrate(plaintext, what=what, key=key)
-    if prefix in KNOWN_FORMATS:
-        raise SerializationError(
-            f"{what} uses the {prefix.decode()!r} format, which this SDK cannot read"
-        )
+        prefix, payload = _decode_format(plaintext, what=what)
+    if prefix in (GZIP, ZSTD):
+        try:
+            decompressed = (
+                compression.decompress_gzip(payload)
+                if prefix == GZIP
+                else compression.decompress_zstd(payload)
+            )
+        except compression.DecompressionError as error:
+            raise SerializationError(f"Cannot decompress {what}: {error}") from error
+        prefix, payload = _decode_format(decompressed, what=what)
+    if prefix == DEVALUE_V1:
+        try:
+            return devalue.parse(payload.decode(), REVIVERS)
+        except (devalue.DevalueError, ValueError, TypeError) as error:
+            raise SerializationError(f"Cannot deserialize {what}: {error}") from error
     raise SerializationError(f"{what} has an unknown serialization format: {prefix!r}")
 
 
