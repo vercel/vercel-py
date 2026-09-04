@@ -368,6 +368,7 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
         "setprofile",
         "setprofile_all_threads",
     ),
+    "zstandard": _blocklist("zstandard", "open"),
 }
 
 _BLOCKED: set[str] = {
@@ -460,6 +461,12 @@ _PASSTHROUGHS: set[str] = {
     "sniffio",
     "typing_extensions",
     "annotated_types",
+    # Supporting zstandard here is a little ad-hoc, but it is a
+    # dependency of vercel-workflow itself, and httpx has an optional
+    # dependency on it and will try to import it. So importing httpx
+    # would fail unless we allow zstandard. (Actually *using* httpx
+    # will still actually fail, of course.)
+    "zstandard",
 }
 
 
@@ -622,15 +629,17 @@ class _SandboxFinder(MetaPathFinder):
             )
         if fullname in self._restrictions:
             policy = self._restrictions[fullname]
-            # If the module is also in the passthrough set and already
-            # loaded in the host, wrap the existing module with a proxy
-            # instead of re-importing (avoids issues with packages that
-            # have complex init like asyncio).
-            if fullname in self._host and self._is_passthrough(fullname):
-                proxy = _ProxyModule(self._host[fullname], policy)
+            # If the module is also in the passthrough set, wrap the host module
+            # with a proxy instead of re-importing (avoids issues with packages that
+            # have complex init like asyncio or platform checks).
+            if self._is_passthrough(fullname):
+                host_mod = self._host.get(fullname)
+                if host_mod is None:
+                    host_mod = _host_import(fullname)
+                proxy = _ProxyModule(host_mod, policy)
                 policy.post_exec(
                     proxy=proxy,
-                    module=self._host[fullname],
+                    module=host_mod,
                 )
                 return spec_from_loader(fullname, _PreloadedLoader(proxy), origin="sandbox")
             real_spec = self._find_real_spec(fullname, path, target)
