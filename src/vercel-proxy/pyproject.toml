@@ -54,4 +54,4 @@ packages = ["vercel.proxy"]
 cmd = "$MYPY"
 
 [tool.poe.tasks.test]
-cmd = "python -c \"pass\""
+cmd = "$PYTEST"
