@@ -40,10 +40,6 @@ def debug_enabled() -> bool:
     return os.environ.get(_DEBUG_ENV) in {"1", "true"}
 
 
-def configure_asgi_logger() -> None:
-    logging.getLogger(_LOGGER_NAME).setLevel(logging.INFO if debug_enabled() else logging.WARNING)
-
-
 def debug_log(event: str, **fields: Any) -> None:
     if not debug_enabled():
         return

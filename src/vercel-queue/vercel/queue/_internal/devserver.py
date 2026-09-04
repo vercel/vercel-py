@@ -12,35 +12,16 @@ import json
 import signal
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
 
 import anyio
 from anyio import from_thread
 
 from ..embedded import create_embedded_queue_app
-from .asgi import QueueClientAsgiApp, asgi_app
-from .client import QueueClient
-from .config import CURRENT_DEPLOYMENT, BaseUrl, DeploymentOption
 from .embedded import EmbeddedQueueDevServer
-from .http import AsyncHttpClientFactory
-from .types import Duration
 
 _GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 _SERVER_STOP_TIMEOUT_MARGIN_SECONDS = 1.0
-
-
-@dataclass(frozen=True, kw_only=True)
-class QueueClientAsgiDevServer:
-    """Running queue client ASGI dev server."""
-
-    base_url: str
-    app: QueueClientAsgiApp
-    _server: Any
-    _thread: threading.Thread
-
-    def is_running(self) -> bool:
-        return self._thread.is_alive() and not self._server.should_exit
 
 
 @contextlib.contextmanager
@@ -85,62 +66,6 @@ def embedded_queue_dev_server(
             )
         finally:
             app.state.close()
-
-
-@contextlib.contextmanager
-def queue_client_asgi_dev_server(  # noqa: PLR0913
-    *,
-    client: QueueClient | None = None,
-    host: str = "127.0.0.1",
-    port: int = 0,
-    token: str | None = None,
-    region: str | None = None,
-    base_url: BaseUrl | None = None,
-    deployment: DeploymentOption = CURRENT_DEPLOYMENT,
-    headers: Mapping[str, str] | None = None,
-    timeout: Duration | None = 10.0,
-    http_client_factory: AsyncHttpClientFactory | None = None,
-    profile: str | None = None,
-) -> Iterator[QueueClientAsgiDevServer]:
-    """Run a queue client ASGI callback app on a localhost HTTP port."""
-    uvicorn = _uvicorn()
-    app = asgi_app(
-        client=client,
-        token=token,
-        region=region,
-        base_url=base_url,
-        deployment=deployment,
-        headers=headers,
-        timeout=timeout,
-        http_client_factory=http_client_factory,
-    )
-    config = uvicorn.Config(
-        app,
-        host=host,
-        port=port,
-        log_level="warning",
-        lifespan="on",
-        ws="none",
-        timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
-    )
-    server = _cancellable_server(uvicorn, config)
-    thread = threading.Thread(target=_profiled_server_run(server, profile), daemon=True)
-    thread.start()
-    _wait_for_server(server, "queue client ASGI dev server")
-    try:
-        yield QueueClientAsgiDevServer(
-            base_url=f"http://{host}:{_server_port(server)}",
-            app=app,
-            _server=server,
-            _thread=thread,
-        )
-    finally:
-        _stop_server(
-            server,
-            thread,
-            "queue client ASGI dev server",
-            timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
-        )
 
 
 def main(argv: list[str] | None = None) -> int:
