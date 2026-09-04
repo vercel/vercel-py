@@ -368,6 +368,8 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
         "setprofile",
         "setprofile_all_threads",
     ),
+    "io": _blocklist("io", "open", "open_code", "FileIO"),
+    "_io": _blocklist("_io", "open", "open_code", "FileIO"),
     "zstandard": _blocklist("zstandard", "open"),
 }
 
@@ -419,6 +421,7 @@ _PASSTHROUGHS: set[str] = {
     "heapq",
     "html",
     "io",
+    "_io",
     "ipaddress",
     "itertools",
     "json",
