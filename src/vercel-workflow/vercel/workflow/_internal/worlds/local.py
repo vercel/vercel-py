@@ -730,6 +730,7 @@ class LocalWorld(w.World):
                 workflow_name=run_data.workflow_name,
                 input=run_data.input,
                 execution_context=run_data.execution_context,
+                encryption_public_key=run_data.encryption_public_key,
             ),
             spec_version=data.spec_version,
         )
@@ -894,6 +895,7 @@ class LocalWorld(w.World):
                 spec_version=data.spec_version,
                 execution_context=run_data.execution_context,
                 input=run_data.input,
+                encryption_public_key=run_data.encryption_public_key,
                 created_at=now,
                 updated_at=now,
             )

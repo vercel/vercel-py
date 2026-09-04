@@ -40,6 +40,7 @@ from cryptography.hazmat.primitives.serialization import (
 from tests.payloads import PLAIN_ENCODER
 from vercel.oidc import VercelOidcTokenError
 from vercel.workflow._internal import (
+    core,
     encryption,
     py_sandbox,
     runtime,
@@ -255,6 +256,50 @@ def test_the_envelope_opens_what_webcrypto_sealed(size: int) -> None:
     assert encryption.open_envelope(key, nonce + sealed) == plaintext
 
 
+def test_the_envelope_writer_produces_webcrypto_compatible_bytes() -> None:
+    key = AESGCM.generate_key(bit_length=256)
+    plaintext = b'devl[["amount"],21]'
+
+    envelope = encryption.encrypt_envelope(key, plaintext)
+
+    assert len(envelope) == 12 + len(plaintext) + 16
+    assert AESGCM(key).decrypt(envelope[:12], envelope[12:], None) == plaintext
+
+
+def test_symmetric_payload_writes_are_randomized() -> None:
+    encoder = ser.PayloadEncoder(encryption_key=RUN_KEY)
+
+    first = encoder.encode({"amount": 21})
+    second = encoder.encode({"amount": 21})
+
+    assert first.startswith(ser.ENCRYPTED)
+    assert second.startswith(ser.ENCRYPTED)
+    assert first != second
+    assert ser.hydrate(first, what="a payload", key=RUN_KEY) == {"amount": 21}
+    assert ser.hydrate(second, what="a payload", key=RUN_KEY) == {"amount": 21}
+
+
+def test_random_nonces_do_not_make_a_step_call_nondeterministic() -> None:
+    encoder = ser.PayloadEncoder(encryption_key=RUN_KEY)
+
+    first = encoder.encode(ser.step_arguments((21,), {}))
+    replay = encoder.encode(ser.step_arguments((21,), {}))
+    changed = encoder.encode(ser.step_arguments((22,), {}))
+
+    assert first != replay
+    assert ser.payloads_equal(first, replay, key=RUN_KEY)
+    assert not ser.payloads_equal(first, changed, key=RUN_KEY)
+
+
+def test_encryption_works_inside_the_workflow_sandbox() -> None:
+    encoder = ser.PayloadEncoder(encryption_key=RUN_KEY)
+
+    with py_sandbox.Sandbox().enter():
+        payload = encoder.encode({"amount": 21})
+
+    assert ser.hydrate(payload, what="a payload", key=RUN_KEY) == {"amount": 21}
+
+
 def test_the_envelope_carries_no_additional_data() -> None:
     # `world-vercel` calls `aesGcmEncrypt(aesKey, data)` with `aad` omitted --
     # the AAD machinery in that module is for `encp`.
@@ -439,6 +484,27 @@ def test_the_sealed_box_opens_what_typescript_sealed() -> None:
     assert encryption.open_sealed_envelope(RUN_KEY, TS_SEALED) == b'devl[["amount"],21]'
 
 
+def test_the_sealed_box_writer_produces_typescript_compatible_bytes() -> None:
+    plaintext = b'devl[["amount"],21]'
+
+    sealed = encryption.seal_envelope(TS_PUBLIC_KEY, plaintext)
+
+    assert len(sealed) == 32 + 12 + len(plaintext) + 16
+    assert encryption.open_sealed_envelope(RUN_KEY, sealed) == plaintext
+
+
+def test_a_seal_only_payload_encoder_writes_encp() -> None:
+    payload = ser.PayloadEncoder(recipient_public_key=TS_PUBLIC_KEY).encode({"amount": 21})
+
+    assert payload.startswith(ser.SEALED)
+    assert ser.hydrate(payload, what="a payload", key=RUN_KEY) == {"amount": 21}
+
+
+def test_a_payload_encoder_cannot_mix_symmetric_and_seal_only_keys() -> None:
+    with pytest.raises(ValueError, match="cannot both encrypt and seal"):
+        ser.PayloadEncoder(encryption_key=RUN_KEY, recipient_public_key=TS_PUBLIC_KEY)
+
+
 def test_the_sealed_box_carries_no_additional_data() -> None:
     # `resumeHook` seals with `sealTo(runPublicKey)` and passes no AAD; the
     # construction binds the payload to its recipient through the content key's
@@ -606,13 +672,13 @@ async def test_a_run_of_this_deployment_derives_its_key_in_process(monkeypatch) 
     assert await world.run_key(RUN_ID, deployment_id="dpl_current") == key
 
 
-async def test_local_derivation_needs_a_project_id(monkeypatch) -> None:
-    # Getting it wrong yields a GCM failure rather than anything that names it.
+async def test_a_world_without_a_project_id_has_no_encryption_key(monkeypatch) -> None:
+    # JS omits getEncryptionKeyForRun entirely in this configuration, so a
+    # new run remains plaintext rather than making start() fail.
     _deployed(monkeypatch, VERCEL_PROJECT_ID=None)
     world = VercelWorld()
 
-    with pytest.raises(RuntimeError, match="no project id"):
-        await world.run_key(RUN_ID)
+    assert await world.run_key(RUN_ID) is None
 
 
 @respx.mock
@@ -766,6 +832,87 @@ async def test_a_world_that_does_not_encrypt_resolves_no_key() -> None:
     from vercel.workflow._internal.worlds.local import LocalWorld
 
     assert await LocalWorld().run_key(RUN_ID) is None
+
+
+async def test_start_encrypts_a_new_run_and_publishes_its_public_key(tmp_path, monkeypatch) -> None:
+    from vercel.workflow._internal.worlds.local import LocalWorld
+
+    class EncryptedLocalWorld(LocalWorld):
+        def __init__(self) -> None:
+            super().__init__()
+            self.queued: list[w.WorkflowInvokePayload] = []
+
+        async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
+            return RUN_KEY
+
+        async def queue(self, queue_name, message, **kwargs) -> str:
+            assert isinstance(message, w.WorkflowInvokePayload)
+            self.queued.append(message)
+            return "msg_1"
+
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    world = EncryptedLocalWorld()
+    w.set_world(world)
+    registry = core.Workflows(as_vercel_job=False)
+
+    @registry.workflow
+    async def checkout(amount: int, /) -> int:
+        return amount
+
+    try:
+        public_run = await runtime.start(checkout, 21)
+        stored = await world.runs_get(public_run.run_id)
+    finally:
+        w.set_world(None)
+
+    expected_public_key = base64.b64encode(
+        encryption.derive_run_key_pair(RUN_KEY).public_key
+    ).decode()
+    assert isinstance(stored.input, bytes) and stored.input.startswith(ser.ENCRYPTED)
+    assert ser.hydrate(stored.input, what="the run input", key=RUN_KEY) == [21]
+    assert stored.encryption_public_key == expected_public_key
+    assert stored.execution_context is not None
+    assert stored.execution_context["workflowCoreVersion"] == w.WORKFLOW_CORE_COMPAT_VERSION
+    assert stored.execution_context["features"] == {"encryption": True}
+    (queued,) = world.queued
+    assert queued.run_id == stored.run_id
+    assert queued.run_input is not None
+    assert queued.run_input.encryption_public_key == expected_public_key
+    assert queued.run_input.input == stored.input
+
+
+async def test_start_stays_plaintext_without_a_project_id(monkeypatch) -> None:
+    _deployed(monkeypatch, VERCEL_PROJECT_ID=None)
+
+    class NoProjectVercelWorld(VercelWorld):
+        def __init__(self) -> None:
+            super().__init__()
+            self.created: w.RunCreatedEvent | None = None
+
+        async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
+            assert isinstance(data, w.RunCreatedEvent)
+            self.created = data
+            return w.EventResult()
+
+        async def queue(self, queue_name, message, **kwargs) -> str:
+            return "msg_1"
+
+    world = NoProjectVercelWorld()
+    w.set_world(world)
+    registry = core.Workflows(as_vercel_job=False)
+
+    @registry.workflow
+    async def checkout(amount: int, /) -> int:
+        return amount
+
+    try:
+        await runtime.start(checkout, 21)
+    finally:
+        w.set_world(None)
+
+    assert world.created is not None
+    assert world.created.event_data.input.startswith(ser.DEVALUE_V1)
+    assert world.created.event_data.encryption_public_key is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

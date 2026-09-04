@@ -535,8 +535,20 @@ async def test_uncancelled_cancellable_step_runs_normally(tmp_path, monkeypatch)
 
 
 class _AbortListenerWorld:
-    def __init__(self, reason: str, *, break_once: bool = False, split: bool = False) -> None:
-        payload = PLAIN_ENCODER.encode({"aborted": True, "reason": reason})
+    def __init__(
+        self,
+        reason: str,
+        *,
+        break_once: bool = False,
+        split: bool = False,
+        encryption_key: bytes | None = None,
+        serialized_payload: bytes | None = None,
+    ) -> None:
+        payload = serialized_payload
+        if payload is None:
+            payload = ser.PayloadEncoder(encryption_key=encryption_key).encode(
+                {"aborted": True, "reason": reason}
+            )
         self.wire = streams.encode_frame(payload)
         self.break_once = break_once
         self.split = split
@@ -562,7 +574,9 @@ class _AbortListenerWorld:
             yield self.wire
 
 
-async def _run_abort_listener(world: _AbortListenerWorld, reason: str) -> None:
+async def _run_abort_listener(
+    world: _AbortListenerWorld, reason: str, *, run_key: bytes | None = None
+) -> None:
     async def waits_forever() -> None:
         await asyncio.sleep(3600)
 
@@ -575,6 +589,7 @@ async def _run_abort_listener(world: _AbortListenerWorld, reason: str) -> None:
             world=world,  # type: ignore[arg-type]
             run_id="wrun_test",
             step_id="step_01M1329YCHWS235PHTPW377KZM",
+            run_key=run_key,
         )
 
 
@@ -592,6 +607,20 @@ async def test_abort_listener_reassembles_transport_fragments() -> None:
     world = _AbortListenerWorld(reason, split=True)
 
     await _run_abort_listener(world, reason)
+
+
+async def test_abort_listener_hydrates_an_encrypted_signal() -> None:
+    reason = "encrypted cancellation"
+    run_key = bytes(range(32))
+    world = _AbortListenerWorld(reason, encryption_key=run_key)
+
+    await _run_abort_listener(world, reason, run_key=run_key)
+
+
+async def test_abort_listener_accepts_a_signal_with_an_unreadable_payload() -> None:
+    world = _AbortListenerWorld("unused", serialized_payload=b"invalid")
+
+    await _run_abort_listener(world, "step cancelled by its workflow")
 
 
 class _OpenAbortListenerWorld:

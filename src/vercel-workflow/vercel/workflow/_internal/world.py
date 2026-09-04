@@ -25,6 +25,7 @@ else:
     from typing_extensions import Self
 
 import pydantic
+import semver
 
 from vercel._internal.core.polyfills import UTC, Self
 from vercel.queue import SanitizedName
@@ -115,6 +116,16 @@ def get_physical_topic(queue_name: str) -> SanitizedName:
 SPEC_VERSION_SUPPORTS_COMPRESSION = 5
 SPEC_VERSION_CURRENT: Literal[5] = 5
 SPEC_VERSION_MAX_SUPPORTED = 7
+
+# The highest synthetic `@workflow/core` version whose wire capabilities this
+# Python runtime has audited. This is deliberately not the Python package
+# version: upstream uses the field to choose formats for cross-deployment
+# writes, so advancing it is a protocol claim.
+WORKFLOW_CORE_COMPAT_VERSION = "4.2.0"
+
+# First upstream release that can read the symmetric `encr` payload format.
+_WORKFLOW_CORE_ENCRYPTION_MIN_VERSION = semver.Version.parse("4.2.0-beta.64")
+_WORKFLOW_CORE_COMPRESSION_MIN_VERSION = semver.Version.parse("5.0.0-beta.18")
 
 # Which version of "lazy hook resume" this SDK's queue consumer implements.
 #
@@ -310,11 +321,37 @@ class BaseWorkflowRun(BaseModel):
     created_at: datetime = pydantic.Field(alias="createdAt")
     updated_at: datetime = pydantic.Field(alias="updatedAt")
 
-    def payload_encoder(self) -> "PayloadEncoder":
+    def payload_encoder(
+        self,
+        *,
+        encryption_key: bytes | None = None,
+        recipient_public_key: bytes | None = None,
+        check_target_core_version: bool = False,
+    ) -> "PayloadEncoder":
         from .serialization import PayloadEncoder
 
+        if encryption_key is not None and recipient_public_key is not None:
+            raise ValueError("A payload encoder cannot both encrypt and seal")
+        compression = (self.spec_version or 0) >= SPEC_VERSION_SUPPORTS_COMPRESSION
+        if check_target_core_version:
+            version_str = (self.execution_context or {}).get("workflowCoreVersion")
+            try:
+                if not isinstance(version_str, str):
+                    raise ValueError
+                version = semver.Version.parse(version_str.removeprefix("v"))
+            except ValueError:
+                encryption_key = None
+                compression = False
+            else:
+                if version < _WORKFLOW_CORE_ENCRYPTION_MIN_VERSION:
+                    encryption_key = None
+                if version < _WORKFLOW_CORE_COMPRESSION_MIN_VERSION:
+                    compression = False
+
         return PayloadEncoder(
-            compression=(self.spec_version or 0) >= SPEC_VERSION_SUPPORTS_COMPRESSION
+            compression=compression,
+            encryption_key=encryption_key,
+            recipient_public_key=recipient_public_key,
         )
 
 
@@ -456,6 +493,9 @@ class RunCreatedEventData(BaseModel):
     input: bytes
     execution_context: dict[str, Any] | None = pydantic.Field(
         default=None, alias="executionContext", exclude_if=lambda e: e is None
+    )
+    encryption_public_key: str | None = pydantic.Field(
+        default=None, alias="encryptionPublicKey", exclude_if=lambda e: e is None
     )
 
     def into_event(self) -> "RunCreatedEvent":
@@ -1200,13 +1240,14 @@ class World(metaclass=abc.ABCMeta):
     async def hooks_get_by_token(self, token: str) -> Hook: ...
 
     @overload
-    async def events_create(self, run_id: None, data: RunCreatedEvent) -> EventResult:
+    async def events_create(self, run_id: str | None, data: RunCreatedEvent) -> EventResult:
         """
         Create a run_created event to start a new workflow run.
-        The run_id parameter must be None - the server generates and returns the runId.
+        When run_id is None the server generates it; callers may provide one
+        when key derivation needs the stable id before the event is encoded.
 
         Args:
-            run_id: Must be None for run_created events
+            run_id: Optional client-generated workflow run ID
             data: The run_created event data
         Returns:
             The created event and run entity

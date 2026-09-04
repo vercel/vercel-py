@@ -85,13 +85,20 @@ class FakeWorld(NoStreams, w.World):
         started_step: w.WorkflowStep | None = None,
         start_error: Exception | None = None,
         run_spec_version: int | None = w.SPEC_VERSION_CURRENT,
+        run_key: bytes | None = None,
     ) -> None:
         self.step = step
         self.started_step = started_step
         self.start_error = start_error
         self.run = _running_run(spec_version=run_spec_version)
+        self.run_key_material = run_key
+        if run_key is not None:
+            self.run = self.run.model_copy(update={"encryption_public_key": "enabled"})
         self.queued: list[tuple[str, Any]] = []
         self.events: list[Any] = []
+
+    async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
+        return self.run_key_material
 
     async def get_deployment_id(self) -> str:
         return ""
@@ -301,6 +308,30 @@ async def test_step_output_compression_follows_the_run_version(
     (completed,) = fake.events
     assert isinstance(completed, w.StepCompletedEvent)
     assert completed.event_data.result.startswith(prefix)
+
+
+async def test_step_output_is_encrypted_for_an_encrypted_run(
+    registry: core.Workflows,
+) -> None:
+    key = bytes(range(32))
+
+    @registry.step
+    async def my_step() -> str:
+        return "ok"
+
+    input_data = ser.PayloadEncoder(encryption_key=key).encode(ser.step_arguments((), {}))
+    fake = FakeWorld(
+        started_step=_running_step(my_step.name, attempt=1, input=input_data),
+        run_key=key,
+    )
+    w.set_world(fake)
+
+    await _invoke(registry, my_step.name)
+
+    (completed,) = fake.events
+    assert isinstance(completed, w.StepCompletedEvent)
+    assert completed.event_data.result.startswith(ser.ENCRYPTED)
+    assert ser.hydrate(completed.event_data.result, what="the result", key=key) == "ok"
 
 
 async def test_unregistered_step_fails_without_retrying(registry: core.Workflows) -> None:

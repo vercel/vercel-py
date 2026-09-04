@@ -114,6 +114,7 @@ async def test_answers_a_probe_with_json(flow) -> None:
         "healthy": True,
         "endpoint": runtime.ENDPOINT_PATH,
         "specVersion": w.SPEC_VERSION_CURRENT,
+        "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
     }
     # A probe is not a message: nothing was handed to the queue handler.
     assert world.delivered == []
@@ -140,15 +141,13 @@ async def test_the_reported_path_is_the_one_that_was_probed(flow) -> None:
     assert json.loads(response.body)["endpoint"] == "/api/workflow"
 
 
-async def test_the_answer_claims_no_capability_it_does_not_have(flow) -> None:
-    """Omitted for the same reason as on the queue transport: it names a
-    JavaScript package's version, and the reader feeds it to that package's
-    capability tables."""
+async def test_the_answer_claims_its_audited_core_compatibility(flow) -> None:
+    """The version tells JavaScript which wire formats this runtime can read."""
     handler, _ = flow
 
     response = await handler(Request(f"{runtime.ENDPOINT_PATH}?__health"))
 
-    assert "workflowCoreVersion" not in json.loads(response.body)
+    assert json.loads(response.body)["workflowCoreVersion"] == w.WORKFLOW_CORE_COMPAT_VERSION
 
 
 async def test_a_preflight_gets_an_empty_204(flow) -> None:

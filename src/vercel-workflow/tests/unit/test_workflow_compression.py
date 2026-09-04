@@ -5,7 +5,13 @@ import gzip
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from vercel.workflow._internal import compression, py_sandbox, serialization as ser, world as w
+from vercel.workflow._internal import (
+    compression,
+    encryption,
+    py_sandbox,
+    serialization as ser,
+    world as w,
+)
 
 # Produced by Node 24's node:zlib over b'devl["charged 42"]'.
 TS_GZIP = bytes.fromhex(
@@ -104,6 +110,18 @@ def test_compression_under_encryption_composes() -> None:
     payload = ser.ENCRYPTED + nonce + AESGCM(key).encrypt(nonce, compressed, None)
 
     assert ser.hydrate(payload, what="a payload", key=key) == "charged 42"
+
+
+def test_writes_compression_under_encryption() -> None:
+    key = bytes(range(32))
+    value = "charged " * 256
+
+    payload = ser.PayloadEncoder(compression=True, encryption_key=key).encode(value)
+
+    assert payload.startswith(ser.ENCRYPTED)
+    inner = encryption.open_envelope(key, payload[len(ser.ENCRYPTED) :])
+    assert inner.startswith(ser.ZSTD)
+    assert ser.hydrate(payload, what="a payload", key=key) == value
 
 
 @pytest.mark.parametrize("prefix", [ser.GZIP, ser.ZSTD])

@@ -13,6 +13,7 @@ deliberately omits are asserted as directly as the ones it sends.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import Sequence
@@ -21,7 +22,7 @@ from typing import Any
 import pydantic
 import pytest
 
-from vercel.workflow._internal import core, runtime, world as w
+from vercel.workflow._internal import core, encryption, runtime, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
 from ..world_stubs import NoStreams
@@ -147,17 +148,15 @@ async def test_the_answer_is_plain_json(registry) -> None:
     assert isinstance(body["timestamp"], int)
 
 
-async def test_the_answer_claims_no_capability_it_does_not_have(registry) -> None:
-    """The deliberate omissions -- see `_health_check_response`. Each is read as
-    a capability claim, and the consequence of a wrong one lands in the caller,
-    not here."""
+async def test_the_answer_claims_only_its_audited_core_compatibility(registry) -> None:
+    """The synthetic version is a wire capability claim, not our package version."""
     world = StreamsWorld()
     w.set_world(world)
 
     await _probe(registry)
 
     body = json.loads(world.writes[0][2])
-    assert "workflowCoreVersion" not in body
+    assert body["workflowCoreVersion"] == w.WORKFLOW_CORE_COMPAT_VERSION
     assert "encryptionPublicKey" not in body
 
 
@@ -186,9 +185,26 @@ async def test_a_probe_naming_a_run_is_still_a_probe(registry) -> None:
     world = StreamsWorld()
     w.set_world(world)
 
-    assert await _probe(registry, run_id="wrun_not_created_yet") is None
+    assert await _probe(registry, runId="wrun_not_created_yet") is None
 
     assert world.closes == [(RUN_ID, STREAM)]
+
+
+async def test_a_probe_naming_a_run_publishes_its_encryption_key(registry) -> None:
+    key = bytes(range(32))
+
+    class EncryptedWorld(StreamsWorld):
+        async def run_key(self, run_id: str, *, deployment_id: str | None = None) -> bytes | None:
+            return key
+
+    world = EncryptedWorld()
+    w.set_world(world)
+
+    await _probe(registry, runId="wrun_not_created_yet")
+
+    body = json.loads(world.writes[0][2])
+    expected = base64.b64encode(encryption.derive_run_key_pair(key).public_key).decode()
+    assert body["encryptionPublicKey"] == expected
 
 
 async def test_a_message_without_the_discriminator_is_not_a_probe(registry) -> None:

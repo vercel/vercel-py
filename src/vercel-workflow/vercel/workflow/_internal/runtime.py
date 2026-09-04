@@ -26,6 +26,7 @@ from vercel._internal.core.polyfills import UTC, Self
 from . import (
     attributes as attrs,
     core,
+    encryption,
     errors,
     loop,
     nanoid,
@@ -42,6 +43,7 @@ T = TypeVar("T")
 Chunk = TypeVar("Chunk")
 logger = logging.getLogger("vercel.workflow")
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_generate_run_ulid = ulid.monotonic_factory()
 
 # Wait-continuation dispatch — mirrors @workflow/core's wait-continuation.ts.
 # The delayed re-enqueue that wakes a run when a pending wait elapses is keyed on
@@ -1198,7 +1200,9 @@ class WorkflowOrchestratorContext:
                 # The recorded step at this (positional) correlation ID must be
                 # the same call the body just issued; a mismatch means the body
                 # is non-deterministic.
-                if sus.step.name != name or sus.input != recorded_input:
+                if sus.step.name != name or not ser.payloads_equal(
+                    sus.input, recorded_input, key=self.run_key
+                ):
                     self._fail_nondeterminism(
                         sus,
                         NondeterminismError(
@@ -1429,9 +1433,11 @@ async def _write_attr_set(world: w.World, run_id: str, sus: Attributes) -> None:
 async def _resolve_run_key(
     world: w.World, run: w.WorkflowRun, events: list[w.Event]
 ) -> bytes | None:
-    """The key this run's payloads need, or ``None`` when none of them is encrypted."""
-    encrypted = ser.is_encrypted(run.input) or any(
-        ser.is_encrypted(payload) for event in events for payload in event.payloads()
+    """The key this run reads and writes with, or ``None`` when encryption is off."""
+    encrypted = (
+        run.encryption_public_key is not None
+        or ser.is_encrypted(run.input)
+        or any(ser.is_encrypted(payload) for event in events for payload in event.payloads())
     )
     if not encrypted:
         return None
@@ -1468,20 +1474,40 @@ def _parse_health_check(message: Any) -> w.HealthCheckPayload | None:
         return None
 
 
-def _health_check_response(correlation_id: str) -> dict[str, Any]:
-    return {
+def _health_check_response(
+    correlation_id: str, *, encryption_public_key: str | None = None
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
         "healthy": True,
         "correlationId": correlation_id,
         "specVersion": w.SPEC_VERSION_CURRENT,
+        "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
         "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
         "timestamp": int(datetime.now(UTC).timestamp() * 1000),
     }
+    if encryption_public_key is not None:
+        response["encryptionPublicKey"] = encryption_public_key
+    return response
 
 
 async def _answer_health_check(world: w.World, health: w.HealthCheckPayload) -> None:
     run_id = _health_check_run_id(health.correlation_id)
     name = _health_check_stream_name(health.correlation_id)
-    body = json.dumps(_health_check_response(health.correlation_id)).encode()
+    encryption_public_key = None
+    if health.run_id is not None:
+        try:
+            run_key = await world.run_key(health.run_id)
+            if run_key is not None:
+                encryption_public_key = encryption.derive_run_public_key(run_key)
+        except Exception as error:
+            logger.warning(
+                "Health check %r could not derive a run public key: %s",
+                health.correlation_id,
+                error,
+            )
+    body = json.dumps(
+        _health_check_response(health.correlation_id, encryption_public_key=encryption_public_key)
+    ).encode()
     try:
         await world.streams_write(run_id, name, body)
         await world.streams_close(run_id, name)
@@ -1775,20 +1801,21 @@ async def _workflow_replay_pass(
         if _has_terminal_run_event(events, run_id):
             return None
 
+    run_key = await _resolve_run_key(world, workflow_run, events)
     context = WorkflowOrchestratorContext(
         events,
         run_id=run_id,
         seed=run_id,
         started_at=workflow_started_at,
         registry=registry,
-        run_key=await _resolve_run_key(world, workflow_run, events),
-        payload_encoder=workflow_run.payload_encoder(),
+        run_key=run_key,
+        payload_encoder=workflow_run.payload_encoder(encryption_key=run_key),
         workflow_info=WorkflowInfo(
             run_id=run_id,
             workflow_name=workflow_run.workflow_name,
             started_at=workflow_run.started_at,
             url=_workflow_url(),
-            features=WorkflowFeatures(encryption=workflow_run.encryption_public_key is not None),
+            features=WorkflowFeatures(encryption=run_key is not None),
         ),
     )
     try:
@@ -1996,6 +2023,7 @@ async def _run_cancellable_step(
     world: w.World,
     run_id: str,
     step_id: str,
+    run_key: bytes | None = None,
 ) -> T:
     """Run a cancellable step and a listener for cancellations.
 
@@ -2012,16 +2040,21 @@ async def _run_cancellable_step(
     async def listen() -> None:
         nonlocal cancelled, reason
         try:
-            async for chunk in streams.reconnecting_frames(world, run_id, stream_name):
-                cancelled = True
-                try:
-                    data = ser.hydrate(chunk, what=f"the cancellation of step {step_id}")
-                except ser.SerializationError:
-                    pass
-                else:
+            source = _read_stream(
+                world,
+                run_id,
+                stream_name,
+                None,
+                0,
+                key=run_key,
+                ignore_payload_errors=True,
+            )
+            async with contextlib.aclosing(source):
+                async for data in source:
+                    cancelled = True
                     if isinstance(data, dict) and data.get("reason") is not None:
                         reason = str(data["reason"])
-                break
+                    break
         except Exception as error:
             # A dead listener must not fail the step: without the signal
             # the step simply runs to completion.
@@ -2105,7 +2138,10 @@ async def _execute_step(
     if not start_result.step:
         raise RuntimeError(f"step_started event for '{req.step_id}' did not return step entity")
     step_run = start_result.step
-    payload_encoder = run.payload_encoder()
+    run_key = None
+    if run.encryption_public_key is not None or ser.is_encrypted(step_run.input):
+        run_key = await world.run_key(req.run_id, deployment_id=run.deployment_id)
+    payload_encoder = run.payload_encoder(encryption_key=run_key)
     current_attempt = step_run.attempt
     if not step_run.started_at:
         raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
@@ -2191,9 +2227,7 @@ async def _execute_step(
                 # the run, which we don't want to have to do.
                 started_at=None,
                 url=_workflow_url(),
-                features=WorkflowFeatures(
-                    encryption=bool(step_run.input) and ser.is_encrypted(step_run.input)
-                ),
+                features=WorkflowFeatures(encryption=run_key is not None),
             ),
         )
     )
@@ -2206,7 +2240,6 @@ async def _execute_step(
             what = f"the input of step {req.step_id}"
             # No deployment id: the queue message routed this step to the deployment
             # that owns the run, so the key resolves against the current one.
-            run_key = await world.run_key(req.run_id) if ser.is_encrypted(step_run.input) else None
             args, kwargs = ser.step_call_arguments(
                 ser.hydrate(step_run.input, what=what, key=run_key), what=what
             )
@@ -2222,7 +2255,13 @@ async def _execute_step(
             # Execute the step function
             if step.cancellable:
                 result = await _run_cancellable_step(
-                    step, args, kwargs, world=world, run_id=req.run_id, step_id=req.step_id
+                    step,
+                    args,
+                    kwargs,
+                    world=world,
+                    run_id=req.run_id,
+                    step_id=req.step_id,
+                    run_key=run_key,
                 )
             else:
                 result = await step.func(*args, **kwargs)
@@ -2384,15 +2423,13 @@ def _with_health_check(handler: w.HTTPHandler) -> w.HTTPHandler:
             return await handler(request)
         if request.method == "OPTIONS":
             return w.HTTPResponse(204, b"", dict(_HEALTH_CHECK_CORS_HEADERS))
-        # Same omissions as `_health_check_response`, and `endpoint` in place of
-        # the correlation id: taken from the request, as `url.pathname` is
-        # upstream, so an app serving the route elsewhere reports where it
-        # actually answered.
+        # Match upstream: `endpoint` is the path of the HTTP health-check request.
         response = w.HTTPResponse.json(
             {
                 "healthy": True,
                 "endpoint": target.path,
                 "specVersion": w.SPEC_VERSION_CURRENT,
+                "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
             }
         )
         response.headers.update(_HEALTH_CHECK_CORS_HEADERS)
@@ -2678,7 +2715,14 @@ def read_stream(
 
 
 async def _read_stream(
-    world: w.World, run_id: str, name: str, type: Any, start_index: int | None
+    world: w.World,
+    run_id: str,
+    name: str,
+    type: Any,
+    start_index: int | None,
+    *,
+    key: bytes | None = None,
+    ignore_payload_errors: bool = False,
 ) -> AsyncGenerator[Any, None]:
     codec = None if type is None else signature_codec.TypeCodec(type)
     frames = streams.reconnecting_frames(world, run_id, name, start_index)
@@ -2686,7 +2730,16 @@ async def _read_stream(
         index = start_index or 0
         async for payload in frames:
             what = f"chunk {index} of stream {name}"
-            value = ser.hydrate(payload, what=what)
+            try:
+                value = ser.hydrate(payload, what=what, key=key)
+            except ser.SerializationError:
+                if ignore_payload_errors:
+                    # This is only used by cancellation streams: the payload carries
+                    # an optional cancel reason; the cancel happens anyway even if
+                    # the reason cannot be read.
+                    value = None
+                else:
+                    raise
             if codec is not None:
                 value = codec.validate(value, what=what)
             yield value
@@ -2701,10 +2754,20 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     world = w.get_world()
     deployment_id = await world.get_deployment_id()
     namespace = wf._resolve_queue_namespace()
-    input_data = ser.PayloadEncoder(compression=True).encode(
+    # TODO: add and prefer world.create_run_id()
+    run_id = f"wrun_{_generate_run_ulid()}"
+    run_key = await world.run_key(run_id, deployment_id=deployment_id)
+    encryption_public_key = (
+        encryption.derive_run_public_key(run_key) if run_key is not None else None
+    )
+    input_data = ser.PayloadEncoder(compression=True, encryption_key=run_key).encode(
         ser.argument_array(dumped_args, dumped_kwargs)
     )
-    execution_context: dict[str, Any] = {"hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION}
+    execution_context: dict[str, Any] = {
+        "workflowCoreVersion": w.WORKFLOW_CORE_COMPAT_VERSION,
+        "hookResumeInputVersion": w.HOOK_RESUME_INPUT_VERSION,
+        "features": {"encryption": run_key is not None},
+    }
     if namespace is not None:
         execution_context["queueNamespace"] = namespace
     data = w.RunCreatedEventData(
@@ -2712,17 +2775,23 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
         workflow_name=wf.workflow_id,
         input=input_data,
         execution_context=execution_context,
+        encryption_public_key=encryption_public_key,
     )
-    result = await world.events_create(None, data.into_event())
-
-    # Assert that the run was created
-    if not result.run:
-        raise RuntimeError("Missing 'run' in server response for 'run_created' event")
-
-    run_id = result.run.run_id
+    await world.events_create(run_id, data.into_event())
     await world.queue(
         w.get_queue_name(wf.workflow_id, namespace),
-        w.WorkflowInvokePayload(run_id=run_id),
+        w.WorkflowInvokePayload(
+            run_id=run_id,
+            run_input=w.RunInput(
+                input=input_data,
+                deployment_id=deployment_id,
+                workflow_name=wf.workflow_id,
+                spec_version=w.SPEC_VERSION_CURRENT,
+                execution_context=execution_context,
+                encryption_public_key=encryption_public_key,
+                environment=world.get_environment(),
+            ),
+        ),
         deployment_id=deployment_id,
     )
 
@@ -2754,6 +2823,35 @@ async def get_hook_by_token(token: str) -> core.Hook:
     return await _public_hook(world, await world.hooks_get_by_token(token))
 
 
+async def _hook_resume_payload_encoder(world: w.World, run: w.WorkflowRun) -> ser.PayloadEncoder:
+    """Build an encoder for a hook payload written from outside its run.
+
+    Prefer sealing to the run's published X25519 public key, avoiding a
+    symmetric-key lookup. If no valid public key is stored, fall back to the
+    symmetric run key. ``check_target_core_version`` disables symmetric
+    encryption or compression when the target run's library version doesn't
+    support them.
+    """
+    recipient_public_key = None
+    if run.encryption_public_key is not None:
+        try:
+            recipient_public_key = encryption.decode_key(
+                run.encryption_public_key, what="the run encryption public key"
+            )
+        except ValueError:
+            pass
+
+    encryption_key = None
+    if recipient_public_key is None:
+        encryption_key = await world.run_key(run.run_id, deployment_id=run.deployment_id)
+
+    return run.payload_encoder(
+        encryption_key=encryption_key,
+        recipient_public_key=recipient_public_key,
+        check_target_core_version=True,
+    )
+
+
 async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook:
     world = w.get_world()
     if isinstance(token_or_hook, str):
@@ -2763,7 +2861,7 @@ async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook
     else:
         hook = token_or_hook
         run = await world.runs_get(hook.run_id)
-    payload_encoder = run.payload_encoder()
+    payload_encoder = await _hook_resume_payload_encoder(world, run)
     data = w.HookReceivedEventData(payload=payload_encoder.encode(payload))
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     execution_context = run.execution_context or {}
