@@ -338,14 +338,16 @@ def test_a_truncated_envelope_is_rejected_before_the_cipher() -> None:
 
 
 def test_cryptography_is_probed_once_at_import(monkeypatch) -> None:
-    # Not per call, because a run input is hydrated inside the sandbox, whose
-    # context has a private `sys.modules` -- an import reached from there would
-    # build a second copy of a native extension. Blocking the import and
-    # decrypting anyway is what pins that the binding already happened.
+    # Not per call, because key derivation and input hydration happen inside the
+    # sandbox, whose context has a private `sys.modules` -- an import reached
+    # from there would build a second copy of a native extension. Blocking the
+    # import and doing both anyway pins that the KDF and cipher bindings were
+    # initialized already.
     monkeypatch.setattr(builtins, "__import__", _no_cryptography(monkeypatch))
-    key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
 
-    assert encryption.open_envelope(key, seal(key, b"devl[42]")[4:]) == b"devl[42]"
+    with py_sandbox.Sandbox().enter():
+        key = encryption.derive_run_key(DEPLOYMENT_KEY, project_id=PROJECT_ID, run_id=RUN_ID)
+        assert encryption.open_envelope(key, seal(key, b"devl[42]")[4:]) == b"devl[42]"
 
 
 def test_decryption_works_inside_the_workflow_sandbox() -> None:

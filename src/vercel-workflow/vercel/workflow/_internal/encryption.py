@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
-import hmac
 import os
 from typing import Any, NamedTuple
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import (
     load_der_private_key,
     load_der_public_key,
@@ -155,15 +155,14 @@ def _x25519_exchange(scalar: bytes, peer_public_key: bytes) -> bytes | None:
 
 def hkdf_sha256(*, ikm: bytes, salt: bytes, info: bytes, length: int) -> bytes:
     """HKDF-SHA256 (RFC 5869): extract *ikm* under *salt*, expand over *info*."""
-    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
-    okm = bytearray()
-    block = b""
-    counter = 1
-    while len(okm) < length:
-        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
-        okm += block
-        counter += 1
-    return bytes(okm[:length])
+    return HKDF(algorithm=SHA256(), length=length, salt=salt, info=info).derive(ikm)
+
+
+# HKDF defers an internal import until its first complete derivation. Do that in
+# the host: deriving a run key can otherwise make the import for the first time
+# inside the workflow sandbox, whose private module table cannot load the native
+# extension a second time. As with the AES-GCM probe above, the value is discarded.
+hkdf_sha256(ikm=b"", salt=b"", info=b"", length=KEY_LENGTH)
 
 
 def derive_run_key(deployment_key: bytes, *, project_id: str, run_id: str) -> bytes:
