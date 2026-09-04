@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import anyio
 import pydantic
@@ -26,6 +26,7 @@ from vercel._internal.core.polyfills import UTC, Self
 from . import (
     attributes as attrs,
     core,
+    encryption,
     errors,
     loop,
     nanoid,
@@ -33,6 +34,7 @@ from . import (
     signature_codec,
     streams,
     ulid,
+    webhook,
     world as w,
 )
 from .duration import DurationParam, parse_duration_to_date
@@ -196,6 +198,7 @@ class Hook(BaseSuspension, Generic[T]):
     conflicting_run: "Run[Any] | None" = None
     hook_cls: type[T]
     metadata: bytes | None = None
+    is_webhook: bool = False
 
     def fail(self, exc: Exception) -> None:
         while self.futures:
@@ -209,7 +212,9 @@ class Hook(BaseSuspension, Generic[T]):
 
     def set_result(self, raw_data: Any) -> None:
         res: T
-        if dataclasses.is_dataclass(self.hook_cls):
+        if self.is_webhook:
+            res = cast(T, webhook.decode_request(raw_data, self.hook_cls))
+        elif dataclasses.is_dataclass(self.hook_cls):
             res = self.hook_cls(**raw_data)
         elif issubclass(self.hook_cls, pydantic.BaseModel):
             res = self.hook_cls.model_validate(raw_data)
@@ -975,6 +980,32 @@ class WorkflowOrchestratorContext:
         self.hooks[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
 
+    def create_webhook(
+        self,
+        hook_cls: type[T],
+        *,
+        metadata: Any = None,
+        respond_with: w.HTTPResponse | None = None,
+    ) -> core.WebhookEvent[T]:
+        token = self.generate_nanoid()
+        hook = Hook(
+            correlation_id=f"hook_{self.generate_ulid()}",
+            token=token,
+            hook_cls=hook_cls,
+            metadata=(
+                None
+                if (envelope := webhook.encode_metadata(metadata, respond_with)) is None
+                else self.payload_encoder.encode(envelope)
+            ),
+            is_webhook=True,
+        )
+        self.hooks[hook.correlation_id] = hook
+        return core.WebhookEvent(
+            correlation_id=hook.correlation_id,
+            token=token,
+            url=self.registry._webhook_url(token),
+        )
+
     def run_hook(self, *, correlation_id: str) -> asyncio.Future[T]:
         hook = self.hooks[correlation_id]
         if hook.disposed:
@@ -1150,10 +1181,20 @@ class WorkflowOrchestratorContext:
                     return
                 sus.has_created_event = True
 
-            case w.HookCreatedEvent():
+            case w.HookCreatedEvent(event_data=w.HookCreatedEventData(is_webhook=is_webhook)):
                 hook = self.suspensions[event.correlation_id]
                 hook.has_created_event = True
                 if isinstance(hook, Hook):
+                    if hook.is_webhook != bool(is_webhook):
+                        self._fail_nondeterminism(
+                            hook,
+                            NondeterminismError(
+                                f"workflow replay diverged at {event.correlation_id}: recorded a "
+                                f"{'webhook' if is_webhook else 'regular hook'}, but the body now "
+                                f"creates a {'webhook' if hook.is_webhook else 'regular hook'}."
+                            ),
+                        )
+                        return
                     while hook.conflict_futures:
                         future = hook.conflict_futures.popleft()
                         if not future.cancelled():
@@ -1830,7 +1871,11 @@ async def _workflow_replay_pass(
             elif isinstance(sus, Hook):
 
                 async def create_hook(s=sus):
-                    hook_data = w.HookCreatedEventData(token=s.token, metadata=s.metadata)
+                    hook_data = w.HookCreatedEventData(
+                        token=s.token,
+                        metadata=s.metadata,
+                        is_webhook=True if s.is_webhook else None,
+                    )
                     try:
                         result = await world.events_create(
                             run_id, hook_data.into_event(s.correlation_id)
@@ -2344,6 +2389,96 @@ def workflow_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
     )
 
 
+WEBHOOK_PATH = "/.well-known/workflow/v1/webhook"
+"""The public route prefix for workflow webhooks; append ``/{token}``."""
+
+_WEBHOOK_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+
+
+def _webhook_token(registry: core.Workflows, request_url: str) -> str | None:
+    path = urlsplit(request_url).path
+    base_path = urlsplit(registry._base_url).path.rstrip("/")
+    prefix = f"{base_path}{WEBHOOK_PATH}/"
+    if not path.startswith(prefix):
+        return None
+    token = path[len(prefix) :]
+    if not token or "/" in token:
+        return None
+    return token
+
+
+def _absolute_webhook_request_url(registry: core.Workflows, request_url: str) -> str:
+    target = urlsplit(request_url)
+    if target.scheme and target.netloc:
+        return request_url
+    base = urlsplit(registry._base_url)
+    if target.path.startswith("/"):
+        path = target.path
+    else:
+        path = f"{base.path.rstrip('/')}/{target.path}"
+    return urlunsplit((base.scheme, base.netloc, path, target.query, target.fragment))
+
+
+def _webhook_header_pairs(headers: Mapping[str, str]) -> list[tuple[str, str]]:
+    multi_items = getattr(headers, "multi_items", None)
+    if callable(multi_items):
+        return [(str(name), str(value)) for name, value in multi_items()]
+    return [(str(name), str(value)) for name, value in headers.items()]
+
+
+def webhook_entrypoint(registry: core.Workflows) -> w.HTTPHandler:
+    async def handler(request: w.HTTPRequest) -> w.HTTPResponse:
+        token = _webhook_token(registry, request.url)
+        if token is None:
+            return w.HTTPResponse(404, b"", {})
+        if request.method.upper() not in _WEBHOOK_METHODS:
+            return w.HTTPResponse(405, b"", {"allow": ", ".join(sorted(_WEBHOOK_METHODS))})
+
+        world = w.get_world()
+        try:
+            entity = await world.hooks_get_by_token(token)
+            if entity.is_webhook is not True:
+                return w.HTTPResponse(404, b"", {})
+            run = await world.runs_get(entity.run_id)
+            _, configured_response = await _hook_metadata(world, entity, run=run)
+
+            body = b"".join([chunk async for chunk in request.aiter_bytes()])
+            request_envelope = webhook.encode_request(
+                method=request.method,
+                url=_absolute_webhook_request_url(registry, request.url),
+                headers=_webhook_header_pairs(request.headers),
+                raw_body=body,
+            )
+            payload = ser.PayloadEncoder().encode(request_envelope)
+            if run.encryption_public_key is not None:
+                public_key = encryption.decode_key(
+                    run.encryption_public_key,
+                    what=f"the encryption public key of run {run.run_id}",
+                )
+                payload = ser.SEALED + encryption.seal_to_public_key(public_key, payload)
+
+            await world.events_create(
+                entity.run_id,
+                w.HookReceivedEventData(payload=payload, token=token).into_event(entity.hook_id),
+            )
+            execution_context = run.execution_context or {}
+            namespace = execution_context.get("queueNamespace")
+            if namespace is not None and not isinstance(namespace, str):
+                raise RuntimeError("Workflow run has an invalid queue namespace")
+            await world.queue(
+                w.get_queue_name(run.workflow_name, namespace),
+                w.WorkflowInvokePayload(run_id=entity.run_id),
+            )
+            return configured_response or w.HTTPResponse(202, b"", {})
+        except w.HookNotFoundError:
+            return w.HTTPResponse(404, b"", {})
+        except Exception:
+            logger.exception("Failed to deliver webhook request for token %r", token)
+            return w.HTTPResponse(500, b"", {})
+
+    return handler
+
+
 MANIFEST_PATH = "/.well-known/workflow/v1/manifest.json"
 MANIFEST_VERSION = "1.0.0"
 PUBLIC_MANIFEST_ENV = "WORKFLOW_PUBLIC_MANIFEST"
@@ -2617,9 +2752,9 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
     return Run(run_id, output_codec=wf.codec)
 
 
-async def _public_hook(
+async def _hook_metadata(
     world: w.World, hook: w.Hook, *, run: w.WorkflowRun | None = None
-) -> core.Hook:
+) -> tuple[Any, w.HTTPResponse | None]:
     metadata = hook.metadata
     if metadata is not None:
         key = None
@@ -2628,6 +2763,15 @@ async def _public_hook(
                 run = await world.runs_get(hook.run_id)
             key = await world.run_key(run.run_id, deployment_id=run.deployment_id)
         metadata = ser.hydrate(metadata, what=f"the metadata of hook {hook.hook_id}", key=key)
+    if hook.is_webhook is True:
+        return webhook.decode_metadata(metadata)
+    return metadata, None
+
+
+async def _public_hook(
+    world: w.World, hook: w.Hook, *, run: w.WorkflowRun | None = None
+) -> core.Hook:
+    metadata, _ = await _hook_metadata(world, hook, run=run)
     return core.Hook(
         token=hook.token,
         hook_id=hook.hook_id,

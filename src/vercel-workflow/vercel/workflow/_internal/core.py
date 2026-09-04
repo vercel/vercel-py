@@ -5,15 +5,17 @@ import dataclasses
 import datetime
 import functools
 import inspect
+import os
 import random as _random
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator
 from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeVar, overload
+from urllib.parse import urlsplit, urlunsplit
 
 import pydantic
 
 from vercel._internal.core.polyfills import Self
 
-from . import errors, py_sandbox, signature_codec, world as w
+from . import errors, py_sandbox, signature_codec, webhook, world as w
 from .duration import DurationParam
 from .errors import HookDisposedError
 
@@ -24,6 +26,29 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 DEFAULT_MAX_RETRIES = 3
+
+
+def _normalize_base_url(configured: str | None) -> str:
+    if configured is None:
+        vercel_url = os.environ.get("VERCEL_URL")
+        configured = (
+            f"https://{vercel_url}"
+            if vercel_url
+            else f"http://localhost:{os.environ.get('PORT', '3000')}"
+        )
+
+    parts = urlsplit(configured)
+    if (
+        parts.scheme not in {"http", "https"}
+        or not parts.netloc
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError("base_url must be an absolute HTTP(S) URL without query or fragment")
+    path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 def _bind_arguments(
@@ -215,6 +240,10 @@ class HookEvent(Generic[T]):
         self._token = token
         self._disposed = False
 
+    @property
+    def token(self) -> str:
+        return self._token
+
     def __await__(self) -> Generator[Any, None, T]:
         async def next_or_raise() -> T:
             try:
@@ -274,6 +303,19 @@ class HookEvent(Generic[T]):
         ctx.dispose_hook(correlation_id=self._correlation_id)
 
 
+class WebhookEvent(HookEvent[webhook.WebhookRequest[T]], Generic[T]):
+    def __init__(self, *, correlation_id: str, token: str, url: str) -> None:
+        super().__init__(correlation_id=correlation_id, token=token)
+        self._url = url
+
+    async def get_url(self) -> str:
+        """Register this webhook durably, then return its public URL."""
+        conflict = await self.get_conflict()
+        if conflict is not None:
+            raise errors.HookConflictError(self.token, conflict.run_id)
+        return self._url
+
+
 @dataclasses.dataclass(frozen=True)
 class Hook:
     token: str
@@ -294,6 +336,22 @@ class BaseHook:
             raise RuntimeError("cannot call wait() outside workflow") from None
         else:
             return ctx.create_hook(token, cls, metadata=metadata)
+
+    @classmethod
+    def wait_webhook(
+        cls,
+        *,
+        metadata: Any = None,
+        respond_with: w.HTTPResponse | None = None,
+    ) -> WebhookEvent[Self]:
+        from . import runtime
+
+        try:
+            ctx = runtime.WorkflowOrchestratorContext.current()
+        except LookupError:
+            raise RuntimeError("cannot call wait_webhook() outside workflow") from None
+        else:
+            return ctx.create_webhook(cls, metadata=metadata, respond_with=respond_with)
 
     async def resume(self, token_or_hook: str | Hook, **kwargs) -> Hook:
         from . import runtime
@@ -324,10 +382,12 @@ class Workflows:
         as_vercel_job: bool = True,
         namespace: str | None = None,
         sandbox_policy: py_sandbox.SandboxPolicy | None = None,
+        base_url: str | None = None,
     ):
         w.validate_queue_namespace(namespace)
 
         self._namespace = namespace
+        self._base_url = _normalize_base_url(base_url)
         self._workflows: dict[str, Workflow] = {}
         self._steps: dict[str, Step] = {}
         if sandbox_policy is None:
@@ -369,6 +429,17 @@ class Workflows:
         from . import runtime
 
         return runtime.manifest_entrypoint(self)
+
+    @property
+    def webhook_handler(self) -> w.HTTPHandler:
+        from . import runtime
+
+        return runtime.webhook_entrypoint(self)
+
+    def _webhook_url(self, token: str) -> str:
+        from .runtime import WEBHOOK_PATH
+
+        return f"{self._base_url}{WEBHOOK_PATH}/{token}"
 
     def workflow(self, func: Callable[P, Coroutine[Any, Any, T]]) -> Workflow[P, T]:
         rv = Workflow(func, registry=self)

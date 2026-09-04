@@ -162,6 +162,88 @@ decoded metadata. Pass it back to `resume()` rather than the token to reuse the
 lookup. `get_hook_by_token()` raises `HookNotFoundError` when no live hook holds
 the token.
 
+### Webhooks
+
+Use `wait_webhook()` when an external service needs a generated callback URL:
+
+```python
+import pydantic
+from vercel.workflow import BaseHook, HTTPResponse, Workflows
+
+app = Workflows(base_url="https://example.com/api")
+
+
+class StripeEvent(BaseHook, pydantic.BaseModel):
+    id: str
+    type: str
+
+
+@app.step
+async def register_callback(url: str) -> None:
+    ...
+
+
+@app.workflow
+async def wait_for_stripe() -> str:
+    webhook = StripeEvent.wait_webhook(
+        metadata={"provider": "stripe"},
+        respond_with=HTTPResponse.json({"received": True}, status=200),
+    )
+    url = await webhook.get_url()  # waits until registration is durable
+    await register_callback(url)
+    request = await webhook
+    verify_signature(request.headers, request.raw_body)
+    return request.body.type
+```
+
+`WebhookRequest` retains the method, absolute URL (including the query),
+case-insensitive headers and exact body bytes. Its `body` is the JSON-decoded
+Pydantic model or dataclass. Decoding and validation happen when the workflow
+consumes the durable event, so invalid input is not reported synchronously as
+HTTP `422`. With no `respond_with`, the endpoint returns an empty `202` after
+the event has been stored. A webhook can be awaited or iterated more than once
+and remains live until `dispose()` or an `async with` exit.
+
+Mount all seven supported methods on the standard route. For example, a
+Starlette adapter can translate its request and response types around the
+framework-neutral handler:
+
+```python
+import httpx
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import Response
+
+starlette = Starlette()
+
+
+class WebhookRequestAdapter:
+    def __init__(self, request: Request):
+        self.request = request
+        self.method = request.method
+        self.url = str(request.url)
+        self.headers = httpx.Headers(request.headers.raw)
+
+    async def aiter_bytes(self, chunk_size=None):
+        async for chunk in self.request.stream():
+            yield chunk
+
+
+@starlette.route(
+    "/api/.well-known/workflow/v1/webhook/{token}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+)
+async def workflow_webhook(request: Request) -> Response:
+    result = await app.webhook_handler(WebhookRequestAdapter(request))
+    return Response(result.body, status_code=result.status, headers=result.headers)
+```
+
+Set `base_url` to the externally visible URL, including any reverse-proxy path
+prefix. Otherwise it falls back to `https://${VERCEL_URL}`, then
+`http://localhost:${PORT}` (`3000` by default). Webhook tokens are unguessable
+identifiers, not complete authentication; verify the provider signature from
+`raw_body` and headers. Manual responses are not supported in this release.
+
 ## Streaming
 
 Every run has a stream a step can write to while it runs, so a client sees

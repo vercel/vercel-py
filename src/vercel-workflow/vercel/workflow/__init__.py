@@ -2,6 +2,7 @@ from vercel.workflow._internal.core import (
     BaseHook,
     Hook,
     HookEvent,
+    WebhookEvent,
     Workflows,
     now,
     random,
@@ -11,6 +12,7 @@ from vercel.workflow._internal.core import (
 from vercel.workflow._internal.runtime import (
     ENDPOINT_PATH,
     MANIFEST_PATH,
+    WEBHOOK_PATH,
     Run,
     StepInfo,
     WorkflowFeatures,
@@ -30,6 +32,7 @@ from vercel.workflow._internal.streams import (
     WorkflowStreamWriter,
     WorkflowWritable,
 )
+from vercel.workflow._internal.webhook import WebhookRequest
 from vercel.workflow._internal.world import HTTPHandler, HTTPRequest, HTTPResponse
 
 from . import sandbox
@@ -56,6 +59,7 @@ __all__ = [
     "Workflows",
     "ENDPOINT_PATH",
     "MANIFEST_PATH",
+    "WEBHOOK_PATH",
     "HTTPHandler",
     "HTTPRequest",
     "HTTPResponse",
@@ -70,6 +74,8 @@ __all__ = [
     "BaseHook",
     "Hook",
     "HookEvent",
+    "WebhookEvent",
+    "WebhookRequest",
     "get_hook_by_token",
     "get_step_metadata",
     "get_workflow_metadata",

@@ -439,6 +439,14 @@ def test_the_sealed_box_opens_what_typescript_sealed() -> None:
     assert encryption.open_sealed_envelope(RUN_KEY, TS_SEALED) == b'devl[["amount"],21]'
 
 
+def test_the_sealed_box_writer_round_trips_through_the_workflow_reader() -> None:
+    plaintext = PLAIN_ENCODER.encode({"webhook": True})
+
+    payload = ser.SEALED + encryption.seal_to_public_key(TS_PUBLIC_KEY, plaintext)
+
+    assert ser.hydrate(payload, what="the webhook payload", key=RUN_KEY) == {"webhook": True}
+
+
 def test_the_sealed_box_carries_no_additional_data() -> None:
     # `resumeHook` seals with `sealTo(runPublicKey)` and passes no AAD; the
     # construction binds the payload to its recipient through the content key's

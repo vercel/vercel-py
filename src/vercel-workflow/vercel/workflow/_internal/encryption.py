@@ -1,8 +1,5 @@
 """The `encr` and `encp` payload formats, as `@workflow/world-vercel` writes them.
 
-Decryption only, for now: writing either is not implemented, so the payloads
-this SDK produces are plain `devl`.
-
 Both envelopes are two nested layers, and both descend from the same per-run
 key material :func:`derive_run_key` produces::
 
@@ -23,6 +20,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import os
 from typing import Any, NamedTuple
 
 from cryptography.exceptions import InvalidTag
@@ -55,6 +53,10 @@ def _aes_gcm_decrypt(key: bytes, nonce: bytes, sealed: bytes) -> bytes | None:
         return AESGCM(key).decrypt(nonce, sealed, None)
     except InvalidTag:
         return None
+
+
+def _aes_gcm_encrypt(key: bytes, nonce: bytes, plaintext: bytes) -> bytes:
+    return AESGCM(key).encrypt(nonce, plaintext, None)
 
 
 # Make `cryptography` do its internal imports now.
@@ -198,6 +200,28 @@ def derive_run_key_pair(run_key: bytes) -> RunKeyPair:
         raise ValueError(f"A run key is {KEY_LENGTH} bytes, got {len(run_key)}")
     scalar = hkdf_sha256(ikm=run_key, salt=bytes(32), info=SCALAR_INFO, length=KEY_LENGTH)
     return RunKeyPair(scalar, _x25519_public_key(scalar))
+
+
+def seal_to_public_key(public_key: bytes, plaintext: bytes) -> bytes:
+    """Seal *plaintext* to a run's published X25519 public key.
+
+    The returned bytes are the payload after the ``encp`` format prefix.
+    """
+    if len(public_key) != KEY_LENGTH:
+        raise ValueError(f"A run public key is {KEY_LENGTH} bytes, got {len(public_key)}")
+    ephemeral_scalar = os.urandom(KEY_LENGTH)
+    ephemeral_public_key = _x25519_public_key(ephemeral_scalar)
+    shared = _x25519_exchange(ephemeral_scalar, public_key)
+    if shared is None:
+        raise ValueError("the run encryption public key is not a valid curve point")
+    content_key = hkdf_sha256(
+        ikm=shared,
+        salt=bytes(32),
+        info=CONTENT_KEY_INFO + ephemeral_public_key + public_key,
+        length=KEY_LENGTH,
+    )
+    nonce = os.urandom(NONCE_LENGTH)
+    return ephemeral_public_key + nonce + _aes_gcm_encrypt(content_key, nonce, plaintext)
 
 
 def open_sealed_envelope(run_key: bytes, payload: bytes) -> bytes:

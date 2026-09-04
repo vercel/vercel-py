@@ -1175,7 +1175,7 @@ class LocalWorld(w.World):
                 environment="local",
                 created_at=now,
                 spec_version=data.spec_version,
-                is_webhook=False,
+                is_webhook=bool(hook_data.is_webhook),
                 is_system=bool(hook_data.is_system),
             )
             hook_path = self.data_dir / "hooks" / f"{data.correlation_id}.json"

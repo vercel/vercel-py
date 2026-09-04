@@ -753,6 +753,9 @@ class HookCreatedEventData(BaseModel):
     is_system: bool | None = pydantic.Field(
         default=None, alias="isSystem", exclude_if=lambda e: e is None
     )
+    is_webhook: bool | None = pydantic.Field(
+        default=None, alias="isWebhook", exclude_if=lambda e: e is None
+    )
 
     def into_event(self, correlation_id: str) -> "HookCreatedEvent":
         return HookCreatedEvent(correlation_id=correlation_id, event_data=self)
