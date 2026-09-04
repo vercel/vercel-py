@@ -14,8 +14,14 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 
+import anyio
+from anyio import from_thread
+
 from ..embedded import create_embedded_queue_app
 from .embedded import EmbeddedQueueDevServer
+
+_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_SERVER_STOP_TIMEOUT_MARGIN_SECONDS = 1.0
 
 
 @contextlib.contextmanager
@@ -36,8 +42,9 @@ def embedded_queue_dev_server(
         log_level="warning",
         lifespan="off",
         ws="none",
+        timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
     )
-    server = uvicorn.Server(config)
+    server = _cancellable_server(uvicorn, config)
     thread = threading.Thread(target=_profiled_server_run(server, profile), daemon=True)
     thread.start()
     _wait_for_server(server)
@@ -50,11 +57,15 @@ def embedded_queue_dev_server(
             _thread=thread,
         )
     finally:
-        server.should_exit = True
-        thread.join(timeout=5)
-        if thread.is_alive():
-            raise RuntimeError("embedded queue dev server did not stop")
-        app.state.close()
+        try:
+            _stop_server(
+                server,
+                thread,
+                "embedded queue dev server",
+                timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        finally:
+            app.state.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,6 +118,52 @@ def _wait_for_server(server: Any, name: str = "embedded queue dev server") -> No
             time.sleep(0.01)
             continue
         raise RuntimeError(f"{name} did not start")
+
+
+def _stop_server(
+    server: Any,
+    thread: threading.Thread,
+    name: str,
+    *,
+    timeout: float,
+) -> None:
+    server.should_exit = True
+    thread.join(timeout=timeout + _SERVER_STOP_TIMEOUT_MARGIN_SECONDS)
+    if thread.is_alive():
+        server.force_exit = True
+        server.cancel()
+        thread.join(timeout=timeout)
+    if thread.is_alive():
+        raise RuntimeError(f"{name} did not stop")
+
+
+def _cancellable_server(uvicorn: Any, config: Any) -> Any:
+    class CancellableServer(uvicorn.Server):
+        _cancel_scope: anyio.CancelScope | None = None
+        _portal: from_thread.BlockingPortal | None = None
+
+        def run(self, sockets: list[Any] | None = None) -> None:
+            backend_options: dict[str, Any] = {}
+            get_loop_factory = getattr(self.config, "get_loop_factory", None)
+            if get_loop_factory is not None:
+                backend_options["loop_factory"] = get_loop_factory()
+            else:
+                self.config.setup_event_loop()
+            anyio.run(self._run, sockets, backend_options=backend_options)
+
+        async def _run(self, sockets: list[Any] | None) -> None:
+            async with from_thread.BlockingPortal() as self._portal:
+                with anyio.CancelScope() as self._cancel_scope:
+                    await self.serve(sockets=sockets)
+
+        def cancel(self) -> None:
+            if self._portal is not None and self._cancel_scope is not None:
+                try:
+                    self._portal.start_task_soon(self._cancel_scope.cancel)
+                except RuntimeError:
+                    pass
+
+    return CancellableServer(config)
 
 
 def _server_port(server: Any) -> int:
