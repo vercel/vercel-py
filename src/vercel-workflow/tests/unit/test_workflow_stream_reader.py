@@ -303,6 +303,16 @@ class TestRunApi:
 
         assert [c async for c in runtime.read_stream(RUN_ID, "strm_someone_else")] == ["x"]
 
+    async def test_read_stream_exposes_payload_serialization_errors(self) -> None:
+        world = ReplayWorld([])
+        world.frames = [streams.encode_frame(b"invalid")]
+        w.set_world(world)
+
+        with pytest.raises(ser.SerializationError) as raised:
+            [c async for c in runtime.read_stream(RUN_ID, NAME)]
+
+        assert type(raised.value) is ser.SerializationError
+
 
 class TestTypedReads:
     """A type on the read side validates each chunk, as a step argument is."""

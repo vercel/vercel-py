@@ -2040,18 +2040,21 @@ async def _run_cancellable_step(
     async def listen() -> None:
         nonlocal cancelled, reason
         try:
-            async for chunk in streams.reconnecting_frames(world, run_id, stream_name):
-                cancelled = True
-                try:
-                    data = ser.hydrate(
-                        chunk, what=f"the cancellation of step {step_id}", key=run_key
-                    )
-                except ser.SerializationError:
-                    pass
-                else:
+            source = _read_stream(
+                world,
+                run_id,
+                stream_name,
+                None,
+                0,
+                key=run_key,
+                ignore_payload_errors=True,
+            )
+            async with contextlib.aclosing(source):
+                async for data in source:
+                    cancelled = True
                     if isinstance(data, dict) and data.get("reason") is not None:
                         reason = str(data["reason"])
-                break
+                    break
         except Exception as error:
             # A dead listener must not fail the step: without the signal
             # the step simply runs to completion.
@@ -2712,7 +2715,14 @@ def read_stream(
 
 
 async def _read_stream(
-    world: w.World, run_id: str, name: str, type: Any, start_index: int | None
+    world: w.World,
+    run_id: str,
+    name: str,
+    type: Any,
+    start_index: int | None,
+    *,
+    key: bytes | None = None,
+    ignore_payload_errors: bool = False,
 ) -> AsyncGenerator[Any, None]:
     codec = None if type is None else signature_codec.TypeCodec(type)
     frames = streams.reconnecting_frames(world, run_id, name, start_index)
@@ -2720,7 +2730,16 @@ async def _read_stream(
         index = start_index or 0
         async for payload in frames:
             what = f"chunk {index} of stream {name}"
-            value = ser.hydrate(payload, what=what)
+            try:
+                value = ser.hydrate(payload, what=what, key=key)
+            except ser.SerializationError:
+                if ignore_payload_errors:
+                    # This is only used by cancellation streams: the payload carries
+                    # an optional cancel reason; the cancel happens anyway even if
+                    # the reason cannot be read.
+                    value = None
+                else:
+                    raise
             if codec is not None:
                 value = codec.validate(value, what=what)
             yield value
@@ -2804,6 +2823,35 @@ async def get_hook_by_token(token: str) -> core.Hook:
     return await _public_hook(world, await world.hooks_get_by_token(token))
 
 
+async def _hook_resume_payload_encoder(world: w.World, run: w.WorkflowRun) -> ser.PayloadEncoder:
+    """Build an encoder for a hook payload written from outside its run.
+
+    Prefer sealing to the run's published X25519 public key, avoiding a
+    symmetric-key lookup. If no valid public key is stored, fall back to the
+    symmetric run key. ``check_target_core_version`` disables symmetric
+    encryption or compression when the target run's library version doesn't
+    support them.
+    """
+    recipient_public_key = None
+    if run.encryption_public_key is not None:
+        try:
+            recipient_public_key = encryption.decode_key(
+                run.encryption_public_key, what="the run encryption public key"
+            )
+        except ValueError:
+            pass
+
+    encryption_key = None
+    if recipient_public_key is None:
+        encryption_key = await world.run_key(run.run_id, deployment_id=run.deployment_id)
+
+    return run.payload_encoder(
+        encryption_key=encryption_key,
+        recipient_public_key=recipient_public_key,
+        check_target_core_version=True,
+    )
+
+
 async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook:
     world = w.get_world()
     if isinstance(token_or_hook, str):
@@ -2813,23 +2861,7 @@ async def resume_hook(token_or_hook: str | core.Hook, payload: Any) -> core.Hook
     else:
         hook = token_or_hook
         run = await world.runs_get(hook.run_id)
-    recipient_public_key = None
-    if run.encryption_public_key is not None:
-        try:
-            recipient_public_key = encryption.decode_key(
-                run.encryption_public_key, what="the run encryption public key"
-            )
-        except ValueError:
-            # Older or corrupted rows must retain the symmetric fallback.
-            pass
-    encryption_key = None
-    if recipient_public_key is None:
-        encryption_key = await world.run_key(run.run_id, deployment_id=run.deployment_id)
-    payload_encoder = run.payload_encoder(
-        encryption_key=encryption_key,
-        recipient_public_key=recipient_public_key,
-        check_target_core_version=True,
-    )
+    payload_encoder = await _hook_resume_payload_encoder(world, run)
     data = w.HookReceivedEventData(payload=payload_encoder.encode(payload))
     await world.events_create(hook.run_id, data.into_event(hook.hook_id))
     execution_context = run.execution_context or {}

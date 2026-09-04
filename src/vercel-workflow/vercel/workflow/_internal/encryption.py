@@ -20,7 +20,7 @@ import base64
 import binascii
 import hashlib
 import hmac
-import os
+import secrets
 from typing import Any, NamedTuple
 
 from cryptography.exceptions import InvalidTag
@@ -59,7 +59,7 @@ def encrypt_envelope(key: bytes, plaintext: bytes) -> bytes:
     """Seal *plaintext* with AES-256-GCM, returning ``nonce + ciphertext + tag``."""
     if len(key) != KEY_LENGTH:
         raise ValueError(f"A run key is {KEY_LENGTH} bytes, got {len(key)}")
-    nonce = os.urandom(NONCE_LENGTH)
+    nonce = secrets.token_bytes(NONCE_LENGTH)
     return nonce + AESGCM(key).encrypt(nonce, plaintext, None)
 
 
@@ -252,7 +252,7 @@ def seal_envelope(recipient_public_key: bytes, plaintext: bytes) -> bytes:
     """
     if len(recipient_public_key) != KEY_LENGTH:
         raise ValueError(f"A run public key is {KEY_LENGTH} bytes, got {len(recipient_public_key)}")
-    ephemeral_scalar = os.urandom(KEY_LENGTH)
+    ephemeral_scalar = secrets.token_bytes(KEY_LENGTH)
     ephemeral_public_key = _x25519_public_key(ephemeral_scalar)
     shared = _x25519_exchange(ephemeral_scalar, recipient_public_key)
     if shared is None:
