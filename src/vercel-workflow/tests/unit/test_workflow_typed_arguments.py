@@ -412,7 +412,7 @@ def test_a_name_that_never_resolves_passes_through_rather_than_erroring_late() -
     @registry.step
     async def nested(items: list[Order]) -> None: ...
 
-    assert dangling.codec._adapter("item") is None
+    assert dangling.codec._codec("item")._adapter is None
     assert dangling.codec.validate_arguments([], {"item": {"whatever": 1}}) == (
         [],
         {"item": {"whatever": 1}},
@@ -420,7 +420,7 @@ def test_a_name_that_never_resolves_passes_through_rather_than_erroring_late() -
 
     args, kwargs = nested.codec.validate_arguments([], {"items": [_ORDER_DICT]})
     assert args == []
-    if nested.codec._adapter("items") is None:
+    if nested.codec._codec("items")._adapter is None:
         assert kwargs == {"items": [_ORDER_DICT]}  # 3.10: unresolved, passed through
     else:
         assert kwargs == {"items": [Order.model_validate(_ORDER_DICT)]}
@@ -497,7 +497,7 @@ def test_a_dump_failure_propagates(monkeypatch) -> None:  # type: ignore[no-unty
     @registry.step
     async def fulfil(order: Order) -> None: ...
 
-    adapter = fulfil.codec._adapter("order")
+    adapter = fulfil.codec._codec("order")._adapter
     assert adapter is not None
 
     def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
@@ -722,11 +722,11 @@ def test_adapters_are_built_once_per_instance_and_not_shared() -> None:
     @registry.step
     async def fulfil(order: Order) -> None: ...
 
-    first = fulfil.codec._adapter("order")
-    assert fulfil.codec._adapter("order") is first
+    first = fulfil.codec._codec("order")
+    assert fulfil.codec._codec("order") is first
 
     other = core.Step(fulfil.func)
-    assert other.codec._adapter("order") is not first
+    assert other.codec._codec("order") is not first
 
 
 def test_binding_without_a_codec_only_canonicalizes_the_call() -> None:

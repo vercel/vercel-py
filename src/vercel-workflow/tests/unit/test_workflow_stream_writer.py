@@ -314,15 +314,16 @@ async def test_cancelling_the_dispatch_does_not_poison_the_writer() -> None:
         writer = streams.WorkflowStreamWriter(
             world=world, run_id=RUN_ID, name=NAME, task_group=task_group
         )
+        sink = writer._sink
         await writer.write("first")
         await _settle()  # the dispatch task is now blocked on the gate
-        assert writer._dispatching
+        assert sink._dispatching
         task_group.cancel_scope.cancel()
 
-    assert writer._sink_error is None
-    assert not writer._dispatching
+    assert sink._sink_error is None
+    assert not sink._dispatching
     assert world.batches == []
-    assert _values([writer._buffer]) == ["first"]
+    assert _values([sink._buffer]) == ["first"]
 
 
 async def test_drain_on_an_untouched_writer_is_a_no_op() -> None:

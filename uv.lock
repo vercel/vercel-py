@@ -686,7 +686,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -732,7 +732,7 @@ name = "ggt"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4b/e5/b125686afaed90b803c91a4394d6fb3520df53734bcd1cea3410645c1265/ggt-1.6.0.tar.gz", hash = "sha256:c2bee3eeeb847da985bdf4a41a0c90220d76c69126c88ba0bcf6d5b6e9d57505", size = 206975, upload-time = "2026-08-31T21:54:03.482Z" }
 wheels = [
@@ -2849,7 +2849,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "semver" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
     { name = "vercel-headers" },
     { name = "vercel-internal-core" },
     { name = "vercel-oidc" },
@@ -2866,7 +2866,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.12.0,<3" },
     { name = "semver", specifier = ">=3,<4" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2,<3" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'", specifier = ">=4.4.0,<5" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },

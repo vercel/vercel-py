@@ -2,7 +2,7 @@
 
 Covers:
 - _RESTRICTIONS: builtins, datetime, platform, os, time, socket, random, threading,
-  asyncio
+  asyncio, zstandard
 - _BLOCKED: subprocess, ssl, ctypes, multiprocessing, signal, etc.
 - _PASSTHROUGHS: stdlib modules that pass through unchanged
 - Loop proxy: allowlisted methods pass, everything else restricted
@@ -453,6 +453,68 @@ class TestThreadingRestrictions:
 
     def test_current_thread_allowed(self):
         _run_in_sandbox("import threading; threading.current_thread()")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  zstandard restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestZstandardRestrictions:
+    @pytest.fixture(autouse=True)
+    def _require_zstandard(self):
+        pytest.importorskip("zstandard")
+
+    def test_zstandard_imports(self):
+        """zstandard should be importable inside the sandbox."""
+        _run_in_sandbox("import zstandard")
+
+    def test_zstandard_open_blocked(self):
+        """zstandard.open should be blocked inside the sandbox."""
+        _raises_in_sandbox("import zstandard; zstandard.open('file.zst')")
+
+    def test_from_zstandard_open_blocked(self):
+        """from zstandard import open should also be blocked inside the sandbox."""
+        _raises_in_sandbox("from zstandard import open; open('file.zst')")
+
+    def test_zstandard_compress_allowed(self):
+        """zstandard compression and decompression should work inside the sandbox."""
+        ns = _run_in_sandbox(
+            "import zstandard; "
+            "data = zstandard.compress(b'deterministic payload'); "
+            "result = zstandard.decompress(data)"
+        )
+        assert ns["result"] == b"deterministic payload"
+
+    def test_zstandard_classes_allowed(self):
+        """ZstdCompressor and ZstdDecompressor should work inside the sandbox."""
+        ns = _run_in_sandbox(
+            "import zstandard; "
+            "cctx = zstandard.ZstdCompressor(); "
+            "dctx = zstandard.ZstdDecompressor(); "
+            "result = dctx.decompress(cctx.compress(b'streaming payload'))"
+        )
+        assert ns["result"] == b"streaming payload"
+
+    def test_host_zstandard_open_unaffected(self):
+        """zstandard.open on the host should remain unblocked."""
+        import zstandard
+
+        assert callable(zstandard.open)
+        _raises_in_sandbox("import zstandard; zstandard.open('file.zst')")
+        assert callable(zstandard.open)
+
+    def test_httpx_import_succeeds_with_zstandard(self, monkeypatch: pytest.MonkeyPatch):
+        """httpx importing zstandard inside the sandbox should succeed."""
+
+        class _HideDevDeps:
+            def find_spec(self, fullname, path, target=None):
+                if fullname.split(".")[0] in ("rich", "pygments", "click"):
+                    raise ModuleNotFoundError(f"No module named {fullname}")
+
+        monkeypatch.setattr(sys, "meta_path", [_HideDevDeps(), *sys.meta_path])
+        ns = _run_in_sandbox("import httpx; result = httpx.__name__")
+        assert ns["result"] == "httpx"
 
 
 # ═══════════════════════════════════════════════════════════════
