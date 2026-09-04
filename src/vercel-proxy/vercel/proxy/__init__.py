@@ -5,11 +5,12 @@ from ._method import Method
 from ._params import Params
 from ._proxy import Proxy
 from ._request import Request
-from ._response import Response
+from ._response import Kind, Response
 from .version import __version__
 
 __all__ = [
     "Headers",
+    "Kind",
     "Method",
     "Params",
     "Proxy",
