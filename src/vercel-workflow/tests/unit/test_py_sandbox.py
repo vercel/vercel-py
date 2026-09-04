@@ -2,10 +2,10 @@
 
 Covers:
 - _RESTRICTIONS: builtins, datetime, platform, os, time, socket, random, threading,
-  asyncio, zstandard
+  zstandard
 - _BLOCKED: subprocess, ssl, ctypes, multiprocessing, signal, etc.
-- _PASSTHROUGHS: stdlib modules that pass through unchanged
-- Loop proxy: allowlisted methods pass, everything else restricted
+- _PASSTHROUGHS: stdlib modules that pass through unchanged (including asyncio)
+- WorkflowLoop: allowlisted methods pass, restricted I/O/subprocess methods blocked
 - random: module-level functions blocked; explicit Random(seed) allowed
 - Module isolation: non-passthrough modules are freshly imported
 """
@@ -518,7 +518,7 @@ class TestZstandardRestrictions:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  asyncio restrictions + loop proxy
+#  asyncio in sandbox
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -527,76 +527,34 @@ class TestAsyncioRestrictions:
         """asyncio should be importable inside the sandbox."""
         _run_in_sandbox("import asyncio")
 
-    @pytest.mark.asyncio
-    async def test_loop_create_connection_blocked(self):
-        with workflow_sandbox():
-            import asyncio
+    def test_asyncio_run_blocked(self):
+        """asyncio.run cannot be used to escape the workflow loop."""
+        _raises_in_sandbox("import asyncio; asyncio.run(None)")
 
-            loop = asyncio.get_running_loop()
-            with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
-                loop.create_connection(None, "localhost", 80)  # type: ignore[call-overload]
+    def test_asyncio_events_loop_escape_blocked(self):
+        """asyncio.events cannot be used to escape or overwrite the event loop."""
+        _raises_in_sandbox("import asyncio.events; asyncio.events.new_event_loop()")
+        _raises_in_sandbox("import asyncio.events; asyncio.events.set_event_loop(None)")
+        ns = _run_in_sandbox(
+            "import asyncio.events; "
+            "loop_cls = asyncio.events.AbstractEventLoop; "
+            "getter = asyncio.events.get_running_loop"
+        )
+        assert ns["loop_cls"] is not None
+        assert callable(ns["getter"])
 
-    @pytest.mark.asyncio
-    async def test_loop_subprocess_exec_blocked(self):
-        with workflow_sandbox():
-            import asyncio
+    def test_host_asyncio_unaffected(self):
+        """Host asyncio functions should remain unblocked."""
+        import asyncio
 
-            loop = asyncio.get_running_loop()
-            with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
-                loop.subprocess_exec(None, "echo")  # type: ignore[arg-type,unused-coroutine]
-
-    @pytest.mark.asyncio
-    async def test_loop_subprocess_shell_blocked(self):
-        with workflow_sandbox():
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-            with pytest.raises(SandboxRestrictionError, match="loop.subprocess_shell"):
-                loop.subprocess_shell(None, "echo")  # type: ignore[arg-type,unused-coroutine]
-
-    @pytest.mark.asyncio
-    async def test_loop_call_soon_allowed(self):
-        with workflow_sandbox():
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-            called: list[int] = []
-            loop.call_soon(called.append, 1)
-            await asyncio.sleep(0)  # yield to let call_soon fire
-            # call_soon should not raise — we can't easily assert it fired
-            # because asyncio.sleep is going through the real loop, but
-            # the important thing is call_soon didn't raise.
-
-    @pytest.mark.asyncio
-    async def test_loop_create_future_allowed(self):
-        with workflow_sandbox():
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-            fut = loop.create_future()
-            assert not fut.done()
-
-    @pytest.mark.asyncio
-    async def test_loop_create_task_allowed(self):
-        with workflow_sandbox():
-            import asyncio
-
-            async def noop():
-                pass
-
-            loop = asyncio.get_running_loop()
-            task = loop.create_task(noop())
-            await task
+        assert callable(asyncio.run)
+        _raises_in_sandbox("import asyncio; asyncio.run(None)")
+        assert callable(asyncio.run)
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
     async def test_taskgroup_works_in_sandbox(self):
-        """asyncio.TaskGroup must work inside the sandbox.
-
-        Regression: TaskGroup.__aenter__ calls current_task() which
-        returned None inside the sandbox, causing RuntimeError:
-        'TaskGroup cannot determine the parent task'.
-        """
+        """asyncio.TaskGroup must work inside the sandbox."""
         with workflow_sandbox():
             import asyncio
 
@@ -614,14 +572,7 @@ class TestAsyncioRestrictions:
     @pytest.mark.asyncio
     @pytest.mark.skipif(sys.version_info < (3, 11), reason="TaskGroup requires Python 3.11+")
     async def test_taskgroup_cancels_siblings_on_error(self):
-        """TaskGroup must correctly cancel siblings when one task fails.
-
-        Regression: when asyncio was a plain passthrough (no restriction
-        proxy), CancelledError inside the sandbox was a different class
-        than the one used by the C _asyncio extension, so TaskGroup's
-        _on_task_done failed with:
-            AttributeError: 'NoneType' object has no attribute 'append'
-        """
+        """TaskGroup must correctly cancel siblings when one task fails."""
         with workflow_sandbox():
             import asyncio
 
@@ -648,112 +599,75 @@ class TestAsyncioRestrictions:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  asyncio loop proxy with uvloop
+#  WorkflowLoop restrictions
 # ═══════════════════════════════════════════════════════════════
 
 
-class TestUvloopProxy:
-    """Loop proxy must work with uvloop (C-based event loop)."""
+class TestWorkflowLoopRestrictions:
+    """WorkflowLoop blocks I/O, subprocess, and non-deterministic methods."""
 
-    @pytest.fixture(autouse=True)
-    def _use_uvloop(self):
-        """Run every test in this class on uvloop."""
-        uvloop = pytest.importorskip("uvloop")
-        loop = uvloop.new_event_loop()
-        yield loop
+    @staticmethod
+    def _make_loop():
+        from vercel.workflow._internal.loop import WorkflowLoop
+
+        class DummyWorkflow:
+            def resume(self):
+                pass
+
+            def time(self):
+                return 0.0
+
+            def check_suspended(self):
+                pass
+
+            def run_wait(self, spec):
+                pass
+
+        return WorkflowLoop(workflow=DummyWorkflow())
+
+    def test_loop_create_connection_blocked(self):
+        loop = self._make_loop()
+        with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
+            loop.create_connection(None, "localhost", 80)
+
+    def test_loop_subprocess_exec_blocked(self):
+        loop = self._make_loop()
+        with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
+            loop.subprocess_exec(None, "echo")
+
+    def test_loop_subprocess_shell_blocked(self):
+        loop = self._make_loop()
+        with pytest.raises(SandboxRestrictionError, match="loop.subprocess_shell"):
+            loop.subprocess_shell(None, "echo")
+
+    def test_loop_call_soon_allowed(self):
+        loop = self._make_loop()
+        called: list[int] = []
+        loop.call_soon(called.append, 1)
+        assert len(loop._ready) == 1
+
+    def test_loop_create_future_allowed(self):
+        loop = self._make_loop()
+        fut = loop.create_future()
+        assert not fut.done()
+
+    def test_loop_create_task_allowed(self):
+        import asyncio
+
+        loop = self._make_loop()
+
+        async def run():
+            task = loop.create_task(asyncio.sleep(0))
+            await task
+            assert task.done()
+
+        loop.run_until_complete(run())
         loop.close()
 
-    def _run_async(self, coro, loop):
-        return loop.run_until_complete(coro)
-
-    def test_uvloop_create_connection_blocked(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                with pytest.raises(SandboxRestrictionError, match="loop.create_connection"):
-                    proxy_loop.create_connection(  # type: ignore[call-overload]
-                        None, "localhost", 80
-                    )
-
-        self._run_async(go(), loop)
-
-    def test_uvloop_subprocess_exec_blocked(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                with pytest.raises(SandboxRestrictionError, match="loop.subprocess_exec"):
-                    proxy_loop.subprocess_exec(  # type: ignore[arg-type,unused-coroutine]
-                        None,  # type: ignore[arg-type]
-                        "echo",
-                    )
-
-        self._run_async(go(), loop)
-
-    def test_uvloop_call_soon_allowed(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                called: list[int] = []
-                proxy_loop.call_soon(called.append, 1)
-                await asyncio.sleep(0)
-                # call_soon should not raise
-
-        self._run_async(go(), loop)
-
-    def test_uvloop_create_task_allowed(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                async def noop():
-                    pass
-
-                proxy_loop = asyncio.get_running_loop()
-                task = proxy_loop.create_task(noop())
-                await task
-
-        self._run_async(go(), loop)
-
-    def test_uvloop_create_future_allowed(self, _use_uvloop):
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                fut = proxy_loop.create_future()
-                assert not fut.done()
-
-        self._run_async(go(), loop)
-
-    def test_uvloop_proxy_wraps_real_loop(self, _use_uvloop):
-        """Proxy loop should delegate allowed attrs to the real uvloop."""
-        loop = _use_uvloop
-
-        async def go():
-            with workflow_sandbox():
-                import asyncio
-
-                proxy_loop = asyncio.get_running_loop()
-                assert proxy_loop.is_running()
-                assert not proxy_loop.is_closed()
-
-        self._run_async(go(), loop)
+    def test_loop_nonexistent_attribute_raises_attribute_error(self):
+        loop = self._make_loop()
+        assert not hasattr(loop, "nonexistent_method")
+        assert getattr(loop, "nonexistent_method", None) is None
 
 
 # ═══════════════════════════════════════════════════════════════

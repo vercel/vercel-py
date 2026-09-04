@@ -13,7 +13,6 @@ import sys
 import threading
 import types
 import typing
-import weakref
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from importlib.abc import Loader, MetaPathFinder
@@ -181,114 +180,6 @@ class _RestrictedRandom(random.Random, metaclass=_RestrictedRandomMeta):
         super().seed(a, version=version)
 
 
-def _wrap_get_loop(real_fn: Callable[..., Any]) -> Callable[..., Any]:
-    cache: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
-
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        real_loop = real_fn(*args, **kwargs)
-        if real_loop in cache:
-            return cache[real_loop]
-
-        real_loop_cls = type(real_loop)
-
-        class _LoopProxyMeta(type):
-            def __instancecheck__(cls, instance: Any) -> bool:
-                return isinstance(instance, real_loop_cls)
-
-            def __subclasscheck__(cls, subclass: type) -> bool:
-                return issubclass(subclass, real_loop_cls)
-
-        _LOOP_ALLOWED: frozenset[str] = frozenset(
-            {
-                # Core event loop lifecycle
-                "run_forever",
-                "run_until_complete",
-                "stop",
-                "close",
-                "is_running",
-                "is_closed",
-                "shutdown_asyncgens",
-                "shutdown_default_executor",
-                # Deterministic scheduling
-                "call_soon",
-                # Sleep based scheduling (does a workflow sleep)
-                "call_at",
-                "call_later",
-                # Time (uses deterministic time)
-                "time",
-                # Task / future creation
-                "create_future",
-                "create_task",
-                "set_task_factory",
-                "get_task_factory",
-                # Exception handling
-                "get_exception_handler",
-                "set_exception_handler",
-                "default_exception_handler",
-                "call_exception_handler",
-                # Debug
-                "get_debug",
-                "set_debug",
-                # Timer handle cancellation (internal)
-                "_timer_handle_cancelled",
-            }
-        )
-
-        class _LoopProxy(metaclass=_LoopProxyMeta):
-            """Wraps an event loop; only allowlisted methods pass through."""
-
-            def __init__(self, real: Any) -> None:
-                self._real = real
-
-            def __getattr__(self, name: str) -> Any:
-                if name.startswith("__") and name.endswith("__"):
-                    return getattr(self._real, name)
-                if name in _LOOP_ALLOWED:
-                    return getattr(self._real, name)
-                return _restricted(f"loop.{name}")
-
-            def __hash__(self) -> int:
-                return hash(self._real)
-
-            def __eq__(self, other: object) -> bool:
-                real = self._real
-                if hasattr(other, "_real"):
-                    return real is other._real
-                return real is other
-
-            def __repr__(self) -> str:
-                return f"<proxy for {self._real!r}>"
-
-        rv = _LoopProxy(real_loop)
-        cache[real_loop] = rv
-        return rv
-
-    return wrapper
-
-
-class _RestrictedAsyncioPolicy(_ModulePolicy):
-    """Wraps get_running_loop/get_event_loop to return a _LoopProxy."""
-
-    def post_exec(self, *, proxy: _ProxyModule, module: types.ModuleType, **kwargs: Any) -> None:
-        for attr in ("get_running_loop", "get_event_loop"):
-            real_fn = getattr(module, attr, None)
-            if real_fn is not None:
-                proxy.__dict__[attr] = _wrap_get_loop(real_fn)
-
-        # Wrap current_task so that passing a _LoopProxy works.
-        # The C implementation uses internal identity-based lookup that
-        # does not honour __hash__/__eq__, so we unwrap the proxy first.
-        real_current_task = getattr(module, "current_task", None)
-        if real_current_task is not None:
-
-            def _current_task(loop: Any = None) -> Any:
-                if loop is not None and hasattr(loop, "_real"):
-                    loop = loop._real
-                return real_current_task(loop)
-
-            proxy.__dict__["current_task"] = _current_task
-
-
 def _host_system() -> str:
     return _host_import("platform").system()
 
@@ -355,8 +246,6 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
         # all-caps constants (AF_*, SOCK_*, SOL_*, SO_*, IPPROTO_*, etc.)
         allow_if=str.isupper,
     ),
-    "asyncio": _RestrictedAsyncioPolicy("asyncio"),
-    "_asyncio": _RestrictedAsyncioPolicy("asyncio.events"),
     "threading": _blocklist(
         "threading",
         # thread creation
@@ -367,6 +256,42 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
         "settrace_all_threads",
         "setprofile",
         "setprofile_all_threads",
+    ),
+    "asyncio": _blocklist(
+        "asyncio",
+        # Event loop creation and management escapes
+        "run",
+        "Runner",
+        "new_event_loop",
+        "set_event_loop",
+        "get_event_loop_policy",
+        "set_event_loop_policy",
+        "get_child_watcher",
+        "set_child_watcher",
+        "DefaultEventLoopPolicy",
+        # Threading / concurrency escapes
+        "to_thread",
+        "run_coroutine_threadsafe",
+        # Subprocesses
+        "create_subprocess_exec",
+        "create_subprocess_shell",
+        # Network / socket I/O
+        "open_connection",
+        "open_unix_connection",
+        "start_server",
+        "start_unix_server",
+        # Bridging external threaded futures
+        "wrap_future",
+    ),
+    "asyncio.events": _blocklist(
+        "asyncio.events",
+        "new_event_loop",
+        "set_event_loop",
+        "get_event_loop_policy",
+        "set_event_loop_policy",
+        "get_child_watcher",
+        "set_child_watcher",
+        "BaseDefaultEventLoopPolicy",
     ),
     "zstandard": _blocklist("zstandard", "open"),
 }
@@ -387,6 +312,10 @@ _BLOCKED: set[str] = {
     "faulthandler",  # write to arbitrary fds
     "syslog",  # write to system log
     "readline",  # terminal input
+    # Asyncio submodules for subprocesses, threads, and runners
+    "asyncio.subprocess",
+    "asyncio.runners",
+    "asyncio.threads",
 }
 
 _PASSTHROUGHS: set[str] = {
