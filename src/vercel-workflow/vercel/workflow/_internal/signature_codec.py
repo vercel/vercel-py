@@ -11,7 +11,8 @@ untouched.
 
 SignatureCodec is layered on top of the lower-level serialization done
 by the `serialization` module, which handles anything that has been
-passed through.
+passed through. TypeCodec is the per-annotation unit it is made of, and
+is also what a typed stream carries.
 
 ===========  ==========================================================
 outbound     caller -> SignatureCodec.dump -> PayloadEncoder.encode
@@ -73,6 +74,39 @@ def _build_adapter(annotation: Any) -> pydantic.TypeAdapter[Any] | None:
     return adapter if adapter.pydantic_complete else None
 
 
+class TypeCodec:
+    """Dump and validate values against one annotation.
+
+    An annotation pydantic can build no schema for -- or `Any`, or one that
+    still needs resolving -- passes values through untouched in both
+    directions.
+    """
+
+    def __init__(self, annotation: Any) -> None:
+        self.annotation = annotation
+        self._adapter = _build_adapter(annotation)
+
+    def dump(self, value: Any) -> Any:
+        """*value*, as the annotation puts it on the wire."""
+        if self._adapter is None:
+            return value
+        # serialize_as_any so a subclass keeps the fields the annotation does
+        # not know about, rather than being silently truncated in transit.
+        # warnings=False because validation belongs to the receiving side; an
+        # actual serialization failure, however, must prevent writing bytes the
+        # receiver cannot reconstruct.
+        return self._adapter.dump_python(value, serialize_as_any=True, warnings=False)
+
+    def validate(self, value: Any, *, what: str) -> Any:
+        """*value* as the annotation reads it, or `TypeValidationError` naming *what*."""
+        if self._adapter is None:
+            return value
+        try:
+            return self._adapter.validate_python(value)
+        except pydantic.ValidationError as error:
+            raise TypeValidationError(f"{what} does not match: {error}") from error
+
+
 class SignatureCodec:
     """The adapters for one workflow's or step's signature.
 
@@ -87,7 +121,7 @@ class SignatureCodec:
         self._signature = signature
         self._qualname = qualname
         self._hints: Mapping[str, Any] | None = None
-        self._adapters: dict[str, pydantic.TypeAdapter[Any] | None] = {}
+        self._codecs: dict[str, TypeCodec] = {}
 
     def _resolved_hints(self) -> Mapping[str, Any]:
         if self._hints is None:
@@ -106,15 +140,15 @@ class SignatureCodec:
                 self._hints = {}
         return self._hints
 
-    def _adapter(self, name: str) -> pydantic.TypeAdapter[Any] | None:
+    def _codec(self, name: str) -> TypeCodec:
         try:
-            return self._adapters[name]
+            return self._codecs[name]
         except KeyError:
             pass
         annotation = self._resolved_hints().get(name, inspect.Parameter.empty)
-        adapter = _build_adapter(annotation)
-        self._adapters[name] = adapter
-        return adapter
+        codec = TypeCodec(annotation)
+        self._codecs[name] = codec
+        return codec
 
     # ═══════════════════════════════════════════════════════════════════════
     # outbound
@@ -122,15 +156,7 @@ class SignatureCodec:
 
     def dump(self, name: str, value: Any) -> Any:
         """*value*, as the parameter named *name* puts it on the wire."""
-        adapter = self._adapter(name)
-        if adapter is None:
-            return value
-        # serialize_as_any so a subclass keeps the fields the annotation does
-        # not know about, rather than being silently truncated in transit.
-        # warnings=False because validation belongs to the receiving side; an
-        # actual serialization failure, however, must prevent writing bytes the
-        # receiver cannot reconstruct.
-        return adapter.dump_python(value, serialize_as_any=True, warnings=False)
+        return self._codec(name).dump(value)
 
     def dump_arguments(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -150,15 +176,7 @@ class SignatureCodec:
     # ═══════════════════════════════════════════════════════════════════════
 
     def _validate(self, name: str, value: Any, *, what: str) -> Any:
-        adapter = self._adapter(name)
-        if adapter is None:
-            return value
-        try:
-            return adapter.validate_python(value)
-        except pydantic.ValidationError as error:
-            raise TypeValidationError(
-                f"{self._qualname}: {what} does not match: {error}"
-            ) from error
+        return self._codec(name).validate(value, what=f"{self._qualname}: {what}")
 
     def validate_return(self, value: Any) -> Any:
         return self._validate("return", value, what="the return value")

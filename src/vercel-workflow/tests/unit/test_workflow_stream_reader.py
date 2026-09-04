@@ -12,14 +12,21 @@ import contextlib
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
+import pydantic
 import pytest
 
+from vercel.workflow import TypeValidationError
 from vercel.workflow._internal import runtime, serialization as ser, streams, world as w
 
 from ..world_stubs import NoStreams
 
 RUN_ID = "wrun_test"
 NAME = "strm_test_user"
+
+
+class Token(pydantic.BaseModel):
+    text: str
+    index: int
 
 
 class ReplayWorld(NoStreams, w.World):
@@ -295,3 +302,62 @@ class TestRunApi:
         w.set_world(world)
 
         assert [c async for c in runtime.read_stream(RUN_ID, "strm_someone_else")] == ["x"]
+
+
+class TestTypedReads:
+    """A type on the read side validates each chunk, as a step argument is."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_world(self):
+        yield
+        w.set_world(None)
+
+    async def test_a_typed_read_validates_each_chunk(self) -> None:
+        # What a typed writer put on the wire: plain dicts.
+        w.set_world(ReplayWorld([{"text": "a", "index": 0}, {"text": "b", "index": 1}]))
+
+        chunks = runtime.Run(RUN_ID).readable(type=Token)
+        tokens: list[Token] = [token async for token in chunks]
+
+        assert tokens == [Token(text="a", index=0), Token(text="b", index=1)]
+
+    async def test_an_untyped_read_of_the_same_stream_gets_the_dicts(self) -> None:
+        w.set_world(ReplayWorld([{"text": "a", "index": 0}]))
+
+        assert [c async for c in runtime.Run(RUN_ID).readable()] == [{"text": "a", "index": 0}]
+
+    async def test_a_chunk_that_does_not_match_names_its_index(self) -> None:
+        w.set_world(ReplayWorld([{"text": "a", "index": 0}, "not a token"]))
+
+        chunks = runtime.Run(RUN_ID).readable(type=Token)
+        async with contextlib.aclosing(chunks):
+            assert await chunks.__anext__() == Token(text="a", index=0)
+            with pytest.raises(TypeValidationError, match=f"chunk 1 of stream {NAME}"):
+                await chunks.__anext__()
+
+    async def test_the_index_in_the_error_is_absolute(self) -> None:
+        # Resumed at 5, so the first chunk seen is chunk 5, not chunk 0.
+        w.set_world(ReplayWorld([{}] * 5 + ["bad"]))
+
+        with pytest.raises(TypeValidationError, match="chunk 5 of stream"):
+            [c async for c in runtime.Run(RUN_ID).readable(type=Token, start_index=5)]
+
+    async def test_read_stream_takes_a_type_the_same_way(self) -> None:
+        w.set_world(ReplayWorld([{"text": "x", "index": 9}]))
+
+        chunks = runtime.read_stream(RUN_ID, "strm_someone_else", type=Token)
+        assert [c async for c in chunks] == [Token(text="x", index=9)]
+
+    async def test_a_generic_alias_validates_too(self) -> None:
+        w.set_world(ReplayWorld([[{"text": "a", "index": 0}]]))
+
+        chunks = runtime.Run(RUN_ID).readable(type=list[Token])
+        assert [c async for c in chunks] == [[Token(text="a", index=0)]]
+
+    async def test_a_union_validates_at_runtime(self) -> None:
+        # `Any` for the checker, since `type[T]` cannot name a union, but the
+        # adapter still runs.
+        w.set_world(ReplayWorld([[{"text": "a", "index": 0}], None]))
+
+        chunks = runtime.Run(RUN_ID).readable(type=list[Token] | None)
+        assert [c async for c in chunks] == [[Token(text="a", index=0)], None]

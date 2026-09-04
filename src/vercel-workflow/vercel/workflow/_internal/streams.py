@@ -24,22 +24,37 @@ from __future__ import annotations
 
 import abc
 import base64
+import builtins
 import contextlib
+import copy
 import os
+import sys
 from collections.abc import AsyncGenerator, AsyncIterable, Iterator, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, get_args, overload
 
 import anyio
 import pydantic
+from pydantic_core import core_schema
 
-from . import serialization as ser
+from . import serialization as ser, signature_codec
+
+if sys.version_info >= (3, 13):
+    from typing import TypeVar
+else:
+    from typing_extensions import TypeVar
 
 _PAYLOAD_ENCODER = ser.PayloadEncoder()
 
 if TYPE_CHECKING:
     from anyio.abc import TaskGroup
+    from pydantic import GetCoreSchemaHandler
 
     from . import world as w
+
+T = TypeVar("T", default=Any)
+"""What a stream carries. Defaults to ``Any``: an unparametrized stream is untyped."""
+
+S = TypeVar("S")
 
 FRAME_HEADER_SIZE = 4
 """Bytes of big-endian length prefix in front of every frame."""
@@ -273,7 +288,7 @@ MAX_BYTES_PER_BATCH = 1024 * 1024
 """Cumulative bytes in one write request, under platform body limits."""
 
 
-class WorkflowWritable(abc.ABC):
+class WorkflowWritable(abc.ABC, Generic[T]):
     """One of a run's streams, as :func:`vercel.workflow.get_writable` hands it out.
 
     Two classes implement it. In a step it is a :class:`WorkflowStreamWriter`
@@ -285,7 +300,46 @@ class WorkflowWritable(abc.ABC):
     pass it to a step without the type changing on the way, which is also how
     `@workflow/core` does it -- its workflow-side `getWritable()` returns
     something with `WritableStream`'s prototype whose methods throw.
+
+    The type parameter is what the stream carries. Left off, it is ``Any`` and
+    values travel exactly as :mod:`.serialization` writes them. Given --
+    ``get_writable(type=Token)`` -- each write is dumped through pydantic first, the
+    way a typed step argument is.
+
+    The type is not on the wire. A handle passed into a step arrives untyped
+    unless the step's parameter says otherwise: annotate it
+    ``WorkflowWritable[Token]`` and the argument is revived as a writer of
+    that type.
     """
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        """The schema pydantic uses when a signature names a stream.
+
+        Validation is an instance check, plus -- when the annotation is
+        parametrized -- retyping the value to carry that type, which is how a
+        handle a workflow passed in becomes a typed writer on the step side.
+        Serialization is the identity: the value is left for the lower layer's
+        ``WritableStream`` reducer, which is what puts it on the wire.
+        """
+        schema: Any = handler(cls)
+
+        # Serialize is just the identity function. The devalue layer is in charge
+        # of reducing stream references.
+        identity = core_schema.plain_serializer_function_ser_schema(lambda value: value)
+        schema["serialization"] = identity
+
+        args = get_args(source)
+        if args:
+            (type_,) = args
+            # If we have a type param, stamp it on the object
+            schema = core_schema.no_info_after_validator_function(
+                lambda value: value.with_type(type_),
+                schema,
+            )
+        return schema
 
     @property
     @abc.abstractmethod
@@ -297,12 +351,29 @@ class WorkflowWritable(abc.ABC):
     def name(self) -> str:
         """The stream this writes to."""
 
+    @overload
+    def with_type(self, type: type[S]) -> WorkflowWritable[S]: ...
+
+    @overload
+    def with_type(self, type: Any) -> WorkflowWritable[Any]: ...
+
     @abc.abstractmethod
-    async def write(self, value: Any) -> None:
+    def with_type(self, type: Any) -> WorkflowWritable[Any]:
+        """This same stream, carrying *type*.
+
+        A new view over the same stream rather than a change to this one: in a
+        step both share one buffer, so writes through either keep their order.
+        ``get_writable(type)`` is this applied to the run's stream; use this
+        when the writable arrived by other means, such as an untyped step
+        parameter.
+        """
+
+    @abc.abstractmethod
+    async def write(self, value: T) -> None:
         """Append *value* as one chunk."""
 
     @abc.abstractmethod
-    async def write_from(self, source: AsyncIterable[Any]) -> None:
+    async def write_from(self, source: AsyncIterable[T]) -> None:
         """Append every item *source* yields, in order."""
 
     @abc.abstractmethod
@@ -315,7 +386,7 @@ class WorkflowWritable(abc.ABC):
 
 
 @pydantic.dataclasses.dataclass(frozen=True)
-class WorkflowStreamHandle(WorkflowWritable):
+class WorkflowStreamHandle(WorkflowWritable[T]):
     """A reference to a stream, writable only once it reaches a step.
 
     A workflow body re-executes on every replay and its sandbox has no network,
@@ -328,6 +399,10 @@ class WorkflowStreamHandle(WorkflowWritable):
     Deterministic by construction: the stream name is derived from the run id
     and the namespace, so a replay produces the same handle rather than
     pointing a later attempt at a different stream.
+
+    Carries no type at runtime. Its type parameter is for the checker, and
+    for the step parameter it is passed to -- a handle is never written to,
+    so there is nothing here for a type to do.
     """
 
     # Underscored because the interface declares `run_id` and `name` as
@@ -337,11 +412,6 @@ class WorkflowStreamHandle(WorkflowWritable):
     _run_id: str
     _name: str
 
-    @pydantic.model_serializer(mode="plain")
-    def _identity(self) -> Any:
-        """Leave the handle for the lower layer's ``WritableStream`` reducer."""
-        return self
-
     @property
     def run_id(self) -> str:
         return self._run_id
@@ -350,6 +420,15 @@ class WorkflowStreamHandle(WorkflowWritable):
     def name(self) -> str:
         return self._name
 
+    @overload
+    def with_type(self, type: type[S]) -> WorkflowStreamHandle[S]: ...
+
+    @overload
+    def with_type(self, type: Any) -> WorkflowStreamHandle[Any]: ...
+
+    def with_type(self, type: Any) -> WorkflowStreamHandle[Any]:
+        return self
+
     def _refuse(self) -> RuntimeError:
         return RuntimeError(
             f"cannot write to stream {self._name!r} from here: a workflow body re-runs "
@@ -357,10 +436,10 @@ class WorkflowStreamHandle(WorkflowWritable):
             f"nothing to carry the sends. Pass this to a step and write to it there."
         )
 
-    async def write(self, value: Any) -> None:
+    async def write(self, value: T) -> None:
         raise self._refuse()
 
-    async def write_from(self, source: AsyncIterable[Any]) -> None:
+    async def write_from(self, source: AsyncIterable[T]) -> None:
         raise self._refuse()
 
     async def drain(self) -> None:
@@ -370,13 +449,20 @@ class WorkflowStreamHandle(WorkflowWritable):
         raise self._refuse()
 
 
-class WorkflowStreamWriter(WorkflowWritable):
+class WorkflowStreamWriter(WorkflowWritable[T]):
     """A stream that workflow steps can write to.
 
     Sending happens in a task of *task_group*, not in ``write()``, which is
     what lets a producer keep filling the buffer while a request is in flight.
     The group therefore has to outlive every write and the final
     :meth:`drain` -- the step handler owns one for exactly that span.
+
+    The buffer and the dispatch live in a :class:`_StreamSink`, and every
+    writer over one stream in one step shares it, whatever type each was asked
+    for. Two buffers over the same stream would flush independently and
+    interleave by whichever request wins, so the sink is what keeps
+    ``get_writable()`` and ``get_writable(type=Token)`` in one step writing in call
+    order.
 
     Not safe to use from more than one event loop; within one loop, concurrent
     writers are fine and their chunks land in call order.
@@ -389,13 +475,98 @@ class WorkflowStreamWriter(WorkflowWritable):
         run_id: str,
         name: str,
         task_group: TaskGroup,
+        type: Any = None,
         reentrant_ctx_on_err: bool = True,
     ) -> None:
+        self._sink = _StreamSink(world=world, run_id=run_id, name=name, task_group=task_group)
+        self._codec = None if type is None else signature_codec.TypeCodec(type)
+        self._reentrant_ctx_on_err = reentrant_ctx_on_err
+
+    @property
+    def name(self) -> str:
+        """The stream this writer appends to."""
+        return self._sink.name
+
+    @property
+    def run_id(self) -> str:
+        """The run that owns the stream."""
+        return self._sink.run_id
+
+    @property
+    def type(self) -> Any:
+        """The type this writer dumps values as, or ``None`` when untyped."""
+        return None if self._codec is None else self._codec.annotation
+
+    # `builtins.type` because the `type` property above shadows it here.
+    @overload
+    def with_type(self, type: builtins.type[S]) -> WorkflowStreamWriter[S]: ...
+
+    @overload
+    def with_type(self, type: Any) -> WorkflowStreamWriter[Any]: ...
+
+    def with_type(self, type: Any) -> WorkflowStreamWriter[Any]:
+        # A shallow copy shares the sink, which is the point.
+        writer = copy.copy(self)
+        writer._codec = signature_codec.TypeCodec(type)
+        return writer
+
+    async def write(self, value: T) -> None:
+        """Append *value* as one chunk.
+
+        Returns once the chunk is buffered and ordered, which is not yet
+        durable; await :meth:`drain` or :meth:`close` for that. Blocks while
+        the buffer is full, so a fast producer cannot grow it without bound.
+        """
+        if self._codec is not None:
+            value = self._codec.dump(value)
+        await self._sink.enqueue(encode_value(value))
+
+    async def write_from(self, source: AsyncIterable[T]) -> None:
+        """Append every item *source* yields, in order.
+
+        This is simply a shortcut for a manual loop + :meth:`write` for
+        forwarding an upstream async iterator (e.g. LLM tokens, HTTP body).
+        """
+        async for value in source:
+            await self.write(value)
+
+    async def drain(self) -> None:
+        """Wait until every accepted chunk is durably written.
+
+        Raises the sink's error if any request failed -- including one whose
+        ``write()`` had already returned.
+        """
+        await self._sink.drain()
+
+    async def close(self) -> None:
+        """Drain, then mark the stream complete so readers see the end.
+
+        Idempotent. Nothing closes a run's stream implicitly -- not the end of
+        a step, not the end of the run -- so a stream a workflow never closes
+        leaves its readers waiting until the run expires.
+        """
+        await self._sink.close()
+
+    async def __aenter__(self) -> WorkflowStreamWriter[T]:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if exc_type is None or not self._reentrant_ctx_on_err:
+            await self.close()
+
+
+class _StreamSink:
+    """The buffer and dispatch behind every writer over one stream.
+
+    Deals in encoded frames only; what a frame means is the writer's business.
+    """
+
+    def __init__(self, *, world: w.World, run_id: str, name: str, task_group: TaskGroup) -> None:
         if not name:
             raise ValueError(f'"name" is required, got {name!r}')
         self._world = world
-        self._run_id = run_id
-        self._name = name
+        self.run_id = run_id
+        self.name = name
         self._task_group = task_group
 
         self._buffer: list[bytes] = []
@@ -432,37 +603,7 @@ class WorkflowStreamWriter(WorkflowWritable):
             "WORKFLOW_STREAM_MAX_BYTES_PER_BATCH", MAX_BYTES_PER_BATCH
         )
 
-        self._reentrant_ctx_on_err = reentrant_ctx_on_err
-
-    @property
-    def name(self) -> str:
-        """The stream this writer appends to."""
-        return self._name
-
-    @property
-    def run_id(self) -> str:
-        """The run that owns the stream."""
-        return self._run_id
-
-    async def write(self, value: Any) -> None:
-        """Append *value* as one chunk.
-
-        Returns once the chunk is buffered and ordered, which is not yet
-        durable; await :meth:`drain` or :meth:`close` for that. Blocks while
-        the buffer is full, so a fast producer cannot grow it without bound.
-        """
-        await self._enqueue(encode_value(value))
-
-    async def write_from(self, source: AsyncIterable[Any]) -> None:
-        """Append every item *source* yields, in order.
-
-        This is simply a shortcut for a manual loop + :meth:`write` for
-        forwarding an upstream async iterator (e.g. LLM tokens, HTTP body).
-        """
-        async for value in source:
-            await self.write(value)
-
-    async def _enqueue(self, frame: bytes) -> None:
+    async def enqueue(self, frame: bytes) -> None:
         async with self._condition:
             self._raise_if_unusable()
             while self._at_capacity():
@@ -476,7 +617,7 @@ class WorkflowStreamWriter(WorkflowWritable):
         if self._sink_error is not None:
             raise self._sink_error
         if self._closed:
-            raise ser.SerializationError(f"Stream {self._name!r} is closed")
+            raise ser.SerializationError(f"Stream {self.name!r} is closed")
 
     def _at_capacity(self) -> bool:
         chunks = len(self._buffer) + self._inflight_chunks
@@ -587,16 +728,11 @@ class WorkflowStreamWriter(WorkflowWritable):
 
     async def _send(self, group: Sequence[bytes]) -> None:
         if len(group) == 1:
-            await self._world.streams_write(self._run_id, self._name, group[0])
+            await self._world.streams_write(self.run_id, self.name, group[0])
         else:
-            await self._world.streams_write_multi(self._run_id, self._name, group)
+            await self._world.streams_write_multi(self.run_id, self.name, group)
 
     async def drain(self) -> None:
-        """Wait until every accepted chunk is durably written.
-
-        Raises the sink's error if any request failed -- including one whose
-        ``write()`` had already returned.
-        """
         async with self._condition:
             while True:
                 if self._sink_error is not None:
@@ -607,21 +743,8 @@ class WorkflowStreamWriter(WorkflowWritable):
                 await self._condition.wait()
 
     async def close(self) -> None:
-        """Drain, then mark the stream complete so readers see the end.
-
-        Idempotent. Nothing closes a run's stream implicitly -- not the end of
-        a step, not the end of the run -- so a stream a workflow never closes
-        leaves its readers waiting until the run expires.
-        """
         if self._closed and self._sink_error is None:
             return
         await self.drain()
-        await self._world.streams_close(self._run_id, self._name)
+        await self._world.streams_close(self.run_id, self.name)
         self._closed = True
-
-    async def __aenter__(self) -> WorkflowStreamWriter:
-        return self
-
-    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if exc_type is None or not self._reentrant_ctx_on_err:
-            await self.close()

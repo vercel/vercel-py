@@ -15,7 +15,7 @@ import traceback
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from datetime import datetime
-from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast
+from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast, overload
 from urllib.parse import parse_qsl, urlsplit
 
 import anyio
@@ -39,6 +39,7 @@ from .duration import DurationParam, parse_duration_to_date
 
 P = ParamSpec("P")
 T = TypeVar("T")
+Chunk = TypeVar("Chunk")
 logger = logging.getLogger("vercel.workflow")
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -366,8 +367,13 @@ class _StepStreams:
     """
 
     run_id: str
-    writers: dict[tuple[str, str], streams.WorkflowStreamWriter] = dataclasses.field(
+    writers: dict[tuple[str, str], streams.WorkflowStreamWriter[Any]] = dataclasses.field(
         default_factory=dict
+    )
+    # Typed views over the writers above, so a step asking for the same type
+    # in a loop does not build a pydantic adapter per call.
+    typed_writers: dict[tuple[str, str, Any], streams.WorkflowStreamWriter[Any]] = (
+        dataclasses.field(default_factory=dict)
     )
     _task_group: anyio.abc.TaskGroup | None = None
 
@@ -414,18 +420,28 @@ class _StepStreams:
             raise error
 
     def writer(
-        self, namespace: str | None, *, reentrant_ctx_on_err: bool = True
-    ) -> streams.WorkflowStreamWriter:
+        self,
+        namespace: str | None,
+        *,
+        type: Any = None,
+        reentrant_ctx_on_err: bool = True,
+    ) -> streams.WorkflowStreamWriter[Any]:
         """The writer for this run's *namespace* stream."""
         return self.writer_for(
             self.run_id,
             streams.workflow_run_stream_id(self.run_id, namespace),
+            type=type,
             reentrant_ctx_on_err=reentrant_ctx_on_err,
         )
 
     def writer_for(
-        self, run_id: str, name: str, *, reentrant_ctx_on_err: bool = True
-    ) -> streams.WorkflowStreamWriter:
+        self,
+        run_id: str,
+        name: str,
+        *,
+        type: Any = None,
+        reentrant_ctx_on_err: bool = True,
+    ) -> streams.WorkflowStreamWriter[Any]:
         """The writer for one stream, created on first use.
 
         One writer per stream per step, deliberately. Handing out a fresh writer
@@ -436,6 +452,10 @@ class _StepStreams:
         that pattern correct instead of subtly wrong, and it is why a handle the
         workflow passed in resolves to the same writer the step would have got
         by asking for the stream itself.
+
+        A *type* gives a typed view over that same writer: another
+        object, the same buffer, so the ordering guarantee holds across
+        ``get_writable()`` and ``get_writable(type=Token)`` in one step.
         """
         if self._task_group is None:
             raise RuntimeError("stream writers are only available while a step is running")
@@ -450,7 +470,13 @@ class _StepStreams:
                 reentrant_ctx_on_err=reentrant_ctx_on_err,
             )
             self.writers[key] = writer
-        return writer
+        if type is None:
+            return writer
+        typed = self.typed_writers.get((run_id, name, type))
+        if typed is None:
+            typed = writer.with_type(type)
+            self.typed_writers[run_id, name, type] = typed
+        return typed
 
     async def drain(self) -> None:
         for writer in self.writers.values():
@@ -567,16 +593,50 @@ async def _write_attributes(pairs: list[tuple[str, str | None]], *, allow_reserv
     )
 
 
+@overload
 def get_writable(
     *,
     namespace: str | None = None,
     reentrant_ctx_on_err: bool = True,
-) -> streams.WorkflowWritable:
+) -> streams.WorkflowWritable[Any]: ...
+
+
+@overload
+def get_writable(
+    *,
+    type: type[T],
+    namespace: str | None = None,
+    reentrant_ctx_on_err: bool = True,
+) -> streams.WorkflowWritable[T]: ...
+
+
+@overload
+def get_writable(
+    *,
+    type: Any,
+    namespace: str | None = None,
+    reentrant_ctx_on_err: bool = True,
+) -> streams.WorkflowWritable[Any]: ...
+
+
+def get_writable(
+    *,
+    type: Any = None,
+    namespace: str | None = None,
+    reentrant_ctx_on_err: bool = True,
+) -> streams.WorkflowWritable[Any]:
     """The run's writable stream, for streaming output while the run works.
 
     Chunks are readable straight away, through :meth:`Run.readable`, the
     TypeScript SDK, the dashboard or ``workflow inspect stream`` -- no waiting
     for the step or the run to finish.
+
+    Pass *type* to say what the stream carries. Each write is dumped through
+    pydantic the way a typed step argument is, so a model crosses as the plain
+    dict the wire format carries, and :meth:`Run.readable` asked for the same
+    type hands the model back. Without it the stream is ``Any`` and values
+    travel as :mod:`.serialization` writes them. Any annotation pydantic can
+    build a schema for works.
 
     In a step this is a :class:`~.streams.WorkflowStreamWriter`, ready to write.
     In a workflow body it is a :class:`~.streams.WorkflowStreamHandle`, which
@@ -599,7 +659,7 @@ def get_writable(
     except LookupError:
         pass
     else:
-        return state.writer(namespace, reentrant_ctx_on_err=reentrant_ctx_on_err)
+        return state.writer(namespace, type=type, reentrant_ctx_on_err=reentrant_ctx_on_err)
 
     try:
         ctx = WorkflowOrchestratorContext.current()
@@ -610,7 +670,7 @@ def get_writable(
     return ctx.stream_handle(namespace)
 
 
-def open_writable(run_id: str | None, name: str) -> streams.WorkflowWritable:
+def open_writable(run_id: str | None, name: str) -> streams.WorkflowWritable[Any]:
     """Turn a serialized stream reference back into something writable.
 
     The reviving half of the ``WritableStream`` tag, so a handle a workflow put
@@ -953,7 +1013,7 @@ class WorkflowOrchestratorContext:
     def random(self) -> random.Random:
         return self._user_random
 
-    def stream_handle(self, namespace: str | None) -> streams.WorkflowStreamHandle:
+    def stream_handle(self, namespace: str | None) -> streams.WorkflowStreamHandle[Any]:
         """A reference to one of this run's streams, for a step to write to.
 
         Deterministic, so a replay of the body produces the same handle rather
@@ -2498,14 +2558,42 @@ class Run(Generic[T]):
             else:
                 await asyncio.sleep(1)
 
+    @overload
     def readable(
         self, *, namespace: str | None = None, start_index: int | None = None
+    ) -> AsyncGenerator[Any, None]: ...
+
+    @overload
+    def readable(
+        self,
+        *,
+        type: type[Chunk],
+        namespace: str | None = None,
+        start_index: int | None = None,
+    ) -> AsyncGenerator[Chunk, None]: ...
+
+    @overload
+    def readable(
+        self, *, type: Any, namespace: str | None = None, start_index: int | None = None
+    ) -> AsyncGenerator[Any, None]: ...
+
+    def readable(
+        self,
+        *,
+        type: Any = None,
+        namespace: str | None = None,
+        start_index: int | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Read what the run's steps stream, as they stream it.
 
         Yields one value per :meth:`~vercel.workflow.WorkflowStreamWriter.write`,
         in write order, and ends when a step closes the stream. A run that never
         closes its stream leaves this waiting until the run expires.
+
+        Pass *type* to validate each chunk against it, the way a typed
+        step argument is: a chunk a step wrote as a model comes back a model.
+        A chunk that does not match raises
+        :class:`~vercel.workflow.TypeValidationError` naming its index.
 
         *start_index* skips that many chunks; a negative value reads that many
         back from the end. Positive values resume exactly, which is what makes
@@ -2517,17 +2605,8 @@ class Run(Generic[T]):
         A method rather than a property, because each call opens its own read:
         iterating a property twice would quietly start a second one.
         """
-
-        async def values() -> AsyncGenerator[Any, None]:
-            name = streams.workflow_run_stream_id(self._run_id, namespace)
-            frames = streams.reconnecting_frames(self._world, self._run_id, name, start_index)
-            async with contextlib.aclosing(frames):
-                index = start_index or 0
-                async for payload in frames:
-                    yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
-                    index += 1
-
-        return values()
+        name = streams.workflow_run_stream_id(self._run_id, namespace)
+        return _read_stream(self._world, self._run_id, name, type, start_index)
 
     def readable_bytes(
         self, *, namespace: str | None = None, start_index: int | None = None
@@ -2567,27 +2646,51 @@ class Run(Generic[T]):
         return await self._world.streams_list(self._run_id)
 
 
+@overload
 def read_stream(
     run_id: str, name: str, *, start_index: int | None = None
+) -> AsyncGenerator[Any, None]: ...
+
+
+@overload
+def read_stream(
+    run_id: str, name: str, *, type: type[Chunk], start_index: int | None = None
+) -> AsyncGenerator[Chunk, None]: ...
+
+
+@overload
+def read_stream(
+    run_id: str, name: str, *, type: Any, start_index: int | None = None
+) -> AsyncGenerator[Any, None]: ...
+
+
+def read_stream(
+    run_id: str, name: str, *, type: Any = None, start_index: int | None = None
 ) -> AsyncGenerator[Any, None]:
     """Read one of a run's streams by its full name.
 
     :meth:`Run.readable` derives the name from the run id and a namespace, so
     it only reaches streams that follow that scheme. This takes the name
     verbatim, which is what :meth:`Run.list_streams` returns and what another
-    SDK may have used.
+    SDK may have used. *type* means what it does there.
     """
+    return _read_stream(w.get_world(), run_id, name, type, start_index)
 
-    async def values() -> AsyncGenerator[Any, None]:
-        world = w.get_world()
-        frames = streams.reconnecting_frames(world, run_id, name, start_index)
-        async with contextlib.aclosing(frames):
-            index = start_index or 0
-            async for payload in frames:
-                yield ser.hydrate(payload, what=f"chunk {index} of stream {name}")
-                index += 1
 
-    return values()
+async def _read_stream(
+    world: w.World, run_id: str, name: str, type: Any, start_index: int | None
+) -> AsyncGenerator[Any, None]:
+    codec = None if type is None else signature_codec.TypeCodec(type)
+    frames = streams.reconnecting_frames(world, run_id, name, start_index)
+    async with contextlib.aclosing(frames):
+        index = start_index or 0
+        async for payload in frames:
+            what = f"chunk {index} of stream {name}"
+            value = ser.hydrate(payload, what=what)
+            if codec is not None:
+                value = codec.validate(value, what=what)
+            yield value
+            index += 1
 
 
 async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:
