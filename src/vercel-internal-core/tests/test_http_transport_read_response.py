@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator, Iterator
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.core.http import AsyncTransport, ReadResponsePolicy, SyncTransport

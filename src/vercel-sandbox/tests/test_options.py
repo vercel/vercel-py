@@ -1,10 +1,10 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 
+import vendor.respx as respx
 from vercel import sandbox
 from vercel.sandbox._internal.options import (
     SandboxCredentials,

@@ -6,7 +6,7 @@ import base64
 from collections.abc import Callable, Iterable
 from datetime import timedelta
 
-import httpx
+import httpx2 as httpx
 
 from celery.backends.base import BackendGetMetaError, BackendStoreError, KeyValueStoreBackend
 from celery.utils.time import maybe_timedelta

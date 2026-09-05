@@ -1,7 +1,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-import httpx
+import httpx2 as httpx
 
 SleepFn = Callable[[float], Awaitable[None] | None]
 

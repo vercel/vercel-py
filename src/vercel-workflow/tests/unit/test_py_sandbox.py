@@ -504,8 +504,8 @@ class TestZstandardRestrictions:
         _raises_in_sandbox("import zstandard; zstandard.open('file.zst')")
         assert callable(zstandard.open)
 
-    def test_httpx_import_succeeds_with_zstandard(self, monkeypatch: pytest.MonkeyPatch):
-        """httpx importing zstandard inside the sandbox should succeed."""
+    def test_httpx2_import_succeeds_with_zstandard(self, monkeypatch: pytest.MonkeyPatch):
+        """httpx2 importing zstandard inside the sandbox should succeed."""
 
         class _HideDevDeps:
             def find_spec(self, fullname, path, target=None):
@@ -513,8 +513,8 @@ class TestZstandardRestrictions:
                     raise ModuleNotFoundError(f"No module named {fullname}")
 
         monkeypatch.setattr(sys, "meta_path", [_HideDevDeps(), *sys.meta_path])
-        ns = _run_in_sandbox("import httpx; result = httpx.__name__")
-        assert ns["result"] == "httpx"
+        ns = _run_in_sandbox("import httpx2; result = httpx2.__name__")
+        assert ns["result"] == "httpx2"
 
 
 # ═══════════════════════════════════════════════════════════════

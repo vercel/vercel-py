@@ -1,8 +1,8 @@
 """Guard the respx exclusion used by the installed-wheel workflow.
 
-`.github/scripts/test_installed_wheel.sh` installs a bundle wheel, where httpx is
-vendored as `vercel._vendor.httpx`, and runs the package's tests against it. respx
-patches the *unvendored* httpx, so it silently fails to intercept anything and the
+`.github/scripts/test_installed_wheel.sh` installs a bundle wheel, where httpx2 is
+vendored as `vercel.internal._vendor.httpx2`, and runs the package's tests against it. respx
+patches the *unvendored* httpx2, so it silently fails to intercept anything and the
 affected tests attempt real network calls. The script therefore deselects every
 test that touches respx, deciding by scanning each test's source.
 

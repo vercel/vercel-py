@@ -4,6 +4,8 @@ from collections.abc import Generator
 
 import pytest
 
+pytest_plugins = ["vendor.respx.plugin"]
+
 
 @pytest.fixture
 def mock_env_clear(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:

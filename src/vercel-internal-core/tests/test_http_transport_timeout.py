@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
-from httpx import Response
+from httpx2 import Response
 
+import vendor.respx as respx
 from vercel._internal.core.http import NO_TIMEOUT, AsyncTransport, SyncTransport
 from vercel._internal.core.iter_coroutine import iter_coroutine
 

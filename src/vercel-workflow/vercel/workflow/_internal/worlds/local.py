@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
-import httpx
+import httpx2 as httpx
 import pydantic
 
 import vercel.queue as vqs

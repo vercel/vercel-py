@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.core.errors import VercelSessionClosedError, VercelSessionError

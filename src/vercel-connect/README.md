@@ -14,7 +14,7 @@ pip install vercel-connect
 ## Usage
 
 ```python
-import httpx
+import httpx2 as httpx
 from vercel.connect import ConnectAppTokenSubject, get_token
 
 token = await get_token("github/my-app", subject=ConnectAppTokenSubject())

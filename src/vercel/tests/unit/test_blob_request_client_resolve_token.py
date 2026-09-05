@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
-import httpx
+import httpx as legacy_httpx
+import httpx2 as httpx
 import pytest
 
 from vercel._internal.blob.core import BlobRequestClient, _add_authorization_header
+from vercel._internal.blob.errors import BlobUnknownError
 
 TOKEN = "test_token_123"
 PROVIDER_TOKEN = "provider_token_456"
@@ -94,6 +97,71 @@ async def test_request_api_sends_provider_token_authorization_header() -> None:
     call_kwargs = send.await_args.kwargs
     headers = call_kwargs["headers"]
     assert headers["authorization"] == f"Bearer {PROVIDER_TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_send_retries_legacy_httpx_transport_errors() -> None:
+    request = legacy_httpx.Request("GET", "https://api.example.com/data")
+    send = AsyncMock(
+        side_effect=[
+            legacy_httpx.ConnectError("connection reset", request=request),
+            legacy_httpx.Response(200, request=request),
+        ]
+    )
+    transport = Mock()
+    transport.send = send
+    client = BlobRequestClient(
+        transport=cast(Any, transport),
+        retry=MagicMock(
+            retries=1,
+            backoff_base=0,
+            backoff_max=0,
+            retry_on_response=None,
+            retry_on_network_error=True,
+        ),
+        sleep_fn=lambda _: None,
+        token_provider=AsyncMock(return_value=PROVIDER_TOKEN),
+    )
+
+    response = await client.send("GET", str(request.url), token=TOKEN)
+
+    assert isinstance(response, legacy_httpx.Response)
+    assert send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_request_api_wraps_legacy_httpx_errors() -> None:
+    request = legacy_httpx.Request("PUT", "https://api.example.com/")
+    send = AsyncMock(side_effect=legacy_httpx.ConnectError("network down", request=request))
+    transport = Mock()
+    transport.send = send
+    client = BlobRequestClient(
+        transport=cast(Any, transport),
+        retry=MagicMock(
+            retries=0,
+            backoff_base=0,
+            backoff_max=0,
+            retry_on_response=None,
+            retry_on_network_error=False,
+        ),
+        sleep_fn=lambda _: None,
+        token_provider=AsyncMock(return_value=PROVIDER_TOKEN),
+    )
+
+    with (
+        patch("vercel._internal.blob.core.get_api_url", return_value=str(request.url)),
+        patch("vercel._internal.blob.core.make_request_id", return_value="req-1"),
+        patch("vercel._internal.blob.core.get_api_version", return_value="1"),
+        patch(
+            "vercel._internal.blob.core.get_proxy_through_alternative_api_header_from_env",
+            return_value={},
+        ),
+        patch("vercel._internal.blob.core.should_use_x_content_length", return_value=False),
+        pytest.raises(BlobUnknownError) as exc_info,
+    ):
+        await client.request_api("", "PUT", token=TOKEN, body=b"data")
+
+    assert isinstance(exc_info.value.__cause__, legacy_httpx.ConnectError)
 
 
 class TestAddAuthorizationHeader:

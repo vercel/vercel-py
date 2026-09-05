@@ -1,9 +1,9 @@
 import json
 from datetime import timedelta
 
-import httpx
+import httpx2 as httpx
 import pytest
-from httpx._types import HeaderTypes, QueryParamTypes
+from httpx2._types import HeaderTypes, QueryParamTypes
 
 from vercel._internal.core.http import (
     NO_TIMEOUT,

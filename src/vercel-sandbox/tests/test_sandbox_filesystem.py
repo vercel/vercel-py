@@ -5,12 +5,12 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import PurePosixPath
 from typing import Any, cast
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 from hypothesis import HealthCheck, given, settings, strategies as st
 from sandbox_fixtures import sandbox_service_options as _session_options
 
+import vendor.respx as respx
 from vercel import sandbox
 from vercel.api import session
 from vercel.sandbox import (

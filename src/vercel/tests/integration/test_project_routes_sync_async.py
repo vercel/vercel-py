@@ -4,9 +4,9 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
+import vendor.respx as respx
 
 from vercel.client import AsyncVercel, Vercel
 from vercel.project_routes import (

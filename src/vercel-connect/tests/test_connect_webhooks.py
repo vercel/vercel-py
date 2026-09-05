@@ -190,7 +190,7 @@ async def test_accepts_a_request_object_exposing_headers(
     fake_verifier: list[dict[str, Any]],
 ) -> None:
     """A request object is the natural thing to reach for, so accept one."""
-    import httpx
+    import httpx2 as httpx
 
     request = httpx.Request(
         "POST", "https://myapp.com/hook", headers={"Authorization": "Bearer from-request"}
@@ -207,7 +207,7 @@ def test_accepts_a_request_object_exposing_headers_sync(
     mock_env_clear: None,
     fake_verifier: list[dict[str, Any]],
 ) -> None:
-    import httpx
+    import httpx2 as httpx
 
     request = httpx.Request(
         "POST", "https://myapp.com/hook", headers={"Authorization": "Bearer from-request"}

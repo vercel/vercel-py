@@ -506,12 +506,12 @@ def _serving(handler: w.HTTPHandler, seen: list[str]) -> Iterator[str]:
     """
     # Imported here because replay re-imports this module -- the one defining
     # `checkout` -- inside the workflow sandbox, and executes its imports there.
-    # `import httpx` alone fails a run: `httpx/__init__` pulls in its CLI entry
+    # `import httpx2` alone fails a run: `httpx2/__init__` pulls in its CLI entry
     # point, which pulls in `rich`, which calls `random.getrandbits()` on import.
     import http.server
     import threading
 
-    import httpx
+    import httpx2 as httpx
 
     class ServerRequest(w.HTTPRequest):
         """One `BaseHTTPRequestHandler` request, as an SDK `HTTPRequest`.

@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import cbor2
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 
+import vendor.respx as respx
 from vercel.headers import HeadersContext
 from vercel.workflow._internal import world as w
 from vercel.workflow._internal.worlds.vercel import VercelWorld

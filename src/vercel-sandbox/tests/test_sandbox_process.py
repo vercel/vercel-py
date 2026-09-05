@@ -8,11 +8,11 @@ from datetime import timedelta
 from threading import Event, Lock
 
 import anyio
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 from sandbox_fixtures import sandbox_service_options
 
+import vendor.respx as respx
 from vercel import sandbox
 from vercel._internal.core.options import ServiceOptions
 from vercel.api import session

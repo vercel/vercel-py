@@ -145,8 +145,9 @@ def _world(tmp_path, monkeypatch) -> RecordingLocalWorld:
 
 def _vercel_route(world: VercelWorld, response: object):
     import cbor2
-    import httpx
-    import respx
+    import httpx2 as httpx
+
+    import vendor.respx as respx
 
     return respx.post(f"{world._base_url}/v3/runs/{VERCEL_RUN_ID}/events").mock(
         return_value=httpx.Response(
@@ -450,8 +451,8 @@ async def test_step_creation_waits_for_its_result_instead_of_replaying(
 
 async def test_vercel_lazy_hook_conflict_result_is_returned_as_typed_event() -> None:
     import cbor2
-    import respx
 
+    import vendor.respx as respx
     from vercel.workflow._internal.worlds.vercel import VercelWorld
 
     with respx.mock:
@@ -483,8 +484,7 @@ async def test_vercel_lazy_hook_conflict_result_is_returned_as_typed_event() -> 
 
 
 async def test_vercel_successful_lazy_hook_result_stays_opaque() -> None:
-    import respx
-
+    import vendor.respx as respx
     from vercel.workflow._internal.worlds.vercel import VercelWorld
 
     with respx.mock:

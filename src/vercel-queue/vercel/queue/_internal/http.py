@@ -20,8 +20,13 @@ from email.utils import parsedate_to_datetime
 from threading import Lock
 from urllib.parse import urljoin, urlsplit
 
-import httpx
+import httpx2 as httpx
 from anyio.lowlevel import get_async_backend
+
+from vercel._internal.core.http._compat import (
+    response_not_read_errors,
+    transport_errors,
+)
 
 from .asynctools import iter_bytes_async
 from .config import resolve_token, resolve_token_async
@@ -30,7 +35,7 @@ from .errors import CommunicationError
 from .log import content_type, debug_enabled, debug_log, redact_text, safe_header_names, safe_url
 from .types import Duration, Headers, RawHeaders, RequestContent, duration_to_float_seconds
 
-_httpx_logger = logging.getLogger("httpx")
+_httpx_loggers = (logging.getLogger("httpx2"), logging.getLogger("httpx"))
 
 
 @dataclass
@@ -296,7 +301,7 @@ class _SyncResponse:
 async def response_text(response: AsyncHttpResponse) -> str:
     try:
         return response.text
-    except httpx.ResponseNotRead:
+    except response_not_read_errors():
         body = bytearray()
         async for chunk in response.aiter_bytes():
             body.extend(chunk)
@@ -452,7 +457,7 @@ class SyncQueueRuntime(BaseQueueRuntime):
         client = self._acquire_client()
         try:
             response = client.request(method, url, **kwargs)
-        except httpx.TransportError as exc:
+        except transport_errors() as exc:
             _log_http_error(method, url, exc)
             raise CommunicationError(str(exc)) from exc
         finally:
@@ -480,7 +485,7 @@ class SyncQueueRuntime(BaseQueueRuntime):
             ) as response:
                 _log_http_response(method, resolved_url, response.status_code, response.headers)
                 yield _SyncResponse(response)
-        except httpx.TransportError as exc:
+        except transport_errors() as exc:
             _log_http_error(method, resolved_url, exc)
             raise CommunicationError(str(exc)) from exc
         finally:
@@ -525,7 +530,7 @@ class AsyncQueueRuntime(BaseQueueRuntime):
         key, client = self._acquire_client()
         try:
             response = await client.request(method, url, **kwargs)
-        except httpx.TransportError as exc:
+        except transport_errors() as exc:
             _log_http_error(method, url, exc)
             raise CommunicationError(str(exc)) from exc
         finally:
@@ -553,7 +558,7 @@ class AsyncQueueRuntime(BaseQueueRuntime):
             ) as response:
                 _log_http_response(method, resolved_url, response.status_code, response.headers)
                 yield response
-        except httpx.TransportError as exc:
+        except transport_errors() as exc:
             _log_http_error(method, resolved_url, exc)
             raise CommunicationError(str(exc)) from exc
         finally:
@@ -630,5 +635,7 @@ def _install_httpx_request_log_filter() -> None:
     with _httpx_filter_state.lock:
         if _httpx_filter_state.installed:
             return
-        _httpx_logger.addFilter(_QueueHttpxRequestLogFilter())
+        request_filter = _QueueHttpxRequestLogFilter()
+        for logger in _httpx_loggers:
+            logger.addFilter(request_filter)
         _httpx_filter_state.installed = True

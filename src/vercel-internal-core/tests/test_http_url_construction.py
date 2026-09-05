@@ -11,11 +11,11 @@ without leading slash - the result will be the same.
 
 from datetime import timedelta
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
-from httpx import Response
+from httpx2 import Response
 
+import vendor.respx as respx
 from vercel._internal.core.http import (
     AsyncTransport,
     JSONBody,

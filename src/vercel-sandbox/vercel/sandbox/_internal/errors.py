@@ -1,6 +1,6 @@
 """Sandbox errors for the SDK surface."""
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.core.errors import VercelError
 from vercel.sandbox._internal.models import SandboxStatus

@@ -302,6 +302,8 @@ custom queue service URLs, create a `QueueClient` explicitly:
 
 ```python
 # explicit_client.py
+import httpx2
+
 from vercel.queue import ALL_DEPLOYMENTS, QueueClient
 
 queue = QueueClient(
@@ -315,6 +317,12 @@ queue = QueueClient(
 
 await queue.send("my-topic", {"message": "Hello world"})
 ```
+
+HTTPX2 is the default and the only HTTPX family installed by the SDK. For
+migration, an application that explicitly installs legacy `httpx` may return a
+complete `httpx.Client` or `httpx.AsyncClient` from `http_client_factory`.
+Legacy transport objects must remain inside a legacy client; they cannot be
+mounted in an `httpx2.Client`.
 
 By default queue clients send requests to `https://<region>.vercel-queue.com/`. A custom endpoint
 can be configured by passing a `base_url` keyword argument to the client constructor. The value

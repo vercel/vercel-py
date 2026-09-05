@@ -23,9 +23,8 @@ import sys
 import typing
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
@@ -37,6 +36,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
 from vercel.oidc import VercelOidcTokenError
 from vercel.workflow._internal import (

@@ -9,7 +9,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.auth import TokenProvider
 from vercel._internal.blob import (
@@ -77,6 +77,11 @@ from vercel._internal.core.http import (
     SyncTransport,
     TransportOptions,
     create_base_client,
+)
+from vercel._internal.core.http._compat import (
+    http_errors,
+    http_status_errors,
+    transport_errors,
 )
 from vercel._internal.core.http.retry import RetryPolicy, SleepFn
 from vercel._internal.core.iter_coroutine import iter_coroutine
@@ -520,7 +525,7 @@ class BlobRequestClient:
                     continue
 
                 return response
-            except httpx.TransportError:
+            except transport_errors():
                 if retry.retry_on_network_error and attempt < retry.retries:
                     await self._backoff(attempt)
                     continue
@@ -590,7 +595,7 @@ class BlobRequestClient:
                 ),
                 timeout=effective_timeout,
             )
-        except httpx.HTTPError as exc:
+        except http_errors() as exc:
             raise BlobUnknownError() from exc
 
         if 200 <= resp.status_code < 300:
@@ -964,7 +969,7 @@ class BaseBlobOpsClient:
                 content=response.content,
                 status_code=response.status_code,
             )
-        except httpx.HTTPStatusError as exc:
+        except http_status_errors() as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 raise BlobNotFoundError() from exc
             raise

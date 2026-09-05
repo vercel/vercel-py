@@ -6,15 +6,19 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar, Token
 from types import TracebackType
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast, overload
 
 import anyio
-import httpx
+import httpx2 as httpx
 
 from vercel._internal.core.errors import (
     VercelServiceOptionsError,
     VercelSessionClosedError,
     VercelSessionError,
+)
+from vercel._internal.core.http._compat import (
+    is_async_http_client,
+    is_sync_http_client,
 )
 from vercel._internal.core.options import ServiceOptions, merge_service_options
 from vercel._internal.core.polyfills import Self
@@ -197,17 +201,18 @@ class SdkSession(_BaseSdkSession):
                 )
             )
         else:
-            candidate = self._httpx_client_factory()
-            if not isinstance(candidate, httpx.AsyncClient):
-                if isinstance(candidate, httpx.Client):
+            candidate = cast(Any, self._httpx_client_factory())
+            if not is_async_http_client(candidate):
+                if is_sync_http_client(candidate):
                     try:
                         candidate.close()
                     except Exception:
                         pass
                 raise VercelSessionError(
-                    "Async SDK sessions require httpx_client_factory to return httpx.AsyncClient"
+                    "Async SDK sessions require httpx_client_factory to return "
+                    "httpx2.AsyncClient or httpx.AsyncClient"
                 )
-            client = candidate
+            client = cast(httpx.AsyncClient, candidate)
         return client
 
     def get_transport(self) -> "AsyncTransport":
@@ -294,7 +299,7 @@ class SyncSdkSession(_BaseSdkSession):
             ),
         )
 
-    def _close_wrong_async_client(self, client: httpx.AsyncClient) -> None:
+    def _close_wrong_async_client(self, client: Any) -> None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -327,14 +332,15 @@ class SyncSdkSession(_BaseSdkSession):
                 )
             )
         else:
-            candidate = self._httpx_client_factory()
-            if not isinstance(candidate, httpx.Client):
-                if isinstance(candidate, httpx.AsyncClient):
+            candidate = cast(Any, self._httpx_client_factory())
+            if not is_sync_http_client(candidate):
+                if is_async_http_client(candidate):
                     self._close_wrong_async_client(candidate)
                 raise VercelSessionError(
-                    "Sync SDK sessions require httpx_client_factory to return httpx.Client"
+                    "Sync SDK sessions require httpx_client_factory to return "
+                    "httpx2.Client or httpx.Client"
                 )
-            client = candidate
+            client = cast(httpx.Client, candidate)
         self._transport = SyncTransport(client)
         return self._transport
 

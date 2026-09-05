@@ -71,6 +71,7 @@ fi
 if [ -n "$package_path" ] && [ -d "$package_path/examples" ]; then
     cp -R "$package_path/examples" "$test_root/examples"
 fi
+cp -R vendor "$test_root/vendor"
 
 python - "$wheel_path" "$test_root" <<'PY'
 import sys
@@ -81,6 +82,9 @@ wheel = Path(sys.argv[1])
 test_root = Path(sys.argv[2])
 with zipfile.ZipFile(wheel) as archive:
     names = archive.namelist()
+    assert not any(name.startswith("vendor/") for name in names), (
+        "development-only vendored dependencies must not be included in release wheels"
+    )
     assert not any("/_vendor/vercel/" in name for name in names), (
         "vercel-* packages must be installed side-by-side as -bundle dependencies, "
         "not copied into another package's vendor tree"
@@ -98,7 +102,7 @@ from pathlib import Path
 test_root = Path(sys.argv[1])
 vendored_libraries = tuple(
     library
-    for library in ("anyio", "httpx")
+    for library in ("anyio", "httpx2")
     if any(
         f"vercel.internal._vendor.{library}" in path.read_text(encoding="utf-8")
         or f"from vercel.internal._vendor import {library}" in path.read_text(encoding="utf-8")
@@ -161,7 +165,7 @@ pytest_filter_path = test_root / "pytest-filter.txt"
 vendored_libraries = set(
     test_root.joinpath(".vendored-libraries").read_text(encoding="utf-8").splitlines()
 )
-uses_vendored_httpx = "httpx" in vendored_libraries
+uses_vendored_httpx = "httpx2" in vendored_libraries
 
 
 def load_pyproject(path: Path) -> dict[str, Any]:

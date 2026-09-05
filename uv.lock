@@ -42,6 +42,7 @@ dev = [
     { name = "fastapi", specifier = ">=0.115.0,<1" },
     { name = "ggt", marker = "python_full_version >= '3.11'", specifier = ">=1.6.0" },
     { name = "hatchling", specifier = ">=1.27.0,<2" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "hypothesis", specifier = ">=6.0.0,<7" },
     { name = "lograil", specifier = "~=0.8.1" },
     { name = "mypy", specifier = ">=1.20.2,<2" },
@@ -49,7 +50,6 @@ dev = [
     { name = "pytest", specifier = ">=7.0.0,<10" },
     { name = "pytest-asyncio", specifier = "<2" },
     { name = "pytest-xdist", specifier = "<4" },
-    { name = "respx", specifier = ">=0.21.0,<1" },
     { name = "ruff", specifier = "==0.15.20" },
     { name = "textual", specifier = ">=8.0.0,<9" },
     { name = "time-machine", specifier = ">=2.16,<3" },
@@ -605,9 +605,9 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "asgiref" },
-    { name = "sqlparse" },
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "asgiref", marker = "python_full_version < '3.12'" },
+    { name = "sqlparse", marker = "python_full_version < '3.12'" },
+    { name = "tzdata", marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2b/e3/31722f7284c9f43333daff9aee9184678e4487adcb5506af0db8cea09ce1/django-5.2.15.tar.gz", hash = "sha256:5154a9bf84ac01dde011e367f355c07dbb329532e06810dcf3ef2af269e236e7", size = 10873669, upload-time = "2026-06-03T13:03:35.892Z" }
 wheels = [
@@ -623,9 +623,9 @@ resolution-markers = [
     "python_full_version >= '3.12' and python_full_version < '3.15'",
 ]
 dependencies = [
-    { name = "asgiref" },
-    { name = "sqlparse" },
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "asgiref", marker = "python_full_version >= '3.12'" },
+    { name = "sqlparse", marker = "python_full_version >= '3.12'" },
+    { name = "tzdata", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/78/29/ac41e16097af67066d97a7d5775c5d8e7efc5d0284f6b0a159e07b9adb92/django-6.0.6.tar.gz", hash = "sha256:ad03916ba59523d781ae5c3f631960c23d69a9d9c43cecda52fc23b47e953713", size = 10905525, upload-time = "2026-06-03T13:02:46.503Z" }
 wheels = [
@@ -800,6 +800,19 @@ wheels = [
 ]
 
 [[package]]
+name = "httpcore2"
+version = "2.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "h11" },
+    { name = "truststore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/be/ad/f4f0e57345f1870f3e8cb624e058d7eca6e5a27d33bcc3311d9b618734cd/httpcore2-2.12.0.tar.gz", hash = "sha256:9293522bba0aa7c4c8e9e3f040c16575bd8868e155a77fa30c7a9085a5eae648", size = 67548, upload-time = "2026-08-18T13:22:08.211Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/74/d370e55600d9bcfa0d9794b0166126d49291a3d2b20c268fc98c453a4948/httpcore2-2.12.0-py3-none-any.whl", hash = "sha256:7e04258ce01013d7d615e5b910a3b27fac937d7a95038227e79652b4ba3b4ceb", size = 83074, upload-time = "2026-08-18T13:22:05.854Z" },
+]
+
+[[package]]
 name = "httpx"
 version = "0.28.1"
 source = { registry = "https://pypi.org/simple" }
@@ -814,9 +827,35 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
 ]
 
+[[package]]
+name = "httpx2"
+version = "2.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio", marker = "sys_platform != 'emscripten'" },
+    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
+    { name = "httpx2-jsfetch", marker = "python_full_version >= '3.12' and sys_platform == 'emscripten'" },
+    { name = "idna" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/f8/579a8b51e42e38ee32647df9f08aa25643ae788e275cc625b199829c4671/httpx2-2.12.0.tar.gz", hash = "sha256:7631fe9887a8a2275f4a2540e053aa670fcc50742864a9ae7c66e609fdcf12cf", size = 100040, upload-time = "2026-08-18T13:22:09.086Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/95/411ba65569158e862368917aaf56597f3e5fa3b91b0502919638465a08f3/httpx2-2.12.0-py3-none-any.whl", hash = "sha256:cc8b6eecb8661c146b8f89a60e97456ee086e91a784ed31ac450c3a9e613dd36", size = 95427, upload-time = "2026-08-18T13:22:06.834Z" },
+]
+
 [package.optional-dependencies]
 http2 = [
     { name = "h2" },
+]
+
+[[package]]
+name = "httpx2-jsfetch"
+version = "1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/c4/0e5636363151a2a1795e0a77617168b9ca438e1748ec05fc9b5687f93d64/httpx2_jsfetch-1.0.tar.gz", hash = "sha256:70a0e3eabfef7cce5ad9c629f7d01ca05e418f586646f4ddf14782e4c1454c60", size = 6872, upload-time = "2026-08-07T00:13:07.492Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/43/832f631d32e4f1211caa2ba368317739fe71f0b8530e4c9d15dc454bac2a/httpx2_jsfetch-1.0-py3-none-any.whl", hash = "sha256:cb916b707601e69a07721aabc8f3f6659be3a6893bc1ff5c6f9e02241df2da32", size = 6382, upload-time = "2026-08-07T00:13:06.567Z" },
 ]
 
 [[package]]
@@ -855,11 +894,11 @@ wheels = [
 
 [[package]]
 name = "idna"
-version = "3.13"
+version = "3.19"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ce/cc/762dfb036166873f0059f3b7de4565e1b5bc3d6f28a414c13da27e442f99/idna-3.13.tar.gz", hash = "sha256:585ea8fe5d69b9181ec1afba340451fba6ba764af97026f92a91d4eef164a242", size = 194210, upload-time = "2026-04-22T16:42:42.314Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/f7/abb373e5757eaec4b922b92f97ec8d6d7e057cf06778247604fbc4e7c3f3/idna-3.19.tar.gz", hash = "sha256:5e0811a4383b21dc5838069f801c4fb62113b7447663d2530d2bd6e77b49bf15", size = 215237, upload-time = "2026-08-18T05:14:24.27Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/13/ad7d7ca3808a898b4612b6fe93cde56b53f3034dcde235acb1f0e1df24c6/idna-3.13-py3-none-any.whl", hash = "sha256:892ea0cde124a99ce773decba204c5552b69c3c67ffd5f232eb7696135bc8bb3", size = 68629, upload-time = "2026-04-22T16:42:40.909Z" },
+    { url = "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl", hash = "sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4", size = 68550, upload-time = "2026-08-18T05:14:22.343Z" },
 ]
 
 [[package]]
@@ -867,7 +906,7 @@ name = "importlib-metadata"
 version = "9.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp" },
+    { name = "zipp", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405, upload-time = "2026-03-20T06:42:56.999Z" }
 wheels = [
@@ -1746,18 +1785,6 @@ wheels = [
 ]
 
 [[package]]
-name = "respx"
-version = "0.23.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/43/98/4e55c9c486404ec12373708d015ebce157966965a5ebe7f28ff2c784d41b/respx-0.23.1.tar.gz", hash = "sha256:242dcc6ce6b5b9bf621f5870c82a63997e8e82bc7c947f9ffe272b8f3dd5a780", size = 29243, upload-time = "2026-04-08T14:37:16.008Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/4a/221da6ca167db45693d8d26c7dc79ccfc978a440251bf6721c9aaf251ac0/respx-0.23.1-py2.py3-none-any.whl", hash = "sha256:b18004b029935384bccfa6d7d9d74b4ec9af73a081cc28600fffc0447f4b8c1a", size = 25557, upload-time = "2026-04-08T14:37:14.613Z" },
-]
-
-[[package]]
 name = "rfc3986"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2370,6 +2397,15 @@ wheels = [
 ]
 
 [[package]]
+name = "truststore"
+version = "0.10.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
+]
+
+[[package]]
 name = "twine"
 version = "6.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2549,12 +2585,12 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "click" },
-    { name = "jsonschema" },
-    { name = "packaging" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "toml" },
+    { name = "click", marker = "python_full_version < '3.11'" },
+    { name = "jsonschema", marker = "python_full_version < '3.11'" },
+    { name = "packaging", marker = "python_full_version < '3.11'" },
+    { name = "requests", marker = "python_full_version < '3.11'" },
+    { name = "rich", marker = "python_full_version < '3.11'" },
+    { name = "toml", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/bd/b92bbd4a5e6fb52c05af4fdef86726e05c38e5a36313716cf37e38183c65/vendoring-1.2.0.tar.gz", hash = "sha256:6340a84bf542222c96f22ebc3cb87e4d86932dc04bc8d446e38285594702c00e", size = 21475, upload-time = "2021-10-14T06:18:33.641Z" }
 wheels = [
@@ -2571,13 +2607,13 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "click" },
-    { name = "jsonschema" },
-    { name = "packaging" },
-    { name = "pip" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "tomli" },
+    { name = "click", marker = "python_full_version >= '3.11'" },
+    { name = "jsonschema", marker = "python_full_version >= '3.11'" },
+    { name = "packaging", marker = "python_full_version >= '3.11'" },
+    { name = "pip", marker = "python_full_version >= '3.11'" },
+    { name = "requests", marker = "python_full_version >= '3.11'" },
+    { name = "rich", marker = "python_full_version >= '3.11'" },
+    { name = "tomli", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/55/a6/2ad9ec99117eccf78ba6e69e7c904a3dc08ca2fba50e8869a3f02c1bc518/vendoring-1.4.0.tar.gz", hash = "sha256:48113adfb29db5e5051da823c083219567b9b3405859682cc04400a7743279d9", size = 24761, upload-time = "2026-05-19T14:39:50.773Z" }
 wheels = [
@@ -2589,7 +2625,7 @@ name = "vercel"
 source = { editable = "src/vercel" }
 dependencies = [
     { name = "anyio" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
@@ -2607,7 +2643,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
@@ -2642,14 +2678,14 @@ requires-dist = [
 name = "vercel-cache"
 source = { editable = "src/vercel-cache" }
 dependencies = [
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "vercel-headers" },
     { name = "vercel-internal-telemetry" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
 ]
@@ -2659,6 +2695,7 @@ name = "vercel-celery"
 source = { editable = "integrations/vercel-celery" }
 dependencies = [
     { name = "celery" },
+    { name = "httpx2" },
     { name = "vercel-cache" },
     { name = "vercel-queue" },
 ]
@@ -2666,6 +2703,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "celery", specifier = ">=5.3,<6" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
     { name = "vercel-queue", editable = "src/vercel-queue" },
 ]
@@ -2674,7 +2712,7 @@ requires-dist = [
 name = "vercel-connect"
 source = { editable = "src/vercel-connect" }
 dependencies = [
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "pydantic" },
     { name = "vercel-internal-core" },
     { name = "vercel-oidc", extra = ["verify"] },
@@ -2682,7 +2720,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", extras = ["verify"], editable = "src/vercel-oidc" },
@@ -2729,14 +2767,14 @@ name = "vercel-internal-core"
 source = { editable = "src/vercel-internal-core" }
 dependencies = [
     { name = "anyio" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "typing-extensions", marker = "python_full_version < '3.12'" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "typing-extensions", marker = "python_full_version < '3.12'", specifier = ">=4.6.0,<5" },
 ]
 
@@ -2744,13 +2782,13 @@ requires-dist = [
 name = "vercel-internal-telemetry"
 source = { editable = "src/vercel-internal-telemetry" }
 dependencies = [
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "vercel-oidc" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]
 
@@ -2759,7 +2797,7 @@ name = "vercel-oidc"
 source = { editable = "src/vercel-oidc" }
 dependencies = [
     { name = "anyio" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "vercel-headers" },
 ]
 
@@ -2773,7 +2811,7 @@ verify = [
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
     { name = "cryptography", marker = "extra == 'verify'", specifier = ">=48.0.1" },
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "pyjwt", extras = ["crypto"], marker = "extra == 'verify'", specifier = ">=2.13.0,<3" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
 ]
@@ -2784,7 +2822,7 @@ name = "vercel-queue"
 source = { editable = "src/vercel-queue" }
 dependencies = [
     { name = "anyio" },
-    { name = "httpx", extra = ["http2"] },
+    { name = "httpx2", extra = ["http2"] },
     { name = "python-multipart" },
     { name = "typing-extensions" },
     { name = "vercel-headers" },
@@ -2807,7 +2845,7 @@ typed = [
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "anyio", extras = ["trio"], marker = "extra == 'trio'", specifier = ">=4.0.0" },
-    { name = "httpx", extras = ["http2"], specifier = ">=0.27.0" },
+    { name = "httpx2", extras = ["http2"], specifier = ">=2" },
     { name = "pydantic", marker = "extra == 'typed'", specifier = ">=2.7.0" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "typing-extensions", specifier = ">=4.0.0" },
@@ -2823,7 +2861,7 @@ name = "vercel-sandbox"
 source = { editable = "src/vercel-sandbox" }
 dependencies = [
     { name = "anyio" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "pydantic" },
     { name = "vercel-internal-core" },
     { name = "vercel-oidc" },
@@ -2832,7 +2870,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
@@ -2845,7 +2883,7 @@ dependencies = [
     { name = "anyio" },
     { name = "cbor2" },
     { name = "cryptography" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "pydantic" },
     { name = "semver" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
@@ -2862,7 +2900,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
     { name = "cbor2", specifier = ">=6.0,<7" },
     { name = "cryptography", specifier = ">=43.0.0" },
-    { name = "httpx", specifier = ">=0.27.0,<1" },
+    { name = "httpx2", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.12.0,<3" },
     { name = "semver", specifier = ">=3,<4" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2,<3" },

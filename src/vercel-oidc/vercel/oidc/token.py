@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 
 from vercel.headers import get_headers
 

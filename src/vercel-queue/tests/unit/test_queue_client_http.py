@@ -8,7 +8,8 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 
 import anyio
-import httpx
+import httpx as legacy_httpx
+import httpx2 as httpx
 import pytest
 from pydantic import BaseModel
 
@@ -30,6 +31,7 @@ from vercel.queue._internal.constants import (
     HEADER_USER_AGENT,
     VQS_HEADER_CLIENT_TS,
 )
+from vercel.queue._internal.http import response_text
 from vercel.queue.devserver import EmbeddedQueueDevServer
 from vercel.queue.sync import QueueClient as SyncQueueClient
 from vercel.queue.testing import reset_default_async_queue_clients
@@ -339,7 +341,7 @@ def test_queue_debug_logs_sync_http_request_response_and_redacts_values(
     assert all(message.metadata.receipt_handle not in str(event) for event in events)
 
 
-def test_queue_client_suppresses_httpx_request_logs_with_unredacted_urls(
+def test_queue_client_suppresses_httpx2_request_logs_with_unredacted_urls(
     eqs: EmbeddedQueueDevServer,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -357,7 +359,7 @@ def test_queue_client_suppresses_httpx_request_logs_with_unredacted_urls(
     message = delivery.message
     client.acknowledge(message)
 
-    assert not any(record.name == "httpx" for record in caplog.records)
+    assert not any(record.name == "httpx2" for record in caplog.records)
     assert message.metadata.receipt_handle is not None
     events = _queue_debug_events(caplog)
     assert all(message.metadata.receipt_handle not in str(event) for event in events)
@@ -511,6 +513,36 @@ def test_queue_client_accepts_http_client_factory(
     assert not http_client.is_closed
 
 
+def test_queue_client_accepts_legacy_httpx_factory_and_filters_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests: list[legacy_httpx.Request] = []
+
+    def handler(request: legacy_httpx.Request) -> legacy_httpx.Response:
+        requests.append(request)
+        return legacy_httpx.Response(200, json={"messageId": "msg_legacy"})
+
+    http_client = legacy_httpx.Client(transport=legacy_httpx.MockTransport(handler))
+
+    def client_factory(**kwargs: Any) -> legacy_httpx.Client:
+        assert kwargs == {}
+        return http_client
+
+    client = _sync_client(
+        token="token",
+        base_url="https://queue.test",
+        deployment=ALL_DEPLOYMENTS,
+        http_client_factory=cast("Any", client_factory),
+    )
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        result = client.send("emails", {"ok": True})
+
+    assert result == "msg_legacy"
+    assert requests[0].url.path == "/api/v3/topic/emails"
+    assert not any(record.name == "httpx" for record in caplog.records)
+    assert not http_client.is_closed
+
+
 def test_module_send_reuses_process_default_client(
     embedded_queue_module_env: EmbeddedQueueDevServer,
 ) -> None:
@@ -622,6 +654,29 @@ def test_sync_acknowledge_gives_up_after_transport_error_retries() -> None:
     assert isinstance(exc_info.value, ConnectionError)
 
 
+def test_sync_legacy_httpx_transport_errors_are_communication_errors() -> None:
+    def handler(request: legacy_httpx.Request) -> legacy_httpx.Response:
+        raise legacy_httpx.ConnectError("connection reset", request=request)
+
+    def client_factory(**client_kwargs: Any) -> legacy_httpx.Client:
+        return legacy_httpx.Client(
+            transport=legacy_httpx.MockTransport(handler),
+            **client_kwargs,
+        )
+
+    client = _sync_client(
+        token="token",
+        region="iad1",
+        base_url="http://queue.test",
+        deployment=ALL_DEPLOYMENTS,
+        http_client_factory=cast("Any", client_factory),
+    )
+    with pytest.raises(CommunicationError) as exc_info:
+        client.acknowledge(make_leased_metadata("emails"))
+
+    assert isinstance(exc_info.value.__cause__, legacy_httpx.ConnectError)
+
+
 def test_sync_acknowledge_tolerates_missing_lease() -> None:
     calls: list[str] = []
 
@@ -698,6 +753,40 @@ async def test_async_acknowledge_retries_transport_errors() -> None:
     await client.acknowledge(make_leased_metadata("emails"))
 
     assert calls == ["DELETE", "DELETE", "DELETE"]
+
+
+@pytest.mark.anyio
+async def test_async_legacy_httpx_transport_errors_are_communication_errors() -> None:
+    def handler(request: legacy_httpx.Request) -> legacy_httpx.Response:
+        raise legacy_httpx.ConnectError("connection reset", request=request)
+
+    def client_factory(**client_kwargs: Any) -> legacy_httpx.AsyncClient:
+        return legacy_httpx.AsyncClient(
+            transport=legacy_httpx.MockTransport(handler),
+            **client_kwargs,
+        )
+
+    client = _async_client(
+        token="token",
+        region="iad1",
+        base_url="http://queue.test",
+        deployment=ALL_DEPLOYMENTS,
+        http_client_factory=cast("Any", client_factory),
+    )
+    with pytest.raises(CommunicationError) as exc_info:
+        await client.acknowledge(make_leased_metadata("emails"))
+
+    assert isinstance(exc_info.value.__cause__, legacy_httpx.ConnectError)
+
+
+@pytest.mark.anyio
+async def test_response_text_reads_legacy_httpx_stream() -> None:
+    response = legacy_httpx.Response(
+        400,
+        stream=legacy_httpx.ByteStream(b"legacy response"),
+    )
+
+    assert await response_text(cast("Any", response)) == "legacy response"
 
 
 @pytest.mark.anyio

@@ -31,7 +31,7 @@ from tempfile import TemporaryDirectory
 from urllib.parse import unquote
 
 import anyio
-import httpx
+import httpx2 as httpx
 from anyio.abc import TaskGroup
 
 from .client import QueueClient

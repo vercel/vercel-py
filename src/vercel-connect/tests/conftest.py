@@ -6,6 +6,8 @@ import pytest
 
 from vercel.connect import ConnectServiceOptions
 
+pytest_plugins = ["vendor.respx.plugin"]
+
 TEST_BASE_URL = "https://connect.test"
 TEST_OIDC_TOKEN = "oidc-token"
 

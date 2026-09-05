@@ -18,10 +18,10 @@ from datetime import datetime
 from typing import Any
 
 import cbor2
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 
+import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
 from vercel.workflow._internal import core, runtime, world as w

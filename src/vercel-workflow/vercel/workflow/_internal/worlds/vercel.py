@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from typing import Any, TypeVar, overload
 
 import cbor2
-import httpx
+import httpx2 as httpx
 import pydantic
 
 import vercel.queue as vqs

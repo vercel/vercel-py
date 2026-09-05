@@ -13,12 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 import time_machine
 from conftest import TEST_BASE_URL, session_options
 
+import vendor.respx as respx
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel._internal.core.session import get_active_session, get_active_sync_session
 from vercel.api import session
