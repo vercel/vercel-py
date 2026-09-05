@@ -1,0 +1,1 @@
+Fix `BaseHook.wait` to create the hook when the run next suspends rather then when it blocks on the hook. So that hooks are created before their tokens are published, make sure that steps are launched after any hooks are registered.
