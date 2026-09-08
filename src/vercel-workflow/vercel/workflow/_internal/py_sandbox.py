@@ -129,6 +129,18 @@ def _allowlist(
     )
 
 
+class _AsyncioPolicy(_ModulePolicy):
+    """Apply submodule policies to modules re-exported by ``asyncio``."""
+
+    def resolve_attr(self, name: str, real: types.ModuleType) -> Any:
+        value = super().resolve_attr(name, real)
+        if name == "events":
+            return _ProxyModule(value, _ASYNCIO_EVENTS_POLICY)
+        if name in {"runners", "subprocess", "threads"}:
+            return _StubModule(f"asyncio.{name}", value)
+        return value
+
+
 class _RestrictedDatetimeMeta(type):
     def __instancecheck__(cls, instance: Any) -> bool:
         return isinstance(instance, _dt.datetime)
@@ -182,6 +194,17 @@ class _RestrictedRandom(random.Random, metaclass=_RestrictedRandomMeta):
 
 def _host_system() -> str:
     return _host_import("platform").system()
+
+
+_ASYNCIO_EVENTS_POLICY = _blocklist(
+    "asyncio.events",
+    "new_event_loop",
+    "set_event_loop",
+    "get_event_loop_policy",
+    "set_event_loop_policy",
+    "get_child_watcher",
+    "BaseDefaultEventLoopPolicy",
+)
 
 
 _RESTRICTIONS: dict[str, _ModulePolicy] = {
@@ -259,40 +282,35 @@ _RESTRICTIONS: dict[str, _ModulePolicy] = {
     ),
     "io": _blocklist("io", "open", "open_code", "FileIO"),
     "_io": _blocklist("_io", "open", "open_code", "FileIO"),
-    "asyncio": _blocklist(
+    "asyncio": _AsyncioPolicy(
         "asyncio",
-        # Event loop creation and management escapes
-        "run",
-        "Runner",
-        "new_event_loop",
-        "set_event_loop",
-        "get_event_loop_policy",
-        "set_event_loop_policy",
-        "get_child_watcher",
-        "DefaultEventLoopPolicy",
-        # Threading / concurrency escapes
-        "to_thread",
-        "run_coroutine_threadsafe",
-        # Subprocesses
-        "create_subprocess_exec",
-        "create_subprocess_shell",
-        # Network / socket I/O
-        "open_connection",
-        "open_unix_connection",
-        "start_server",
-        "start_unix_server",
-        # Bridging external threaded futures
-        "wrap_future",
+        overrides=_blocklist(
+            "asyncio",
+            # Event loop creation and management escapes
+            "run",
+            "Runner",
+            "new_event_loop",
+            "set_event_loop",
+            "get_event_loop_policy",
+            "set_event_loop_policy",
+            "get_child_watcher",
+            "DefaultEventLoopPolicy",
+            # Threading / concurrency escapes
+            "to_thread",
+            "run_coroutine_threadsafe",
+            # Subprocesses
+            "create_subprocess_exec",
+            "create_subprocess_shell",
+            # Network / socket I/O
+            "open_connection",
+            "open_unix_connection",
+            "start_server",
+            "start_unix_server",
+            # Bridging external threaded futures
+            "wrap_future",
+        ).overrides,
     ),
-    "asyncio.events": _blocklist(
-        "asyncio.events",
-        "new_event_loop",
-        "set_event_loop",
-        "get_event_loop_policy",
-        "set_event_loop_policy",
-        "get_child_watcher",
-        "BaseDefaultEventLoopPolicy",
-    ),
+    "asyncio.events": _ASYNCIO_EVENTS_POLICY,
     "zstandard": _blocklist("zstandard", "open"),
 }
 

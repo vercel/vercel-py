@@ -561,15 +561,29 @@ class TestAsyncioRestrictions:
 
     def test_asyncio_events_loop_escape_blocked(self):
         """asyncio.events cannot be used to escape or overwrite the event loop."""
+        _raises_in_sandbox("import asyncio; asyncio.events.new_event_loop()")
+        _raises_in_sandbox("import asyncio; asyncio.events.set_event_loop(None)")
         _raises_in_sandbox("import asyncio.events; asyncio.events.new_event_loop()")
         _raises_in_sandbox("import asyncio.events; asyncio.events.set_event_loop(None)")
         ns = _run_in_sandbox(
-            "import asyncio.events; "
+            "import asyncio; "
             "loop_cls = asyncio.events.AbstractEventLoop; "
             "getter = asyncio.events.get_running_loop"
         )
         assert ns["loop_cls"] is not None
         assert callable(ns["getter"])
+
+    @pytest.mark.parametrize(
+        ("module", "call"),
+        [
+            ("runners", "run(None)"),
+            ("subprocess", "create_subprocess_exec('echo')"),
+            ("threads", "to_thread(lambda: None)"),
+        ],
+    )
+    def test_asyncio_blocked_submodule_reexports(self, module, call):
+        """Blocked asyncio submodules cannot be reached through the package."""
+        _raises_in_sandbox(f"import asyncio; asyncio.{module}.{call}")
 
     def test_host_asyncio_unaffected(self):
         """Host asyncio functions should remain unblocked."""
