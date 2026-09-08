@@ -2,7 +2,7 @@
 
 Covers:
 - _RESTRICTIONS: builtins, datetime, platform, os, time, socket, random, threading,
-  asyncio, zstandard
+  asyncio, zstandard, io, _io
 - _BLOCKED: subprocess, ssl, ctypes, multiprocessing, signal, etc.
 - _PASSTHROUGHS: stdlib modules that pass through unchanged
 - Loop proxy: allowlisted methods pass, everything else restricted
@@ -518,6 +518,34 @@ class TestZstandardRestrictions:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  io and _io restrictions
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestIoRestrictions:
+    def test_io_open_blocked(self):
+        """io.open should be blocked inside the sandbox."""
+        _raises_in_sandbox("import io; io.open('/dev/null')")
+
+    def test_pathlib_read_text_blocked(self):
+        """Transitive file operations via pathlib should be blocked."""
+        _raises_in_sandbox("import pathlib; pathlib.Path('/dev/null').read_text()")
+
+    def test_io_bytesio_allowed(self):
+        """In-memory io buffers should remain usable."""
+        ns = _run_in_sandbox("import io; result = io.BytesIO(b'hello').getvalue()")
+        assert ns["result"] == b"hello"
+
+    def test_host_io_open_unaffected(self):
+        """Host io.open should remain unblocked."""
+        import io
+
+        assert callable(io.open)
+        _raises_in_sandbox("import io; io.open('/dev/null')")
+        assert callable(io.open)
+
+
+# ═══════════════════════════════════════════════════════════════
 #  asyncio restrictions + loop proxy
 # ═══════════════════════════════════════════════════════════════
 
@@ -825,7 +853,6 @@ class TestPassthroughModules:
             "decimal",
             "enum",
             "copy",
-            "io",
             "zlib",
             "abc",
             "pprint",
