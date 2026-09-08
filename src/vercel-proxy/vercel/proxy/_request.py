@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ._cookies import Cookies
 from ._headers import Headers
 from ._params import Params
 
@@ -29,6 +30,8 @@ class Request:
     """Named captures extracted from the matched route pattern."""
     query_params: Params = field(default_factory=lambda: Params(()))
     """Query parameters parsed from the URL."""
+    cookies: Cookies = field(default_factory=lambda: Cookies(()))
+    """Cookies parsed from the ``Cookie`` request header."""
 
     @classmethod
     def _from_asgi_scope(
@@ -59,7 +62,21 @@ class Request:
             headers=headers,
             path_params=Params(tuple(path_params.items()) if path_params else ()),
             query_params=Params(tuple(parsed_qs.items())),
+            cookies=_parse_cookies("; ".join(headers.get_all("cookie"))),
         )
+
+
+def _parse_cookies(cookie_header: str) -> Cookies:
+    """Parse a ``Cookie`` header value into a :class:`Cookies` mapping."""
+    seen: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for chunk in cookie_header.split(";"):
+        name, _, value = chunk.strip().partition("=")
+        name = name.strip()
+        if name and name not in seen:
+            seen.add(name)
+            pairs.append((name, value))
+    return Cookies(tuple(pairs))
 
 
 def _host_from_scope(scope: dict[str, Any]) -> str:

@@ -2,7 +2,7 @@ import dataclasses
 
 import pytest
 
-from vercel.proxy import Headers, Params, Request
+from vercel.proxy import Cookies, Headers, Params, Request
 
 
 def _scope(
@@ -184,3 +184,82 @@ def test_path_params_immutable() -> None:
     r = Request._from_asgi_scope(_scope(), path_params={"id": "1"})  # noqa: SLF001
     with pytest.raises(TypeError):
         r.path_params["id"] = "2"  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# cookies
+# ---------------------------------------------------------------------------
+
+
+def test_cookies_empty_when_no_header() -> None:
+    r = Request._from_asgi_scope(_scope())  # noqa: SLF001
+    assert isinstance(r.cookies, Cookies)
+    assert dict(r.cookies) == {}
+
+
+def test_cookies_single() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"session=abc123")])
+    )
+    assert r.cookies["session"] == "abc123"
+
+
+def test_cookies_multiple() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"a=1; b=2; c=3")])
+    )
+    assert r.cookies["a"] == "1"
+    assert r.cookies["b"] == "2"
+    assert r.cookies["c"] == "3"
+
+
+def test_cookies_value_with_equals() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"token=abc=def==")])
+    )
+    assert r.cookies["token"] == "abc=def=="
+
+
+def test_cookies_whitespace_around_separator() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"a=1;  b=2")])
+    )
+    assert r.cookies["a"] == "1"
+    assert r.cookies["b"] == "2"
+
+
+def test_cookies_multiple_cookie_headers_joined() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"a=1"), (b"cookie", b"b=2")])
+    )
+    assert r.cookies["a"] == "1"
+    assert r.cookies["b"] == "2"
+
+
+def test_cookies_quoted_value_verbatim() -> None:
+    # RFC 6265: no unquoting — value returned as-is
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b'token="hello world"')])
+    )
+    assert r.cookies["token"] == '"hello world"'
+
+
+def test_cookies_no_value() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"flag=")])
+    )
+    assert r.cookies["flag"] == ""
+
+
+def test_cookies_duplicate_name_first_wins() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"x=first; x=second")])
+    )
+    assert r.cookies["x"] == "first"
+
+
+def test_cookies_duplicate_across_headers_first_wins() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"a=first"), (b"cookie", b"a=second")])
+    )
+    assert r.cookies["a"] == "first"
