@@ -87,7 +87,10 @@ class Proxy:
             await _handle_lifespan(receive, send)
             return
         if scope_type != "http":
-            return
+            raise RuntimeError(
+                f"vercel.proxy received an unexpected ASGI scope type {scope_type!r}. "
+                "Only 'http' and 'lifespan' scopes are handled."
+            )
 
         request = Request._from_asgi_scope(scope)
 

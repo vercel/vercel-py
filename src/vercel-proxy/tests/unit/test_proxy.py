@@ -3,6 +3,8 @@ import functools
 import json
 from typing import Any
 
+import pytest
+
 from vercel.proxy import Method, Proxy, Request, Response
 
 # ---------------------------------------------------------------------------
@@ -560,17 +562,22 @@ def test_lifespan_scope() -> None:
     ]
 
 
-def test_unknown_scope_noop() -> None:
-    sent: list[dict[str, Any]] = []
-
+@pytest.mark.parametrize(
+    ("scope_type", "match"),
+    [
+        ("websocket", "unexpected ASGI scope type 'websocket'"),
+        ("mqtt", "unexpected ASGI scope type 'mqtt'"),
+    ],
+)
+def test_unexpected_scope_raises(scope_type: str, match: str) -> None:
     async def _run() -> None:
         async def receive() -> dict[str, Any]:  # noqa: RUF029
             return {}
 
         async def send(message: dict[str, Any]) -> None:  # noqa: RUF029
-            sent.append(message)
+            pass
 
-        await Proxy()({"type": "websocket"}, receive, send)
+        await Proxy()({"type": scope_type}, receive, send)
 
-    asyncio.run(_run())
-    assert sent == []
+    with pytest.raises(RuntimeError, match=match):
+        asyncio.run(_run())
