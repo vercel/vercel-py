@@ -337,6 +337,40 @@ def test_rewrite_emits_middleware_rewrite() -> None:
     ]
 
 
+def test_rewrite_non_ascii_destination_percent_encoded() -> None:
+    app = Proxy()
+
+    @app.route("/")
+    def handler(request: Request) -> Response:
+        return Response.rewrite("/café")
+
+    assert _drive(app, "/") == [
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"x-middleware-rewrite", b"/caf%C3%A9")],
+        },
+        {"type": "http.response.body", "body": b""},
+    ]
+
+
+def test_rewrite_already_encoded_destination_not_double_encoded() -> None:
+    app = Proxy()
+
+    @app.route("/")
+    def handler(request: Request) -> Response:
+        return Response.rewrite("/caf%C3%A9")
+
+    assert _drive(app, "/") == [
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"x-middleware-rewrite", b"/caf%C3%A9")],
+        },
+        {"type": "http.response.body", "body": b""},
+    ]
+
+
 def test_next_with_headers_emits_diff_header() -> None:
     app = Proxy()
 

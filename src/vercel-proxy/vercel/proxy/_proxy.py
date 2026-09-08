@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import urllib.parse
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeAlias
@@ -113,6 +114,15 @@ class Proxy:
         await _emit(response, send)
 
 
+def _encode_destination(destination: str) -> bytes:
+    """Percent-encode a destination URL for use in x-middleware-* headers.
+
+    Reserves all valid URI characters unencoded; ``%`` is safe to prevent
+    double-encoding already-encoded destinations.
+    """
+    return urllib.parse.quote(destination, safe="/:@!$&'()*+,;=?#%[]").encode("ascii")
+
+
 async def _handle_lifespan(
     receive: Callable[[], Awaitable[dict[str, Any]]],
     send: Callable[[dict[str, Any]], Awaitable[None]],
@@ -173,7 +183,7 @@ async def _emit_continuing(
     if response.destination is None:
         headers.append((b"x-middleware-next", b"1"))
     else:
-        headers.append((b"x-middleware-rewrite", response.destination.encode("latin-1")))
+        headers.append((b"x-middleware-rewrite", _encode_destination(response.destination)))
 
     if response.headers is not None:
         diff = ",".join(k.lower() for k in response.headers)
@@ -194,7 +204,7 @@ async def _emit_terminating(
     headers: list[tuple[bytes, bytes]] = []
 
     if response.destination is not None:
-        headers.append((b"x-middleware-redirect", response.destination.encode("latin-1")))
+        headers.append((b"x-middleware-redirect", _encode_destination(response.destination)))
 
     if response.headers:
         for k, v in response.headers.items():
