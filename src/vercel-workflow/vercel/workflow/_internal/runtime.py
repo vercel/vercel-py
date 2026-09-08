@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import abc
 import asyncio
 import contextlib
@@ -199,19 +201,16 @@ class Hook(BaseSuspension, Generic[T]):
     disposed: bool = False
     has_dispose_event: bool = False
     has_conflict_awaiter: bool = False
+    # Values that came in while no waiters were active
+    buffered_values: deque[T] = dataclasses.field(default_factory=deque)
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
-    conflict_futures: deque[asyncio.Future["Run[Any] | None"]] = dataclasses.field(
+    conflict_futures: deque[asyncio.Future[Run[Any] | None]] = dataclasses.field(
         default_factory=deque
     )
     conflict_error: errors.HookConflictError | None = None
-    conflicting_run: "Run[Any] | None" = None
+    conflicting_run: Run[Any] | None = None
     hook_cls: type[T]
     metadata: bytes | None = None
-
-    @property
-    def awaited(self) -> bool:
-        """Whether the body is currently blocked on this hook."""
-        return any(not fut.done() for fut in self.futures)
 
     def fail(self, exc: Exception) -> None:
         while self.futures:
@@ -238,7 +237,7 @@ class Hook(BaseSuspension, Generic[T]):
                 fut.set_result(res)
                 break
         else:
-            logger.warning("Hook %r resumed but no handler needs it; ignoring: %r", self.token, res)
+            self.buffered_values.append(res)
 
 
 def _correlation_kind(correlation_id: str) -> str:
@@ -811,9 +810,6 @@ class WorkflowOrchestratorContext:
         # What get_workflow_metadata() returns inside the body; None only for
         # contexts built without a run entity (tests, tooling).
         self.workflow_info = workflow_info
-        # List of Out-of-order HookReceivedEvent: such events may arrive at any time unexpectedly,
-        # so we stash them separately for delayed consumption
-        self.ooo_hook_received_events: deque[w.HookReceivedEvent] = deque()
         self.replay_index = 0
         prng = random.Random(seed)
         self.generate_ulid = functools.partial(ulid.monotonic_factory(prng.random), started_at)
@@ -1051,27 +1047,26 @@ class WorkflowOrchestratorContext:
         self.suspensions[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
 
-    def run_hook(self, *, correlation_id: str) -> asyncio.Future[T]:
+    async def run_hook(self, *, correlation_id: str) -> T:
         hook = self.hooks[correlation_id]
         if hook.disposed:
             raise StopAsyncIteration
         if hook.conflict_error is not None:
             raise hook.conflict_error
+        if hook.buffered_values:
+            return hook.buffered_values.popleft()
+
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
-        return fut
+        return await fut
 
-    def run_hook_conflict(self, *, correlation_id: str) -> asyncio.Future["Run[Any] | None"]:
+    async def run_hook_conflict(self, *, correlation_id: str) -> Run[Any] | None:
         hook = self.hooks[correlation_id]
         if hook.has_created_event:
-            future = asyncio.Future[Run[Any] | None]()
-            future.set_result(None)
-            return future
+            return None
         if hook.conflict_error is not None:
             if hook.conflicting_run is not None:
-                future = asyncio.Future[Run[Any] | None]()
-                future.set_result(hook.conflicting_run)
-                return future
+                return hook.conflicting_run
             raise hook.conflict_error
         if hook.disposed:
             raise RuntimeError("cannot call get_conflict() on a disposed hook")
@@ -1079,7 +1074,7 @@ class WorkflowOrchestratorContext:
         hook.has_conflict_awaiter = True
         future = asyncio.Future[Run[Any] | None]()
         hook.conflict_futures.append(future)
-        return future
+        return await future
 
     def dispose_hook(self, *, correlation_id: str) -> None:
         hook = self.hooks[correlation_id]
@@ -1089,17 +1084,6 @@ class WorkflowOrchestratorContext:
             if not fut.done():
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
-
-    def _awaits_hook_payload(self, correlation_id: str) -> bool:
-        """Whether a stashed ``hook_received`` can be delivered now.
-
-        A step cancellation has no awaiter and always consumes its
-        ``hook_received``.
-        """
-        sus = self.suspensions.get(correlation_id)
-        if isinstance(sus, Hook):
-            return sus.awaited
-        return isinstance(sus, Cancellation)
 
     def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
@@ -1131,10 +1115,9 @@ class WorkflowOrchestratorContext:
         If the event log is exhausted, suspend the workflow.
         """
 
-        # Once suspended, replaying further events could only deliver results
-        # onto failed or cancelled futures. Just keep cancelling whatever the
-        # body is still running until the loop winds down.
-        if self.suspended:
+        # If there are no events to process, or we are already suspended:
+        # cancel all the tasks and suspend.
+        if self.suspended or self.replay_index >= len(self.events):
             self.suspend()
             return
 
@@ -1146,70 +1129,52 @@ class WorkflowOrchestratorContext:
         # multiple deliveries bunched up before a resume(), which could
         # lead to mismatches between a recording trace and a replaying
         # one.
-        event: w.Event | None = None
-        # Look for any out-of-order hooks that can be applied
-        for event in self.ooo_hook_received_events:
-            if self._awaits_hook_payload(event.correlation_id):
-                self.ooo_hook_received_events.remove(event)
-                break
-        else:
-            event = None
-
-        if event is None and self.replay_index < len(self.events):
-            event = self.events[self.replay_index]
-            if event.correlation_id not in self.suspensions:
-                match event:
-                    case (
-                        # A step's attribute write. It answers no call in
-                        # this body, so consume it and move on.
-                        w.AttrSetEvent(correlation_id=None)
-                        | w.AttrSetEvent(
-                            event_data=w.AttrSetEventData(writer=w.StepAttributeWriter())
-                        )
-                        # A hook received without being registered
-                        # means it has been disposed of. Nothing to do
-                        # but drop it.
-                        | w.HookReceivedEvent()
-                    ):
-                        self.replay_index += 1
-                        return
-                    case (
-                        w.StepCreatedEvent(correlation_id=str() as slot_id)
-                        | w.HookCreatedEvent(correlation_id=str() as slot_id)
-                        | w.HookConflictEvent(correlation_id=str() as slot_id)
-                        | w.WaitCreatedEvent(correlation_id=str() as slot_id)
-                        | w.AttrSetEvent(correlation_id=str() as slot_id)
-                    ):
-                        # Error if body already registered a different-kind
-                        # call at this positional slot (same ULID, different
-                        # prefix). A same-kind match would have hit the dict
-                        # lookup above, so a ULID collision here is a step/wait/
-                        # hook swap -- the body is non-deterministic. Fail loudly
-                        # instead of yielding forever (the matching ID will never
-                        # appear, so plain `return` would deadlock the run).
-                        pos = _correlation_ulid(slot_id)
-                        for sus in self.suspensions.values():
-                            if _correlation_ulid(sus.correlation_id) == pos:
-                                self._fail_nondeterminism(
-                                    sus,
-                                    NondeterminismError(
-                                        f"workflow replay diverged at position {pos}: recorded a "
-                                        f"{_correlation_kind(slot_id)!r} call, but the body now "
-                                        f"issues a {_correlation_kind(sus.correlation_id)!r} call. "
-                                        "The workflow body is non-deterministic."
-                                    ),
-                                )
-                                return
-                        raise RuntimeError(
-                            f"workflow replay cannot deliver {slot_id!r}: "
-                            "the workflow body has not registered its suspension"
-                        )
-            self.replay_index += 1
-
-        # No events to process. Suspend.
-        if not event:
-            self.suspend()
-            return
+        event = self.events[self.replay_index]
+        self.replay_index += 1
+        if event.correlation_id not in self.suspensions:
+            match event:
+                case (
+                    # A step's attribute write. It answers no call in
+                    # this body, so consume it and move on.
+                    w.AttrSetEvent(correlation_id=None)
+                    | w.AttrSetEvent(event_data=w.AttrSetEventData(writer=w.StepAttributeWriter()))
+                    # A hook received without being registered
+                    # means it has been disposed of. Nothing to do
+                    # but drop it.
+                    | w.HookReceivedEvent()
+                ):
+                    return
+                case (
+                    w.StepCreatedEvent(correlation_id=str() as slot_id)
+                    | w.HookCreatedEvent(correlation_id=str() as slot_id)
+                    | w.HookConflictEvent(correlation_id=str() as slot_id)
+                    | w.WaitCreatedEvent(correlation_id=str() as slot_id)
+                    | w.AttrSetEvent(correlation_id=str() as slot_id)
+                ):
+                    # Error if body already registered a different-kind
+                    # call at this positional slot (same ULID, different
+                    # prefix). A same-kind match would have hit the dict
+                    # lookup above, so a ULID collision here is a step/wait/
+                    # hook swap -- the body is non-deterministic. Fail loudly
+                    # instead of yielding forever (the matching ID will never
+                    # appear, so plain `return` would deadlock the run).
+                    pos = _correlation_ulid(slot_id)
+                    for sus in self.suspensions.values():
+                        if _correlation_ulid(sus.correlation_id) == pos:
+                            self._fail_nondeterminism(
+                                sus,
+                                NondeterminismError(
+                                    f"workflow replay diverged at position {pos}: recorded a "
+                                    f"{_correlation_kind(slot_id)!r} call, but the body now "
+                                    f"issues a {_correlation_kind(sus.correlation_id)!r} call. "
+                                    "The workflow body is non-deterministic."
+                                ),
+                            )
+                            return
+                    raise RuntimeError(
+                        f"workflow replay cannot deliver {slot_id!r}: "
+                        "the workflow body has not registered its suspension"
+                    )
 
         match event:
             case w.StepCreatedEvent(
@@ -1346,11 +1311,6 @@ class WorkflowOrchestratorContext:
                     return
 
                 assert isinstance(hook, Hook)
-                if not hook.awaited:
-                    # Nothing is blocked on the hook right now: hold the payload
-                    # for its next await rather than dropping it.
-                    self.ooo_hook_received_events.append(event)
-                    return
                 result = ser.hydrate(
                     data,
                     what=f"the payload of hook {event.correlation_id}",
