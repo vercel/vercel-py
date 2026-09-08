@@ -246,12 +246,26 @@ def test_cookies_multiple_cookie_headers_joined() -> None:
     assert r.cookies["b"] == "2"
 
 
-def test_cookies_quoted_value_verbatim() -> None:
-    # RFC 6265: no unquoting — value returned as-is
+def test_cookies_quoted_value_unquoted() -> None:
     r = Request._from_asgi_scope(  # noqa: SLF001
         _scope(headers=[(b"cookie", b'token="hello world"')])
     )
-    assert r.cookies["token"] == '"hello world"'
+    assert r.cookies["token"] == "hello world"
+
+
+def test_cookies_unquoted_value_unchanged() -> None:
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b"token=abc123")])
+    )
+    assert r.cookies["token"] == "abc123"
+
+
+def test_cookies_single_quote_not_stripped() -> None:
+    # Only surrounding double-quotes are stripped
+    r = Request._from_asgi_scope(  # noqa: SLF001
+        _scope(headers=[(b"cookie", b'token="only-left')])
+    )
+    assert r.cookies["token"] == '"only-left'
 
 
 def test_cookies_no_value() -> None:

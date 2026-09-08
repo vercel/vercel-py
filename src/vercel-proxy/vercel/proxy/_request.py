@@ -57,9 +57,7 @@ class Request:
             url=url,
             headers=headers,
             path_params=Params(tuple(path_params.items()) if path_params else ()),
-            query_params=Params(
-                tuple(urllib.parse.parse_qsl(query_str, keep_blank_values=True))
-            ),
+            query_params=Params(tuple(urllib.parse.parse_qsl(query_str, keep_blank_values=True))),
             cookies=_parse_cookies("; ".join(headers.get_all("cookie"))),
         )
 
@@ -73,8 +71,15 @@ def _parse_cookies(cookie_header: str) -> Cookies:
         name = name.strip()
         if name and name not in seen:
             seen.add(name)
-            pairs.append((name, value))
+            pairs.append((name, _unquote_cookie(value)))
     return Cookies(tuple(pairs))
+
+
+def _unquote_cookie(value: str) -> str:
+    """Strip a single layer of surrounding double-quotes if present."""
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value
 
 
 def _host_from_scope(scope: dict[str, Any]) -> str:
