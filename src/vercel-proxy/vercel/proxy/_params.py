@@ -53,6 +53,10 @@ class Params(Mapping[str, str]):
                 return v
         return default
 
+    def get_all(self, key: str) -> list[str]:
+        """Return all values for *key* in insertion order."""
+        return [v for k, v in self._store if k == key]
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}({dict(self)!r})"
 

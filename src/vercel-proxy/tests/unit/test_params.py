@@ -105,3 +105,24 @@ def test_hashable() -> None:
     p = Params((("id", "1"),))
     assert isinstance(hash(p), int)
     assert p in {p}
+
+
+def test_get_all_single_value() -> None:
+    p = Params((("x", "1"),))
+    assert p.get_all("x") == ["1"]
+
+
+def test_get_all_multiple_values() -> None:
+    p = Params((("x", "1"), ("x", "2"), ("x", "3")))
+    assert p.get_all("x") == ["1", "2", "3"]
+
+
+def test_get_all_missing_key() -> None:
+    p = Params((("x", "1"),))
+    assert p.get_all("missing") == []
+
+
+def test_get_all_does_not_affect_getitem() -> None:
+    p = Params((("x", "1"), ("x", "2")))
+    assert p["x"] == "1"
+    assert p.get_all("x") == ["1", "2"]

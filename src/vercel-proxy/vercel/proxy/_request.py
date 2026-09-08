@@ -51,17 +51,15 @@ class Request:
         query_str = query_bytes.decode("latin-1")
         url = urllib.parse.urlunsplit((scheme, host, path, query_str, ""))
 
-        parsed_qs: dict[str, str] = {}
-        for k, v in urllib.parse.parse_qsl(query_str, keep_blank_values=True):
-            parsed_qs.setdefault(k, v)
-
         return cls(
             method=method,
             path=path,
             url=url,
             headers=headers,
             path_params=Params(tuple(path_params.items()) if path_params else ()),
-            query_params=Params(tuple(parsed_qs.items())),
+            query_params=Params(
+                tuple(urllib.parse.parse_qsl(query_str, keep_blank_values=True))
+            ),
             cookies=_parse_cookies("; ".join(headers.get_all("cookie"))),
         )
 

@@ -109,9 +109,19 @@ def test_query_params_parsed() -> None:
     assert r.query_params["baz"] == "qux"
 
 
-def test_query_params_first_value_wins_for_duplicates() -> None:
+def test_query_params_first_value_wins_for_getitem() -> None:
     r = Request._from_asgi_scope(_scope(query_string=b"x=1&x=2"))  # noqa: SLF001
     assert r.query_params["x"] == "1"
+
+
+def test_query_params_get_all_returns_all_values() -> None:
+    r = Request._from_asgi_scope(_scope(query_string=b"tag=python&tag=async&tag=web"))  # noqa: SLF001
+    assert r.query_params.get_all("tag") == ["python", "async", "web"]
+
+
+def test_query_params_get_all_missing_key_returns_empty() -> None:
+    r = Request._from_asgi_scope(_scope(query_string=b"x=1"))  # noqa: SLF001
+    assert r.query_params.get_all("missing") == []
 
 
 def test_query_params_empty_when_no_query_string() -> None:
