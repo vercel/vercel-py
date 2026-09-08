@@ -13,7 +13,7 @@ from typing import Any, TypeAlias
 from ._params import Params
 from ._request import Request
 from ._response import Kind, Response
-from ._routing import compile_host, compile_path
+from ._routing import CompiledPattern, compile_host, compile_path
 
 __all__ = ["Proxy"]
 
@@ -25,10 +25,10 @@ _Fallback: TypeAlias = (  # noqa: E501
 
 @dataclass(frozen=True, slots=True)
 class _Route:
-    pattern: Any  # CompiledPattern
+    pattern: CompiledPattern
     methods: frozenset[str] | None  # None = all methods
     handler: _Handler
-    host_pattern: Any | None = None  # CompiledPattern | None
+    host_pattern: CompiledPattern | None = None
 
 
 class Proxy:

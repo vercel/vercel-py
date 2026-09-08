@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 import types
 from collections.abc import Mapping
-from typing import cast, final
+from typing import final
 
 __all__ = ["Response"]
 
@@ -67,8 +67,7 @@ class Response:
         """
         if not (300 <= status <= 399):
             raise ValueError(f"redirect status must be a 3xx code; got {status}")
-        h = cast(dict[str, str | None], headers or {})
-        return Response._make(Kind.TERMINATING, destination, status, b"", h)
+        return Response._make(Kind.TERMINATING, destination, status, b"", headers or {})
 
     @staticmethod
     def json(
@@ -88,8 +87,7 @@ class Response:
         body = _json.dumps(data).encode()
         out: dict[str, str] = dict(headers) if headers else {}
         out["content-type"] = "application/json"
-        h = cast(dict[str, str | None], out)
-        return Response._make(Kind.TERMINATING, None, status, body, h)
+        return Response._make(Kind.TERMINATING, None, status, body, out)
 
     @staticmethod
     def respond(
@@ -104,8 +102,7 @@ class Response:
         *body* is the response body.
         *headers* are response headers sent to the client.
         """
-        h = cast(dict[str, str | None], headers or {})
-        return Response._make(Kind.TERMINATING, None, status, body, h)
+        return Response._make(Kind.TERMINATING, None, status, body, headers or {})
 
     # ------------------------------------------------------------------
     # Read-only properties (for Proxy and testing)
@@ -163,7 +160,7 @@ class Response:
         destination: str | None,
         status: int,
         body: bytes,
-        headers: dict[str, str | None] | None,
+        headers: Mapping[str, str | None] | None,
     ) -> Response:
         obj = object.__new__(Response)
         object.__setattr__(obj, "_kind", kind)
