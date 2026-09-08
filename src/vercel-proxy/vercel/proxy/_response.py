@@ -62,9 +62,11 @@ class Response:
     ) -> Response:
         """Redirect the client to *destination*.
 
-        *status* should be a 3xx code; defaults to 307 (Temporary Redirect).
+        *status* must be a 3xx code. Defaults to 307 (Temporary Redirect).
         *headers* are sent to the client as response headers (e.g. ``Set-Cookie``).
         """
+        if not (300 <= status <= 399):
+            raise ValueError(f"redirect status must be a 3xx code; got {status}")
         h = cast(dict[str, str | None], headers or {})
         return Response._make(Kind.TERMINATING, destination, status, b"", h)
 

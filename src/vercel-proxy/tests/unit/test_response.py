@@ -86,8 +86,15 @@ def test_redirect_default_status_307() -> None:
     assert Response.redirect("/login").status == 307
 
 
-def test_redirect_custom_status() -> None:
-    assert Response.redirect("/login", status=308).status == 308
+def test_redirect_valid_statuses() -> None:
+    for status in (300, 301, 302, 303, 307, 308, 399):
+        assert Response.redirect("/login", status=status).status == status
+
+
+@pytest.mark.parametrize("status", [200, 299, 400, 404, 500])
+def test_redirect_invalid_status_raises(status: int) -> None:
+    with pytest.raises(ValueError, match="3xx"):
+        Response.redirect("/login", status=status)
 
 
 def test_redirect_empty_body() -> None:
