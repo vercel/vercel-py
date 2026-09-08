@@ -244,12 +244,7 @@ class HookEvent(Generic[T]):
         self.dispose()
 
     async def get_conflict(self) -> Run[Any] | None:
-        """Return the run already using this hook's token, if there is one.
-
-        Awaiting this method commits the hook registration without waiting for
-        payload data. A successful registration returns ``None``; a conflict
-        returns a handle for the run that owns the token.
-        """
+        """Return the run already using this hook's token, if there is one."""
         from . import runtime
 
         try:

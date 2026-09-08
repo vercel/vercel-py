@@ -13,7 +13,15 @@ import random
 import sys
 import traceback
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime
 from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast, overload
 from urllib.parse import parse_qsl, urlsplit
@@ -199,6 +207,11 @@ class Hook(BaseSuspension, Generic[T]):
     conflicting_run: "Run[Any] | None" = None
     hook_cls: type[T]
     metadata: bytes | None = None
+
+    @property
+    def awaited(self) -> bool:
+        """Whether the body is currently blocked on this hook."""
+        return any(not fut.done() for fut in self.futures)
 
     def fail(self, exc: Exception) -> None:
         while self.futures:
@@ -1035,6 +1048,7 @@ class WorkflowOrchestratorContext:
             metadata=None if metadata is None else self.payload_encoder.encode(metadata),
         )
         self.hooks[hook.correlation_id] = hook
+        self.suspensions[hook.correlation_id] = hook
         return core.HookEvent(correlation_id=hook.correlation_id, token=hook.token)
 
     def run_hook(self, *, correlation_id: str) -> asyncio.Future[T]:
@@ -1043,7 +1057,6 @@ class WorkflowOrchestratorContext:
             raise StopAsyncIteration
         if hook.conflict_error is not None:
             raise hook.conflict_error
-        self.suspensions[hook.correlation_id] = hook
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
         return fut
@@ -1064,7 +1077,6 @@ class WorkflowOrchestratorContext:
             raise RuntimeError("cannot call get_conflict() on a disposed hook")
 
         hook.has_conflict_awaiter = True
-        self.suspensions[hook.correlation_id] = hook
         future = asyncio.Future[Run[Any] | None]()
         hook.conflict_futures.append(future)
         return future
@@ -1077,6 +1089,17 @@ class WorkflowOrchestratorContext:
             if not fut.done():
                 fut.set_exception(StopAsyncIteration)
         self.suspensions.pop(correlation_id, None)
+
+    def _awaits_hook_payload(self, correlation_id: str) -> bool:
+        """Whether a stashed ``hook_received`` can be delivered now.
+
+        A step cancellation has no awaiter and always consumes its
+        ``hook_received``.
+        """
+        sus = self.suspensions.get(correlation_id)
+        if isinstance(sus, Hook):
+            return sus.awaited
+        return isinstance(sus, Cancellation)
 
     def _fail_nondeterminism(self, sus: BaseSuspension, exc: Exception) -> None:
         """Fail the run with a replay-divergence error the body cannot suppress.
@@ -1126,7 +1149,7 @@ class WorkflowOrchestratorContext:
         event: w.Event | None = None
         # Look for any out-of-order hooks that can be applied
         for event in self.ooo_hook_received_events:
-            if event.correlation_id in self.suspensions:
+            if self._awaits_hook_payload(event.correlation_id):
                 self.ooo_hook_received_events.remove(event)
                 break
         else:
@@ -1136,13 +1159,17 @@ class WorkflowOrchestratorContext:
             event = self.events[self.replay_index]
             if event.correlation_id not in self.suspensions:
                 match event:
-                    # A step's attribute write. It answers no call in
-                    # this body, so consume it and move on.
                     case (
+                        # A step's attribute write. It answers no call in
+                        # this body, so consume it and move on.
                         w.AttrSetEvent(correlation_id=None)
                         | w.AttrSetEvent(
                             event_data=w.AttrSetEventData(writer=w.StepAttributeWriter())
                         )
+                        # A hook received without being registered
+                        # means it has been disposed of. Nothing to do
+                        # but drop it.
+                        | w.HookReceivedEvent()
                     ):
                         self.replay_index += 1
                         return
@@ -1177,13 +1204,6 @@ class WorkflowOrchestratorContext:
                             f"workflow replay cannot deliver {slot_id!r}: "
                             "the workflow body has not registered its suspension"
                         )
-                    # HookReceivedEvent is not created from workflows, it may arrive
-                    # at any time out of order. At this momemnt we don't need one,
-                    # so we just stash it and continue with the event log.
-                    case w.HookReceivedEvent():
-                        self.ooo_hook_received_events.append(event)
-                        self.replay_index += 1
-                        return
             self.replay_index += 1
 
         # No events to process. Suspend.
@@ -1326,14 +1346,17 @@ class WorkflowOrchestratorContext:
                     return
 
                 assert isinstance(hook, Hook)
+                if not hook.awaited:
+                    # Nothing is blocked on the hook right now: hold the payload
+                    # for its next await rather than dropping it.
+                    self.ooo_hook_received_events.append(event)
+                    return
                 result = ser.hydrate(
                     data,
                     what=f"the payload of hook {event.correlation_id}",
                     key=self.run_key,
                 )
                 hook.set_result(result)
-                if not hook.futures:
-                    self.suspensions.pop(event.correlation_id)
 
             case w.HookDisposedEvent():
                 self.hooks[event.correlation_id].has_dispose_event = True
@@ -1873,7 +1896,10 @@ async def _workflow_replay_pass(
                 events_created = True
 
     # Now that the workflow is fully suspended and old hook tokens have been
-    # released, create all pending events in parallel.
+    # released, create all pending events in parallel. Steps are enqueued only
+    # once every event is durable: a step may hand a hook's token to whoever
+    # will resume it, so the hook has to exist by the time the step runs.
+    steps_to_queue: list[Callable[[], Awaitable[str]]] = []
     async with anyio.create_task_group() as tg:
         for sus in context.suspensions.values():
             if sus.has_created_event:
@@ -1894,15 +1920,18 @@ async def _workflow_replay_pass(
                     #
                     # Instead we use an idempotency_key to pervent
                     # duplicate queueing.
-                    await world.queue(
-                        w.get_queue_name(workflow_run.workflow_name, namespace),
-                        w.WorkflowInvokePayload(
-                            run_id=run_id,
-                            step_id=s.correlation_id,
-                            step_name=s.step.name,
-                            requested_at=datetime.now(UTC),
-                        ),
-                        idempotency_key=s.correlation_id,
+                    steps_to_queue.append(
+                        functools.partial(
+                            world.queue,
+                            w.get_queue_name(workflow_run.workflow_name, namespace),
+                            w.WorkflowInvokePayload(
+                                run_id=run_id,
+                                step_id=s.correlation_id,
+                                step_name=s.step.name,
+                                requested_at=datetime.now(UTC),
+                            ),
+                            idempotency_key=s.correlation_id,
+                        )
                     )
 
                 tg.start_soon(create_step)
@@ -1959,6 +1988,10 @@ async def _workflow_replay_pass(
 
                 tg.start_soon(set_attr)
                 events_created = True
+
+    async with anyio.create_task_group() as tg:
+        for queue_step in steps_to_queue:
+            tg.start_soon(queue_step)
 
     if not context.suspensions and events_created:
         # A disposed hook can clear the last suspension while its lifecycle
