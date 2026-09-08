@@ -531,21 +531,46 @@ def test_async_partial_handler() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Non-http scope is a no-op
+# Non-http scopes
 # ---------------------------------------------------------------------------
 
 
-def test_non_http_scope_noop() -> None:
-    events: list[dict[str, Any]] = []
+def test_lifespan_scope() -> None:
+    messages = [
+        {"type": "lifespan.startup"},
+        {"type": "lifespan.shutdown"},
+    ]
+    sent: list[dict[str, Any]] = []
+
+    async def _run() -> None:
+        it = iter(messages)
+
+        async def receive() -> dict[str, Any]:  # noqa: RUF029
+            return next(it)
+
+        async def send(message: dict[str, Any]) -> None:  # noqa: RUF029
+            sent.append(message)
+
+        await Proxy()({"type": "lifespan"}, receive, send)
+
+    asyncio.run(_run())
+    assert sent == [
+        {"type": "lifespan.startup.complete"},
+        {"type": "lifespan.shutdown.complete"},
+    ]
+
+
+def test_unknown_scope_noop() -> None:
+    sent: list[dict[str, Any]] = []
 
     async def _run() -> None:
         async def receive() -> dict[str, Any]:  # noqa: RUF029
             return {}
 
         async def send(message: dict[str, Any]) -> None:  # noqa: RUF029
-            events.append(message)
+            sent.append(message)
 
-        await Proxy()({"type": "lifespan"}, receive, send)
+        await Proxy()({"type": "websocket"}, receive, send)
 
     asyncio.run(_run())
-    assert events == []
+    assert sent == []

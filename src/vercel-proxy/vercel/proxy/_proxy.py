@@ -82,7 +82,11 @@ class Proxy:
         receive: Callable[[], Awaitable[dict[str, Any]]],
         send: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> None:
-        if scope.get("type") != "http":
+        scope_type = scope.get("type")
+        if scope_type == "lifespan":
+            await _handle_lifespan(receive, send)
+            return
+        if scope_type != "http":
             return
 
         request = Request._from_asgi_scope(scope)
@@ -105,6 +109,24 @@ class Proxy:
         fallback = self._fallback
         response = fallback if isinstance(fallback, Response) else await _call(fallback, request)
         await _emit(response, send)
+
+
+async def _handle_lifespan(
+    receive: Callable[[], Awaitable[dict[str, Any]]],
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    """Consume ASGI lifespan messages and reply with completion events.
+
+    The proxy has no startup or shutdown work; this keeps the ASGI contract
+    intact without leaving the lifespan messages unread.
+    """
+    while True:
+        message = await receive()
+        if message["type"] == "lifespan.startup":
+            await send({"type": "lifespan.startup.complete"})
+        elif message["type"] == "lifespan.shutdown":
+            await send({"type": "lifespan.shutdown.complete"})
+            return
 
 
 def _is_async_callable(obj: Any) -> bool:
