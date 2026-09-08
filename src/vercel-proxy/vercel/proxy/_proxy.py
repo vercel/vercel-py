@@ -13,7 +13,7 @@ from typing import Any, TypeAlias
 from ._params import Params
 from ._request import Request
 from ._response import Kind, Response
-from ._routing import compile_path
+from ._routing import compile_host, compile_path
 
 __all__ = ["Proxy"]
 
@@ -28,6 +28,7 @@ class _Route:
     pattern: Any  # CompiledPattern
     methods: frozenset[str] | None  # None = all methods
     handler: _Handler
+    host_pattern: Any | None = None  # CompiledPattern | None
 
 
 class Proxy:
@@ -53,17 +54,36 @@ class Proxy:
         path: str,
         *,
         methods: list[str] | None = None,
+        host: str | None = None,
     ) -> Callable[[_Handler], _Handler]:
         """Register a route handler.
 
         *path* supports ``{param}``, ``{param:path}``, and ``{param:str}`` patterns.
         *methods* is a list of HTTP methods to match; omit to match all methods.
+        *host* is an optional hostname pattern such as ``{tenant}.myapp.com``.
+        Omit to match any host.
         """
 
         def decorator(func: _Handler) -> _Handler:
             pattern = compile_path(path, strict=self._strict)
+            host_pattern = compile_host(host) if host is not None else None
             method_set = frozenset(m.upper() for m in methods) if methods else None
-            self._routes.append(_Route(pattern=pattern, methods=method_set, handler=func))
+            if host_pattern is not None:
+                path_names = set(pattern._pattern.groupindex)  # noqa: SLF001
+                host_names = set(host_pattern._pattern.groupindex)  # noqa: SLF001
+                overlap = path_names & host_names
+                if overlap:
+                    raise ValueError(
+                        f"param name(s) {overlap} appear in both host and path patterns"
+                    )
+            self._routes.append(
+                _Route(
+                    pattern=pattern,
+                    methods=method_set,
+                    handler=func,
+                    host_pattern=host_pattern,
+                )
+            )
             return func
 
         return decorator
@@ -93,6 +113,8 @@ class Proxy:
             )
 
         request = Request._from_asgi_scope(scope)
+        host_header = request.headers.get("host", "")
+        hostname = urllib.parse.urlsplit(f"//{host_header}").hostname or ""
 
         for route in self._routes:
             params = route.pattern.match(request.path)
@@ -100,10 +122,16 @@ class Proxy:
                 continue
             if route.methods is not None and request.method not in route.methods:
                 continue
+            host_params: dict[str, str] = {}
+            if route.host_pattern is not None:
+                host_match = route.host_pattern.match(hostname)
+                if host_match is None:
+                    continue
+                host_params = host_match
 
             final_request = dataclasses.replace(
                 request,
-                path_params=Params(tuple(params.items())),
+                path_params=Params(tuple({**host_params, **params}.items())),
             )
             response = await _call(route.handler, final_request)
             await _emit(response, send)

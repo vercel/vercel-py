@@ -508,6 +508,90 @@ def test_json_emits_content_type_and_body() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Host matching
+# ---------------------------------------------------------------------------
+
+
+def test_host_exact_match() -> None:
+    app = Proxy()
+
+    @app.route("/", host="myapp.com")
+    def handler(request: Request) -> Response:
+        return Response.respond(status=200, body=b"matched")
+
+    assert _drive(app, "/", headers=[(b"host", b"myapp.com")]) == [
+        {"type": "http.response.start", "status": 200, "headers": []},
+        {"type": "http.response.body", "body": b"matched"},
+    ]
+
+
+def test_host_no_match_falls_through() -> None:
+    app = Proxy(fallback=Response.respond(status=418))
+
+    @app.route("/", host="myapp.com")
+    def handler(request: Request) -> Response:
+        return Response.respond(status=200, body=b"matched")
+
+    assert _drive(app, "/", headers=[(b"host", b"other.com")]) == [
+        {"type": "http.response.start", "status": 418, "headers": []},
+        {"type": "http.response.body", "body": b""},
+    ]
+
+
+def test_host_param_captured_in_path_params() -> None:
+    captured: dict[str, str] = {}
+
+    app = Proxy()
+
+    @app.route("/{path:path}", host="{tenant}.myapp.com")
+    def handler(request: Request) -> Response:
+        captured.update(request.path_params)
+        return Response.respond(status=200, body=b"matched")
+
+    assert _drive(app, "/dashboard", headers=[(b"host", b"acme.myapp.com")]) == [
+        {"type": "http.response.start", "status": 200, "headers": []},
+        {"type": "http.response.body", "body": b"matched"},
+    ]
+    assert captured == {"tenant": "acme", "path": "dashboard"}
+
+
+def test_host_ipv6_does_not_mangle() -> None:
+    app = Proxy(fallback=Response.respond(status=418))
+
+    @app.route("/", host="myapp.com")
+    def handler(request: Request) -> Response:
+        return Response.respond(status=200, body=b"matched")
+
+    # IPv6 host should fall through cleanly, not raise or match wrongly
+    assert _drive(app, "/", headers=[(b"host", b"[::1]:8080")]) == [
+        {"type": "http.response.start", "status": 418, "headers": []},
+        {"type": "http.response.body", "body": b""},
+    ]
+
+
+def test_host_port_stripped_before_matching() -> None:
+    app = Proxy()
+
+    @app.route("/", host="myapp.com")
+    def handler(request: Request) -> Response:
+        return Response.respond(status=200, body=b"matched")
+
+    assert _drive(app, "/", headers=[(b"host", b"myapp.com:3000")]) == [
+        {"type": "http.response.start", "status": 200, "headers": []},
+        {"type": "http.response.body", "body": b"matched"},
+    ]
+
+
+def test_host_path_overlap_raises_at_registration() -> None:
+    app = Proxy()
+    with pytest.raises(ValueError, match="appear in both host and path"):
+
+        @app.route("/{tenant}", host="{tenant}.myapp.com")
+        def handler(request: Request) -> Response:
+            return Response.next()
+
+
+# ---------------------------------------------------------------------------
 # Callable objects and functools.partial handlers
 # ---------------------------------------------------------------------------
 
