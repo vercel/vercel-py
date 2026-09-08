@@ -1,6 +1,6 @@
 import pytest
 
-from vercel.proxy._routing import compile_path
+from vercel.proxy._routing import compile_host, compile_path
 
 # ---------------------------------------------------------------------------
 # Exact match
@@ -204,3 +204,48 @@ def test_duplicate_param_raises() -> None:
 def test_invalid_param_name_raises() -> None:
     with pytest.raises(ValueError, match="invalid param name"):
         compile_path("/{123}")
+
+
+# ---------------------------------------------------------------------------
+# compile_host
+# ---------------------------------------------------------------------------
+
+
+def test_host_exact_match() -> None:
+    p = compile_host("myapp.com")
+    assert p.match("myapp.com") == {}
+
+
+def test_host_exact_no_match() -> None:
+    p = compile_host("myapp.com")
+    assert p.match("other.com") is None
+
+
+def test_host_param_capture() -> None:
+    p = compile_host("{tenant}.myapp.com")
+    assert p.match("acme.myapp.com") == {"tenant": "acme"}
+
+
+def test_host_param_no_match_wrong_base() -> None:
+    p = compile_host("{tenant}.myapp.com")
+    assert p.match("acme.other.com") is None
+
+
+def test_host_param_no_dots_in_label() -> None:
+    p = compile_host("{tenant}.myapp.com")
+    assert p.match("a.b.myapp.com") is None
+
+
+def test_host_multiple_params() -> None:
+    p = compile_host("{env}.{tenant}.myapp.com")
+    assert p.match("prod.acme.myapp.com") == {"env": "prod", "tenant": "acme"}
+
+
+def test_host_path_converter_unsupported() -> None:
+    with pytest.raises(ValueError, match="unknown converter"):
+        compile_host("{path:path}.myapp.com")
+
+
+def test_host_duplicate_param_raises() -> None:
+    with pytest.raises(ValueError, match="duplicate param name"):
+        compile_host("{x}.{x}.myapp.com")
