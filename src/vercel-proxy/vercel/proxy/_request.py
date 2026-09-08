@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ._headers import Headers
-from ._method import Method
 from ._params import Params
 
 __all__ = ["Request"]
@@ -18,8 +17,8 @@ __all__ = ["Request"]
 class Request:
     """Immutable snapshot of an incoming proxy request."""
 
-    method: Method
-    """HTTP request method."""
+    method: str
+    """HTTP method, normalised to uppercase (e.g. ``"GET"``)."""
     path: str
     """Request path (e.g. ``"/api/users/42"``)."""
     url: str
@@ -38,7 +37,7 @@ class Request:
         path_params: Mapping[str, str] | None = None,
     ) -> Request:
         """Internal: construct from an ASGI http scope dict."""
-        method = Method(scope["method"].upper())
+        method = scope["method"].upper()
         path = scope.get("path", "/")
         query_bytes: bytes = scope.get("query_string", b"")
         scheme = scope.get("scheme", "https")

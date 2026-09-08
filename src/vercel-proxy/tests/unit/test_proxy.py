@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from vercel.proxy import Method, Proxy, Request, Response
+from vercel.proxy import Proxy, Request, Response
 
 # ---------------------------------------------------------------------------
 # ASGI test helpers
@@ -139,7 +139,7 @@ def test_path_params_empty_for_exact_match() -> None:
 def test_method_match() -> None:
     app = Proxy()
 
-    @app.route("/resource", methods=[Method.GET])
+    @app.route("/resource", methods=["GET"])
     def handler(request: Request) -> Response:
         return Response.respond(status=200, body=b"ok")
 
@@ -152,7 +152,7 @@ def test_method_match() -> None:
 def test_method_no_match_falls_through() -> None:
     app = Proxy(fallback=Response.respond(status=418))
 
-    @app.route("/resource", methods=[Method.GET])
+    @app.route("/resource", methods=["GET"])
     def handler(request: Request) -> Response:
         return Response.respond(status=200, body=b"ok")
 
@@ -165,7 +165,7 @@ def test_method_no_match_falls_through() -> None:
 def test_method_case_insensitive() -> None:
     app = Proxy()
 
-    @app.route("/resource", methods=[Method.GET])
+    @app.route("/resource", methods=["GET"])
     def handler(request: Request) -> Response:
         return Response.respond(status=200, body=b"ok")
 

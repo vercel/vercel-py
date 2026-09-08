@@ -2,7 +2,7 @@ import dataclasses
 
 import pytest
 
-from vercel.proxy import Headers, Method, Params, Request
+from vercel.proxy import Headers, Params, Request
 
 
 def _scope(
@@ -32,18 +32,23 @@ def _scope(
 
 def test_basic_construction() -> None:
     r = Request._from_asgi_scope(_scope(method="GET", path="/hello"))  # noqa: SLF001
-    assert r.method == Method.GET
+    assert r.method == "GET"
     assert r.path == "/hello"
 
 
 def test_method_normalised_to_uppercase() -> None:
     r = Request._from_asgi_scope(_scope(method="post"))  # noqa: SLF001
-    assert r.method == Method.POST
+    assert r.method == "POST"
 
 
 def test_method_already_uppercase() -> None:
     r = Request._from_asgi_scope(_scope(method="DELETE"))  # noqa: SLF001
-    assert r.method == Method.DELETE
+    assert r.method == "DELETE"
+
+
+def test_nonstandard_method_preserved() -> None:
+    r = Request._from_asgi_scope(_scope(method="PROPFIND"))  # noqa: SLF001
+    assert r.method == "PROPFIND"
 
 
 def test_url_no_query_string() -> None:
@@ -160,7 +165,7 @@ def test_path_params_is_params() -> None:
 def test_frozen_raises_on_assignment() -> None:
     r = Request._from_asgi_scope(_scope())  # noqa: SLF001
     with pytest.raises(dataclasses.FrozenInstanceError):
-        r.method = Method.POST  # type: ignore[misc]
+        r.method = "POST"  # type: ignore[misc]
 
 
 def test_frozen_raises_on_delete() -> None:

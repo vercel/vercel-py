@@ -9,7 +9,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
-from ._method import Method
 from ._params import Params
 from ._request import Request
 from ._response import Kind, Response
@@ -26,7 +25,7 @@ _Fallback: TypeAlias = (  # noqa: E501
 @dataclass(frozen=True, slots=True)
 class _Route:
     pattern: Any  # CompiledPattern
-    methods: frozenset[Method] | None  # None = all methods
+    methods: frozenset[str] | None  # None = all methods
     handler: _Handler
 
 
@@ -52,7 +51,7 @@ class Proxy:
         self,
         path: str,
         *,
-        methods: list[Method] | None = None,
+        methods: list[str] | None = None,
     ) -> Callable[[_Handler], _Handler]:
         """Register a route handler.
 
@@ -62,7 +61,7 @@ class Proxy:
 
         def decorator(func: _Handler) -> _Handler:
             pattern = compile_path(path, strict=self._strict)
-            method_set = frozenset(methods) if methods else None
+            method_set = frozenset(m.upper() for m in methods) if methods else None
             self._routes.append(_Route(pattern=pattern, methods=method_set, handler=func))
             return func
 
@@ -141,9 +140,10 @@ def _is_async_callable(obj: Any) -> bool:
     """
     while isinstance(obj, functools.partial):
         obj = obj.func
-    return asyncio.iscoroutinefunction(obj) or asyncio.iscoroutinefunction(
-        getattr(obj, "__call__", None)
-    )
+    if asyncio.iscoroutinefunction(obj):
+        return True
+    call = getattr(obj, "__call__", None)  # noqa: B004
+    return call is not None and asyncio.iscoroutinefunction(call)
 
 
 async def _call(handler: Any, request: Request) -> Response:
