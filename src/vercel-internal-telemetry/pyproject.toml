@@ -22,6 +22,7 @@ dependencies = [
 
 [tool.vercel-sdk.release.bundle]
 enabled = true
+shared-runtime = true
 
 [tool.uv.sources]
 vercel-oidc = { workspace = true }

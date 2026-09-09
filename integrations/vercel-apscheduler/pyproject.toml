@@ -18,6 +18,7 @@ dependencies = [
 
 [tool.vercel-sdk.release.bundle]
 enabled = true
+shared-runtime = true
 external-dependencies = ["apscheduler", "redis"]
 
 [tool.uv.sources]

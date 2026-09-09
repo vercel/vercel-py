@@ -24,6 +24,7 @@ dependencies = [
 
 [tool.vercel-sdk.release.bundle]
 enabled = true
+shared-runtime = true
 external-dependencies = ["celery"]
 
 [tool.uv.sources]

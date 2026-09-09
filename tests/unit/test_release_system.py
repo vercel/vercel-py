@@ -1838,7 +1838,10 @@ def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_dep
         "tool": {
             "vercel-sdk": {
                 "release": {
-                    "bundle": {"external-dependencies": ["celery"]},
+                    "bundle": {
+                        "external-dependencies": ["celery"],
+                        "shared-runtime": True,
+                    },
                     "dependencies": [
                         "httpx2>=2",
                         "celery>=5.3,<6",
@@ -1885,7 +1888,16 @@ def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
         },
     )
     data = {
-        "tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["dramatiq"]}}}},
+        "tool": {
+            "vercel-sdk": {
+                "release": {
+                    "bundle": {
+                        "external-dependencies": ["dramatiq"],
+                        "shared-runtime": True,
+                    }
+                }
+            }
+        },
         "project": {
             "dependencies": [
                 "dramatiq>=2.2,<3",
@@ -1930,7 +1942,16 @@ def test_django_tasks_bundle_keeps_django_peer_dependency(
         },
     )
     data = {
-        "tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["django"]}}}},
+        "tool": {
+            "vercel-sdk": {
+                "release": {
+                    "bundle": {
+                        "external-dependencies": ["django"],
+                        "shared-runtime": True,
+                    }
+                }
+            }
+        },
         "project": {
             "dependencies": [
                 "Django>=6.0; python_version >= '3.12'",
@@ -1976,7 +1997,16 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
         },
     )
     data = {
-        "tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["apscheduler"]}}}},
+        "tool": {
+            "vercel-sdk": {
+                "release": {
+                    "bundle": {
+                        "external-dependencies": ["apscheduler"],
+                        "shared-runtime": True,
+                    }
+                }
+            }
+        },
         "project": {
             "dependencies": [
                 "APScheduler>=3.10.4,<4",
@@ -2117,7 +2147,10 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
         "tool": {
             "vercel-sdk": {
                 "release": {
-                    "bundle": {"external-dependencies": ["celery"]},
+                    "bundle": {
+                        "external-dependencies": ["celery"],
+                        "shared-runtime": True,
+                    },
                     "dependencies": [
                         "celery>=5.3,<6",
                         "vercel-cache>=0.6.0",
