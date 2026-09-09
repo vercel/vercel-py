@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-09-09
+
+> **Release note:** Version 0.3.0 was declared in repository history but was
+> never published to PyPI. This forward release includes its intended contents.
+
+- Update dependencies.
+
 ## 0.3.0 - 2026-09-01
 
 ### Breaking Changes
