@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vercel.env import Env, __version__, get_env
-
-
-def test_version() -> None:
-    assert __version__ == "0.0.0"
+from vercel.env import Env, get_env
 
 
 def test_get_env_from_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
