@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 - 2026-09-09
+
+### Features
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor. (#356)
+
 ## 0.7.3 - 2026-09-01
 
 - Update dependencies.

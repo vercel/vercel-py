@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1 - 2026-09-09
+
+- Update dependencies.
+
 ## 0.7.0 - 2026-09-01
 
 ### Features

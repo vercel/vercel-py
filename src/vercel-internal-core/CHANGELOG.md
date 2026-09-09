@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 - 2026-09-09
+
+### Features
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor while retaining runtime-only support for explicitly installed legacy clients returned by the session factory. (#356)
+
+### Bug Fixes
+
+- Buffer requires `typing-extensions` >=4.6 on Python <3.12. (#363)
+
 ## 0.1.3 - 2026-09-01
 
 ### Internal

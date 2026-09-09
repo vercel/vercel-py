@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 - 2026-09-09
+
+### Breaking Changes
+
+- Remove the `asgi_app`, `QueueClientAsgiApp`, `QueueClient.asgi_app()`,
+  `QueueClientAsgiDevServer`, and `queue_client_asgi_dev_server` APIs. Deploy
+  queue handlers with `[[tool.vercel.subscribers]]` declarations instead. (#309)
+
+### Features
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor while retaining runtime-only support for explicitly installed legacy clients returned by the client factory. (#356)
+
 ## 0.8.1 - 2026-09-01
 
 ### Bug Fixes
