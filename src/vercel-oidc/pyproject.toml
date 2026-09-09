@@ -33,6 +33,9 @@ dependencies = [
     "vercel-headers>=0.6.0",
 ]
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.uv.sources]
 vercel-headers = { workspace = true }
 

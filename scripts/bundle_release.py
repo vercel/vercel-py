@@ -99,14 +99,6 @@ EXTERNAL_DEPENDENCIES = {
     # store's connection pool anyway.
     "vercel-apscheduler": {"redis"},
 }
-# Packages that ship no `-bundle` variant.
-UNBUNDLED_PACKAGES = {
-    # Workflow is not vendored by anything yet, so we don't need its -bundle
-    "vercel-workflow",
-    # Proxy is only used as an explicit dependency of user code, so it has no
-    # need for a -bundle.
-    "vercel-proxy",
-}
 COMMON_DROP_TRANSFORMATIONS = (
     "*.so",
     "*/tests/",
@@ -140,10 +132,22 @@ class VendoringTransformations:
     drops: tuple[str, ...] = COMMON_DROP_TRANSFORMATIONS
 
 
+def _bundle_metadata(data: dict[str, Any]) -> dict[str, Any]:
+    release = data.get("tool", {}).get("vercel-sdk", {}).get("release", {})
+    bundle = release.get("bundle", {})
+    if not isinstance(bundle, dict):
+        return {}
+    return bundle
+
+
 def is_vendored_eligible(package: workspace.Package) -> bool:
-    if package.name in UNBUNDLED_PACKAGES:
-        return False
+    pyproject_file = package.path / "pyproject.toml"
+    if not pyproject_file.exists():
+        return True
     data = _load_pyproject(package.path)
+    bundle = _bundle_metadata(data)
+    if not bundle.get("enabled", False):
+        return False
     return _vendoring_config_for_package(package, data) is not None
 
 

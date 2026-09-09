@@ -1763,6 +1763,9 @@ def test_vendored_eligibility_is_derived_from_package_layout(tmp_path: Path) -> 
 [project]
 name = "{package.name}"
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.hatch.build.targets.wheel]
 only-include = ["{include}"]
 """.lstrip(),
@@ -1773,6 +1776,9 @@ only-include = ["{include}"]
         """
 [project]
 name = "vercel"
+
+[tool.vercel-sdk.release.bundle]
+enabled = true
 
 [tool.hatch.build.targets.wheel]
 only-include = ["/_internal", "/blob"]
@@ -1799,6 +1805,9 @@ only-include = ["/_internal", "/blob"]
         """
 [project]
 name = "vercel-fallback"
+
+[tool.vercel-sdk.release.bundle]
+enabled = true
 """.lstrip(),
         encoding="utf-8",
     )
@@ -1823,13 +1832,15 @@ def test_unbundled_packages_are_excluded_despite_looking_eligible(tmp_path: Path
 [project]
 name = "vercel-workflow"
 
+[tool.vercel-sdk.release.bundle]
+enabled = false
+
 [tool.hatch.build.targets.wheel]
 only-include = ["/vercel/workflow"]
 """.lstrip(),
         encoding="utf-8",
     )
 
-    assert package.name in bundle_release.UNBUNDLED_PACKAGES
     assert not bundle_release.is_vendored_eligible(package)
     # Both probes would otherwise say yes, so the exclusion is what decides it.
     data = bundle_release._load_pyproject(package.path)  # noqa: SLF001

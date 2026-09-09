@@ -17,6 +17,9 @@ path = "hatch_build.py"
 [tool.vercel-sdk.release.dependencies]
 dependencies = []
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.hatch.version]
 path = "vercel/headers/version.py"
 

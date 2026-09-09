@@ -20,6 +20,9 @@ dependencies = [
     "vercel-oidc>=0.6.0",
 ]
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.uv.sources]
 vercel-oidc = { workspace = true }
 

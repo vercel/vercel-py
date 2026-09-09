@@ -22,6 +22,9 @@ dependencies = [
     "vercel-queue>=0.6.0",
 ]
 
+[tool.vercel-sdk.release.bundle]
+enabled = true
+
 [tool.uv.sources]
 vercel-cache = { workspace = true }
 vercel-queue = { workspace = true }
