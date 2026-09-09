@@ -1838,12 +1838,13 @@ def test_vendored_external_dependencies_keep_peers_and_side_by_side_vendored_dep
         "tool": {
             "vercel-sdk": {
                 "release": {
+                    "bundle": {"external-dependencies": ["celery"]},
                     "dependencies": [
                         "httpx2>=2",
                         "celery>=5.3,<6",
                         "vercel-cache>=0.6.0",
                         "vercel-queue>=0.6.0",
-                    ]
+                    ],
                 }
             }
         }
@@ -1884,13 +1885,14 @@ def test_dramatiq_bundle_keeps_dramatiq_peer_dependency(
         },
     )
     data = {
+        "tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["dramatiq"]}}}},
         "project": {
             "dependencies": [
                 "dramatiq>=2.2,<3",
                 "vercel-cache>=0.6.0",
                 "vercel-queue>=0.6.0",
             ]
-        }
+        },
     }
 
     assert bundle_release._external_dependencies(  # noqa: SLF001
@@ -1928,13 +1930,14 @@ def test_django_tasks_bundle_keeps_django_peer_dependency(
         },
     )
     data = {
+        "tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["django"]}}}},
         "project": {
             "dependencies": [
                 "Django>=6.0; python_version >= '3.12'",
                 "vercel-cache",
                 "vercel-queue>=0.6.0",
             ]
-        }
+        },
     }
 
     assert (
@@ -1973,13 +1976,14 @@ def test_apscheduler_bundle_keeps_apscheduler_peer_dependency(
         },
     )
     data = {
+        "tool": {"vercel-sdk": {"release": {"bundle": {"external-dependencies": ["apscheduler"]}}}},
         "project": {
             "dependencies": [
                 "APScheduler>=3.10.4,<4",
                 "anyio>=4,<5",
                 "vercel-queue>=0.6.0",
             ]
-        }
+        },
     }
 
     assert (
@@ -2113,11 +2117,12 @@ def test_vendored_requirements_are_derived_from_release_deps_and_lock(
         "tool": {
             "vercel-sdk": {
                 "release": {
+                    "bundle": {"external-dependencies": ["celery"]},
                     "dependencies": [
                         "celery>=5.3,<6",
                         "vercel-cache>=0.6.0",
                         "vercel-queue>=0.6.0",
-                    ]
+                    ],
                 }
             }
         }

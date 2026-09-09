@@ -60,7 +60,7 @@ Packages opt in to `-bundle` variants with `[tool.vercel-sdk.release.bundle] ena
 
 [[scripts/bundle_release.py#validate_bundle_packages]] requires every workspace dependency of an enabled bundle to provide its own bundle. [[scripts/build.sh]] and [[scripts/publish.py#dependency_graph]] validate this before building or planning releases. Integrations and their selected SDK dependencies enable eleven variants; Blob, Connect, Drives, Passport, and Sandbox no longer publish bundles.
 
-Libraries with required compiled extensions cannot be vendored, because bundling drops `*.so` files: Pydantic needs `pydantic-core`, and cbor2 needs its `_cbor2` module. Every package that depends on one must list it in [[scripts/bundle_release.py#EXTERNAL_DEPENDENCIES]], or its bundle fails to build or import.
+Libraries with required compiled extensions cannot be vendored, because bundling drops `*.so` files: Pydantic needs `pydantic-core`, and cbor2 needs its `_cbor2` module. Packages declare these exclusions with `external-dependencies` in their bundle tables, read by [[scripts/bundle_release.py#_external_and_peer_dependencies]].
 
 [[.github/scripts/test_installed_wheel.sh]] detects vendored HTTP clients in the package and its local bundle dependency wheels. It adapts test imports and excludes respx-dependent tests because respx patches only unvendored transports; workspace tests retain that coverage.
 
