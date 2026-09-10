@@ -31,6 +31,7 @@ from urllib.parse import parse_qsl, urlsplit
 import anyio
 import pydantic
 
+from vercel._internal.core import outcome
 from vercel._internal.core.polyfills import UTC, Self
 
 from . import (
@@ -201,8 +202,8 @@ class Hook(BaseSuspension, Generic[T]):
     disposed: bool = False
     has_dispose_event: bool = False
     has_conflict_awaiter: bool = False
-    # Values that came in while no waiters were active
-    buffered_values: deque[T] = dataclasses.field(default_factory=deque)
+    # Outcomes that came in while no waiters were active
+    buffered_outcomes: deque[outcome.Outcome[T]] = dataclasses.field(default_factory=deque)
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
     conflict_futures: deque[asyncio.Future[Run[Any] | None]] = dataclasses.field(
         default_factory=deque
@@ -223,21 +224,31 @@ class Hook(BaseSuspension, Generic[T]):
                 conflict_future.set_exception(exc)
 
     def set_result(self, raw_data: Any) -> None:
-        res: T
-        if dataclasses.is_dataclass(self.hook_cls):
-            res = self.hook_cls(**raw_data)
-        elif issubclass(self.hook_cls, pydantic.BaseModel):
-            res = self.hook_cls.model_validate(raw_data)
+        try:
+            res: T
+            if dataclasses.is_dataclass(self.hook_cls):
+                res = self.hook_cls(**raw_data)
+            elif issubclass(self.hook_cls, pydantic.BaseModel):
+                res = self.hook_cls.model_validate(raw_data)
+            else:
+                raise RuntimeError(f"Invalid hook type for {self.hook_cls}")
+        except Exception as error:
+            self.set_error(error)
         else:
-            raise RuntimeError(f"Invalid hook type for {self.hook_cls}")
+            self._set_outcome(outcome.Value(res))
+
+    def set_error(self, error: Exception) -> None:
+        self._set_outcome(outcome.Error(error))
+
+    def _set_outcome(self, item: outcome.Outcome[T]) -> None:
         while self.futures:
             fut = self.futures.popleft()
             # The future might be cancelled by the user
             if not fut.done():
-                fut.set_result(res)
+                item.set_future(fut)
                 break
         else:
-            self.buffered_values.append(res)
+            self.buffered_outcomes.append(item)
 
 
 def _correlation_kind(correlation_id: str) -> str:
@@ -1053,8 +1064,8 @@ class WorkflowOrchestratorContext:
             raise StopAsyncIteration
         if hook.conflict_error is not None:
             raise hook.conflict_error
-        if hook.buffered_values:
-            return hook.buffered_values.popleft()
+        if hook.buffered_outcomes:
+            return hook.buffered_outcomes.popleft().unwrap()
 
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
@@ -1311,12 +1322,16 @@ class WorkflowOrchestratorContext:
                     return
 
                 assert isinstance(hook, Hook)
-                result = ser.hydrate(
-                    data,
-                    what=f"the payload of hook {event.correlation_id}",
-                    key=self.run_key,
-                )
-                hook.set_result(result)
+                try:
+                    result = ser.hydrate(
+                        data,
+                        what=f"the payload of hook {event.correlation_id}",
+                        key=self.run_key,
+                    )
+                except Exception as error:
+                    hook.set_error(error)
+                else:
+                    hook.set_result(result)
 
             case w.HookDisposedEvent():
                 self.hooks[event.correlation_id].has_dispose_event = True

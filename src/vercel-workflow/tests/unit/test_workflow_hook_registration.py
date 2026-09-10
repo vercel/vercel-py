@@ -51,6 +51,17 @@ async def confirm_then_step_then_await() -> dict[str, object]:
     return {"approved": (await approval).approved, "step_result": step_result}
 
 
+@registry.workflow
+async def recover_from_invalid_payload() -> bool:
+    approval = Approval.wait(token=TOKEN)
+    await pending_step()
+    try:
+        await approval
+    except pydantic.ValidationError:
+        pass
+    return (await approval).approved
+
+
 class RecordingLocalWorld(local_mod.LocalWorld):
     async def queue(self, queue_name: str, message: w.QueuePayload, **kwargs: object) -> str:
         return "msg_test"
@@ -165,3 +176,81 @@ async def test_hooks_are_created_before_steps_are_enqueued(tmp_path, monkeypatch
         w.set_world(None)
 
     assert world.hook_existed_at_enqueue == [True]
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_type"),
+    [
+        (PLAIN_ENCODER.encode({"wrong": True}), pydantic.ValidationError),
+        (b"dev", ser.SerializationError),
+    ],
+    ids=["model validation", "hydration"],
+)
+async def test_invalid_buffered_payload_fails_only_when_awaited(
+    payload: bytes, error_type: type[Exception]
+) -> None:
+    context = runtime.WorkflowOrchestratorContext(
+        [],
+        run_id="wrun_test",
+        seed="seed",
+        started_at=0,
+        registry=registry,
+    )
+    hook_event = context.create_hook(TOKEN, Approval)
+    hook_id = hook_event._correlation_id
+    context.events.extend(
+        [
+            w.HookCreatedEventData(token=TOKEN).into_event(hook_id),
+            w.HookReceivedEventData(payload=payload).into_event(hook_id),
+        ]
+    )
+
+    context.resume()
+    context.resume()
+
+    with pytest.raises(error_type):
+        await context.run_hook(correlation_id=hook_id)
+
+
+async def test_dispose_discards_an_invalid_buffered_payload() -> None:
+    context = runtime.WorkflowOrchestratorContext(
+        [],
+        run_id="wrun_test",
+        seed="seed",
+        started_at=0,
+        registry=registry,
+    )
+    hook_event = context.create_hook(TOKEN, Approval)
+    hook_id = hook_event._correlation_id
+    context.events.append(
+        w.HookReceivedEventData(payload=PLAIN_ENCODER.encode({"wrong": True})).into_event(hook_id)
+    )
+    context.resume()
+
+    context.dispose_hook(correlation_id=hook_id)
+
+    with pytest.raises(StopAsyncIteration):
+        await context.run_hook(correlation_id=hook_id)
+
+
+async def test_a_workflow_can_recover_and_await_the_next_payload(world) -> None:
+    run_id = await _create_run(world, recover_from_invalid_payload.workflow_id)
+    await _invoke(run_id, recover_from_invalid_payload.workflow_id)
+    hook_id = await _correlation_id(world, run_id, w.HookCreatedEvent)
+    step_id = await _correlation_id(world, run_id, w.StepCreatedEvent)
+
+    for payload in ({"wrong": True}, {"approved": True}):
+        await world.events_create(
+            run_id,
+            w.HookReceivedEventData(payload=PLAIN_ENCODER.encode(payload), token=TOKEN).into_event(
+                hook_id
+            ),
+        )
+    await world.events_create(
+        run_id, w.StepCompletedEventData(result=PLAIN_ENCODER.encode("done")).into_event(step_id)
+    )
+
+    await _invoke(run_id, recover_from_invalid_payload.workflow_id)
+
+    assert (await world.runs_get(run_id)).status == "completed"
+    assert await runtime.Run(run_id).return_value() is True
