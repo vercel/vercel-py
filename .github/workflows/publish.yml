@@ -24,6 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.packages.outputs.packages }}
+      shared-version: ${{ steps.packages.outputs.shared-version }}
+      publish-shared: ${{ steps.packages.outputs.publish-shared }}
+      shared-error: ${{ steps.packages.outputs.shared-error }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -39,57 +42,7 @@ jobs:
         env:
           BASE_REF: ${{ github.event.before || 'HEAD^' }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
-        run: |
-          packages_json=$(python - <<'PY'
-          import os
-          import json
-          import subprocess
-
-          shared = "vercel-internal-shared-vendored-deps"
-          if os.environ.get("FORCE") == "true":
-              packages = subprocess.check_output(
-                  [
-                      "python",
-                      "scripts/release.py",
-                      "publishable",
-                  ],
-                  text=True,
-              ).splitlines()
-              print(json.dumps([shared, *packages]))
-              raise SystemExit
-
-          base = os.environ["BASE_REF"]
-          if base == "0000000000000000000000000000000000000000":
-              base = "HEAD^"
-
-          packages = subprocess.check_output(
-              [
-                  "python",
-                  "scripts/release.py",
-                  "changed",
-                  "--base",
-                  base,
-                  "--head",
-                  "HEAD",
-              ],
-              text=True,
-          ).splitlines()
-          shared_check = subprocess.run(
-              [
-                  "python",
-                  "scripts/bundle_release.py",
-                  "shared-version",
-                  "--needs-publish",
-              ],
-              check=False,
-              stdout=subprocess.DEVNULL,
-          )
-          if shared_check.returncode == 0:
-              packages = [shared, *packages]
-          print(json.dumps(packages))
-          PY
-          )
-          echo "packages=$packages_json" >> "$GITHUB_OUTPUT"
+        run: python scripts/publish.py detect
 
   publish:
     needs: detect
@@ -114,216 +67,101 @@ jobs:
         env:
           PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
-        run: |
-          python - <<'PY' > /tmp/packages.txt
-          import json
-          import os
-
-          packages = json.loads(os.environ["PACKAGES_JSON"])
-          if any(package != "vercel-internal-shared-vendored-deps" for package in packages):
-              packages = ["vercel-internal-shared-vendored-deps", *packages]
-          seen = set()
-          for package in packages:
-              if package in seen:
-                  continue
-              seen.add(package)
-              print(package)
-          PY
-          : > /tmp/tags.txt
-          mkdir -p /tmp/release-bodies
-          mkdir -p dist-bundle-publish
-
-          while IFS= read -r package; do
-            is_shared_vendored_deps=false
-            if [ "$package" = "vercel-internal-shared-vendored-deps" ]; then
-              is_shared_vendored_deps=true
-            fi
-            if [ "$is_shared_vendored_deps" = "true" ]; then
-              version=$(python scripts/bundle_release.py shared-version)
-              if [ "$FORCE" = "true" ]; then
-                publish_shared_vendored_deps=true
-              elif python scripts/bundle_release.py shared-version --needs-publish >/dev/null; then
-                publish_shared_vendored_deps=true
-              else
-                publish_shared_vendored_deps=false
-              fi
-            else
-              version=$(python scripts/get-version.py "$package")
-              publish_shared_vendored_deps=false
-            fi
-            if [ "$is_shared_vendored_deps" != "true" ] && [ "$version" = "0.0.0" ]; then
-              echo "$package is at the unpublished sentinel version, skipping publish"
-              continue
-            fi
-            tag="$package-v$version"
-            if [ "$is_shared_vendored_deps" != "true" ] || [ "$publish_shared_vendored_deps" = "true" ]; then
-              echo "$tag" >> /tmp/tags.txt
-              if [ "$is_shared_vendored_deps" = "true" ]; then
-                python scripts/bundle_release.py shared-github-release-body > "/tmp/release-bodies/$tag.md"
-              else
-                python scripts/release.py github-release-body "$package" > "/tmp/release-bodies/$tag.md"
-              fi
-            fi
-
-            http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${package}/${version}/json")
-            if [ "$is_shared_vendored_deps" = "true" ] && [ "$publish_shared_vendored_deps" != "true" ]; then
-              echo "$package dependency set already matches latest PyPI release, skipping publish"
-            elif [ "$http_status" = "200" ]; then
-              echo "$package $version already exists on PyPI, skipping publish"
-            elif [ "$http_status" != "404" ]; then
-              echo "Unexpected PyPI response for $package $version: $http_status"
-              exit 1
-            fi
-
-            rm -rf dist-publish
-            if [ "$http_status" = "404" ] && [ "$is_shared_vendored_deps" != "true" ]; then
-              uv build --package "$package" --no-sources --out-dir dist-publish
-              # Install it before it is uploaded. `dist-verify` accumulates
-              # every wheel built by this run, so a package is resolved
-              # against the sibling versions it is being released with rather
-              # than whatever is already on the index.
-              mkdir -p dist-verify
-              cp dist-publish/*.whl dist-verify/
-              python scripts/verify_dist.py --dist-dir dist-verify --package "$package"
-            fi
-            if python scripts/bundle_release.py plan --package "$package" > /tmp/bundle-plan.txt 2>/dev/null; then
-              cat /tmp/bundle-plan.txt
-              python scripts/bundle_release.py build --package "$package" --out-dir dist-bundle-publish
-              python scripts/bundle_release.py test-wheel --package "$package" --dist-dir dist-bundle-publish
-
-              bundle_package=$(sed -n 's/^bundle-package: //p' /tmp/bundle-plan.txt)
-              if [ -z "$bundle_package" ]; then
-                echo "missing bundle-package in plan"
-                exit 1
-              fi
-              bundle_tag="${bundle_package}-v${version}"
-              if [ "$bundle_tag" != "$tag" ]; then
-                echo "$bundle_tag" >> /tmp/tags.txt
-                cp "/tmp/release-bodies/$tag.md" "/tmp/release-bodies/$bundle_tag.md"
-              fi
-
-              if [ "$is_shared_vendored_deps" = "true" ] && [ "$publish_shared_vendored_deps" != "true" ]; then
-                bundle_http_status=200
-              elif [ "$DRY_RUN" = "true" ]; then
-                echo "Dry run: would publish $bundle_package $version"
-                bundle_http_status=404
-              else
-                bundle_http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${bundle_package}/${version}/json")
-              fi
-              if [ "$is_shared_vendored_deps" = "true" ]; then
-                :
-              elif [ "$bundle_http_status" = "200" ]; then
-                echo "$bundle_package $version already exists on PyPI, skipping publish"
-              elif [ "$DRY_RUN" = "true" ]; then
-                :
-              elif [ "$bundle_http_status" != "404" ]; then
-                echo "Unexpected PyPI response for $bundle_package $version: $bundle_http_status"
-                exit 1
-              else
-                bundle_prefix=${bundle_package//-/_}
-                find dist-bundle-publish -maxdepth 1 -type f -name "${bundle_prefix}-${version}*" -print0 | xargs -0 uv publish
-              fi
-            else
-              echo "$package is not vendored-eligible"
-            fi
-
-            if [ "$is_shared_vendored_deps" = "true" ]; then
-              if [ "$publish_shared_vendored_deps" != "true" ]; then
-                :
-              elif [ "$http_status" = "200" ]; then
-                :
-              elif [ "$DRY_RUN" = "true" ]; then
-                echo "Dry run: would publish $package $version"
-              else
-                bundle_prefix=${package//-/_}
-                find dist-bundle-publish -maxdepth 1 -type f -name "${bundle_prefix}-${version}*" -print0 | xargs -0 uv publish
-              fi
-            elif [ "$http_status" = "200" ]; then
-              :
-            elif [ "$DRY_RUN" = "true" ]; then
-              echo "Dry run: would publish $package $version"
-            else
-              uv publish dist-publish/*
-            fi
-          done < /tmp/packages.txt
-
-          {
-            echo "tags<<EOF"
-            cat /tmp/tags.txt
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          PUBLISH_SHARED: ${{ needs.detect.outputs.publish-shared }}
+          SHARED_ERROR: ${{ needs.detect.outputs.shared-error }}
+          VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION: ${{ needs.detect.outputs.shared-version }}
+        run: python scripts/publish.py run
 
       - name: Create Git Tags
-        if: steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        if: ${{ !cancelled() && steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAGS: ${{ steps.publish.outputs.tags }}
+          RELEASE_BODIES: ${{ steps.publish.outputs.release-bodies }}
         with:
           script: |
             const fs = require('fs');
             const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
             for (const tag of tags) {
-              const ref = `tags/${tag}`;
               try {
-                await github.rest.git.getRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref,
-                });
-                core.info(`Tag ${tag} already exists, skipping`);
-                continue;
-              } catch (error) {
-                if (error.status !== 404) throw error;
-              }
+                const ref = `tags/${tag}`;
+                try {
+                  await github.rest.git.getRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref,
+                  });
+                  core.info(`Tag ${tag} already exists, skipping`);
+                  continue;
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
 
-              const message = fs.readFileSync(`/tmp/release-bodies/${tag}.md`, 'utf8');
-              const tagObject = await github.rest.git.createTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag,
-                message,
-                object: context.sha,
-                type: 'commit',
-              });
-              try {
-                await github.rest.git.createRef({
+                const message = fs.readFileSync(`${process.env.RELEASE_BODIES}/${tag}.md`, 'utf8');
+                const tagObject = await github.rest.git.createTag({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  ref: `refs/${ref}`,
-                  sha: tagObject.data.sha,
+                  tag,
+                  message,
+                  object: context.sha,
+                  type: 'commit',
                 });
+                try {
+                  await github.rest.git.createRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: `refs/${ref}`,
+                    sha: tagObject.data.sha,
+                  });
+                } catch (error) {
+                  if (error.status !== 422) throw error;
+                  await github.rest.git.getRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref,
+                  });
+                  core.info(`Tag ${tag} was created concurrently, skipping`);
+                }
               } catch (error) {
-                if (error.status !== 422) throw error;
-                await github.rest.git.getRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref,
-                });
-                core.info(`Tag ${tag} was created concurrently, skipping`);
+                core.setFailed(`Failed to create tag ${tag}: ${error.message}`);
               }
             }
 
       - name: Create GitHub Releases
-        if: steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        if: ${{ !cancelled() && steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAGS: ${{ steps.publish.outputs.tags }}
+          RELEASE_BODIES: ${{ steps.publish.outputs.release-bodies }}
         with:
           script: |
             const fs = require('fs');
             const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
             for (const tag of tags) {
-              const body = fs.readFileSync(`/tmp/release-bodies/${tag}.md`, 'utf8');
               try {
+                const body = fs.readFileSync(`${process.env.RELEASE_BODIES}/${tag}.md`, 'utf8');
                 await github.rest.repos.createRelease({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   tag_name: tag,
+                  target_commitish: context.sha,
                   name: tag,
                   body,
                 });
               } catch (error) {
-                if (error.status !== 422) throw error;
+                if (error.status !== 422) {
+                  core.setFailed(`Failed to create release ${tag}: ${error.message}`);
+                  continue;
+                }
+                try {
+                  await github.rest.repos.getReleaseByTag({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    tag,
+                  });
+                  core.info(`Release ${tag} already exists, skipping`);
+                } catch (lookupError) {
+                  core.setFailed(`Failed to create release ${tag}: ${error.message}; ${lookupError.message}`);
+                }
               }
             }
