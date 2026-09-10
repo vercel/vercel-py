@@ -9,10 +9,6 @@
 
 - Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor while retaining runtime-only support for explicitly installed legacy clients returned by the session factory. (#356)
 
-### Bug Fixes
-
-- Depend on `vercel-env` and remove duplicate `vercel.env` implementation. (#384)
-
 ## 0.11.0 - 2026-09-01
 
 ### Features

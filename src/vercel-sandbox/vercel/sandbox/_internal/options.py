@@ -1,11 +1,11 @@
 """Sandbox service options."""
 
+import os
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol
 
 from vercel._internal.core.options import ServiceOptions
-from vercel.env import get_env
 from vercel.sandbox._internal.errors import SandboxCredentialsError
 
 DEFAULT_SANDBOX_API_BASE_URL = "https://vercel.com/api"
@@ -95,7 +95,7 @@ class SandboxServiceOptions(_SandboxServiceOptionsKey):
             if file_transfer_timeout is not None
             else _DEFAULT_FILE_TRANSFER_TIMEOUT,
         )
-        object.__setattr__(self, "region", region or get_env().VERCEL_REGION)
+        object.__setattr__(self, "region", region or os.environ.get("VERCEL_REGION") or None)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -132,4 +132,4 @@ class SyncSandboxServiceOptions(_SandboxServiceOptionsKey):
             if file_transfer_timeout is not None
             else _DEFAULT_FILE_TRANSFER_TIMEOUT,
         )
-        object.__setattr__(self, "region", region or get_env().VERCEL_REGION)
+        object.__setattr__(self, "region", region or os.environ.get("VERCEL_REGION") or None)

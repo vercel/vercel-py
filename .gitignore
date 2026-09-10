@@ -121,10 +121,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-!**/vercel/env/
-!**/vercel/env/*.py
-!**/vercel/env/py.typed
-
 # dotenv anywhere
 **/.env
 **/.env.*
