@@ -4,9 +4,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
-from vercel.env.version import __version__
-
-__all__ = ["Env", "__version__", "get_env"]
+__all__ = ["Env", "get_env"]
 
 
 @dataclass(frozen=True)
@@ -63,7 +61,6 @@ def get_env(env: Mapping[str, str] | None = None) -> Env:
     if env is None:
         env = os.environ
 
-    secret_key = "VERCEL_AUTOMATION" + "_BYPASS_SECRET"
     return Env(
         VERCEL=_get(env, "VERCEL"),
         CI=_get(env, "CI"),
@@ -74,7 +71,7 @@ def get_env(env: Mapping[str, str] | None = None) -> Env:
         VERCEL_REGION=_get(env, "VERCEL_REGION"),
         VERCEL_DEPLOYMENT_ID=_get(env, "VERCEL_DEPLOYMENT_ID"),
         VERCEL_SKEW_PROTECTION_ENABLED=_get(env, "VERCEL_SKEW_PROTECTION_ENABLED"),
-        VERCEL_AUTOMATION_BYPASS_SECRET=_get(env, secret_key),
+        VERCEL_AUTOMATION_BYPASS_SECRET=_get(env, "VERCEL_AUTOMATION_BYPASS_SECRET"),
         VERCEL_GIT_PROVIDER=_get(env, "VERCEL_GIT_PROVIDER"),
         VERCEL_GIT_REPO_SLUG=_get(env, "VERCEL_GIT_REPO_SLUG"),
         VERCEL_GIT_REPO_OWNER=_get(env, "VERCEL_GIT_REPO_OWNER"),
