@@ -1,0 +1,90 @@
+"""Proxy request dataclass."""
+
+from __future__ import annotations
+
+import urllib.parse
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+from ._cookies import Cookies
+from ._headers import Headers
+from ._params import Params
+
+__all__ = ["Request"]
+
+
+@dataclass(frozen=True, slots=True)
+class Request:
+    """Immutable snapshot of an incoming proxy request."""
+
+    method: str
+    """HTTP method, normalised to uppercase (e.g. ``"GET"``)."""
+    path: str
+    """Request path (e.g. ``"/api/users/42"``)."""
+    url: str
+    """Full URL including query string."""
+    headers: Headers
+    """Request headers with case-insensitive access."""
+    path_params: Params = field(default_factory=lambda: Params(()))
+    """Named captures extracted from the matched route pattern."""
+    query_params: Params = field(default_factory=lambda: Params(()))
+    """Query parameters parsed from the URL."""
+    cookies: Cookies = field(default_factory=lambda: Cookies(()))
+    """Cookies parsed from the ``Cookie`` request header."""
+
+    @classmethod
+    def _from_asgi_scope(
+        cls,
+        scope: dict[str, Any],
+        path_params: Mapping[str, str] | None = None,
+    ) -> Request:
+        """Internal: construct from an ASGI http scope dict."""
+        method = scope["method"].upper()
+        path = scope.get("path", "/")
+        query_bytes: bytes = scope.get("query_string", b"")
+        scheme = scope.get("scheme", "https")
+
+        headers = Headers.from_asgi(scope.get("headers", []))
+
+        host = headers.get("host") or _host_from_scope(scope)
+        query_str = query_bytes.decode("latin-1")
+        url = urllib.parse.urlunsplit((scheme, host, path, query_str, ""))
+
+        return cls(
+            method=method,
+            path=path,
+            url=url,
+            headers=headers,
+            path_params=Params(tuple(path_params.items()) if path_params else ()),
+            query_params=Params(tuple(urllib.parse.parse_qsl(query_str, keep_blank_values=True))),
+            cookies=_parse_cookies("; ".join(headers.get_all("cookie"))),
+        )
+
+
+def _parse_cookies(cookie_header: str) -> Cookies:
+    """Parse a ``Cookie`` header value into a :class:`Cookies` mapping."""
+    seen: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for chunk in cookie_header.split(";"):
+        name, _, value = chunk.strip().partition("=")
+        name = name.strip()
+        if name and name not in seen:
+            seen.add(name)
+            pairs.append((name, _unquote_cookie(value)))
+    return Cookies(tuple(pairs))
+
+
+def _unquote_cookie(value: str) -> str:
+    """Strip a single layer of surrounding double-quotes if present."""
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    return value
+
+
+def _host_from_scope(scope: dict[str, Any]) -> str:
+    server = scope.get("server")
+    if server:
+        host, port = server
+        return f"{host}:{port}" if port not in (80, 443) else str(host)
+    return "localhost"
