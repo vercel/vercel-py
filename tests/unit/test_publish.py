@@ -125,13 +125,29 @@ def test_package_logs_stream_live_with_a_bounded_failure_tail(
     assert console.endswith("error: rejected upload\n::endgroup::\n")
 
 
-def test_process_start_failure_is_reported_as_a_package_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_process_start_failure_is_reported_in_publish_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("PATH", str(tmp_path))
-    result = publish.run_package("pkg", directory=tmp_path)
-    assert result.returncode == 1
-    assert "bash" in result.stdout
+    monkeypatch.setattr(workspace, "packages", lambda: {})
+    monkeypatch.setattr(publish, "dependency_graph", lambda _: {"pkg": set()})
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
+    def fail_to_start(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("bash is unavailable")
+
+    monkeypatch.setattr(publish.subprocess, "Popen", fail_to_start)
+    assert publish.run_packages(["pkg"], directory=tmp_path / "run") == 1
+
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "| pkg | failed, exit 1 |" in summary_text
+    assert "<summary>pkg: failed (exit 1)</summary>" in summary_text
+    assert "bash is unavailable" in summary_text
+    console = capsys.readouterr().out
+    assert "::error title=Publish pkg::pkg: failed (exit 1)" in console
+    assert console.index("::endgroup::") < console.index("::error title=Publish pkg::")
 
 
 @pytest.mark.parametrize("packages_json", ["{}", "null", '"pkg"', "[1]"])
