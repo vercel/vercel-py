@@ -8,19 +8,18 @@ import functools
 import urllib.parse
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 from ._params import Params
 from ._request import Request
 from ._response import Kind, Response
 from ._routing import CompiledPattern, compile_host, compile_path
 
-__all__ = ["Proxy"]
+if TYPE_CHECKING:
+    _Handler = Callable[[Request], Response] | Callable[[Request], Awaitable[Response]]
+    _Fallback = Response | Callable[[Request], Response] | Callable[[Request], Awaitable[Response]]
 
-_Handler: TypeAlias = Callable[[Request], Response] | Callable[[Request], Awaitable[Response]]
-_Fallback: TypeAlias = (  # noqa: E501
-    Response | Callable[[Request], Response] | Callable[[Request], Awaitable[Response]]
-)
+__all__ = ["Proxy"]
 
 
 @dataclass(frozen=True, slots=True)
