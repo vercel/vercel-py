@@ -386,6 +386,41 @@ async def test_an_ordinary_failure_below_max_retries_asks_for_a_retry(
     assert str(recorded) == "flaky"
 
 
+@pytest.mark.parametrize("failure_at", ["input", "body", "output"])
+async def test_serialization_failure_gives_up_on_the_first_attempt(
+    registry: core.Workflows, failure_at: str
+) -> None:
+    ran = False
+
+    @registry.step
+    async def my_step() -> Any:
+        nonlocal ran
+        ran = True
+        if failure_at == "body":
+            raise ser.SerializationError("cannot read a stream payload")
+        return object()
+
+    my_step.max_retries = 3
+    fake = FakeWorld(
+        started_step=_running_step(
+            my_step.name, attempt=1, input=b"invalid" if failure_at == "input" else None
+        )
+    )
+    w.set_world(fake)
+
+    result = await _invoke(registry, my_step.name)
+
+    assert result is None
+    assert ran is (failure_at != "input")
+    assert _event_types(fake) == ["step_failed"]
+    assert len(_workflow_enqueues(fake)) == 1
+    (failed,) = fake.events
+    recorded = ser.hydrate_error(failed.event_data.error, what="the recorded error")
+    assert isinstance(recorded, FatalError)
+    assert "SerializationError" in recorded.stack  # type: ignore[attr-defined]
+    assert "failed after" not in str(recorded)
+
+
 async def test_keyboard_interrupt_bypasses_step_error_serialization(
     registry: core.Workflows,
 ) -> None:

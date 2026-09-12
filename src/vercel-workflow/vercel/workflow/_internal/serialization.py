@@ -42,8 +42,8 @@ ENCRYPTED_FORMATS = (ENCRYPTED, SEALED)
 """The formats that need the run's key material. Both derive from the same 32 bytes."""
 
 
-class SerializationError(RuntimeError):
-    """A payload could not be encoded, or arrived in a format we cannot read."""
+class SerializationError(errors.FatalError):
+    """A non-retryable failure to encode or read a payload."""
 
 
 def _reduce_writable_stream(value: Any) -> Any:
