@@ -43,7 +43,7 @@ ENCRYPTED_FORMATS = (ENCRYPTED, SEALED)
 
 
 class SerializationError(errors.FatalError):
-    """A non-retryable failure to encode or read a payload."""
+    """A payload could not be encoded, or arrived in a format we cannot read."""
 
 
 def _reduce_writable_stream(value: Any) -> Any:
