@@ -13,6 +13,8 @@ registered hook with no awaiter.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 from collections.abc import Iterator
 
 import pydantic
@@ -29,6 +31,42 @@ registry = core.Workflows(as_vercel_job=False)
 
 class Approval(core.BaseHook, pydantic.BaseModel):
     approved: bool
+
+
+@dataclasses.dataclass
+class ExceptionPayload(Exception):
+    message: str
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_hook_distinguishes_exception_payloads_from_errors(buffered, failed) -> None:
+    context = runtime.WorkflowOrchestratorContext(
+        [], run_id="wrun_test", seed="seed", started_at=0, registry=registry
+    )
+    hook_event = context.create_hook(TOKEN, ExceptionPayload)
+    hook_id = hook_event._correlation_id
+    hook = context.hooks[hook_id]
+    cancelled = asyncio.Future[ExceptionPayload]()
+    cancelled.cancel()
+    hook.futures.append(cancelled)
+    if not buffered:
+        future = asyncio.Future[ExceptionPayload]()
+        hook.futures.append(future)
+
+    error = ExceptionPayload("payload")
+    if failed:
+        hook.set_error(error)
+    else:
+        hook.set_result({"message": "payload"})
+
+    result = context.run_hook(correlation_id=hook_id) if buffered else future
+    if failed:
+        with pytest.raises(ExceptionPayload) as caught:
+            await result
+        assert caught.value is error
+    else:
+        assert await result == error
 
 
 @registry.step

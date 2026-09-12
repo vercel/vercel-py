@@ -31,7 +31,6 @@ from urllib.parse import parse_qsl, urlsplit
 import anyio
 import pydantic
 
-from vercel._internal.core import outcome
 from vercel._internal.core.polyfills import UTC, Self
 
 from . import (
@@ -202,8 +201,8 @@ class Hook(BaseSuspension, Generic[T]):
     disposed: bool = False
     has_dispose_event: bool = False
     has_conflict_awaiter: bool = False
-    # Outcomes that came in while no waiters were active
-    buffered_outcomes: deque[outcome.Outcome[T]] = dataclasses.field(default_factory=deque)
+    # Wrap successful payloads so an exception instance can also be a value.
+    buffered_results: deque[tuple[T] | Exception] = dataclasses.field(default_factory=deque)
     futures: deque[asyncio.Future[T]] = dataclasses.field(default_factory=deque)
     conflict_futures: deque[asyncio.Future[Run[Any] | None]] = dataclasses.field(
         default_factory=deque
@@ -235,20 +234,24 @@ class Hook(BaseSuspension, Generic[T]):
         except Exception as error:
             self.set_error(error)
         else:
-            self._set_outcome(outcome.Value(res))
+            if (future := self._next_waiter()) is not None:
+                future.set_result(res)
+            else:
+                self.buffered_results.append((res,))
 
     def set_error(self, error: Exception) -> None:
-        self._set_outcome(outcome.Error(error))
+        if (future := self._next_waiter()) is not None:
+            future.set_exception(error)
+        else:
+            self.buffered_results.append(error)
 
-    def _set_outcome(self, item: outcome.Outcome[T]) -> None:
+    def _next_waiter(self) -> asyncio.Future[T] | None:
         while self.futures:
             fut = self.futures.popleft()
             # The future might be cancelled by the user
             if not fut.done():
-                item.set_future(fut)
-                break
-        else:
-            self.buffered_outcomes.append(item)
+                return fut
+        return None
 
 
 def _correlation_kind(correlation_id: str) -> str:
@@ -1064,8 +1067,11 @@ class WorkflowOrchestratorContext:
             raise StopAsyncIteration
         if hook.conflict_error is not None:
             raise hook.conflict_error
-        if hook.buffered_outcomes:
-            return hook.buffered_outcomes.popleft().unwrap()
+        if hook.buffered_results:
+            result = hook.buffered_results.popleft()
+            if isinstance(result, Exception):
+                raise result
+            return result[0]
 
         fut = asyncio.Future[T]()
         hook.futures.append(fut)
