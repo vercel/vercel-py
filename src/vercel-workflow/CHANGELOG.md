@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.10.1 - 2026-09-09
+
+> **Release note:** Version 0.10.0 was declared in repository history but was
+> never published to PyPI. This forward release includes its intended contents.
+
+### Features
+
+- Read gzip- and zstd-compressed workflow payloads. (#369)
+- Write gzip- and zstd-compressed workflow payloads when the run supports them. (#372)
+- Encrypt workflow payload writes and seal external hook resumes to the run's public key. (#374)
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor. (#356)
+
+- Streams can now carry typed data. (#375)
+
+  `get_writable(type=Token)` returns a `WorkflowWritable[Token]` whose writes are dumped through pydantic the way typed step arguments are; then `run.readable(type=Token)` and `read_stream(run_id, name, type=Token)` validate each chunk on the way back, raising `TypeValidationError` on a mismatch.
+
+  `WorkflowWritable` is now generic, defaulting to `Any`; a step parameter annotated `WorkflowWritable[Token]` becomes a handle the workflow passed in as a writer of that type, and `writable.with_type(Token)` gives a typed view of any writable.
+
+### Bug Fixes
+
+- Treat an already-closed cancellation stream as a successful cancellation signal. (#362)
+- Add a bunch of incorrectly missing `asyncio` methods to the sandbox blacklist. (#378)
+- Properly handle hook resumes that arrive after calling `get_conflict()` but before waiting. (#380)
+- Fix `BaseHook.wait` to create the hook when the run next suspends rather then when it blocks on the hook. So that hooks are created before their tokens are published, make sure that steps are launched after any hooks are registered. (#380)
+- Block `open`, `open_code`, and `FileIO` in `io` and `_io` in sandbox. This will block `Path.read_text()` and similar also. (#379)
+- Forward the ambient Vercel request ID with workflow events so Dashboard logs can be correlated with the function invocation that produced them. (#361)
+- Make `zstandard` a sandbox passthrough while blocking `zstandard.open` to allow importing packages like `httpx2`. (#356)
+
+### Internal
+
+- Get rid of `ooo_hook_received_events` (#381)
+- Refactor workflow payload serialization behind an encoder context. (#370)
+
 ## 0.10.0 - 2026-09-01
 
 ### Breaking Changes

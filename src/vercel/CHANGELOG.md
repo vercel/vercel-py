@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.1 - 2026-09-09
+
+> **Release note:** Version 0.11.0 was declared in repository history but was
+> never published to PyPI. This forward release includes its intended contents.
+
+### Features
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor while retaining runtime-only support for explicitly installed legacy clients returned by the session factory. (#356)
+
+### Bug Fixes
+
+- Depend on `vercel-env` and remove duplicate `vercel.env` implementation. (#384)
+
 ## 0.11.0 - 2026-09-01
 
 ### Features

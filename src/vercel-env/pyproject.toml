@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27.0,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vercel-env"
+dynamic = ["version", "dependencies"]
+description = "Vercel system environment variable parsing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "LICENSE.*"]
+
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.vercel.release.dependencies]
+dependencies = []
+
+[tool.hatch.version]
+path = "vercel/env/version.py"
+
+[tool.hatch.build.targets.sdist]
+force-include = { "../../scripts/hatch_build.py" = "/_vercel_hatch_build.py" }
+include = [
+    "/vercel/env/**/*.py",
+    "/vercel/env/py.typed",
+    "/README.md",
+    "/pyproject.toml",
+    "/hatch_build.py",
+    "/LICENSE",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+dev-mode-dirs = ["."]
+only-include = [
+    "/vercel/env",
+]
+exclude = [
+    "/**/__pycache__",
+]
+
+[tool.poe]
+include = "../../scripts/poe/poe.toml"
+verbosity = -1
+
+[tool.mypy]
+cache_dir = "../../.mypy_cache/vercel-env"
+explicit_package_bases = true
+packages = ["vercel.env"]
+
+[tool.poe.tasks.typecheck]
+cmd = "$MYPY"
+
+[tool.poe.tasks.test]
+cmd = "$PYTEST tests"

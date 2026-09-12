@@ -3,7 +3,7 @@ import contextvars
 import datetime
 import sys
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from vercel._internal.core.polyfills import UTC
 
@@ -116,3 +116,56 @@ class WorkflowLoop(asyncio.BaseEventLoop):
 
     def time(self) -> float:
         return self.workflow.time()
+
+
+_LOOP_ALLOWED: frozenset[str] = frozenset(
+    {
+        # Core event loop lifecycle
+        "run_forever",
+        "run_until_complete",
+        "stop",
+        "close",
+        "is_running",
+        "is_closed",
+        "shutdown_asyncgens",
+        "shutdown_default_executor",
+        # Deterministic scheduling
+        "call_soon",
+        # Sleep based scheduling (does a workflow sleep)
+        "call_at",
+        "call_later",
+        # Time (uses deterministic time)
+        "time",
+        # Task / future creation
+        "create_future",
+        "create_task",
+        "set_task_factory",
+        "get_task_factory",
+        # Exception handling
+        "get_exception_handler",
+        "set_exception_handler",
+        "default_exception_handler",
+        "call_exception_handler",
+        # Debug
+        "get_debug",
+        "set_debug",
+    }
+)
+
+
+def _make_restricted_method(name: str) -> Callable[..., NoReturn]:
+    def _restricted(*_args: Any, **_kwargs: Any) -> NoReturn:
+        from .py_sandbox import SandboxRestrictionError
+
+        raise SandboxRestrictionError(
+            f"Cannot call loop.{name}() inside a workflow. Workflows must be deterministic."
+        )
+
+    _restricted.__name__ = name
+    _restricted.__qualname__ = f"WorkflowLoop.{name}"
+    return _restricted
+
+
+for _name in dir(asyncio.AbstractEventLoop):
+    if not _name.startswith("_") and _name not in _LOOP_ALLOWED:
+        setattr(WorkflowLoop, _name, _make_restricted_method(_name))
