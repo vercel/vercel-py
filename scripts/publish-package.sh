@@ -4,16 +4,9 @@ set -euo pipefail
 package=${PACKAGE:?}
 : "${DRY_RUN:?}" "${PUBLISH_SHARED:?}" "${VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION?}"
 state_dir=${PUBLISH_DIR:?}
+built_dir=${BUILD_DIR:?}
 : > "$state_dir/tags.txt"
-mkdir -p "$state_dir/release-bodies" "$state_dir/verify" "$state_dir/bundle" \
-  "$state_dir/artifacts"/standard "$state_dir/artifacts"/bundle
-shopt -s nullglob
-for wheel in "$state_dir/dependencies"/standard/*.whl; do
-  cp "$wheel" "$state_dir/verify"/
-done
-for wheel in "$state_dir/dependencies"/bundle/*.whl; do
-  cp "$wheel" "$state_dir/bundle"/
-done
+mkdir -p "$state_dir/release-bodies"
 
 is_shared_vendored_deps=false
 if [ "$package" = "vercel-internal-shared-vendored-deps" ]; then
@@ -50,12 +43,37 @@ elif [ "$http_status" != "404" ]; then
   exit 1
 fi
 
-if [ "$http_status" = "404" ] && [ "$is_shared_vendored_deps" != "true" ]; then
-  uv build --package "$package" --no-sources --out-dir "$state_dir/standard"
-  mkdir -p "$state_dir/verify"
-  cp "$state_dir/standard"/*.whl "$state_dir/verify"/
-  python scripts/verify_dist.py --dist-dir "$state_dir/verify" --package "$package"
-fi
+publish_matching_artifacts() {
+  local target_pkg=$1
+  local target_ver=$2
+  local artifacts=()
+  local artifact_list
+  artifact_list=$(python3 - "$built_dir" "$target_pkg" "$target_ver" <<'PY'
+import sys, re
+from pathlib import Path
+
+dist_dir = Path(sys.argv[1])
+pkg = sys.argv[2]
+version = sys.argv[3]
+norm = pkg.replace("-", "_")
+pattern = re.compile(rf"^{re.escape(norm)}-{re.escape(version)}(?:-.+\.whl|\.tar\.gz)$")
+matching = sorted(p.resolve() for p in dist_dir.iterdir() if pattern.match(p.name))
+if not matching:
+    sys.exit(f"No built artifacts found for {pkg} {version} in {dist_dir}")
+for path in matching:
+    print(path)
+PY
+  )
+  while IFS= read -r artifact; do
+    [ -n "$artifact" ] && artifacts+=("$artifact")
+  done <<< "$artifact_list"
+  if [ "${#artifacts[@]}" -eq 0 ]; then
+    echo "No built artifacts resolved for $target_pkg $target_ver" >&2
+    exit 1
+  fi
+  uv publish "${artifacts[@]}"
+}
+
 bundle_eligible=$(python - "$package" <<'PY'
 import sys
 from scripts import bundle_release, workspace
@@ -68,12 +86,9 @@ print("true" if eligible else "false")
 PY
 )
 if [ "$bundle_eligible" = "true" ]; then
-  python scripts/bundle_release.py plan --package "$package" > "$state_dir/bundle-plan.txt"
-  cat "$state_dir/bundle-plan.txt"
-  python scripts/bundle_release.py build --package "$package" --out-dir "$state_dir/bundle"
-  python scripts/bundle_release.py test-wheel --package "$package" --dist-dir "$state_dir/bundle"
+  cat "$built_dir/bundle-plan.txt"
 
-  bundle_package=$(sed -n 's/^bundle-package: //p' "$state_dir/bundle-plan.txt")
+  bundle_package=$(sed -n 's/^bundle-package: //p' "$built_dir/bundle-plan.txt")
   if [ -z "$bundle_package" ]; then
     echo "missing bundle-package in plan"
     exit 1
@@ -102,8 +117,7 @@ if [ "$bundle_eligible" = "true" ]; then
     echo "Unexpected PyPI response for $bundle_package $version: $bundle_http_status"
     exit 1
   else
-    bundle_prefix=${bundle_package//-/_}
-    find "$state_dir/bundle" -maxdepth 1 -type f -name "${bundle_prefix}-${version}*" -print0 | xargs -0 uv publish
+    publish_matching_artifacts "$bundle_package" "$version"
   fi
 else
   echo "$package is not vendored-eligible"
@@ -117,24 +131,12 @@ if [ "$is_shared_vendored_deps" = "true" ]; then
   elif [ "$DRY_RUN" = "true" ]; then
     echo "Dry run: would publish $package $version"
   else
-    bundle_prefix=${package//-/_}
-    find "$state_dir/bundle" -maxdepth 1 -type f -name "${bundle_prefix}-${version}*" -print0 | xargs -0 uv publish
+    publish_matching_artifacts "$package" "$version"
   fi
 elif [ "$http_status" = "200" ]; then
   :
 elif [ "$DRY_RUN" = "true" ]; then
   echo "Dry run: would publish $package $version"
 else
-  uv publish "$state_dir/standard"/*
+  publish_matching_artifacts "$package" "$version"
 fi
-
-for wheel in "$state_dir/standard"/*.whl; do
-  cp "$wheel" "$state_dir/artifacts"/standard/
-done
-bundle_prefix=${package//-/_}
-if [ "$is_shared_vendored_deps" != "true" ]; then
-  bundle_prefix="${bundle_prefix}_bundle"
-fi
-for wheel in "$state_dir/bundle"/"${bundle_prefix}-${version}"-*.whl; do
-  cp "$wheel" "$state_dir/artifacts"/bundle/
-done

@@ -35,6 +35,11 @@ def test_publish_continues_independent_packages_and_blocks_failed_ancestors(
     graph = {"base": set(), "left": {"base"}, "right": {"other"}, "other": set(), "app": {"left"}}
     monkeypatch.setattr(workspace, "packages", lambda: {})
     monkeypatch.setattr(publish, "dependency_graph", lambda _: graph)
+    monkeypatch.setattr(
+        publish,
+        "build_package",
+        lambda name, *, directory: subprocess.CompletedProcess(["build"], 0, stdout="build ok\n"),
+    )
     output = tmp_path / "outputs"
     summary = tmp_path / "summary"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
@@ -44,19 +49,10 @@ def test_publish_continues_independent_packages_and_blocks_failed_ancestors(
     monkeypatch.setenv(bundle_release.SHARED_VERSION_ENV, "0.8.2")
     calls = []
 
-    def publish_package(name: str, *, directory: Path) -> subprocess.CompletedProcess[str]:
+    def publish_package(
+        name: str, *, directory: Path, build_dir: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(name)
-        expected_dependencies = set(publish.ancestors(graph)[name]) & set(calls) - failures
-        actual_wheels = {path.name for path in (directory / "dependencies").rglob("*.whl")}
-        assert actual_wheels == {
-            wheel
-            for dependency in expected_dependencies
-            for wheel in (f"{dependency}.whl", f"{dependency}-bundle.whl")
-        }
-        for kind, wheel in (("standard", name), ("bundle", f"{name}-bundle")):
-            artifacts = directory / "artifacts" / kind
-            artifacts.mkdir(parents=True)
-            (artifacts / f"{wheel}.whl").write_text("wheel", encoding="utf-8")
         (directory / "tags.txt").write_text(f"{name}-v1.0.0\n", encoding="utf-8")
         bodies = directory / "release-bodies"
         bodies.mkdir()
@@ -112,7 +108,7 @@ def test_package_logs_stream_live_with_a_bounded_failure_tail(
     monkeypatch.setenv("DRY_RUN", "true")
     monkeypatch.setenv("PUBLISH_SHARED", "false")
     monkeypatch.setenv(bundle_release.SHARED_VERSION_ENV, "0.8.2")
-    result = publish.run_package("pkg", directory=tmp_path)
+    result = publish.run_package("pkg", directory=tmp_path, build_dir=tmp_path / "dist")
     console = capsys.readouterr().out
     assert result.returncode == 7
     assert f"env=pkg,{tmp_path},true,false,0.8.2\n" in console
@@ -132,6 +128,11 @@ def test_process_start_failure_is_reported_in_publish_results(
 ) -> None:
     monkeypatch.setattr(workspace, "packages", lambda: {})
     monkeypatch.setattr(publish, "dependency_graph", lambda _: {"pkg": set()})
+    monkeypatch.setattr(
+        publish,
+        "build_package",
+        lambda name, *, directory: subprocess.CompletedProcess(["build"], 0, stdout="build ok\n"),
+    )
     summary = tmp_path / "summary"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
 
@@ -172,6 +173,11 @@ def test_publish_does_not_continue_after_interruption(
 ) -> None:
     monkeypatch.setattr(workspace, "packages", lambda: {})
     monkeypatch.setattr(publish, "dependency_graph", lambda _: {"first": set(), "second": set()})
+    monkeypatch.setattr(
+        publish,
+        "build_package",
+        lambda name, *, directory: subprocess.CompletedProcess(["build"], 0, stdout="build ok\n"),
+    )
     calls = []
 
     def interrupted(*args: object, **kwargs: object) -> None:
@@ -274,17 +280,24 @@ def test_shared_lookup_failure_preserves_independent_candidates(
     assert "PyPI unavailable" in result["shared-error"]
 
 
-def test_shared_lookup_failure_blocks_consumers_not_independent_packages(
+def test_shared_lookup_failure_prevents_all_builds_and_uploads(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     graph = {publish.SHARED: set(), "consumer": {publish.SHARED}, "independent": set()}
     monkeypatch.setattr(workspace, "packages", lambda: {})
     monkeypatch.setattr(publish, "dependency_graph", lambda _: graph)
+    monkeypatch.setattr(
+        publish,
+        "build_package",
+        lambda name, *, directory: subprocess.CompletedProcess(["build"], 0, stdout="build ok\n"),
+    )
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "outputs"))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
     calls = []
 
-    def run_package(name: str, *, directory: Path) -> subprocess.CompletedProcess[str]:
+    def run_package(
+        name: str, *, directory: Path, build_dir: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(name)
         (directory / "tags.txt").write_text("", encoding="utf-8")
         return subprocess.CompletedProcess(["bash"], 0, stdout="")
@@ -296,10 +309,10 @@ def test_shared_lookup_failure_blocks_consumers_not_independent_packages(
         )
         == 1
     )
-    assert calls == ["independent"]
+    assert calls == []
     summary = (tmp_path / "summary").read_text(encoding="utf-8")
     assert "PyPI unavailable" in summary
-    assert f"| consumer | blocked | Blocked by {publish.SHARED}" in summary
+    assert "publishing was not started" in summary
 
 
 def test_missing_package_outputs_do_not_abort_other_packages(
@@ -308,12 +321,19 @@ def test_missing_package_outputs_do_not_abort_other_packages(
     graph: dict[str, set[str]] = {"a-good": set(), "b-bad": set(), "c-good": set()}
     monkeypatch.setattr(workspace, "packages", lambda: {})
     monkeypatch.setattr(publish, "dependency_graph", lambda _: graph)
+    monkeypatch.setattr(
+        publish,
+        "build_package",
+        lambda name, *, directory: subprocess.CompletedProcess(["build"], 0, stdout="build ok\n"),
+    )
     output = tmp_path / "outputs"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
     calls = []
 
-    def run_package(name: str, *, directory: Path) -> subprocess.CompletedProcess[str]:
+    def run_package(
+        name: str, *, directory: Path, build_dir: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         calls.append(name)
         if name != "b-bad":
             (directory / "tags.txt").write_text(f"{name}-v1.0.0\n", encoding="utf-8")

@@ -62,7 +62,7 @@ jobs:
         with:
           enable-cache: false
 
-      - name: Publish changed packages
+      - name: Build and verify changed packages, then publish
         id: publish
         env:
           PACKAGES_JSON: ${{ needs.detect.outputs.packages }}

@@ -51,15 +51,19 @@ def ancestors(graph: dict[str, set[str]]) -> dict[str, tuple[str, ...]]:
     return result
 
 
-def run_package(name: str, *, directory: Path) -> subprocess.CompletedProcess[str]:
-    command = ["bash", str(ROOT / "scripts/publish-package.sh")]
+def run_command_streaming(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    group_title: str,
+) -> subprocess.CompletedProcess[str]:
     tail: deque[str] = deque(maxlen=40)
-    print(f"::group::Publish {name}", flush=True)
+    print(f"::group::{group_title}", flush=True)
     try:
         with subprocess.Popen(
             command,
             cwd=ROOT,
-            env={**os.environ, "PACKAGE": name, "PUBLISH_DIR": str(directory)},
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -83,6 +87,48 @@ def run_package(name: str, *, directory: Path) -> subprocess.CompletedProcess[st
         print("::endgroup::", flush=True)
 
 
+def build_package(name: str, *, directory: Path) -> subprocess.CompletedProcess[str]:
+    command = ["bash", str(ROOT / "scripts/build-publish-package.sh")]
+    return run_command_streaming(
+        command,
+        env={**os.environ, "PACKAGE": name, "BUILD_DIR": str(directory)},
+        group_title=f"Build and verify {name}",
+    )
+
+
+def run_package(
+    name: str,
+    *,
+    directory: Path,
+    build_dir: Path,
+) -> subprocess.CompletedProcess[str]:
+    command = ["bash", str(ROOT / "scripts/publish-package.sh")]
+    env = {
+        **os.environ,
+        "PACKAGE": name,
+        "PUBLISH_DIR": str(directory),
+        "BUILD_DIR": str(build_dir),
+    }
+    return run_command_streaming(
+        command,
+        env=env,
+        group_title=f"Publish {name}",
+    )
+
+
+def _format_error_annotation(title: str, message: str, log: str = "") -> str:
+    body = f"{message}\n{log}" if log else message
+    encoded = body.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return f"::error title={title}::{encoded}"
+
+
+def _write_step_summary(summary: str) -> None:
+    print(summary, flush=True)
+    if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(summary_path).open("a", encoding="utf-8") as output:
+            output.write(summary)
+
+
 def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -> int:
     graph = dependency_graph(workspace.packages())
     selected = set(names)
@@ -90,6 +136,52 @@ def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -
     if unknown:
         raise ValueError(f"Unknown publish packages: {', '.join(sorted(unknown))}")
     ordered = ancestors(graph)
+    if not selected:
+        release_bodies = directory / "release-bodies"
+        release_bodies.mkdir(parents=True)
+        write_outputs({"tags": "", "release-bodies": str(release_bodies)})
+        _write_step_summary("## Publish results\n\n0 succeeded, 0 failed, 0 blocked.\n")
+        return 0
+    if shared_error:
+        print(_format_error_annotation("Shared dependency lookup failed", shared_error), flush=True)
+        _write_step_summary(
+            "## Publish results\n\nShared dependency lookup failed; publishing was not started.\n\n"
+            f"<pre>{escape(shared_error)}</pre>\n"
+        )
+        return 1
+
+    build_root = directory / "build"
+    build_dirs: dict[str, Path] = {}
+    for name, dependencies in ordered.items():
+        if name not in selected:
+            continue
+        build_dir = build_root / name
+        build_dir.mkdir(parents=True)
+        for dependency in dependencies:
+            if dependency not in selected:
+                continue
+            for wheel in build_dirs[dependency].glob("*.whl"):
+                shutil.copy2(wheel, build_dir)
+        build_result = build_package(name, directory=build_dir)
+        if build_result.returncode != 0:
+            err_msg = build_result.stdout.strip() or "Build or verification failed."
+            print(
+                _format_error_annotation(
+                    f"Build and verification {name} failed",
+                    f"{name} failed (exit {build_result.returncode})",
+                    err_msg,
+                ),
+                flush=True,
+            )
+            summary = (
+                "## Publish results\n\n"
+                "Build or verification failed; publishing was not started.\n\n"
+                f"{name}: exit {build_result.returncode}\n\n<pre>{escape(err_msg)}</pre>\n"
+            )
+            _write_step_summary(summary)
+            return 1
+        build_dirs[name] = build_dir
+
     failed: set[str] = set()
     blocked: set[str] = set()
     tags: list[str] = []
@@ -111,16 +203,7 @@ def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -
         package_dir = directory / name
         try:
             package_dir.mkdir()
-            for dependency in dependencies:
-                for kind in ("standard", "bundle"):
-                    destination = package_dir / "dependencies" / kind
-                    destination.mkdir(parents=True, exist_ok=True)
-                    for wheel in (directory / dependency / "artifacts" / kind).glob("*.whl"):
-                        shutil.copy2(wheel, destination)
-            if name == SHARED and shared_error:
-                result = subprocess.CompletedProcess(["detect"], 1, stdout=shared_error)
-            else:
-                result = run_package(name, directory=package_dir)
+            result = run_package(name, directory=package_dir, build_dir=build_dirs[name])
             if result.returncode == 0:
                 package_tags = (package_dir / "tags.txt").read_text(encoding="utf-8").splitlines()
                 for tag in package_tags:
@@ -137,10 +220,8 @@ def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -
             failure_logs.append(
                 f"<details><summary>{message}</summary>\n\n<pre>{escape(log)}</pre>\n\n</details>\n"
             )
-            annotation = (
-                f"{message}\n{log}".replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-            )
-            print(f"::error title=Publish {name}::{annotation}", flush=True)
+            annotation = _format_error_annotation(f"Publish {name}", message, log)
+            print(annotation, flush=True)
         else:
             rows.append(f"| {name} | succeeded | |")
             print(f"{name}: succeeded", flush=True)
@@ -156,12 +237,9 @@ def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -
             "",
         ]
     )
-    print(summary, flush=True)
     summary += "\n".join(failure_logs)
     write_outputs({"tags": "\n".join(tags), "release-bodies": str(release_bodies)})
-    if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
-        with Path(summary_path).open("a", encoding="utf-8") as output:
-            output.write(summary)
+    _write_step_summary(summary)
     return int(bool(failed or blocked))
 
 
