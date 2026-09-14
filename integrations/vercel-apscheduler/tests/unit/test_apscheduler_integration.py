@@ -263,7 +263,10 @@ class FakeDriver:
         generation: int,
         owner: str,
         now: datetime,
+        *,
+        idle_bounded: bool = False,
     ) -> ClaimResult:
+        del idle_bounded
         with self.lock:
             if (
                 self.state != "running"
@@ -328,8 +331,10 @@ class FakeDriver:
         token: WakeToken,
         owner: str,
         now: datetime,
+        *,
+        idle_bounded: bool = False,
     ) -> ClaimResult:
-        del now
+        del now, idle_bounded
         with self.lock:
             if (
                 self.state != "running"
@@ -422,6 +427,7 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.delenv("VERCEL_TARGET_ENV", raising=False)
     monkeypatch.delenv("VERCEL_PYTHON_SUBSCRIBER_ID", raising=False)
     monkeypatch.delenv("VERCEL_APSCHEDULER_BACKEND", raising=False)
+    monkeypatch.delenv("VERCEL_APSCHEDULER_PREVIEW_IDLE_TIMEOUT_SECONDS", raising=False)
     monkeypatch.setenv(
         "VERCEL_APSCHEDULER_SUBSCRIBERS",
         (
@@ -1131,6 +1137,36 @@ def test_runtime_mutations_are_rejected() -> None:
     assert persisted.next_run_time == persisted_run_time
     assert persisted.trigger.interval == timedelta(hours=2)
     assert driver.current == armed
+
+
+def test_opted_in_preview_publishes_idle_bounded_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle-boundedness is config-derived and stamped on every publication."""
+    monkeypatch.setenv("VERCEL_APSCHEDULER_PREVIEW_IDLE_TIMEOUT_SECONDS", "1800")
+    scheduler, _adapter, _driver = scheduler_with_driver()
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+
+    payload = send.call_args.args[1]
+    assert payload["idle_bounded"] is True
+
+
+def test_unbounded_environments_publish_unbounded_payloads() -> None:
+    scheduler, _adapter, _driver = scheduler_with_driver()
+
+    with patch(
+        "vercel.integrations.apscheduler._adapter.vqs_sync.send",
+        return_value="msg_start",
+    ) as send:
+        scheduler.start()
+
+    payload = send.call_args.args[1]
+    assert payload["idle_bounded"] is False
 
 
 def test_runtime_job_creation_is_rejected() -> None:
