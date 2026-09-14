@@ -3,8 +3,9 @@
 A backend supplies two collaborators to the adapter:
 
 - a *driver*: the lifecycle state machine (start/pause/resume, wake tokens,
-  ownership, the reconciliation marker), and
-- a *job coordinator*: atomic-as-possible job writes coupled to wake rearming.
+  ownership), and
+- a *job coordinator*: atomic-as-possible job reads and writes coupled to
+  wake rearming.
 """
 
 from __future__ import annotations
@@ -137,10 +138,6 @@ class Driver(Protocol):
 
     def owner_deployment(self) -> str | None: ...
 
-    def reconciled_deployment(self) -> str | None: ...
-
-    def mark_reconciled(self, deployment: str, now: datetime) -> bool: ...
-
     def renew(self, owner: str, now: datetime) -> bool: ...
 
     def release(self, owner: str) -> None: ...
@@ -169,15 +166,11 @@ class JobCoordinator(Protocol):
         now: datetime,
     ) -> list[tuple[Any, int]]: ...
 
-    def get_all_jobs_with_revisions(
-        self,
-    ) -> tuple[list[tuple[Any, int]], list[tuple[str, int]]]: ...
+    def get_all_jobs_with_revisions(self) -> list[tuple[Any, int]]: ...
 
     def cas_update_job(self, job: Any, expected_revision: int) -> bool: ...
 
     def cas_remove_job(self, job_id: str, expected_revision: int) -> bool: ...
-
-    def quarantine_job(self, job_id: str) -> None: ...
 
 
 class BoundRuntime(Protocol):

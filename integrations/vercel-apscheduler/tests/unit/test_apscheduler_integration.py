@@ -139,7 +139,6 @@ class FakeDriver:
         self.last_sequence = 0
         self.owner: str | None = None
         self.owner_deployment_value: str | None = None
-        self.reconciled: str | None = None
 
     def owner_deployment(self) -> str | None:
         return self.owner_deployment_value
@@ -220,16 +219,6 @@ class FakeDriver:
             changed = self.state == "running"
             self.state = "paused"
             return changed
-
-    def reconciled_deployment(self) -> str | None:
-        return self.reconciled
-
-    def mark_reconciled(self, deployment: str, now: datetime) -> bool:
-        del now
-        if self.owner_deployment_value != deployment:
-            return False
-        self.reconciled = deployment
-        return True
 
     def repair_overdue_wake(self, now: datetime, *, grace_seconds: int = 600) -> bool:
         with self.lock:
@@ -616,7 +605,7 @@ def test_production_state_is_environment_scoped(
 
     assert adapter.scope == "prj_123:production"
     store = adapter.scheduler._jobstores["default"]
-    assert store.doc_key == f"aps:prj_123:production:{TEST_SCHEDULER_ID}:jobs"
+    assert store.key_prefix == f"aps:prj_123:production:{TEST_SCHEDULER_ID}:job:"
 
 
 def test_custom_environment_state_is_environment_scoped(
@@ -744,15 +733,16 @@ def test_preview_state_stays_deployment_scoped(
     assert adapter.scope == "dpl_test"
 
 
-def test_takeover_reconciles_declared_jobs(
+def test_takeover_read_repair_syncs_records_to_the_new_declarations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A promote syncs the store to the new code's declarations.
+    """A promote syncs the store to the new code's declarations lazily.
 
-    Environment-scoped production state outlives deployments, so the new
-    deployment's first touch must delete undeclared jobs before any wake
-    plans them, restart changed schedules, and preserve progress for
-    unchanged ones.
+    Environment-scoped production records outlive deployments. Enumeration
+    comes from the reading deployment's own declarations, so a job the new
+    code no longer declares is unreachable before any wake plans it; a
+    changed schedule is rebuilt from its declaration on first read; an
+    unchanged job keeps its progress.
     """
     monkeypatch.setenv("VERCEL_ENV", "production")
     monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_123")
@@ -769,10 +759,10 @@ def test_takeover_reconciles_declared_jobs(
     store: Any = first._jobstores["default"]
     kept_run_time = store.lookup_job("keep").next_run_time
     changed_run_time = store.lookup_job("changed").next_run_time
-    assert driver.reconciled == "dpl_test"
+    assert store.lookup_job("gone") is not None
 
     # A new deployment takes over the shared namespace and driver. Its own
-    # injected store reads the same cache documents.
+    # injected store reads the same cache records.
     _clear_scheduler_registrations()
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_two")
     second = BlockingScheduler(timezone=UTC)
@@ -797,7 +787,8 @@ def test_takeover_reconciles_declared_jobs(
     assert shared.lookup_job("keep").next_run_time == kept_run_time
     assert shared.lookup_job("changed").next_run_time != changed_run_time
     assert shared.lookup_job("changed").trigger.interval == timedelta(hours=2)
-    assert driver.reconciled == "dpl_two"
+    # The undeclared job is unreachable through the new code's enumeration.
+    assert shared.lookup_job("gone") is None
 
 
 def test_implicit_activation_respects_chain_ownership(
@@ -826,7 +817,6 @@ def test_implicit_activation_respects_chain_ownership(
 
     send.assert_called_once()
     assert driver.owner_deployment_value == "dpl_test"
-    assert driver.reconciled == "dpl_test"
 
 
 def test_stale_deployment_touches_are_inert(
@@ -875,8 +865,12 @@ def test_stale_deployment_touches_are_inert(
 
     stale_adapter.ensure_local_started()
 
-    # No resurrection of "legacy" in the shared namespace.
+    # No resurrection of "legacy" in the shared namespace: the demoted
+    # deployment's reads see a declaration-derived view but write no record.
     assert {job.id for job in store.get_all_jobs()} == {"kept"}
+    stale_store: Any = stale._jobstores["default"]
+    assert {job.id for job in stale_store.get_all_jobs()} == {"legacy"}
+    assert stale_store._load_record("legacy") is None
     assert stale_adapter.publish_pending_wakeup() is None
     with pytest.raises(APSchedulerConfigurationError, match="no longer drives"):
         stale_adapter.prepare_runtime_mutation()
@@ -1873,7 +1867,6 @@ def test_durable_job_requires_explicit_id() -> None:
 def test_cold_start_preserves_persisted_next_run_time() -> None:
     scheduler, adapter, driver = scheduler_with_driver()
     driver.owner_deployment_value = "dpl_test"
-    driver.reconciled = "dpl_test"
     persisted_time = datetime.now(UTC) + timedelta(hours=2)
 
     scheduler.add_job(
