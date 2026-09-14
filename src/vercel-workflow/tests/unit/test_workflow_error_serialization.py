@@ -13,6 +13,7 @@ from vercel.workflow import (
     HookConflictError,
     RemoteError,
     RetryableError,
+    SerializationError,
     WorkflowRunFailedError,
     serializable,
 )
@@ -51,6 +52,18 @@ def test_hook_conflict_uses_the_typescript_tag() -> None:
         '"Hook token \\"shared-token\\" is already in use by another workflow '
         '(run \\"wrun_owner\\")","shared-token","wrun_owner"]'
     )
+
+
+def test_serialization_error_is_fatal_locally_and_after_round_trip() -> None:
+    error = SerializationError("invalid payload")
+
+    assert isinstance(error, FatalError)
+    assert not isinstance(error, RuntimeError)
+    assert error.fatal is True
+    assert _wire(error) == '[["FatalError",1],{"message":2},"invalid payload"]'
+    restored = _round_trip(error)
+    assert isinstance(restored, FatalError)
+    assert str(restored) == "invalid payload"
 
 
 def test_cause_uses_its_own_error_tag() -> None:

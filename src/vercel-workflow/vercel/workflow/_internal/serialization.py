@@ -42,7 +42,7 @@ ENCRYPTED_FORMATS = (ENCRYPTED, SEALED)
 """The formats that need the run's key material. Both derive from the same 32 bytes."""
 
 
-class SerializationError(RuntimeError):
+class SerializationError(errors.FatalError):
     """A payload could not be encoded, or arrived in a format we cannot read."""
 
 
