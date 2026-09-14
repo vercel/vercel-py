@@ -136,9 +136,6 @@ async def wait_for_approval() -> bool:
 
 `BaseHook` supports dataclasses and Pydantic models for external resume events.
 
-`Approval.wait()` generates a token by default (also when `token=None`).
-Pass a non-empty `token` to choose your own; `token=""` raises `ValueError`.
-
 Pass `metadata` to record data on the hook itself, for whoever resumes it:
 
 ```python
