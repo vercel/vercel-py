@@ -1051,9 +1051,15 @@ class WorkflowOrchestratorContext:
     def create_hook(
         self, token: str | None, hook_cls: type[T], *, metadata: Any = None
     ) -> core.HookEvent[T]:
+        if token == "":
+            raise ValueError(
+                "wait() does not accept an empty string token. "
+                "Pass a non-empty token, or omit it to use a generated one."
+            )
+
         hook = Hook(
             correlation_id=f"hook_{self.generate_ulid()}",
-            token=token or self.generate_nanoid(),
+            token=self.generate_nanoid() if token is None else token,
             hook_cls=hook_cls,
             metadata=None if metadata is None else self.payload_encoder.encode(metadata),
         )
