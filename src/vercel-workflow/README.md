@@ -130,11 +130,15 @@ class Approval(BaseHook):
 
 @app.workflow
 async def wait_for_approval() -> bool:
-    approval = await Approval.wait()
-    return approval.approved
+    async with Approval.wait() as hook:
+        print("Send approval to token:", hook.token)
+        approval = await hook
+        return approval.approved
 ```
 
 `BaseHook` supports dataclasses and Pydantic models for external resume events.
+The returned hook's read-only `token` property exposes its generated or custom
+token, which external code can pass to `resume()`.
 
 Pass `metadata` to record data on the hook itself, for whoever resumes it:
 
