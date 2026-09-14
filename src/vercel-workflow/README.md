@@ -12,15 +12,15 @@ pip install vercel-workflow
 ```python
 from vercel.workflow import Workflows, sleep, start
 
-app = Workflows()
+wf = Workflows()
 
 
-@app.step
+@wf.step
 async def charge_customer(customer_id: str) -> None:
     ...
 
 
-@app.workflow
+@wf.workflow
 async def renew_subscription(customer_id: str) -> None:
     await sleep("1h")
     await charge_customer(customer_id)
@@ -30,7 +30,7 @@ async def main() -> None:
     run = await start(renew_subscription, "cus_123")
 ```
 
-`app.workflow` registers async workflow functions. `app.step` registers async
+`wf.workflow` registers async workflow functions. `wf.step` registers async
 steps that can be called only from inside a workflow. `sleep()` creates a
 durable wait in a workflow run.
 
@@ -43,7 +43,7 @@ from inside the body:
 from vercel.workflow import FatalError, RetryableError
 
 
-@app.step(max_retries=5)
+@wf.step(max_retries=5)
 async def charge_customer(customer_id: str) -> None:
     if not customer_id:
         # Retrying cannot help, so fail the step on this attempt.
@@ -70,7 +70,7 @@ from datetime import datetime, timezone
 from vercel.workflow import get_step_metadata
 
 
-@app.step
+@wf.step
 async def charge_customer(customer_id: str) -> None:
     info = get_step_metadata()
     elapsed = datetime.now(timezone.utc) - info.step_started_at
@@ -84,7 +84,7 @@ a workflow body or a step:
 ```python
 from vercel.workflow import remove_attributes, set_attributes
 
-@app.workflow
+@wf.workflow
 async def renew_subscription(customer_id: str) -> None:
     await set_attributes(customer=customer_id, phase="charging")
     await charge_customer(customer_id)
@@ -120,7 +120,7 @@ workflows = Workflows(namespace="billing")
 from dataclasses import dataclass
 from vercel.workflow import BaseHook, Workflows
 
-app = Workflows()
+wf = Workflows()
 
 
 @dataclass
@@ -128,39 +128,59 @@ class Approval(BaseHook):
     approved: bool
 
 
-@app.workflow
+@wf.workflow
 async def wait_for_approval() -> bool:
-    approval = await Approval.wait()
-    return approval.approved
+    async with Approval.wait() as hook:
+        await send_approval_email(hook.token)
+        approval = await hook
+        return approval.approved
+
+@wf.step
+async def send_approval_email(token: str) -> None:
+    # Send an email with a generated link with the token,
+    # which, when clicked, will resume the hook, see below.
+    link = f"{BASE_URL}/approve?token={token}"
+    ...
 ```
 
 `BaseHook` supports dataclasses and Pydantic models for external resume events.
 
-Pass `metadata` to record data on the hook itself, for whoever resumes it:
+Then you can resume the hook in your application:
 
 ```python
-@app.workflow
+import fastapi
+
+app = fastapi.FastAPI()
+
+@app.get("/approve")
+async def approve(token: str):
+    await Approval(approved=True).resume(token)
+    ...
+```
+
+You can also use custom tokens, and attach metadata to the hook:
+
+```python
+@wf.workflow
 async def wait_for_approval(order_id: str) -> bool:
     approval = await Approval.wait(token=f"order:{order_id}", metadata={"order": order_id})
     return approval.approved
 ```
 
 Metadata is written once, when the hook is registered, and is not part of the
-payload. The resumer reads it back with `get_hook_by_token()`, already decoded,
-which is how a run tells it what it is waiting for:
+payload. The resumer can read it back with `get_hook_by_token()`:
 
 ```python
 from vercel.workflow import get_hook_by_token
 
-hook = await get_hook_by_token(f"order:{order_id}")
-if hook.metadata["order"] == order_id:
-    await Approval(approved=True).resume(hook)
+@app.get("/approve")
+async def approve(order_id: str):
+    hook = await get_hook_by_token(f"order:{order_id}")
+    if hook.metadata["order"] == order_id:
+        await Approval(approved=True).resume(hook)
 ```
 
-That `Hook` carries the token, hook and run ids, when it was created, and the
-decoded metadata. Pass it back to `resume()` rather than the token to reuse the
-lookup. `get_hook_by_token()` raises `HookNotFoundError` when no live hook holds
-the token.
+`BaseHook.resume()` or `get_hook_by_token()` raises `HookNotFoundError` when no live hook holds the token.
 
 ## Streaming
 
@@ -170,10 +190,10 @@ progress without waiting for the run to finish:
 ```python
 from vercel.workflow import Workflows, get_writable
 
-app = Workflows()
+wf = Workflows()
 
 
-@app.step
+@wf.step
 async def summarize(*, document: str) -> str:
     writable = get_writable()
     summary = []
@@ -183,12 +203,12 @@ async def summarize(*, document: str) -> str:
     return "".join(summary)
 
 
-@app.step
+@wf.step
 async def done() -> None:
     await get_writable().close()
 
 
-@app.workflow
+@wf.workflow
 async def analyze(*, document: str) -> str:
     summary = await summarize(document=document)
     await done()
@@ -199,13 +219,13 @@ A workflow body can call `get_writable()` too and pass the result to its steps,
 which take it as a `WorkflowWritable` and write to it:
 
 ```python
-@app.step
+@wf.step
 async def summarize(*, document: str, out: WorkflowWritable) -> str:
     await out.write("starting")
     ...
 
 
-@app.workflow
+@wf.workflow
 async def analyze(*, document: str) -> str:
     out = get_writable()
     return await summarize(document=document, out=out)
@@ -228,7 +248,7 @@ class Token(pydantic.BaseModel):
     index: int
 
 
-@app.step
+@wf.step
 async def summarize(*, document: str) -> str:
     writable = get_writable(type=Token)
     index = 0
@@ -320,12 +340,12 @@ class Order(pydantic.BaseModel):
     quantity: int
 
 
-@app.step
+@wf.step
 async def fulfil(order: Order) -> Receipt:
     ...
 
 
-@app.step
+@wf.step
 async def fulfil_many(orders: list[Order] | None) -> None:
     ...
 ```

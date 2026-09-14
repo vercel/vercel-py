@@ -215,6 +215,11 @@ class HookEvent(Generic[T]):
         self._token = token
         self._disposed = False
 
+    @property
+    def token(self) -> str:
+        """The token external code can use to resume this hook."""
+        return self._token
+
     def __await__(self) -> Generator[Any, None, T]:
         async def next_or_raise() -> T:
             try:
