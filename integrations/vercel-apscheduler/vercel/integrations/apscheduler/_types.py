@@ -19,16 +19,12 @@ from ._time import as_utc
 # activation sweep.
 WAKE_REPAIR_GRACE_SECONDS = 10 * 60
 
-PROVENANCE_DECLARED = "declared"
-PROVENANCE_RUNTIME = "runtime"
 
 ClaimState = Literal["claimed", "busy", "stale"]
 FinishState = Literal["advanced", "fenced", "lost"]
 LifecycleState = Literal["running", "paused", "inactive"]
 
 __all__ = [
-    "PROVENANCE_DECLARED",
-    "PROVENANCE_RUNTIME",
     "WAKE_REPAIR_GRACE_SECONDS",
     "APSchedulerConfigurationError",
     "ClaimResult",

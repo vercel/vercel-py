@@ -11,7 +11,7 @@ from ..._time import as_utc
 # 35 days. Docs are rewritten on every touch (wakes, activation-hook runs),
 # so an active, paused, or dormant scheduler on a traffic-serving deployment
 # never expires; the TTL only reaps abandoned namespaces (and, with them,
-# runtime-added jobs and lifecycle flags — declared jobs come back from code).
+# lifecycle flags — declared jobs come back from code).
 # LRU eviction is the space-based reaper; this is the time-based one.
 DOC_TTL_SECONDS = 35 * 24 * 3600
 _INDEX_MERGE_ATTEMPTS = 4
