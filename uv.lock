@@ -25,7 +25,6 @@ members = [
     "vercel-connect",
     "vercel-django-tasks",
     "vercel-dramatiq",
-    "vercel-env",
     "vercel-headers",
     "vercel-internal-core",
     "vercel-internal-telemetry",
@@ -2631,7 +2630,6 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
     { name = "vercel-cache" },
-    { name = "vercel-env" },
     { name = "vercel-headers" },
     { name = "vercel-internal-core" },
     { name = "vercel-internal-telemetry" },
@@ -2650,7 +2648,6 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0.0,<5" },
     { name = "vercel-cache", editable = "src/vercel-cache" },
-    { name = "vercel-env", editable = "src/vercel-env" },
     { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-internal-telemetry", editable = "src/vercel-internal-telemetry" },
@@ -2762,10 +2759,6 @@ requires-dist = [
 ]
 
 [[package]]
-name = "vercel-env"
-source = { editable = "src/vercel-env" }
-
-[[package]]
 name = "vercel-headers"
 source = { editable = "src/vercel-headers" }
 
@@ -2870,7 +2863,6 @@ dependencies = [
     { name = "anyio" },
     { name = "httpx2" },
     { name = "pydantic" },
-    { name = "vercel-env" },
     { name = "vercel-internal-core" },
     { name = "vercel-oidc" },
 ]
@@ -2880,7 +2872,6 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.0.0,<5" },
     { name = "httpx2", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
-    { name = "vercel-env", editable = "src/vercel-env" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]

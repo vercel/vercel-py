@@ -93,7 +93,6 @@ mypy_path = [
     "src",
     "src/vercel-cache",
     "src/vercel-connect",
-    "src/vercel-env",
     "src/vercel-headers",
     "src/vercel-queue",
     "src/vercel-oidc",
