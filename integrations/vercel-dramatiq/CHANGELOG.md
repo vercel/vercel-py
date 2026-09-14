@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.6 - 2026-09-14
+
+> **Release note:** Supersedes repository-declared versions `0.7.5` and `0.7.4`,
+> which were not published to PyPI. The complete changes since published `0.7.3`
+> are included below.
+
+### Internal
+
+- Update dependencies.
+
 ## 0.7.5 - 2026-09-09
 
 > **Release note:** Version 0.7.4 was declared in repository history but was
