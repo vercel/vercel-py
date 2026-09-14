@@ -171,7 +171,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: $/.github/actions/publish
+      - uses: ./.github/actions/publish
         with:
           base-ref: ${{ github.event.pull_request.base.sha }}
           dry-run: 'true'

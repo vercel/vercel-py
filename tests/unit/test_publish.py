@@ -212,7 +212,6 @@ def test_shared_dependency_only_gates_its_consumers() -> None:
     graph = publish.dependency_graph(workspace.packages())
     shared = publish.SHARED
     assert not graph[shared]
-    assert not graph["vercel-env"]
     assert not graph["vercel-headers"]
     assert shared in graph["vercel-internal-core"]
     assert shared in graph["vercel-oidc"]

@@ -33,7 +33,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: $/.github/actions/publish
+      - uses: ./.github/actions/publish
         id: plan
         with:
           base-ref: ${{ github.event.before || 'HEAD^' }}
@@ -55,7 +55,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: $/.github/actions/publish
+      - uses: ./.github/actions/publish
         with:
           plan: ${{ needs.detect.outputs.plan }}
           dry-run: 'false'
@@ -72,7 +72,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: $/.github/actions/publish
+      - uses: ./.github/actions/publish
         with:
           plan: ${{ needs.detect.outputs.plan }}
           dry-run: 'true'
