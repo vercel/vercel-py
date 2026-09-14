@@ -941,6 +941,7 @@ def test_release_stages_commits_pushes_and_opens_pr(
     assert calls[4][:3] == ["gh", "pr", "create"]
     assert "--title" in calls[4]
     assert release.RELEASE_COMMIT_TITLE in calls[4]
+    assert calls[4][calls[4].index("--label") + 1] == "release"
     assert "--head" in calls[4]
     assert "octocat/release-20260710123456" in calls[4]
 

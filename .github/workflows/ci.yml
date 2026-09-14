@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions: {}
 
@@ -155,6 +156,26 @@ jobs:
       - name: Build package
         run: uv run poe dist
 
+  release-dry-run:
+    name: Release publish dry run
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.base.ref == 'main' &&
+      contains(github.event.pull_request.labels.*.name, 'release')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: $/.github/actions/publish
+        with:
+          base-ref: ${{ github.event.pull_request.base.sha }}
+          dry-run: 'true'
+
   overall:
     name: CI Overall
     if: always()
@@ -162,6 +183,7 @@ jobs:
       - build
       - lint-and-typecheck
       - test
+      - release-dry-run
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -169,5 +191,6 @@ jobs:
         if: >-
           needs.build.result != 'success' ||
           needs.lint-and-typecheck.result != 'success' ||
-          needs.test.result != 'success'
+          needs.test.result != 'success' ||
+          (needs.release-dry-run.result != 'success' && needs.release-dry-run.result != 'skipped')
         run: exit 1

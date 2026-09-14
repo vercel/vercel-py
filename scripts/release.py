@@ -43,6 +43,7 @@ TYPE_BUMPS = {
 FRAGMENT_TYPE_ALTERNATION = "|".join(FRAGMENT_TYPES)
 FRAGMENT_FILE_RE = re.compile(rf".+\.({FRAGMENT_TYPE_ALTERNATION})\.md")
 RELEASE_COMMIT_TITLE = "Release Packages"
+RELEASE_PR_LABEL = "release"
 CHANGELOG_DIFF_MODES = ("staged", "tracked", "all", "base")
 CUTOFF_MARKER = "# ------------------------ >8 ------------------------"
 FRAGMENT_GUIDANCE = """
@@ -422,6 +423,8 @@ def _create_pull_request(body: str, *, branch: str) -> None:
                 "create",
                 "--title",
                 RELEASE_COMMIT_TITLE,
+                "--label",
+                RELEASE_PR_LABEL,
                 "--body-file",
                 str(body_path),
                 "--head",

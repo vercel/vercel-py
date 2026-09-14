@@ -359,11 +359,17 @@ def test_detect_writes_github_outputs(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setattr(release, "publishable_packages", lambda: ["vercel-env"])
     monkeypatch.setattr(bundle_release, "shared_vendored_release", lambda: ("0.8.2", False))
     assert publish.main(["detect"]) == 0
-    assert output.read_text(encoding="utf-8").splitlines() == [
-        f'packages=["{publish.SHARED}", "vercel-env"]',
-        "shared-version=0.8.2",
-        "publish-shared=true",
-    ]
+    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    plan = json.loads(values.pop("plan"))
+    assert (
+        plan
+        == values
+        == {
+            "packages": json.dumps([publish.SHARED, "vercel-env"]),
+            "shared-version": "0.8.2",
+            "publish-shared": "true",
+        }
+    )
 
 
 @pytest.mark.parametrize(

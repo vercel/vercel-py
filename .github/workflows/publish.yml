@@ -22,31 +22,27 @@ permissions: {}
 jobs:
   detect:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
-      packages: ${{ steps.packages.outputs.packages }}
-      shared-version: ${{ steps.packages.outputs.shared-version }}
-      publish-shared: ${{ steps.packages.outputs.publish-shared }}
-      shared-error: ${{ steps.packages.outputs.shared-error }}
+      plan: ${{ steps.plan.outputs.plan }}
+      packages: ${{ steps.plan.outputs.packages }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: $/.github/actions/publish
+        id: plan
         with:
-          enable-cache: false
-
-      - name: Detect changed packages
-        id: packages
-        env:
-          BASE_REF: ${{ github.event.before || 'HEAD^' }}
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
-        run: python scripts/publish.py detect
+          base-ref: ${{ github.event.before || 'HEAD^' }}
+          force: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+          detect-only: 'true'
 
   publish:
     needs: detect
-    if: needs.detect.outputs.packages != '[]'
+    if: needs.detect.outputs.packages != '[]' && (github.event_name == 'push' || !inputs.dry_run)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -56,112 +52,27 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: $/.github/actions/publish
         with:
-          enable-cache: false
+          plan: ${{ needs.detect.outputs.plan }}
+          dry-run: 'false'
 
-      - name: Build and verify changed packages, then publish
-        id: publish
-        env:
-          PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-          PUBLISH_SHARED: ${{ needs.detect.outputs.publish-shared }}
-          SHARED_ERROR: ${{ needs.detect.outputs.shared-error }}
-          VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION: ${{ needs.detect.outputs.shared-version }}
-        run: python scripts/publish.py run
-
-      - name: Create Git Tags
-        if: ${{ !cancelled() && steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          TAGS: ${{ steps.publish.outputs.tags }}
-          RELEASE_BODIES: ${{ steps.publish.outputs.release-bodies }}
+  dry-run:
+    needs: detect
+    if: needs.detect.outputs.packages != '[]' && github.event_name == 'workflow_dispatch' && inputs.dry_run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          script: |
-            const fs = require('fs');
-            const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
-            for (const tag of tags) {
-              try {
-                const ref = `tags/${tag}`;
-                try {
-                  await github.rest.git.getRef({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    ref,
-                  });
-                  core.info(`Tag ${tag} already exists, skipping`);
-                  continue;
-                } catch (error) {
-                  if (error.status !== 404) throw error;
-                }
+          fetch-depth: 0
+          persist-credentials: false
 
-                const message = fs.readFileSync(`${process.env.RELEASE_BODIES}/${tag}.md`, 'utf8');
-                const tagObject = await github.rest.git.createTag({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  tag,
-                  message,
-                  object: context.sha,
-                  type: 'commit',
-                });
-                try {
-                  await github.rest.git.createRef({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    ref: `refs/${ref}`,
-                    sha: tagObject.data.sha,
-                  });
-                } catch (error) {
-                  if (error.status !== 422) throw error;
-                  await github.rest.git.getRef({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    ref,
-                  });
-                  core.info(`Tag ${tag} was created concurrently, skipping`);
-                }
-              } catch (error) {
-                core.setFailed(`Failed to create tag ${tag}: ${error.message}`);
-              }
-            }
-
-      - name: Create GitHub Releases
-        if: ${{ !cancelled() && steps.publish.outputs.tags != '' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        env:
-          TAGS: ${{ steps.publish.outputs.tags }}
-          RELEASE_BODIES: ${{ steps.publish.outputs.release-bodies }}
+      - uses: $/.github/actions/publish
         with:
-          script: |
-            const fs = require('fs');
-            const tags = process.env.TAGS.trim().split('\n').filter(Boolean);
-            for (const tag of tags) {
-              try {
-                const body = fs.readFileSync(`${process.env.RELEASE_BODIES}/${tag}.md`, 'utf8');
-                await github.rest.repos.createRelease({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  tag_name: tag,
-                  target_commitish: context.sha,
-                  name: tag,
-                  body,
-                });
-              } catch (error) {
-                if (error.status !== 422) {
-                  core.setFailed(`Failed to create release ${tag}: ${error.message}`);
-                  continue;
-                }
-                try {
-                  await github.rest.repos.getReleaseByTag({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    tag,
-                  });
-                  core.info(`Release ${tag} already exists, skipping`);
-                } catch (lookupError) {
-                  core.setFailed(`Failed to create release ${tag}: ${error.message}; ${lookupError.message}`);
-                }
-              }
-            }
+          plan: ${{ needs.detect.outputs.plan }}
+          dry-run: 'true'

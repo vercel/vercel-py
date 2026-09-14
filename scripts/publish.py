@@ -288,9 +288,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("detect", "run"))
     args = parser.parse_args(argv)
     if args.command == "detect":
-        write_outputs(
-            detect(base=os.environ.get("BASE_REF", "HEAD^"), force=os.getenv("FORCE") == "true")
-        )
+        plan = detect(base=os.environ.get("BASE_REF", "HEAD^"), force=os.getenv("FORCE") == "true")
+        write_outputs({**plan, "plan": json.dumps(plan)})
         return 0
     names = json.loads(os.environ["PACKAGES_JSON"])
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):

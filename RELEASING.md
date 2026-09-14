@@ -83,7 +83,7 @@ uv run poe release
 - stages the release diff
 - opens `git commit -v` with a prepopulated `Release Packages` commit message
 - pushes the current branch
-- opens a pull request with `gh pr create` non-interactively
+- opens a pull request with `gh pr create` non-interactively and applies the `release` label
 
 News-fragment-backed changelog bullets include PR numbers when Git history for
 the news fragment contains GitHub squash subjects like
@@ -144,17 +144,62 @@ publish packages from a maintainer machine.
 When the release PR is merged to `main`, `.github/workflows/publish.yml`:
 
 - detects packages whose version file or changelog changed in the merge commit
-- publishes changed packages in dependency order
-- builds each package with `uv build --package <name> --no-sources` into an
-  isolated workflow directory
-- publishes only that package's artifacts with `uv publish` and OIDC trusted
-  publishing
+- builds and verifies every matched package in dependency order, using isolated
+  directories with locally built wheels from matched dependency ancestors
+- stops before any upload if a matched package fails to build or verify
+- publishes those same artifacts in dependency order with `uv publish` and OIDC
+  trusted publishing, uploading each eligible bundle before its standard distribution
 - creates and pushes `<package>-v<version>` tags after successful publish
 - creates matching GitHub releases
 
 The workflow skips the PyPI upload when the exact version already exists, but
 still creates the tag and GitHub release idempotently. This lets a failed tag or
 release step be retried after a successful upload.
+
+## Release PR dry runs
+
+The `release` label identifies release PRs. Titles and branch names do not control
+this check. `uv run poe release` applies the label when it creates the PR. For a
+manually prepared release PR, add the label before merging:
+
+```sh
+gh pr edit <number> --add-label release
+```
+
+The repository must define the label. When setting up a new repository or fork,
+create it once:
+
+```sh
+gh label create release --color 0E8A16 --description "Release PR requiring a publish dry run"
+```
+
+CI runs **Release publish dry run** for PRs targeting `main` with this label. It
+compares the PR's checked-out merge revision against the PR base SHA, so detection
+covers the full PR rather than only its latest commit. Pushes to the PR and label
+changes rerun CI. Ordinary PRs skip the dry-run job. **CI Overall** requires the job
+to succeed when it runs and accepts a skip when it does not apply.
+
+Release PR checks, manual dry runs, and real publishing all call
+`.github/actions/publish/action.yml`. They share detection, the frozen shared-vendor
+version decision, builds, installed-wheel checks, registry reads, artifact selection,
+and release-body generation. On main pushes and manual dispatches, a read-only
+job emits a frozen JSON plan first. An empty release set skips the execution jobs
+without requesting the `pypi` environment. The execution job consumes that plan
+without repeating the shared-vendor version lookup.
+
+Only real publication enables PyPI uploads and GitHub tag and release writes.
+PR and manual dry-run jobs have read-only repository access,
+no OIDC permission, and no `pypi` environment. The publishing job retains those
+permissions and environment protections.
+
+A dry run can fail because PyPI is unavailable or a required unmatched dependency
+version is not published. It does not validate OIDC authorization or prove that an
+existing PyPI artifact matches a fresh build. A release can also fail during an
+upload even after its dry run passes.
+
+For a manual dry run, dispatch **Publish PyPI** with `dry_run=true`. Use
+`force=true` to inspect every publishable package instead of only the detected
+release set. Force does not overwrite existing artifacts or assign new versions.
 
 ## Validation
 

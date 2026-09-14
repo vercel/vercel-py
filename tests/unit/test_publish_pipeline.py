@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -59,7 +60,8 @@ def write_artifacts(directory, name):
 
 
 if program == "curl":
-    print(os.getenv("PYPI_STATUS", "404"))
+    status = os.getenv("PYPI_STATUS", "404")
+    print(os.getenv("BUNDLE_PYPI_STATUS", status) if "-bundle/" in args[-1] else status)
 elif program == "python":
     if args[0] == "scripts/get-version.py":
         print("1.0.0")
@@ -232,3 +234,34 @@ def test_bundle_upload_failure_blocks_dependents_but_not_independent_packages(
     assert publish.run_packages(["base", "app", "independent"], directory=pipeline / "run") == 1
     uploaded = [name for kind, name in event_names(pipeline) if kind == "publish"]
     assert uploaded == ["independent", "base_bundle"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="publishing runs on POSIX runners")
+@pytest.mark.parametrize("distribution", ["base", "base-bundle", publish.SHARED])
+def test_dry_run_validates_upload_artifact_selection(
+    pipeline: Path, monkeypatch: pytest.MonkeyPatch, distribution: str
+) -> None:
+    monkeypatch.setenv("DRY_RUN", "true")
+    original_build = publish.build_package
+
+    def remove_artifacts(name: str, *, directory: Path) -> subprocess.CompletedProcess[str]:
+        result = original_build(name, directory=directory)
+        for path in directory.glob(f"{distribution.replace('-', '_')}-1.0.0[.-]*"):
+            path.unlink()
+        return result
+
+    monkeypatch.setattr(publish, "build_package", remove_artifacts)
+    selected = publish.SHARED if distribution == publish.SHARED else "base"
+    assert publish.run_packages([selected], directory=pipeline / "run") == 1
+    assert all(kind != "publish" for kind, _ in event_names(pipeline))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="publishing runs on POSIX runners")
+@pytest.mark.parametrize("status", ["403", "500"])
+def test_dry_run_does_not_ignore_bundle_registry_errors(
+    pipeline: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("BUNDLE_PYPI_STATUS", status)
+    assert publish.run_packages(["base"], directory=pipeline / "run") == 1
+    assert all(kind != "publish" for kind, _ in event_names(pipeline))

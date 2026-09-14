@@ -71,7 +71,11 @@ PY
     echo "No built artifacts resolved for $target_pkg $target_ver" >&2
     exit 1
   fi
-  uv publish "${artifacts[@]}"
+  if [ "$DRY_RUN" = "true" ]; then
+    printf 'Dry run: would publish %s\n' "${artifacts[@]}"
+  else
+    uv publish "${artifacts[@]}"
+  fi
 }
 
 bundle_eligible=$(python - "$package" <<'PY'
@@ -101,9 +105,6 @@ if [ "$bundle_eligible" = "true" ]; then
 
   if [ "$is_shared_vendored_deps" = "true" ] && [ "$publish_shared_vendored_deps" != "true" ]; then
     bundle_http_status=200
-  elif [ "$DRY_RUN" = "true" ]; then
-    echo "Dry run: would publish $bundle_package $version"
-    bundle_http_status=404
   else
     bundle_http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/${bundle_package}/${version}/json")
   fi
@@ -111,8 +112,6 @@ if [ "$bundle_eligible" = "true" ]; then
     :
   elif [ "$bundle_http_status" = "200" ]; then
     echo "$bundle_package $version already exists on PyPI, skipping publish"
-  elif [ "$DRY_RUN" = "true" ]; then
-    :
   elif [ "$bundle_http_status" != "404" ]; then
     echo "Unexpected PyPI response for $bundle_package $version: $bundle_http_status"
     exit 1
@@ -128,15 +127,11 @@ if [ "$is_shared_vendored_deps" = "true" ]; then
     :
   elif [ "$http_status" = "200" ]; then
     :
-  elif [ "$DRY_RUN" = "true" ]; then
-    echo "Dry run: would publish $package $version"
   else
     publish_matching_artifacts "$package" "$version"
   fi
 elif [ "$http_status" = "200" ]; then
   :
-elif [ "$DRY_RUN" = "true" ]; then
-  echo "Dry run: would publish $package $version"
 else
   publish_matching_artifacts "$package" "$version"
 fi
