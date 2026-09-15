@@ -470,8 +470,12 @@ def _github_release_body(
     return _latest_changelog_entry(package.path).rstrip() + "\n"
 
 
+def github_release_body(package_name: str) -> str:
+    return _github_release_body(package_name, packages_by_name=workspace.packages())
+
+
 def print_github_release_body(args: argparse.Namespace) -> int:
-    sys.stdout.write(_github_release_body(args.package, packages_by_name=workspace.packages()))
+    sys.stdout.write(github_release_body(args.package))
     return 0
 
 

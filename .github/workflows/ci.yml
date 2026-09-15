@@ -178,19 +178,25 @@ jobs:
 
       - name: Detect release packages
         id: plan
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: uv run --locked python scripts/publish.py detect
+        run: >-
+          uv run --locked python scripts/publish.py detect
+          --base "${{ github.event.pull_request.base.sha }}"
+          --output "${{ runner.temp }}/release-plan.json"
 
-      - name: Build and test release packages
+      - name: Build release packages
         if: steps.plan.outputs.packages != '[]'
-        env:
-          PACKAGES_JSON: ${{ steps.plan.outputs.packages }}
-          DRY_RUN: 'true'
-          PUBLISH_SHARED: ${{ steps.plan.outputs['publish-shared'] }}
-          SHARED_ERROR: ${{ steps.plan.outputs['shared-error'] }}
-          VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION: ${{ steps.plan.outputs['shared-version'] }}
-        run: uv run --locked python scripts/publish.py run
+        run: >-
+          uv run --locked python scripts/publish.py build
+          --plan "${{ runner.temp }}/release-plan.json"
+          --build-dir "${{ runner.temp }}/publish-build"
+
+      - name: Test publishing release packages
+        if: steps.plan.outputs.packages != '[]'
+        run: >-
+          uv run --locked python scripts/publish.py publish
+          --plan "${{ runner.temp }}/publish-build/plan.json"
+          --build-dir "${{ runner.temp }}/publish-build"
+          --dry-run
 
   overall:
     name: CI Overall

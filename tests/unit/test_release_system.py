@@ -2382,12 +2382,10 @@ def test_vendored_source_import_rewrite_handles_workspace_modules(tmp_path: Path
 
 def test_shared_bundle_package_keeps_distribution_name() -> None:
     assert (
-        bundle_release._variant_name(  # noqa: SLF001
-            "vercel-internal-shared-vendored-deps"
-        )
+        bundle_release.variant_name("vercel-internal-shared-vendored-deps")
         == "vercel-internal-shared-vendored-deps"
     )
-    assert bundle_release._variant_name("vercel-queue") == "vercel-queue-bundle"  # noqa: SLF001
+    assert bundle_release.variant_name("vercel-queue") == "vercel-queue-bundle"
 
 
 def test_vendored_nested_namespace_rewrite_deduplicates_vendor_prefix(tmp_path: Path) -> None:

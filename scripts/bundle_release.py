@@ -162,14 +162,14 @@ def load_plan(package_name: str) -> VendoredPlan:
     requirements = _derive_vendor_requirements(package.name, data)
     return VendoredPlan(
         package=package,
-        variant_name=_variant_name(package.name),
+        variant_name=variant_name(package.name),
         config=config,
         vendored_requirements=requirements,
         external_dependencies=_external_dependencies(package.name, data, requirements),
     )
 
 
-def _variant_name(package_name: str) -> str:
+def variant_name(package_name: str) -> str:
     if package_name == SHARED_VENDORED_PACKAGE:
         return package_name
     return f"{package_name}{VENDORED_SUFFIX}"

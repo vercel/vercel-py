@@ -25,7 +25,6 @@ jobs:
     permissions:
       contents: read
     outputs:
-      plan: ${{ steps.plan.outputs.plan }}
       packages: ${{ steps.plan.outputs.packages }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -40,10 +39,19 @@ jobs:
 
       - name: Detect changed packages
         id: plan
-        env:
-          BASE_REF: ${{ github.event.before || 'HEAD^' }}
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
-        run: uv run --locked python scripts/publish.py detect
+        run: >-
+          uv run --locked python scripts/publish.py detect
+          --base "${{ github.event.before || 'HEAD^' }}"
+          --output "${{ runner.temp }}/release-plan/plan.json"
+          ${{ github.event_name == 'workflow_dispatch' && inputs.force && '--force' || '' }}
+
+      - name: Upload release plan
+        if: steps.plan.outputs.packages != '[]'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: publish-plan
+          path: ${{ runner.temp }}/release-plan/plan.json
+          retention-days: 14
 
   build:
     needs: detect
@@ -62,13 +70,17 @@ jobs:
           enable-cache: false
           python-version: '3.12'
 
+      - name: Download release plan
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: publish-plan
+          path: ${{ runner.temp }}/release-plan
+
       - name: Build and verify packages
-        env:
-          BUILD_DIR: ${{ runner.temp }}/publish-build
-          PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
-          SHARED_ERROR: ${{ fromJSON(needs.detect.outputs.plan)['shared-error'] }}
-          VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION: ${{ fromJSON(needs.detect.outputs.plan)['shared-version'] }}
-        run: uv run --locked python scripts/publish.py build
+        run: >-
+          uv run --locked python scripts/publish.py build
+          --plan "${{ runner.temp }}/release-plan/plan.json"
+          --build-dir "${{ runner.temp }}/publish-build"
 
       - name: Upload built packages
         if: ${{ always() }}
@@ -106,13 +118,10 @@ jobs:
 
       - name: Publish packages
         id: publish
-        env:
-          BUILD_DIR: ${{ runner.temp }}/publish-build
-          PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
-          DRY_RUN: 'false'
-          PUBLISH_SHARED: ${{ fromJSON(needs.detect.outputs.plan)['publish-shared'] }}
-          VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION: ${{ fromJSON(needs.detect.outputs.plan)['shared-version'] }}
-        run: uv run --locked python scripts/publish.py publish
+        run: >-
+          uv run --locked python scripts/publish.py publish
+          --plan "${{ runner.temp }}/publish-build/plan.json"
+          --build-dir "${{ runner.temp }}/publish-build"
 
       - name: Create Git Tags
         if: ${{ !cancelled() && steps.publish.outputs.tags != '' }}
@@ -232,10 +241,8 @@ jobs:
           path: ${{ runner.temp }}/publish-build
 
       - name: Test publishing packages
-        env:
-          BUILD_DIR: ${{ runner.temp }}/publish-build
-          PACKAGES_JSON: ${{ needs.detect.outputs.packages }}
-          DRY_RUN: 'true'
-          PUBLISH_SHARED: ${{ fromJSON(needs.detect.outputs.plan)['publish-shared'] }}
-          VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION: ${{ fromJSON(needs.detect.outputs.plan)['shared-version'] }}
-        run: uv run --locked python scripts/publish.py publish
+        run: >-
+          uv run --locked python scripts/publish.py publish
+          --plan "${{ runner.temp }}/publish-build/plan.json"
+          --build-dir "${{ runner.temp }}/publish-build"
+          --dry-run

@@ -184,11 +184,32 @@ directly. They share package detection, the frozen shared-vendor version decisio
 builds, installed-wheel checks, registry reads, artifact selection, and release-body
 generation.
 
-On main pushes and manual dispatches, a read-only job emits a frozen JSON plan.
-The build job consumes that plan, builds every package, and uploads the build
-directory as the `publish-packages` workflow artifact. The publish job downloads
-that artifact instead of rebuilding. A retry of the publish job reuses the same
-artifact. GitHub retains the artifact for 14 days.
+The CLI has three stages:
+
+```sh
+uv run python scripts/publish.py detect --base <git-ref> --output plan.json
+uv run python scripts/publish.py build --plan plan.json --build-dir <directory>
+uv run python scripts/publish.py publish --plan <directory>/plan.json \
+  --build-dir <directory> [--dry-run]
+```
+
+Detection fails immediately if it cannot freeze the shared-vendor registry
+decision. Its typed JSON plan records native package entries and booleans, including
+the topological order, selected ancestors, versions, bundle names, and release
+bodies. Build and publish consume that file directly instead of reconstructing it
+from workflow environment variables.
+
+On main pushes and manual dispatches, a read-only job creates the plan. The build
+job consumes it, builds every package, and only after all builds and installed-wheel
+checks pass copies the plan into the build directory. That directory is uploaded as
+the `publish-packages` workflow artifact. The publish job downloads the self-contained
+artifact instead of rebuilding or recomputing release policy. A retry of the publish
+job reuses the same artifact. GitHub retains the artifacts for 14 days.
+
+Release PR CI runs the same build and publish commands as production as consecutive
+steps in one read-only job. The publish step uses `--dry-run`. In the main workflow,
+the separate publish job depends on a successful build job, which enforces the
+all-builds-before-upload barrier.
 
 An empty release set skips both jobs without requesting the `pypi` environment.
 Only real publication enables PyPI uploads and GitHub tag and release writes. PR
@@ -199,7 +220,9 @@ protections.
 A dry run can fail because PyPI is unavailable or a required unmatched dependency
 version is not published. It does not validate OIDC authorization or prove that an
 existing PyPI artifact matches a fresh build. A release can also fail during an
-upload even after its dry run passes.
+upload even after its dry run passes. Bundle and standard distributions upload in
+that order. Release tags and bodies are emitted only after both succeed; on retry,
+versions already present on PyPI are skipped and the missing distribution resumes.
 
 For a manual dry run, dispatch **Publish PyPI** with `dry_run=true`. Use
 `force=true` to inspect every publishable package instead of only the detected
