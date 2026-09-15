@@ -311,7 +311,7 @@ def test_shared_lookup_failure_prevents_all_builds_and_uploads(
     assert calls == []
     summary = (tmp_path / "summary").read_text(encoding="utf-8")
     assert "PyPI unavailable" in summary
-    assert "publishing was not started" in summary
+    assert "building was not started" in summary
 
 
 def test_missing_package_outputs_do_not_abort_other_packages(

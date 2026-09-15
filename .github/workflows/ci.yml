@@ -171,10 +171,26 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: ./.github/actions/publish
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          base-ref: ${{ github.event.pull_request.base.sha }}
-          dry-run: 'true'
+          enable-cache: false
+          python-version: '3.12'
+
+      - name: Detect release packages
+        id: plan
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: uv run --locked python scripts/publish.py detect
+
+      - name: Build and test release packages
+        if: steps.plan.outputs.packages != '[]'
+        env:
+          PACKAGES_JSON: ${{ steps.plan.outputs.packages }}
+          DRY_RUN: 'true'
+          PUBLISH_SHARED: ${{ steps.plan.outputs['publish-shared'] }}
+          SHARED_ERROR: ${{ steps.plan.outputs['shared-error'] }}
+          VERCEL_INTERNAL_SHARED_VENDORED_DEPS_VERSION: ${{ steps.plan.outputs['shared-version'] }}
+        run: uv run --locked python scripts/publish.py run
 
   overall:
     name: CI Overall

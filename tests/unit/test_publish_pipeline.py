@@ -161,8 +161,12 @@ def event_names(root: Path) -> list[tuple[str, str]]:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="publishing runs on POSIX runners")
-def test_selected_package_build_excludes_unmatched_wheels(pipeline: Path) -> None:
-    assert publish.run_packages(["base"], directory=pipeline / "run") == 0
+def test_built_artifacts_can_be_published_in_a_separate_run(pipeline: Path) -> None:
+    build_root = pipeline / "artifacts"
+    assert publish.build_packages(["base"], build_root=build_root) == 0
+    assert (
+        publish.publish_packages(["base"], build_root=build_root, directory=pipeline / "run") == 0
+    )
     assert event_names(pipeline) == [
         ("build", "base"),
         ("verify", "base"),

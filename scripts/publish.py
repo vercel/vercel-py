@@ -129,28 +129,25 @@ def _write_step_summary(summary: str) -> None:
             output.write(summary)
 
 
-def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -> int:
+def _publish_order(names: list[str]) -> tuple[set[str], dict[str, tuple[str, ...]]]:
     graph = dependency_graph(workspace.packages())
     selected = set(names)
     unknown = selected - graph.keys()
     if unknown:
         raise ValueError(f"Unknown publish packages: {', '.join(sorted(unknown))}")
-    ordered = ancestors(graph)
-    if not selected:
-        release_bodies = directory / "release-bodies"
-        release_bodies.mkdir(parents=True)
-        write_outputs({"tags": "", "release-bodies": str(release_bodies)})
-        _write_step_summary("## Publish results\n\n0 succeeded, 0 failed, 0 blocked.\n")
-        return 0
+    return selected, ancestors(graph)
+
+
+def build_packages(names: list[str], *, build_root: Path, shared_error: str = "") -> int:
+    selected, ordered = _publish_order(names)
     if shared_error:
         print(_format_error_annotation("Shared dependency lookup failed", shared_error), flush=True)
         _write_step_summary(
-            "## Publish results\n\nShared dependency lookup failed; publishing was not started.\n\n"
+            "## Build results\n\nShared dependency lookup failed; building was not started.\n\n"
             f"<pre>{escape(shared_error)}</pre>\n"
         )
         return 1
 
-    build_root = directory / "build"
     build_dirs: dict[str, Path] = {}
     for name, dependencies in ordered.items():
         if name not in selected:
@@ -162,25 +159,36 @@ def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -
                 continue
             for wheel in build_dirs[dependency].glob("*.whl"):
                 shutil.copy2(wheel, build_dir)
-        build_result = build_package(name, directory=build_dir)
-        if build_result.returncode != 0:
-            err_msg = build_result.stdout.strip() or "Build or verification failed."
+        result = build_package(name, directory=build_dir)
+        if result.returncode != 0:
+            message = result.stdout.strip() or "Build or verification failed."
             print(
                 _format_error_annotation(
                     f"Build and verification {name} failed",
-                    f"{name} failed (exit {build_result.returncode})",
-                    err_msg,
+                    f"{name} failed (exit {result.returncode})",
+                    message,
                 ),
                 flush=True,
             )
-            summary = (
-                "## Publish results\n\n"
-                "Build or verification failed; publishing was not started.\n\n"
-                f"{name}: exit {build_result.returncode}\n\n<pre>{escape(err_msg)}</pre>\n"
+            _write_step_summary(
+                "## Build results\n\n"
+                f"{name}: failed (exit {result.returncode})\n\n<pre>{escape(message)}</pre>\n"
             )
-            _write_step_summary(summary)
             return 1
         build_dirs[name] = build_dir
+
+    _write_step_summary(f"## Build results\n\n{len(selected)} succeeded, 0 failed.\n")
+    return 0
+
+
+def publish_packages(names: list[str], *, build_root: Path, directory: Path) -> int:
+    selected, ordered = _publish_order(names)
+    if not selected:
+        release_bodies = directory / "release-bodies"
+        release_bodies.mkdir(parents=True)
+        write_outputs({"tags": "", "release-bodies": str(release_bodies)})
+        _write_step_summary("## Publish results\n\n0 succeeded, 0 failed, 0 blocked.\n")
+        return 0
 
     failed: set[str] = set()
     blocked: set[str] = set()
@@ -203,7 +211,7 @@ def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -
         package_dir = directory / name
         try:
             package_dir.mkdir()
-            result = run_package(name, directory=package_dir, build_dir=build_dirs[name])
+            result = run_package(name, directory=package_dir, build_dir=build_root / name)
             if result.returncode == 0:
                 package_tags = (package_dir / "tags.txt").read_text(encoding="utf-8").splitlines()
                 for tag in package_tags:
@@ -241,6 +249,14 @@ def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -
     write_outputs({"tags": "\n".join(tags), "release-bodies": str(release_bodies)})
     _write_step_summary(summary)
     return int(bool(failed or blocked))
+
+
+def run_packages(names: list[str], *, directory: Path, shared_error: str = "") -> int:
+    build_root = directory / "build"
+    result = build_packages(names, build_root=build_root, shared_error=shared_error)
+    if result:
+        return result
+    return publish_packages(names, build_root=build_root, directory=directory)
 
 
 def write_outputs(values: dict[str, str]) -> None:
@@ -284,8 +300,8 @@ def detect(*, base: str, force: bool) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Publish packages without failing fast.")
-    parser.add_argument("command", choices=("detect", "run"))
+    parser = argparse.ArgumentParser(description="Build and publish release packages.")
+    parser.add_argument("command", choices=("detect", "build", "publish", "run"))
     args = parser.parse_args(argv)
     if args.command == "detect":
         plan = detect(base=os.environ.get("BASE_REF", "HEAD^"), force=os.getenv("FORCE") == "true")
@@ -294,6 +310,17 @@ def main(argv: list[str] | None = None) -> int:
     names = json.loads(os.environ["PACKAGES_JSON"])
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
         raise ValueError("PACKAGES_JSON must be an array of package names")
+    if args.command == "build":
+        return build_packages(
+            names,
+            build_root=Path(os.environ["BUILD_DIR"]),
+            shared_error=os.getenv("SHARED_ERROR", ""),
+        )
+    if args.command == "publish":
+        directory = Path(tempfile.mkdtemp(prefix="vercel-publish-", dir=os.getenv("RUNNER_TEMP")))
+        return publish_packages(
+            names, build_root=Path(os.environ["BUILD_DIR"]), directory=directory
+        )
     directory = Path(tempfile.mkdtemp(prefix="vercel-publish-", dir=os.getenv("RUNNER_TEMP")))
     return run_packages(names, directory=directory, shared_error=os.getenv("SHARED_ERROR", ""))
 

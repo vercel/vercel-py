@@ -179,18 +179,22 @@ covers the full PR rather than only its latest commit. Pushes to the PR and labe
 changes rerun CI. Ordinary PRs skip the dry-run job. **CI Overall** requires the job
 to succeed when it runs and accepts a skip when it does not apply.
 
-Release PR checks, manual dry runs, and real publishing all call
-`.github/actions/publish/action.yml`. They share detection, the frozen shared-vendor
-version decision, builds, installed-wheel checks, registry reads, artifact selection,
-and release-body generation. On main pushes and manual dispatches, a read-only
-job emits a frozen JSON plan first. An empty release set skips the execution jobs
-without requesting the `pypi` environment. The execution job consumes that plan
-without repeating the shared-vendor version lookup.
+Release PR checks, manual dry runs, and real publishing call `scripts/publish.py`
+directly. They share package detection, the frozen shared-vendor version decision,
+builds, installed-wheel checks, registry reads, artifact selection, and release-body
+generation.
 
-Only real publication enables PyPI uploads and GitHub tag and release writes.
-PR and manual dry-run jobs have read-only repository access,
-no OIDC permission, and no `pypi` environment. The publishing job retains those
-permissions and environment protections.
+On main pushes and manual dispatches, a read-only job emits a frozen JSON plan.
+The build job consumes that plan, builds every package, and uploads the build
+directory as the `publish-packages` workflow artifact. The publish job downloads
+that artifact instead of rebuilding. A retry of the publish job reuses the same
+artifact. GitHub retains the artifact for 14 days.
+
+An empty release set skips both jobs without requesting the `pypi` environment.
+Only real publication enables PyPI uploads and GitHub tag and release writes. PR
+and manual dry-run jobs have read-only repository access, no OIDC permission, and
+no `pypi` environment. The publishing job retains those permissions and environment
+protections.
 
 A dry run can fail because PyPI is unavailable or a required unmatched dependency
 version is not published. It does not validate OIDC authorization or prove that an
