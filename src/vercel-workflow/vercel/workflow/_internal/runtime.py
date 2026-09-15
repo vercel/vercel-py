@@ -2577,6 +2577,19 @@ class Run(Generic[T]):
         run = await self._world.runs_get(self._run_id)
         return dict(run.attributes)
 
+    async def cancel(self, *, cancel_reason: str | None = None) -> None:
+        """Cancel the workflow run.
+
+        *cancel_reason* records an optional plaintext reason on the cancellation
+        event (at most 512 UTF-16 code units).
+        """
+        event_data = (
+            w.RunCancelledEventData(cancel_reason=cancel_reason)
+            if cancel_reason is not None
+            else None
+        )
+        await self._world.events_create(self._run_id, w.RunCancelledEvent(event_data=event_data))
+
     async def _failure(self, run: w.WorkflowRun) -> Exception:
         what = f"the error of run {run.run_id}"
         try:

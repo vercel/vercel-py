@@ -1,4 +1,4 @@
-"""Cancellable steps.
+"""Step and run cancellation.
 
 Cancelling the task awaiting a step declared ``cancellable=True`` does not
 cancel the await: like ``Task.cancel()``, it is a request. The orchestrator
@@ -18,10 +18,13 @@ import asyncio
 import sys
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar
+from unittest.mock import AsyncMock, Mock
 
+import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
+from vercel.workflow import Run
 from vercel.workflow._internal import (
     core,
     errors,
@@ -648,3 +651,89 @@ async def test_cancellable_step_error_is_not_wrapped_in_exception_group() -> Non
             run_id="wrun_test",
             step_id="step_01M1329YCHWS235PHTPW377KZM",
         )
+
+
+@pytest.mark.parametrize("reason", [None, "", "superseded by newer run", "x" * 512, "😀" * 256])
+async def test_cancel_writes_only_the_ts_event(monkeypatch, reason) -> None:
+    world = Mock(spec=w.World)
+    monkeypatch.setattr(w, "get_world", lambda: world)
+    run = Run[None]("wrun_test")
+    # The handle keeps the World it was constructed with.
+    monkeypatch.setattr(w, "get_world", lambda: Mock(spec=w.World))
+
+    await run.cancel(cancel_reason=reason)
+
+    world.events_create.assert_awaited_once()
+    run_id, event = world.events_create.call_args.args
+    expected = {"eventType": "run_cancelled", "specVersion": w.SPEC_VERSION_CURRENT}
+    if reason is not None:
+        expected["eventData"] = {"cancelReason": reason}
+    assert run_id == "wrun_test"
+    assert event.model_dump() == expected
+    assert w.EventAdaptor.from_wire(expected).model_dump() == expected
+    assert event.payloads() == ()  # The reason is plaintext metadata.
+    assert len(world.mock_calls) == 1
+
+
+@pytest.mark.parametrize("reason", ["x" * 513, "😀" * 257, "😀" * 256 + "x"])
+async def test_cancel_rejects_oversized_reason(monkeypatch, reason) -> None:
+    world = Mock(spec=w.World)
+    monkeypatch.setattr(w, "get_world", lambda: world)
+    with pytest.raises(pydantic.ValidationError, match="512 UTF-16 code units"):
+        await Run("wrun_test").cancel(cancel_reason=reason)
+    world.events_create.assert_not_called()
+    with pytest.raises(pydantic.ValidationError, match="512 UTF-16 code units"):
+        w.EventAdaptor.from_wire(
+            {"eventType": "run_cancelled", "eventData": {"cancelReason": reason}}
+        )
+
+
+async def test_cancel_propagates_world_error(monkeypatch) -> None:
+    world = Mock(spec=w.World)
+    error = w.EntityConflictError("Run already completed")
+    world.events_create = AsyncMock(side_effect=error)
+    monkeypatch.setattr(w, "get_world", lambda: world)
+    with pytest.raises(w.EntityConflictError) as caught:
+        await Run("wrun_test").cancel()
+    assert caught.value is error
+
+
+@pytest.mark.parametrize("running", [False, True])
+async def test_cancel_persists_status_reason_and_removes_hooks(tmp_path, monkeypatch, running):
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path))
+    world = local_mod.LocalWorld()
+    monkeypatch.setattr(w, "get_world", lambda: world)
+    created = await world.events_create(
+        None,
+        w.RunCreatedEventData(
+            deployment_id="dpl_test",
+            workflow_name="workflow//tests.cancel",
+            input=PLAIN_ENCODER.encode([]),
+        ).into_event(),
+    )
+    assert created.run is not None
+    run = Run[None](created.run.run_id)
+    if running:
+        await world.events_create(run.run_id, w.RunStartedEvent())
+        await world.events_create(
+            run.run_id, w.HookCreatedEventData(token="cancel-hook").into_event("hook_test")
+        )
+
+    await run.cancel(cancel_reason="operator cancelled")
+
+    assert await run.status() == "cancelled"
+    stored = await world.runs_get(run.run_id)
+    assert stored.completed_at is not None
+    events = await world.events_list(run.run_id)
+    cancelled = [event for event in events.data if isinstance(event, w.RunCancelledEvent)]
+    assert len(cancelled) == 1
+    assert cancelled[0].event_data is not None
+    assert cancelled[0].event_data.cancel_reason == "operator cancelled"
+    if running:
+        with pytest.raises(w.HookNotFoundError):
+            await world.hooks_get_by_token("cancel-hook")
+    with pytest.raises(RuntimeError, match="workflow cancelled"):
+        await run.return_value()
+
+    await run.cancel()
+    assert await run.status() == "cancelled"
