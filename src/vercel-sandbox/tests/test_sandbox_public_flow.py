@@ -5,8 +5,9 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from itertools import islice
+from pathlib import PurePosixPath
 from threading import Condition, Event
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import anyio
 import httpx as legacy_httpx
@@ -21,6 +22,11 @@ from vercel._internal.core.session import get_active_session
 from vercel.api import session
 from vercel.errors import VercelSessionClosedError
 from vercel.sandbox import (
+    DriveMount,
+    DriveQuery,
+    DriveQueryByCreatedAt,
+    DriveQueryByName,
+    DriveQueryByUpdatedAt,
     GitSource,
     NetworkPolicy,
     NetworkPolicyKeyValueMatcher,
@@ -31,6 +37,7 @@ from vercel.sandbox import (
     NetworkPolicyTransform,
     SandboxApiError,
     SandboxCleanupError,
+    SandboxMount,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -68,6 +75,7 @@ def _sandbox_response(
     status: str = "running",
     session_status: str | None = None,
     project_id: str = "prj_123",
+    mounts: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "sandbox": {
@@ -87,6 +95,7 @@ def _sandbox_response(
             },
             "createdAt": 1,
             "updatedAt": 2,
+            **({} if mounts is None else {"mounts": mounts}),
         },
         "session": {
             "id": session_id,
@@ -108,6 +117,32 @@ def _sandbox_response(
                 "system": False,
             }
         ],
+    }
+
+
+def _drive_response(
+    *,
+    drive_id: str = "drive_123",
+    name: str = "cache",
+    project_id: str = "prj_123",
+    region: str = "iad1",
+    max_size_bytes: int = 1024**3,
+    current_session_id: str | None = "sbx_123",
+    current_sandbox_name: str | None = "preview",
+    updated_at: int = 2,
+) -> dict[str, object]:
+    return {
+        "drive": {
+            "id": drive_id,
+            "name": name,
+            "projectId": project_id,
+            "region": region,
+            "maxSizeBytes": max_size_bytes,
+            "currentSessionId": current_session_id,
+            "currentSandboxName": current_sandbox_name,
+            "createdAt": 1,
+            "updatedAt": updated_at,
+        }
     }
 
 
@@ -637,6 +672,7 @@ async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
         "networkPolicy": {"mode": "deny-all"},
         "env": {},
         "tags": {},
+        "mounts": {},
         "snapshotExpiration": 0,
         "keepLastSnapshots": {
             "count": 2,
@@ -667,7 +703,7 @@ def test_sync_fork_sandbox_uses_inherited_defaults(mock_env_clear: None) -> None
     assert forked.name == "forked"
     request = fork_route.calls.last.request
     assert dict(request.url.params) == {"teamId": "team_123", "projectId": "prj_123"}
-    assert json.loads(request.content) == {}
+    assert json.loads(request.content) == {"mounts": {}}
 
 
 @respx.mock
@@ -697,7 +733,10 @@ async def test_service_region_defaults_placement_operations_and_allows_call_over
         "name": "created",
         "region": "iad1",
     }
-    assert json.loads(fork_route.calls.last.request.content) == {"region": "sfo1"}
+    assert json.loads(fork_route.calls.last.request.content) == {
+        "mounts": {},
+        "region": "sfo1",
+    }
     assert json.loads(update_route.calls.last.request.content) == {
         "tags": {"updated": "true"},
         "region": "iad1",
@@ -719,7 +758,10 @@ def test_sync_service_region_defaults_fork_from_environment(
     with session(service_options=_session_options(sync=True)):
         sandbox_sync.fork_sandbox(source_sandbox="source")
 
-    assert json.loads(fork_route.calls.last.request.content) == {"region": "cle1"}
+    assert json.loads(fork_route.calls.last.request.content) == {
+        "mounts": {},
+        "region": "cle1",
+    }
 
 
 @respx.mock
@@ -3911,3 +3953,454 @@ def test_sync_managed_exit_does_not_wait_for_racing_recovery(
     assert box.current_session is not None
     assert box.current_session.status is SandboxStatus.RUNNING
     assert new_stop.call_count == 0
+
+
+@respx.mock
+async def test_drive_get_or_create_query_delete_and_mount_serialization(
+    mock_env_clear: None,
+) -> None:
+    create_drive_route = respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(
+            201, json=_drive_response(project_id="prj_other", region="sfo1")
+        )
+    )
+    delete_drive_route = respx.delete("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(
+            200,
+            json=_drive_response(
+                drive_id="drive_replacement",
+                project_id="prj_other",
+                region="sfo1",
+                current_session_id=None,
+                current_sandbox_name=None,
+                updated_at=3,
+            ),
+        )
+    )
+    first_page = {
+        "drives": [_drive_response(name="cache-1")["drive"]],
+        "pagination": {"count": 2, "next": "cursor_2", "prev": None},
+    }
+    second_page = {
+        "drives": [_drive_response(name="cache-2")["drive"]],
+        "pagination": {"count": 2, "next": None, "prev": "cursor_1"},
+    }
+    query_requests: list[dict[str, str]] = []
+
+    def query_handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        query_requests.append(params)
+        return httpx.Response(200, json=second_page if "cursor" in params else first_page)
+
+    respx.get("https://sandbox.test/v2/sandboxes/drives").mock(side_effect=query_handler)
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["mounts"] == {
+            "/cache": {"drive": "cache", "mode": "read-write"},
+            "/readonly": {"drive": "source", "mode": "snapshot"},
+            "/scratch": {"drive": "scratch", "mode": "read-write"},
+        }
+        return httpx.Response(200, json=_sandbox_response())
+
+    create_sandbox_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        side_effect=sandbox_handler
+    )
+
+    async with session(service_options=_session_options()):
+        drive = await sandbox.get_or_create_drive(
+            name="cache",
+            project_id="prj_other",
+            region="sfo1",
+            max_size_bytes=1024**3,
+        )
+        assert isinstance(drive, sandbox.Drive)
+        assert drive.id == "drive_123"
+        assert drive.name == "cache"
+        assert drive.project_id == "prj_other"
+        assert drive.region == "sfo1"
+        assert drive.max_size_bytes == 1024**3
+        assert drive.current_session_id == "sbx_123"
+        assert drive.current_sandbox_name == "preview"
+        assert drive.created_at == 1
+        assert drive.updated_at == 2
+        assert drive.snapshot() == DriveMount(drive, mode="snapshot")
+        with pytest.raises(ValueError, match="snapshot.*read-write"):
+            DriveMount("cache", mode=cast(Any, "read-only"))
+        with pytest.raises(AttributeError):
+            drive.name = "other"  # type: ignore[misc]
+
+        drives = [
+            item
+            async for item in sandbox.query_drives(
+                query=DriveQueryByName(name_prefix="cache-", sort_order="asc"),
+                page_size=1,
+            )
+        ]
+        assert [item.name for item in drives] == ["cache-1", "cache-2"]
+
+        await sandbox.create_sandbox(
+            project_id="prj_other",
+            name="preview",
+            region="sfo1",
+            mounts={
+                "/cache//./": drive,
+                "/readonly": DriveMount("source", mode="snapshot"),
+                "/scratch": "scratch",
+            },
+        )
+
+        deleted_drive = await drive.delete()
+        assert deleted_drive is drive
+        assert drive.id == "drive_replacement"
+        assert drive.current_session_id is None
+        assert drive.current_sandbox_name is None
+        assert drive.updated_at == 3
+
+    assert json.loads(create_drive_route.calls.last.request.content) == {
+        "projectId": "prj_other",
+        "maxSizeBytes": 1024**3,
+        "region": "sfo1",
+    }
+    assert dict(delete_drive_route.calls.last.request.url.params) == {
+        "teamId": "team_123",
+        "projectId": "prj_other",
+    }
+    assert query_requests == [
+        {
+            "teamId": "team_123",
+            "projectId": "prj_123",
+            "limit": "1",
+            "sortBy": "name",
+            "sortOrder": "asc",
+            "namePrefix": "cache-",
+        },
+        {
+            "teamId": "team_123",
+            "projectId": "prj_123",
+            "limit": "1",
+            "cursor": "cursor_2",
+            "sortBy": "name",
+            "sortOrder": "asc",
+            "namePrefix": "cache-",
+        },
+    ]
+    assert create_sandbox_route.called
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("query", "sort_by"),
+    [
+        (DriveQueryByCreatedAt(sort_order="asc"), "createdAt"),
+        (DriveQueryByUpdatedAt(sort_order="asc"), "updatedAt"),
+    ],
+)
+async def test_query_drives_encodes_supported_orderings(
+    mock_env_clear: None,
+    query: DriveQuery,
+    sort_by: str,
+) -> None:
+    route = respx.get("https://sandbox.test/v2/sandboxes/drives").mock(
+        return_value=httpx.Response(200, json={"drives": []})
+    )
+
+    async with session(service_options=_session_options()):
+        assert [item async for item in sandbox.query_drives(query=query)] == []
+
+    assert dict(route.calls.last.request.url.params) == {
+        "teamId": "team_123",
+        "projectId": "prj_123",
+        "sortBy": sort_by,
+        "sortOrder": "asc",
+    }
+
+
+@respx.mock
+def test_sync_drive_get_or_create_query_and_delete(mock_env_clear: None) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(200, json=_drive_response())
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/drives").mock(
+        return_value=httpx.Response(
+            200,
+            json={"drives": [_drive_response()["drive"]]},
+        )
+    )
+    respx.delete("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(
+            200,
+            json=_drive_response(current_session_id=None, current_sandbox_name=None),
+        )
+    )
+
+    with session(service_options=_session_options()):
+        drive = sandbox_sync.get_or_create_drive(name="cache")
+        assert isinstance(drive, sandbox_sync.SyncDrive)
+        assert drive.snapshot() == DriveMount(drive, mode="snapshot")
+        assert [item.name for item in sandbox_sync.query_drives()] == ["cache"]
+        deleted_drive = drive.delete()
+        assert deleted_drive is drive
+        assert drive.current_session_id is None
+
+
+@respx.mock
+async def test_drive_mount_validates_known_conflicts_and_defers_project_names(
+    mock_env_clear: None,
+) -> None:
+    respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(200, json=_drive_response(region="sfo1"))
+    )
+    respx.get("https://sandbox.test/v2/sandboxes/with-drive").mock(
+        return_value=httpx.Response(404, json={"error": {"message": "missing"}})
+    )
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options(region="iad1")):
+        drive = await sandbox.get_or_create_drive(
+            name="cache", project_id="project-name", region="sfo1"
+        )
+
+        with pytest.raises(ValueError, match="project"):
+            await sandbox.create_sandbox(
+                project_id="prj_other", region="sfo1", mounts={"/cache": drive}
+            )
+        with pytest.raises(ValueError, match="region"):
+            await sandbox.create_sandbox(region="cle1", mounts={"/cache": drive})
+        with pytest.raises(ValueError, match="failover"):
+            await sandbox.create_sandbox(
+                region="sfo1", failover_regions=["cle1"], mounts={"/cache": drive}
+            )
+        with pytest.raises(ValueError, match="region"):
+            await sandbox.get_or_create_sandbox(name="with-drive", mounts={"/cache": drive})
+        with pytest.raises(ValueError, match="region"):
+            await sandbox.fork_sandbox(source_sandbox="source", mounts={"/cache": drive})
+
+        await sandbox.create_sandbox(
+            project_id="project-name", region="sfo1", mounts={"/cache": drive}
+        )
+
+    assert create_route.call_count == 1
+    assert not fork_route.called
+
+
+@respx.mock
+async def test_drive_mounts_accept_pure_posix_paths(mock_env_clear: None) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        await sandbox.create_sandbox(mounts={PurePosixPath("/mnt") / "cache": "cache"})
+
+    assert json.loads(create_route.calls.last.request.content)["mounts"] == {
+        "/mnt/cache": {"drive": "cache", "mode": "read-write"}
+    }
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("mounts", "message"),
+    [
+        ({"relative": "cache"}, "absolute"),
+        ({"/data/../cache": "cache"}, r"\.\."),
+        ({"/cache\x00suffix": "cache"}, "NUL"),
+        ({"/": "cache"}, "root"),
+        ({"/run/cell": "cache"}, "reserved"),
+        ({"/run/vercel/share": "cache"}, "reserved"),
+        ({"/" + "x" * 256: "cache"}, "256"),
+        ({f"/drive-{index}": f"drive-{index}" for index in range(5)}, "at most 4"),
+        ({"/data": "cache", "/data/nested": "other"}, "overlap"),
+        ({"/data": "cache", "/data/": "other"}, "overlap"),
+        ({"/one": "cache", "/two": "cache"}, "only once"),
+    ],
+)
+async def test_drive_mounts_reject_invalid_shape_before_create(
+    mock_env_clear: None,
+    mounts: dict[str, Any],
+    message: str,
+) -> None:
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response())
+    )
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match=message):
+            await sandbox.create_sandbox(mounts=mounts)
+
+    assert not create_route.called
+
+
+@respx.mock
+async def test_get_or_create_existing_sandbox_does_not_validate_creation_mounts(
+    mock_env_clear: None,
+) -> None:
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/existing").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="existing"))
+    )
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="existing"))
+    )
+
+    async with session(service_options=_session_options()):
+        box, created = await sandbox.get_or_create_sandbox(
+            name="existing",
+            mounts={"/data/../cache": "cache"},
+        )
+
+    assert box.name == "existing"
+    assert not created
+    assert get_route.called
+    assert not create_route.called
+
+
+@respx.mock
+async def test_get_or_create_stale_sandbox_validates_before_delete(
+    mock_env_clear: None,
+) -> None:
+    get_route = respx.get("https://sandbox.test/v2/sandboxes/stale-invalid").mock(
+        return_value=httpx.Response(
+            410,
+            json={"error": {"code": "snapshot_not_found", "message": "stale"}},
+        )
+    )
+    delete_route = respx.delete("https://sandbox.test/v2/sandboxes/stale-invalid").mock(
+        return_value=httpx.Response(204)
+    )
+    create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(
+        return_value=httpx.Response(200, json=_sandbox_response(name="stale-invalid"))
+    )
+
+    async with session(service_options=_session_options()):
+        with pytest.raises(ValueError, match="NUL"):
+            await sandbox.get_or_create_sandbox(
+                name="stale-invalid",
+                mounts={"/cache\x00suffix": "cache"},
+            )
+
+    assert get_route.called
+    assert not delete_route.called
+    assert not create_route.called
+
+
+@respx.mock
+async def test_async_fork_never_inherits_and_accepts_explicit_mounts(
+    mock_env_clear: None,
+) -> None:
+    drive_route = respx.post("https://sandbox.test/v2/sandboxes/drives/cache").mock(
+        return_value=httpx.Response(
+            201, json=_drive_response(project_id="prj_other", region="sfo1")
+        )
+    )
+    fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
+        side_effect=[
+            httpx.Response(200, json=_sandbox_response(name="omitted")),
+            httpx.Response(200, json=_sandbox_response(name="empty")),
+            httpx.Response(200, json=_sandbox_response(name="string")),
+            httpx.Response(200, json=_sandbox_response(name="handle")),
+        ]
+    )
+
+    async with session(service_options=_session_options(region="iad1")):
+        drive = await sandbox.get_or_create_drive(
+            name="cache", project_id="prj_other", region="sfo1"
+        )
+        await sandbox.fork_sandbox(source_sandbox="source", project_id="prj_other")
+        await sandbox.fork_sandbox(source_sandbox="source", project_id="prj_other", mounts={})
+        await sandbox.fork_sandbox(
+            source_sandbox="source",
+            project_id="prj_other",
+            mounts={"/cache": "cache"},
+            region="sfo1",
+        )
+        await sandbox.fork_sandbox(
+            source_sandbox="source",
+            project_id="prj_other",
+            mounts={"/cache": drive},
+            region="sfo1",
+        )
+
+    assert drive_route.call_count == 1
+    bodies = [json.loads(call.request.content) for call in fork_route.calls]
+    assert bodies[0]["mounts"] == {}
+    assert bodies[1]["mounts"] == {}
+    assert bodies[2]["mounts"] == {"/cache": {"drive": "cache", "mode": "read-write"}}
+    assert bodies[3]["mounts"] == {"/cache": {"drive": "cache", "mode": "read-write"}}
+    assert all(call.request.url.params["projectId"] == "prj_other" for call in fork_route.calls)
+    assert bodies[2]["region"] == "sfo1"
+    assert bodies[3]["region"] == "sfo1"
+
+
+@respx.mock
+async def test_async_update_mounts_omit_clear_and_replace(
+    mock_env_clear: None,
+) -> None:
+    respx.get("https://sandbox.test/v2/sandboxes/mounted").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(
+                name="mounted",
+                mounts={"/existing": {"drive": "existing", "mode": "read-write"}},
+            ),
+        )
+    )
+    update_route = respx.patch("https://sandbox.test/v2/sandboxes/mounted").mock(
+        side_effect=[
+            httpx.Response(200, json=_sandbox_response(name="mounted")),
+            httpx.Response(200, json=_sandbox_response(name="mounted", mounts={})),
+            httpx.Response(
+                200,
+                json=_sandbox_response(
+                    name="mounted",
+                    mounts={"/cache": {"drive": "cache", "mode": "snapshot"}},
+                ),
+            ),
+        ]
+    )
+
+    async with session(service_options=_session_options()):
+        box = await sandbox.get_sandbox(name="mounted")
+        await box.update(mounts=None)
+        assert box.mounts == {"/existing": SandboxMount(drive="existing", mode="read-write")}
+        await box.update(mounts={})
+        await box.update(mounts={"/cache//.": DriveMount("cache", mode="snapshot")})
+
+    bodies = [json.loads(call.request.content) for call in update_route.calls]
+    assert "mounts" not in bodies[0]
+    assert bodies[1]["mounts"] == {}
+    assert bodies[2]["mounts"] == {"/cache": {"drive": "cache", "mode": "snapshot"}}
+    assert box.mounts == {"/cache": SandboxMount(drive="cache", mode="snapshot")}
+
+
+@pytest.mark.parametrize("mount_mode", ["snapshot", "read-write", None])
+@respx.mock
+async def test_async_get_or_create_projects_response_mount_modes_and_defensively_copies(
+    mount_mode: str | None,
+    mock_env_clear: None,
+) -> None:
+    mount = {"drive": "cache"} if mount_mode is None else {"drive": "cache", "mode": mount_mode}
+    mounted = respx.get("https://sandbox.test/v2/sandboxes/mounted").mock(
+        return_value=httpx.Response(
+            200,
+            json=_sandbox_response(name="mounted", mounts={"/cache": mount}),
+        )
+    )
+
+    async with session(service_options=_session_options()):
+        box, created = await sandbox.get_or_create_sandbox(name="mounted")
+
+    assert mounted.call_count == 1
+    assert created is False
+    expected_mode = cast(
+        Literal["snapshot", "read-write"],
+        "read-write" if mount_mode is None else mount_mode,
+    )
+    assert box.mounts == {"/cache": SandboxMount(drive="cache", mode=expected_mode)}
+    mounts = box.mounts
+    assert mounts is not None
+    mounts["/cache"] = SandboxMount(drive="other", mode="read-write")
+    assert box.mounts["/cache"].drive == "cache"

@@ -5,6 +5,7 @@ import platform
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from typing import Literal, TypeVar, cast
@@ -24,6 +25,7 @@ from pydantic import (
 from vercel._internal.core.http import (
     NO_TIMEOUT,
     BaseTransport,
+    BytesBody,
     JSONBody,
     ReadResponsePolicy,
     RequestBody,
@@ -42,6 +44,7 @@ from vercel.sandbox._internal.errors import (
 from vercel.sandbox._internal.models import (
     _OMITTED,
     NO_PRIVATE_PARAMETERS,
+    DriveMountsInput,
     JSONObject,
     JSONValue,
     NetworkPolicy,
@@ -57,6 +60,8 @@ from vercel.sandbox._internal.models import (
     TagFilter,
     _Omitted,
     _parse_network_policy,
+    _RemotePathT,
+    _serialize_drive_mounts,
     _serialize_network_policy,
 )
 from vercel.sandbox._internal.options import (
@@ -66,10 +71,13 @@ from vercel.sandbox._internal.options import (
 from vercel.sandbox._internal.process_output import ProcessOutputRouter
 from vercel.sandbox._internal.state import (
     CompletedProcessState,
+    DrivesPageState,
+    DriveState,
     ProcessState,
     RuntimeSessionsPageState,
     RuntimeSessionStopState,
     SandboxesPageState,
+    SandboxMount,
     SandboxRouteState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -143,6 +151,7 @@ class _SandboxCreationOverridesRequest(_ApiRequestModel):
     network_policy: NetworkPolicy | None = Field(default=None, serialization_alias="networkPolicy")
     env: dict[str, str] | None = None
     tags: dict[str, str] | None = None
+    mounts: dict[str, JSONObject] | None = None
     snapshot_expiration: SnapshotExpiration | None = Field(
         default=None, serialization_alias="snapshotExpiration"
     )
@@ -194,6 +203,7 @@ class _UpdateSandboxRequest(_ApiRequestModel):
     network_policy: NetworkPolicy | None = Field(default=None, serialization_alias="networkPolicy")
     env: dict[str, str] | None = None
     tags: dict[str, str] | None = None
+    mounts: dict[str, JSONObject] | None = None
     snapshot_expiration: SnapshotExpiration | None = Field(
         default=None, serialization_alias="snapshotExpiration"
     )
@@ -259,6 +269,21 @@ class _QuerySnapshotsRequest(_QuerySessionsRequest):
     pass
 
 
+class _GetOrCreateDriveRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="projectId")
+    max_size_bytes: int | None = Field(default=None, serialization_alias="maxSizeBytes")
+    region: str | None = None
+
+
+class _QueryDrivesRequest(_ApiRequestModel):
+    project_id: str = Field(serialization_alias="projectId")
+    limit: int | None = None
+    cursor: str | None = None
+    sort_by: str | None = Field(default=None, serialization_alias="sortBy")
+    sort_order: str | None = Field(default=None, serialization_alias="sortOrder")
+    name_prefix: str | None = Field(default=None, serialization_alias="namePrefix")
+
+
 class _CreateSnapshotRequest(_ApiRequestModel):
     expiration: SnapshotExpiration | None = None
 
@@ -304,6 +329,11 @@ class _SandboxRoutePayload(_ApiModel):
     port: int
     subdomain: str
     system: bool = False
+
+
+class _SandboxMountPayload(_ApiModel):
+    drive: str
+    mode: Literal["snapshot", "read-write"] = "read-write"
 
 
 class _CommandPayload(_ApiModel):
@@ -443,6 +473,7 @@ class _SandboxPayload(_ApiModel):
         serialization_alias="updatedAt",
     )
     tags: dict[str, str] | None = None
+    mounts: dict[str, _SandboxMountPayload] | None = None
     routes: tuple[_SandboxRoutePayload, ...] = ()
     current_session: _RuntimeSessionPayload | None = None
     raw: JSONObject | None = None
@@ -485,6 +516,36 @@ class _SnapshotPayload(_ApiModel):
         default=None,
         validation_alias=AliasChoices("parent_id", "parentId"),
         serialization_alias="parentId",
+    )
+
+
+class _DrivePayload(_ApiModel):
+    id: str
+    name: str
+    project_id: str = Field(
+        validation_alias=AliasChoices("project_id", "projectId"),
+        serialization_alias="projectId",
+    )
+    region: str
+    max_size_bytes: int = Field(
+        validation_alias=AliasChoices("max_size_bytes", "maxSizeBytes"),
+        serialization_alias="maxSizeBytes",
+    )
+    current_session_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("current_session_id", "currentSessionId"),
+        serialization_alias="currentSessionId",
+    )
+    current_sandbox_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("current_sandbox_name", "currentSandboxName"),
+        serialization_alias="currentSandboxName",
+    )
+    created_at: int = Field(
+        validation_alias=AliasChoices("created_at", "createdAt"), serialization_alias="createdAt"
+    )
+    updated_at: int = Field(
+        validation_alias=AliasChoices("updated_at", "updatedAt"), serialization_alias="updatedAt"
     )
 
 
@@ -542,6 +603,7 @@ class _RuntimeSessionResponse(_ApiModel):
                         ),
                     ),
                     project_id=session.project_id or project_id,
+                    mounts_attached=False,
                     routes_attached=False,
                     current_session_attached=False,
                 )
@@ -599,6 +661,7 @@ class _SandboxResponse(_ApiModel):
             current_session=(None if session is None else _runtime_session_state(session)),
             raw=raw,
             project_id=project_id,
+            mounts_attached=(not sparse_attachments or "mounts" in payload.model_fields_set),
             routes_attached=not sparse_attachments or "routes" in self.model_fields_set,
             current_session_attached=not sparse_attachments or "session" in self.model_fields_set,
         )
@@ -644,6 +707,23 @@ class _SnapshotResponse(_ApiModel):
 
 class _SnapshotsResponse(_ApiModel):
     snapshots: list[_SnapshotPayload]
+    pagination: _Pagination | None = None
+
+
+class _DriveResponse(_ApiModel):
+    drive: _DrivePayload | None = None
+
+    def to_drive(self) -> DriveState:
+        if self.drive is None:
+            raise SandboxResponseError(
+                "Sandbox API response is missing object field 'drive'",
+                data=self.model_dump(by_alias=True),
+            )
+        return _drive_state(self.drive)
+
+
+class _DrivesResponse(_ApiModel):
+    drives: list[_DrivePayload]
     pagination: _Pagination | None = None
 
 
@@ -693,6 +773,7 @@ def _sandbox_state(
     current_session: SandboxRuntimeSessionState | None = None,
     raw: JSONObject | None = None,
     project_id: str | None = None,
+    mounts_attached: bool = True,
     routes_attached: bool = True,
     current_session_attached: bool = True,
 ) -> SandboxState:
@@ -725,9 +806,18 @@ def _sandbox_state(
         created_at=payload.created_at,
         updated_at=payload.updated_at,
         tags=None if payload.tags is None else dict(payload.tags),
+        mounts=(
+            None
+            if payload.mounts is None
+            else {
+                path: SandboxMount(drive=mount.drive, mode=mount.mode)
+                for path, mount in payload.mounts.items()
+            }
+        ),
         routes=routes,
         current_session=current_session,
         raw=raw,
+        _mounts_attached=mounts_attached,
         _routes_attached=routes_attached,
         _current_session_attached=current_session_attached,
     )
@@ -760,6 +850,20 @@ def _snapshot_state(payload: _SnapshotPayload) -> SnapshotState:
     )
 
 
+def _drive_state(payload: _DrivePayload) -> DriveState:
+    return DriveState(
+        id=payload.id,
+        name=payload.name,
+        project_id=payload.project_id,
+        region=payload.region,
+        max_size_bytes=payload.max_size_bytes,
+        current_session_id=payload.current_session_id,
+        current_sandbox_name=payload.current_sandbox_name,
+        created_at=payload.created_at,
+        updated_at=payload.updated_at,
+    )
+
+
 def _drop_none(data: Mapping[str, JSONValue | None]) -> JSONObject:
     return {key: value for key, value in data.items() if value is not None}
 
@@ -788,6 +892,13 @@ def _parse_run_process_record(line: str) -> JSONObject:
             data=record,
         )
     return cast(JSONObject, record)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedSandboxCreation:
+    credentials: SandboxCredentials
+    project_id: str
+    body: bytes
 
 
 class SandboxApiClient:
@@ -923,6 +1034,99 @@ class SandboxApiClient:
             raise SandboxResponseError("Sandbox API response must be a JSON object", data=data)
         return cast(JSONObject, data)
 
+    async def prepare_sandbox_creation(
+        self,
+        *,
+        project_id: str | None = None,
+        name: str | None = None,
+        image: str | None = None,
+        source: SandboxSource | None = None,
+        ports: list[int] | None = None,
+        execution_time_limit: timedelta | None = None,
+        resources: SandboxResources | None = None,
+        persistent: bool | None = None,
+        network_policy: NetworkPolicy | None = None,
+        env: Mapping[str, str] | None = None,
+        tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
+        snapshot_expiration: SnapshotExpiration | None = None,
+        snapshot_retention: SnapshotRetention | None = None,
+        region: str | None = None,
+        fallback_region: str | None = None,
+        failover_regions: tuple[str, ...] | None = None,
+        private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
+    ) -> _PreparedSandboxCreation:
+        credentials = await self._credentials_factory()
+        resolved_project_id = project_id or credentials.project_id
+        resolved_region = region or fallback_region
+        serialized_mounts = _serialize_drive_mounts(
+            mounts,
+            project_id=resolved_project_id,
+            region=resolved_region,
+            failover_regions=failover_regions,
+        )
+        if not serialized_mounts:
+            serialized_mounts = None
+        request = _CreateSandboxRequest(
+            project_id=resolved_project_id,
+            name=name,
+            image=image,
+            source=source,
+            ports=ports,
+            timeout=execution_time_limit,
+            resources=resources,
+            persistent=persistent,
+            network_policy=network_policy,
+            env=dict(env) if env is not None else None,
+            tags=dict(tags) if tags is not None else None,
+            mounts=serialized_mounts,
+            snapshot_expiration=snapshot_expiration,
+            keep_last_snapshots=snapshot_retention,
+            region=resolved_region,
+            failover_regions=None if failover_regions is None else list(failover_regions),
+        )
+        body = request.to_api_dict()
+        body.update(private_parameters)
+        encoded_body = json.dumps(
+            body, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        return _PreparedSandboxCreation(
+            credentials=credentials,
+            project_id=resolved_project_id,
+            body=encoded_body,
+        )
+
+    async def send_prepared_sandbox_creation(
+        self, prepared: _PreparedSandboxCreation
+    ) -> SandboxState:
+        response = await self._request(
+            "POST",
+            "v3/sandboxes",
+            credentials=prepared.credentials,
+            body=BytesBody(prepared.body),
+            headers={"content-type": "application/json"},
+        )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise SandboxResponseError(
+                "Sandbox API response body could not be decoded as JSON"
+            ) from exc
+        if not isinstance(data, dict):
+            raise SandboxResponseError("Sandbox API response must be a JSON object", data=data)
+        return _validate_response(_SandboxResponse, cast(JSONObject, data)).to_sandbox()
+
+    async def destroy_sandbox_for_prepared_creation(
+        self, *, name: str, prepared: _PreparedSandboxCreation
+    ) -> SandboxState:
+        data = await self._request_json(
+            "DELETE",
+            format_url_path("v2/sandboxes/{name}", name=name),
+            credentials=prepared.credentials,
+            params={"projectId": prepared.project_id},
+        )
+        return _validate_response(_SandboxResponse, data).to_sandbox()
+
     async def create_sandbox(
         self,
         *,
@@ -937,34 +1141,35 @@ class SandboxApiClient:
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
+        fallback_region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
-        credentials = await self._credentials_factory()
-        request = _CreateSandboxRequest(
-            project_id=project_id or credentials.project_id,
+        prepared = await self.prepare_sandbox_creation(
+            project_id=project_id,
             name=name,
             image=image,
             source=source,
             ports=ports,
-            timeout=execution_time_limit,
+            execution_time_limit=execution_time_limit,
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
-            env=dict(env) if env is not None else None,
-            tags=dict(tags) if tags is not None else None,
+            env=env,
+            tags=tags,
+            mounts=mounts,
             snapshot_expiration=snapshot_expiration,
-            keep_last_snapshots=snapshot_retention,
+            snapshot_retention=snapshot_retention,
             region=region,
-            failover_regions=None if failover_regions is None else list(failover_regions),
+            fallback_region=fallback_region,
+            failover_regions=failover_regions,
+            private_parameters=private_parameters,
         )
-        body = request.to_api_dict()
-        body.update(private_parameters)
-        data = await self._request_json("POST", "v3/sandboxes", credentials=credentials, body=body)
-        return _validate_response(_SandboxResponse, data).to_sandbox()
+        return await self.send_prepared_sandbox_creation(prepared)
 
     async def fork_sandbox(
         self,
@@ -980,13 +1185,23 @@ class SandboxApiClient:
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetention | None = None,
         region: str | None = None,
+        fallback_region: str | None = None,
         failover_regions: tuple[str, ...] | None = None,
         private_parameters: PrivateSandboxParameters = NO_PRIVATE_PARAMETERS,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
+        effective_project_id = project_id or credentials.project_id
+        resolved_region = region or fallback_region
+        serialized_mounts = _serialize_drive_mounts(
+            {} if mounts is None else mounts,
+            project_id=effective_project_id,
+            region=resolved_region,
+            failover_regions=failover_regions,
+        )
         request = _ForkSandboxRequest(
             name=name,
             ports=ports,
@@ -997,9 +1212,10 @@ class SandboxApiClient:
             network_policy=network_policy,
             env=dict(env) if env is not None else None,
             tags=dict(tags) if tags is not None else None,
+            mounts=serialized_mounts,
             snapshot_expiration=snapshot_expiration,
             keep_last_snapshots=snapshot_retention,
-            region=region,
+            region=resolved_region,
             failover_regions=None if failover_regions is None else list(failover_regions),
         )
         data = await self._request_json(
@@ -1098,6 +1314,7 @@ class SandboxApiClient:
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpiration | None = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
@@ -1106,6 +1323,12 @@ class SandboxApiClient:
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         effective_project_id = project_id or credentials.project_id
+        serialized_mounts = _serialize_drive_mounts(
+            mounts,
+            project_id=effective_project_id,
+            region=region,
+            failover_regions=failover_regions,
+        )
         request = _UpdateSandboxRequest(
             ports=ports,
             timeout=execution_time_limit,
@@ -1114,6 +1337,7 @@ class SandboxApiClient:
             network_policy=network_policy,
             env=dict(env) if env is not None else None,
             tags=dict(tags) if tags is not None else None,
+            mounts=serialized_mounts,
             snapshot_expiration=snapshot_expiration,
             current_snapshot_id=current_snapshot_id,
             region=region,
@@ -1280,6 +1504,74 @@ class SandboxApiClient:
             body=body,
         )
         return _validate_response(_CreateSnapshotResponse, data).to_snapshot_and_session()
+
+    async def get_or_create_drive(
+        self,
+        *,
+        name: str,
+        project_id: str | None = None,
+        max_size_bytes: int | None = None,
+        region: str | None = None,
+    ) -> DriveState:
+        credentials = await self._credentials_factory()
+        request = _GetOrCreateDriveRequest(
+            project_id=project_id or credentials.project_id,
+            max_size_bytes=max_size_bytes,
+            region=region,
+        )
+        data = await self._request_json(
+            "POST",
+            format_url_path("v2/sandboxes/drives/{name}", name=name),
+            credentials=credentials,
+            body=request.to_api_dict(),
+        )
+        return _validate_response(_DriveResponse, data).to_drive()
+
+    async def query_drives(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
+        name_prefix: str | None = None,
+    ) -> DrivesPageState:
+        credentials = await self._credentials_factory()
+        request = _QueryDrivesRequest(
+            project_id=project_id or credentials.project_id,
+            limit=limit,
+            cursor=cursor,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            name_prefix=name_prefix,
+        )
+        data = await self._request_json(
+            "GET",
+            "v2/sandboxes/drives",
+            credentials=credentials,
+            params=request.to_api_dict(),
+        )
+        response = _validate_response(_DrivesResponse, data)
+        return DrivesPageState(
+            drives=tuple(_drive_state(drive) for drive in response.drives),
+            next_cursor=response.pagination.next if response.pagination is not None else None,
+        )
+
+    async def delete_drive(
+        self,
+        *,
+        name: str,
+        project_id: str | None = None,
+    ) -> DriveState:
+        credentials = await self._credentials_factory()
+        data = await self._request_json(
+            "DELETE",
+            format_url_path("v2/sandboxes/drives/{name}", name=name),
+            credentials=credentials,
+            params={"projectId": project_id or credentials.project_id},
+        )
+        return _validate_response(_DriveResponse, data).to_drive()
 
     async def query_snapshots(
         self,

@@ -42,12 +42,17 @@ from vercel.sandbox._internal.models import (
     NO_PRIVATE_PARAMETERS,
     CompletedProcess,
     DirectoryEntry,
+    DriveMount,
+    DriveMountInput,
+    DriveMountsInput,
+    DriveQuery,
     DurationInput,
     FailoverRegionsInput,
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
     ProcessSignal,
+    RemotePath,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -57,10 +62,13 @@ from vercel.sandbox._internal.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     _parse_snapshot_expiration,
+    _RemotePathT,
     _WriteFile,
     normalize_failover_regions,
 )
 from vercel.sandbox._internal.pagination import (
+    QueryDrivesPage,
+    QueryDrivesParams,
     QuerySandboxesPage,
     QuerySandboxesParams,
     QuerySessionsPage,
@@ -81,7 +89,7 @@ from vercel.sandbox._internal.recovery import (
     execute_with_sandbox_recovery,
 )
 from vercel.sandbox._internal.runtime_common import (
-    RemotePath,
+    DriveHandleBase,
     RuntimeSessionHandleBase,
     SandboxHandleBase,
     SnapshotHandleBase,
@@ -95,6 +103,7 @@ from vercel.sandbox._internal.runtime_common import (
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
+    DriveState,
     ProcessState,
     SandboxRuntimeSessionState,
     SandboxState,
@@ -225,6 +234,30 @@ class Snapshot(SnapshotHandleBase):
     async def delete(self) -> Self:
         """Delete the snapshot and refresh this handle."""
         payload = await self._service.delete_snapshot(snapshot_id=self.id)
+        self._apply_payload(payload)
+        return self
+
+
+class Drive(DriveHandleBase):
+    """Operate on a project-local persistent Drive."""
+
+    __slots__ = ("_service",)
+
+    def __init__(self, *, payload: DriveState, service: SandboxService) -> None:
+        super().__init__(payload)
+        self._service = service
+
+    def snapshot(self) -> DriveMount:
+        """Return a read-only snapshot mount for this Drive."""
+        return DriveMount(self, mode="snapshot")
+
+    async def delete(self) -> Self:
+        """Delete by project and name, then refresh this handle from the response.
+
+        Deletion does not use the Drive ID. If the name now refers to a replacement
+        Drive, this method deletes that replacement and updates this handle to it.
+        """
+        payload = await self._service.delete_drive(name=self.name, project_id=self.project_id)
         self._apply_payload(payload)
         return self
 
@@ -1293,6 +1326,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         network_policy: NetworkPolicy | None = None,
         env: dict[str, str] | None = None,
         tags: dict[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
@@ -1305,6 +1339,9 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         explicitly passing ``None`` removes the retention policy.
 
         Args:
+            mounts: Complete Drive mount replacement for the next session.
+                Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
+                mounts.
             current_snapshot_id: Snapshot the sandbox restores from on its
                 next resume.
 
@@ -1321,6 +1358,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
             current_snapshot_id=current_snapshot_id,
@@ -1431,6 +1469,7 @@ class _CreateSandboxParams:
     network_policy: NetworkPolicy | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
+    mounts: Mapping[Any, DriveMountInput] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
@@ -1482,6 +1521,7 @@ class CreateSandboxOperation:
             network_policy=self._params.network_policy,
             env=self._params.env,
             tags=self._params.tags,
+            mounts=self._params.mounts,
             snapshot_expiration=self._params.snapshot_expiration,
             snapshot_retention=self._params.snapshot_retention,
             region=self._params.region,
@@ -1531,6 +1571,7 @@ class _ForkSandboxParams:
     network_policy: NetworkPolicy | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
+    mounts: Mapping[Any, DriveMountInput] | None = None
     snapshot_expiration: SnapshotExpiration | None = None
     snapshot_retention: SnapshotRetention | None = None
     region: str | None = None
@@ -1581,6 +1622,7 @@ class ForkSandboxOperation:
             network_policy=self._params.network_policy,
             env=self._params.env,
             tags=self._params.tags,
+            mounts=self._params.mounts,
             snapshot_expiration=self._params.snapshot_expiration,
             snapshot_retention=self._params.snapshot_retention,
             region=self._params.region,
@@ -1737,6 +1779,7 @@ def create_sandbox_operation(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -1758,6 +1801,7 @@ def create_sandbox_operation(
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
             region=region,
@@ -1782,6 +1826,7 @@ def fork_sandbox_operation(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -1803,6 +1848,7 @@ def fork_sandbox_operation(
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
             region=region,
@@ -1851,6 +1897,7 @@ async def get_or_create_sandbox(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -1872,6 +1919,7 @@ async def get_or_create_sandbox(
             network_policy=network_policy,
             env=env,
             tags=tags,
+            mounts=mounts,
             snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
             snapshot_retention=snapshot_retention,
             region=region,
@@ -1934,6 +1982,69 @@ def resume_sandbox_operation(
             private_parameters=private_parameters,
         ),
     )
+
+
+async def get_or_create_drive(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    max_size_bytes: int | None = None,
+    region: str | None = None,
+) -> Drive:
+    return Drive(
+        payload=await service.get_or_create_drive(
+            name=name,
+            project_id=project_id,
+            max_size_bytes=max_size_bytes,
+            region=region,
+        ),
+        service=service,
+    )
+
+
+async def delete_drive(
+    service: SandboxService, *, name: str, project_id: str | None = None
+) -> Drive:
+    return Drive(
+        payload=await service.delete_drive(name=name, project_id=project_id),
+        service=service,
+    )
+
+
+async def query_drives_page(service: SandboxService, **kwargs: Any) -> QueryDrivesPage[Drive]:
+    page = await service.query_drives_page(**kwargs)
+    return QueryDrivesPage(
+        drives=[Drive(payload=state, service=service) for state in page.drives],
+        next_cursor=page.next_cursor,
+    )
+
+
+def query_drives(
+    service: SandboxService,
+    *,
+    query: DriveQuery | None = None,
+    project_id: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+) -> AsyncIterator[Drive]:
+    async def iterate() -> AsyncIterator[Drive]:
+        params = QueryDrivesParams(page_size=page_size, cursor=cursor)
+        while True:
+            page = await query_drives_page(
+                service,
+                query=query,
+                project_id=project_id,
+                page_size=params.page_size,
+                cursor=params.cursor,
+            )
+            for drive in page.drives:
+                yield drive
+            if page.next_cursor is None or not page.drives:
+                return
+            params = params.with_cursor(page.next_cursor)
+
+    return iterate()
 
 
 async def query_sandboxes_page(
