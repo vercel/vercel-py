@@ -162,14 +162,14 @@ def load_plan(package_name: str) -> VendoredPlan:
     requirements = _derive_vendor_requirements(package.name, data)
     return VendoredPlan(
         package=package,
-        variant_name=_variant_name(package.name),
+        variant_name=variant_name(package.name),
         config=config,
         vendored_requirements=requirements,
         external_dependencies=_external_dependencies(package.name, data, requirements),
     )
 
 
-def _variant_name(package_name: str) -> str:
+def variant_name(package_name: str) -> str:
     if package_name == SHARED_VENDORED_PACKAGE:
         return package_name
     return f"{package_name}{VENDORED_SUFFIX}"
@@ -406,23 +406,24 @@ def print_plan(plan: VendoredPlan) -> None:
         print("  - <none>")
 
 
+def shared_vendored_release() -> tuple[str, bool]:
+    previous = _latest_pypi_release(SHARED_VENDORED_PACKAGE)
+    if previous is None:
+        return "0.1.0", True
+    if _pypi_shared_deps_fingerprint(previous) == _shared_deps_fingerprint():
+        return previous, False
+    return _bump_patch(previous), True
+
+
 def shared_vendored_version() -> str:
     override = os.environ.get(SHARED_VERSION_ENV)
     if override:
         return override
-    previous = _latest_pypi_release(SHARED_VENDORED_PACKAGE)
-    if previous is None:
-        return "0.1.0"
-    if _pypi_shared_deps_fingerprint(previous) == _shared_deps_fingerprint():
-        return previous
-    return _bump_patch(previous)
+    return shared_vendored_release()[0]
 
 
 def shared_vendored_needs_publish() -> bool:
-    previous = _latest_pypi_release(SHARED_VENDORED_PACKAGE)
-    if previous is None:
-        return True
-    return _pypi_shared_deps_fingerprint(previous) != _shared_deps_fingerprint()
+    return shared_vendored_release()[1]
 
 
 def _latest_pypi_release(package_name: str) -> str | None:

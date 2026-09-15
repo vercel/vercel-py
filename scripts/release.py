@@ -43,6 +43,7 @@ TYPE_BUMPS = {
 FRAGMENT_TYPE_ALTERNATION = "|".join(FRAGMENT_TYPES)
 FRAGMENT_FILE_RE = re.compile(rf".+\.({FRAGMENT_TYPE_ALTERNATION})\.md")
 RELEASE_COMMIT_TITLE = "Release Packages"
+RELEASE_PR_LABEL = "release"
 CHANGELOG_DIFF_MODES = ("staged", "tracked", "all", "base")
 CUTOFF_MARKER = "# ------------------------ >8 ------------------------"
 FRAGMENT_GUIDANCE = """
@@ -422,6 +423,8 @@ def _create_pull_request(body: str, *, branch: str) -> None:
                 "create",
                 "--title",
                 RELEASE_COMMIT_TITLE,
+                "--label",
+                RELEASE_PR_LABEL,
                 "--body-file",
                 str(body_path),
                 "--head",
@@ -467,8 +470,12 @@ def _github_release_body(
     return _latest_changelog_entry(package.path).rstrip() + "\n"
 
 
+def github_release_body(package_name: str) -> str:
+    return _github_release_body(package_name, packages_by_name=workspace.packages())
+
+
 def print_github_release_body(args: argparse.Namespace) -> int:
-    sys.stdout.write(_github_release_body(args.package, packages_by_name=workspace.packages()))
+    sys.stdout.write(github_release_body(args.package))
     return 0
 
 
