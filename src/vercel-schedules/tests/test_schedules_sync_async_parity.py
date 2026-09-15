@@ -35,6 +35,7 @@ def test_signatures_match(name: str) -> None:
         sync_parameter = sync_signature.parameters[parameter]
         assert async_parameter.kind == sync_parameter.kind
         assert async_parameter.default == sync_parameter.default
+        assert async_parameter.annotation == sync_parameter.annotation
 
 
 @pytest.mark.parametrize("name", OPERATIONS)

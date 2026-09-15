@@ -10,6 +10,7 @@ from typing import Any
 
 from vercel._internal.core.iter_coroutine import iter_coroutine
 from vercel.schedules._internal.models import Schedule
+from vercel.schedules._internal.sentinel import UNSET
 from vercel.schedules._internal.service import SchedulesService
 
 
@@ -22,7 +23,7 @@ def create_schedule(
     name: str | None = None,
     namespace: str | None = None,
     jitter: timedelta | None = None,
-    payload: Any = None,
+    payload: Any = UNSET,
 ) -> str:
     return iter_coroutine(
         service.create_schedule(

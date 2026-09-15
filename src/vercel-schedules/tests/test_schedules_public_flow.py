@@ -1,5 +1,6 @@
 """Public surface over a mocked network: sync and async, validation, sessions."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -151,6 +152,16 @@ async def test_create_omits_optional_fields(mock_env_clear: None) -> None:
     }
 
 
+@respx.mock
+async def test_create_preserves_explicit_json_null_payload(mock_env_clear: None) -> None:
+    route = create_route()
+
+    async with session(service_options=session_options()):
+        await create_schedule("t", cron="* * * * *", payload=None)
+
+    assert sent_body(route)["payload"] is None
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
@@ -237,6 +248,15 @@ async def test_list_rejects_non_positive_page_size(mock_env_clear: None) -> None
     async with session(service_options=session_options()):
         with pytest.raises(SchedulesValidationError):
             async for _ in list_schedules(page_size=0):
+                pass
+
+
+@pytest.mark.parametrize("page_size", [True, 1.5, "10"])
+@respx.mock
+async def test_list_rejects_non_integer_page_size(mock_env_clear: None, page_size: Any) -> None:
+    async with session(service_options=session_options()):
+        with pytest.raises(SchedulesValidationError, match="positive integer"):
+            async for _ in list_schedules(page_size=page_size):
                 pass
 
 
@@ -347,6 +367,24 @@ def test_missing_credentials_surface_as_credentials_error_sync(mock_env_clear: N
     with session(service_options=[SchedulesServiceOptions(base_url=TEST_BASE_URL)]):
         with pytest.raises(SchedulesCredentialsError):
             schedules_sync.get_schedule("sch_123")
+
+
+@respx.mock
+def test_sync_session_rejects_a_suspending_credentials_factory(mock_env_clear: None) -> None:
+    route = respx.get(f"{SCHEDULES_URL}/sch_123").mock(
+        return_value=httpx.Response(200, json=SCHEDULE_JSON)
+    )
+
+    async def factory() -> str:
+        await asyncio.sleep(0)
+        return "token"
+
+    options = SchedulesServiceOptions(base_url=TEST_BASE_URL, credentials_factory=factory)
+    with session(service_options=[options]):
+        with pytest.raises(SchedulesCredentialsError, match="suspended in a sync session"):
+            schedules_sync.get_schedule("sch_123")
+
+    assert not route.called
 
 
 @respx.mock

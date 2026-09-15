@@ -16,6 +16,7 @@ from vercel.schedules._internal.api_client import (
 from vercel.schedules._internal.errors import SchedulesValidationError
 from vercel.schedules._internal.models import Schedule
 from vercel.schedules._internal.options import SchedulesServiceOptions
+from vercel.schedules._internal.sentinel import UNSET
 
 if TYPE_CHECKING:
     from vercel._internal.core.session import SdkSession, SyncSdkSession
@@ -79,7 +80,7 @@ def build_create_body(
         body["jitter"] = jitter_to_wire(jitter)
 
     body["target"] = {"type": "queue", "topic": topic}
-    if payload is not None:
+    if payload is not UNSET:
         body["payload"] = payload
     return body
 
@@ -133,7 +134,9 @@ class SchedulesService:
         page_size: int | None,
     ) -> SchedulesPage:
         self._ensure_open()
-        if page_size is not None and (isinstance(page_size, bool) or page_size < 1):
+        if page_size is not None and (
+            isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1
+        ):
             raise SchedulesValidationError("page_size must be a positive integer")
         return await self._api_client.list_schedules(
             namespace=namespace, cursor=cursor, limit=page_size

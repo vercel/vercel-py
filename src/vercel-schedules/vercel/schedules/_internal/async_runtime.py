@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from vercel.schedules._internal.models import Schedule
+from vercel.schedules._internal.sentinel import UNSET
 from vercel.schedules._internal.service import SchedulesService
 
 
@@ -17,7 +18,7 @@ async def create_schedule(
     name: str | None = None,
     namespace: str | None = None,
     jitter: timedelta | None = None,
-    payload: Any = None,
+    payload: Any = UNSET,
 ) -> str:
     return await service.create_schedule(
         topic,

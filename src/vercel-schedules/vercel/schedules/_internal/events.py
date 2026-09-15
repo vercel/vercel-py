@@ -50,11 +50,16 @@ def _require(headers: Mapping[str, str], name: str) -> str:
 
 def _parse_fired_at(value: str) -> datetime:
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        fired_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ScheduleEventParseError(
             f"Schedule dispatch time is not a valid timestamp: {value}"
         ) from exc
+    if fired_at.tzinfo is None or fired_at.utcoffset() is None:
+        raise ScheduleEventParseError(
+            f"Schedule dispatch time must include a timezone offset: {value}"
+        )
+    return fired_at
 
 
 def _media_type(content_type: str | None) -> str | None:
@@ -68,9 +73,9 @@ def _decode_payload(headers: Mapping[str, str], body: RequestBody) -> tuple[bool
     if body is None:
         return False, None
     raw = body.encode() if isinstance(body, str) else bytes(body)
-    content_type = headers.get("content-type")
-    if content_type is None and not raw:
+    if not raw:
         return False, None
+    content_type = headers.get("content-type")
     if _media_type(content_type) != "application/json":
         raise ScheduleEventParseError(
             "Schedule dispatch payload must use the application/json content type"

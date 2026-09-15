@@ -64,6 +64,7 @@ from vercel.schedules._internal.options import (
     SchedulesCredentialsFactory,
     SchedulesServiceOptions,
 )
+from vercel.schedules._internal.sentinel import UNSET
 from vercel.schedules._internal.service import SchedulesService, get_schedules_service
 from vercel.schedules._internal.sync_runtime import (
     create_schedule as _create_schedule,
@@ -88,7 +89,7 @@ def create_schedule(
     name: str | None = None,
     namespace: str | None = None,
     jitter: timedelta | None = None,
-    payload: JSONValue = None,
+    payload: JSONValue = UNSET,
 ) -> str:
     """Create a schedule that dispatches to a queue topic.
 
@@ -102,7 +103,9 @@ def create_schedule(
             service assigns one when omitted.
         namespace: Namespace to group schedules under.
         jitter: Random delay added to each firing, in whole seconds.
-        payload: JSON-serializable value delivered with each firing.
+        payload: JSON-serializable value delivered with each firing. Passing
+            `None` explicitly configures a JSON `null`; omitting it configures
+            no payload.
 
     Returns:
         The new schedule's id.

@@ -77,8 +77,9 @@ async def app(event: ScheduleEvent[CleanupPayload]) -> None:
 Plain `def` handlers work too and run in a worker thread. Without
 `payload_type`, `event.payload` is the decoded JSON as-is.
 
-Requests that are not schedule dispatches get `400`; a handler that raises gets
-`500`, with the exception logged under `vercel.schedules`.
+Malformed schedule dispatches get `400`, non-`POST` requests get `405`, and a
+handler that raises gets `500`, with the exception logged under
+`vercel.schedules`.
 
 For any other framework, `parse_schedule_event(headers, body)` does the parsing
 and returns the same `ScheduleEvent`.

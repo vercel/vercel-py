@@ -156,6 +156,18 @@ async def test_one_off_expression_is_parsed_to_an_aware_datetime() -> None:
     assert schedule.expression == OneOffExpression(at=datetime(2026, 10, 1, 9, tzinfo=timezone.utc))
 
 
+async def test_non_queue_target_is_a_malformed_response() -> None:
+    client, _ = make_client(
+        httpx.Response(
+            200,
+            json={**SCHEDULE_JSON, "target": {"type": "webhook", "topic": "not-a-queue"}},
+        )
+    )
+
+    with pytest.raises(SchedulesResponseError):
+        await client.get_schedule("sch_123")
+
+
 async def test_delete_tolerates_204() -> None:
     client, transport = make_client(httpx.Response(204))
 

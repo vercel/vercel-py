@@ -1,5 +1,6 @@
 """Schedules service options."""
 
+import inspect
 import os
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -84,6 +85,40 @@ def static_credentials_factory(token: str) -> SchedulesCredentialsFactory:
     return factory
 
 
+def sync_credentials_factory(
+    factory: SchedulesCredentialsFactory,
+) -> SchedulesCredentialsFactory:
+    """Adapt a credential factory to the non-suspending sync runtime."""
+
+    async def resolve() -> str:
+        awaitable = factory()
+        if not inspect.isawaitable(awaitable):
+            raise SchedulesCredentialsError("credentials_factory must return an awaitable")
+        iterator = awaitable.__await__()
+        try:
+            next(iterator)
+        except StopIteration as exc:
+            return exc.value
+        except SchedulesCredentialsError:
+            raise
+        except Exception as exc:
+            raise SchedulesCredentialsError(
+                "credentials_factory could not run in a sync session; pass a "
+                "non-suspending async factory or use vercel.schedules"
+            ) from exc
+        else:
+            raise SchedulesCredentialsError(
+                "credentials_factory suspended in a sync session; pass a non-suspending "
+                "async factory or use vercel.schedules"
+            )
+        finally:
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close()
+
+    return resolve
+
+
 class SchedulesServiceOptions(ServiceOptions, SchedulesModel):
     """Configuration for `vercel.schedules` calls in an SDK session.
 
@@ -97,7 +132,9 @@ class SchedulesServiceOptions(ServiceOptions, SchedulesModel):
             `VERCEL_SCHEDULE_BASE_URL`, else the public endpoint.
         token: A fixed bearer token, instead of resolving the deployment's OIDC
             token. Mutually exclusive with `credentials_factory`.
-        credentials_factory: A callable resolving the bearer token per request.
+        credentials_factory: An async callable resolving the bearer token per
+            request. For `vercel.schedules.sync`, it must complete without
+            suspending; use the async surface for factories that perform I/O.
         timeout: HTTP timeout per request.
     """
 
@@ -115,7 +152,11 @@ class SchedulesServiceOptions(ServiceOptions, SchedulesModel):
     def resolve_credentials_factory(self, *, sync: bool) -> SchedulesCredentialsFactory:
         """The factory this session should use, given its mode."""
         if self.credentials_factory is not None:
-            return self.credentials_factory
+            return (
+                sync_credentials_factory(self.credentials_factory)
+                if sync
+                else self.credentials_factory
+            )
         if self.token is not None:
             return static_credentials_factory(self.token)
         return _default_sync_credentials_factory if sync else _default_async_credentials_factory
@@ -128,4 +169,5 @@ __all__ = [
     "SchedulesServiceOptions",
     "default_base_url",
     "static_credentials_factory",
+    "sync_credentials_factory",
 ]

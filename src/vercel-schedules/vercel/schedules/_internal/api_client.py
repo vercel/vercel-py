@@ -76,7 +76,7 @@ class _SingleExpressionModel(_ApiModel):
 
 
 class _TargetModel(_ApiModel):
-    type: str
+    type: Literal["queue"]
     topic: str
 
 

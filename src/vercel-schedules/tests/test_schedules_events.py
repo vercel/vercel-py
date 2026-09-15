@@ -39,6 +39,10 @@ def test_missing_body_means_no_payload(body: bytes | str | None) -> None:
     assert parse_schedule_event(DISPATCH_HEADERS, body).payload is None
 
 
+def test_empty_json_body_means_no_payload() -> None:
+    assert parse_schedule_event({**DISPATCH_HEADERS, **JSON}, b"").payload is None
+
+
 @pytest.mark.parametrize("raw", [b"null", b"false", b"0"])
 def test_falsy_json_payloads_are_preserved(raw: bytes) -> None:
     event = parse_schedule_event({**DISPATCH_HEADERS, **JSON}, raw)
@@ -114,6 +118,12 @@ def test_rejects_missing_or_empty_required_header(name: str) -> None:
 def test_rejects_invalid_timestamp() -> None:
     with pytest.raises(ScheduleEventParseError, match="not a valid timestamp"):
         parse_schedule_event({**DISPATCH_HEADERS, "ce-time": "yesterday"})
+
+
+@pytest.mark.parametrize("value", ["2026-09-02", "2026-09-02T12:00:00"])
+def test_rejects_timestamp_without_timezone(value: str) -> None:
+    with pytest.raises(ScheduleEventParseError, match="timezone offset"):
+        parse_schedule_event({**DISPATCH_HEADERS, "ce-time": value})
 
 
 def test_rejects_non_json_content_type() -> None:
