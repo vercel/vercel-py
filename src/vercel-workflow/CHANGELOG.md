@@ -8,6 +8,8 @@
 
 ### Breaking Changes
 
+- Make `SerializationError` inherit from `FatalError` instead of `RuntimeError`, so serialization failures fail steps without retrying. (#390)
+
 - Make `await hook` never return `None` (#353)
 
   Raises a new `HookDisposedError` instead of returning `None` when the hook has been disposed. It is now typed to return `T` instead of `T | None`. `async for` over a hook will stop iterating on disposal, still.
@@ -27,6 +29,8 @@
   parameter or return value with their type instead.
 
 ### Features
+
+- Expose a read-only `token` property on hook events so workflows can share generated tokens with external callers. (#393)
 
 - Support `call_later`, `call_at`, and `now` in the event loop implementation. (#343)
 
@@ -85,6 +89,8 @@
   `WorkflowWritable` is now generic, defaulting to `Any`; a step parameter annotated `WorkflowWritable[Token]` becomes a handle the workflow passed in as a writer of that type, and `writable.with_type(Token)` gives a typed view of any writable.
 
 ### Bug Fixes
+
+- Reject empty string hook tokens with `ValueError` instead of silently generating a token, matching the TypeScript SDK. (#392)
 
 - Fix failing or even crashing cipher calls inside the workflow sandbox. (#305)
 - Fail a workflow run with `HookConflictError` when another run already owns its hook token instead of leaving it running indefinitely. (#327)
