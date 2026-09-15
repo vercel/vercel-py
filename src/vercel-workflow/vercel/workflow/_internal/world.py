@@ -622,6 +622,29 @@ class RunFailedEvent(BaseEvent):
         return (self.event_data.error,)
 
 
+class RunCancelledEventData(BaseModel):
+    cancel_reason: str | None = pydantic.Field(
+        default=None, alias="cancelReason", exclude_if=lambda e: e is None
+    )
+
+    @pydantic.field_validator("cancel_reason")
+    @classmethod
+    def validate_cancel_reason(cls, value: str | None) -> str | None:
+        # Zod's string length limit counts UTF-16 code units, like JS strings.
+        if value is not None and sum(2 if ord(char) > 0xFFFF else 1 for char in value) > 512:
+            raise ValueError("cancelReason must be at most 512 UTF-16 code units")
+        return value
+
+
+class RunCancelledEvent(BaseEvent):
+    event_type: Literal["run_cancelled"] = pydantic.Field(
+        default="run_cancelled", alias="eventType"
+    )
+    event_data: RunCancelledEventData | None = pydantic.Field(
+        default=None, alias="eventData", exclude_if=lambda e: e is None
+    )
+
+
 class AttributeChange(BaseModel):
     """One key of a `set_attributes()` call. ``value=None`` removes the key."""
 
@@ -929,6 +952,7 @@ CreateEventRequest: TypeAlias = (
     RunStartedEvent
     | RunCompletedEvent
     | RunFailedEvent
+    | RunCancelledEvent
     | AttrSetEvent
     | StepCreatedEvent
     | StepStartedEvent
@@ -947,6 +971,7 @@ Event: TypeAlias = Annotated[
         | RunStartedEvent
         | RunCompletedEvent
         | RunFailedEvent
+        | RunCancelledEvent
         | AttrSetEvent
         | StepCreatedEvent
         | StepStartedEvent
