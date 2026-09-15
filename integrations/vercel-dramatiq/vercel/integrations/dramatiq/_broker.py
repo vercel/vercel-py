@@ -4,13 +4,16 @@ from typing import Any
 from typing_extensions import TypedDict, Unpack
 
 import logging
+import math
 import os
 import queue
 import threading
 import time
+import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from weakref import WeakKeyDictionary
+from datetime import timedelta
+from weakref import WeakKeyDictionary, ref
 
 import dramatiq
 import dramatiq.broker as dramatiq_broker
@@ -18,9 +21,10 @@ import vercel.cache as vcache
 import vercel.queue as vqs
 import vercel.queue.sync as vqs_sync
 from dramatiq.broker import Broker, Consumer, MessageProxy
-from dramatiq.common import current_millis, dq_name
-from dramatiq.errors import QueueNotFound
+from dramatiq.common import current_millis, dq_name, q_name
+from dramatiq.errors import ActorNotFound, QueueNotFound
 from dramatiq.message import Message as DramatiqMessage
+from dramatiq.middleware import TimeLimit
 from dramatiq.results import Results
 from dramatiq.results.backend import ResultBackend
 from dramatiq.worker import Worker
@@ -30,6 +34,11 @@ from .version import __version__
 
 DEFAULT_CONSUMER_GROUP = "dramatiq"
 DEFAULT_REQUEUE_DELAY_SECONDS = 0
+
+# Bounds enforced by vercel.queue's subscribe(max_duration=...). Duplicated
+# here so misconfigured limits fail at declaration with actionable context.
+_MAX_DURATION_MINIMUM_SECONDS = 1
+_MAX_DURATION_MAXIMUM_SECONDS = 1800
 DEFAULT_PUSH_RETRY_DELAY_SECONDS = 1
 DEFAULT_PUSH_HANDOFF_WAIT_SECONDS = 30.0
 _PUSH_WAIT_POLL_INTERVAL_SECONDS = 0.05
@@ -41,6 +50,47 @@ _DEBUG_LOGGER_NAMES = (
     "dramatiq.broker",
     "dramatiq.worker",
 )
+
+
+def _capped_limit_seconds(limit_seconds: int, source: str) -> int:
+    if limit_seconds <= _MAX_DURATION_MAXIMUM_SECONDS:
+        return limit_seconds
+    warnings.warn(
+        f"{source} exceeds the {_MAX_DURATION_MAXIMUM_SECONDS}s maximum "
+        f"supported by deployed functions; capping max_duration at "
+        f"{_MAX_DURATION_MAXIMUM_SECONDS}s",
+        stacklevel=2,
+    )
+    return _MAX_DURATION_MAXIMUM_SECONDS
+
+
+def _max_duration_option_seconds(value: object) -> float | None:
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _validate_max_duration_option(option: object) -> None:
+    if option is None:
+        return
+    entries: Iterable[tuple[object, object]] = (
+        option.items() if isinstance(option, Mapping) else ((None, option),)
+    )
+    for queue_name, value in entries:
+        seconds = _max_duration_option_seconds(value)
+        if (
+            seconds is None
+            or seconds < _MAX_DURATION_MINIMUM_SECONDS
+            or seconds > _MAX_DURATION_MAXIMUM_SECONDS
+        ):
+            where = f" for queue {queue_name!r}" if queue_name is not None else ""
+            raise ValueError(
+                f"max_duration{where} must be a number of seconds or timedelta "
+                f"between {_MAX_DURATION_MINIMUM_SECONDS} and "
+                f"{_MAX_DURATION_MAXIMUM_SECONDS} seconds, got {value!r}"
+            )
 
 
 def _is_vercel_runtime() -> bool:
@@ -107,6 +157,9 @@ class VercelQueueBrokerOptions(TypedDict, total=False):
 
     poll: bool
     """Force polling mode when true or push mode when false."""
+
+    max_duration: vqs.Duration | Mapping[str, vqs.Duration] | None
+    """Execution time limit for the deployed functions serving Dramatiq queues."""
 
     middleware: list[Any] | None
     """Dramatiq middleware list passed to the base broker."""
@@ -290,6 +343,19 @@ class VercelQueueBroker(Broker):
         middleware = options.get("middleware")
         super().__init__(middleware=middleware)
         _configure_dramatiq_debug_logging()
+        self.max_duration = options.get("max_duration")
+        _validate_max_duration_option(self.max_duration)
+        self._framework_time_limit_middleware: TimeLimit | None = None
+        self._framework_time_limit_ms: float | None = None
+        if middleware is None:
+            # Remember the ``TimeLimit`` instance (and value) that dramatiq's
+            # default middleware set installed, so its built-in limit is not
+            # mistaken for user intent when deriving ``max_duration``.
+            for entry in self.middleware:
+                if isinstance(entry, TimeLimit):
+                    self._framework_time_limit_middleware = entry
+                    self._framework_time_limit_ms = entry.time_limit
+                    break
         self.queues: dict[str, object] = {}
         self.consumer_group = options.get("consumer_group", DEFAULT_CONSUMER_GROUP)
         self.retention = options.get("retention")
@@ -324,6 +390,9 @@ class VercelQueueBroker(Broker):
         self._consumers: list[_VercelQueueConsumer] = []
         self._consumers_lock = threading.RLock()
         self._registered_callbacks: dict[str, Any] = {}
+        self._registered_topics: dict[str, tuple[vqs.Topic[bytes], str]] = {}
+        self._subscriptions_lock = threading.RLock()
+        self._poll_rotation: dict[str, int] = {}
         self._push_handoff_lock = threading.RLock()
 
     @property
@@ -346,14 +415,19 @@ class VercelQueueBroker(Broker):
         self.queues[queue_name] = object()
         self.dead_letters_by_queue.setdefault(queue_name, [])
         self.emit_after("declare_queue", queue_name)
-        self._register_queue_callback(queue_name)
 
         delayed_name = dq_name(queue_name)
         self.queues[delayed_name] = object()
         self.dead_letters_by_queue.setdefault(delayed_name, [])
         self.delay_queues.add(delayed_name)
         self.emit_after("declare_delay_queue", delayed_name)
-        self._register_queue_callback(delayed_name)
+        self._sync_queue_subscriptions()
+
+    def declare_actor(self, actor: Any) -> None:
+        # Warn about capped time limits once per actor, at declaration.
+        self._explicit_actor_limit_seconds(actor, warn=True)
+        super().declare_actor(actor)
+        self._sync_queue_subscriptions()
 
     def enqueue(
         self,
@@ -376,7 +450,7 @@ class VercelQueueBroker(Broker):
 
         self.emit_before("enqueue", message, delay)
         self._queue_client.send(
-            self.topic_for_queue(queue_name),
+            self._delivery_topic(message, queue_name),
             message.encode(),
             idempotency_key=(
                 message.message_id if self.use_message_id_as_idempotency_key else None
@@ -410,14 +484,21 @@ class VercelQueueBroker(Broker):
 
     def poll_messages(self, queue_name: str, prefetch: int) -> Iterable[vqs.Message[bytes]]:
         del prefetch
-        deliveries = self._queue_client.poll(
-            self.topic_for_queue(queue_name),
-            self.consumer_group,
-            limit=1,
-            lease_duration=self.lease_duration,
-        )
-        for delivery in deliveries:
-            yield delivery.accept()
+        topics = self._topics_for_queue(queue_name)
+        # Rotation queue topic for each config so that the same busy topic can't be
+        # continually selected when other topics may have messages.
+        start = self._poll_rotation.get(queue_name, 0) % len(topics)
+        self._poll_rotation[queue_name] = start + 1
+        for topic in topics[start:] + topics[:start]:
+            deliveries = self._queue_client.poll(
+                topic,
+                self.consumer_group,
+                limit=1,
+                lease_duration=self.lease_duration,
+            )
+            for delivery in deliveries:
+                yield delivery.accept()
+                return
 
     def start_lease_renewal(self, message: vqs.Message[bytes]) -> vqs.LeaseRenewal:
         lease_renewal = self._queue_client.run_lease_renewal(
@@ -427,10 +508,117 @@ class VercelQueueBroker(Broker):
         lease_renewal.start()
         return lease_renewal
 
-    def topic_for_queue(self, queue_name: str) -> vqs.Topic[bytes]:
-        return vqs.Topic[bytes](
-            vqs.sanitize_name(f"{self.queue_name_prefix}{queue_name}"),
+    def topic_for_queue(
+        self,
+        queue_name: str,
+        limit_seconds: int | None = None,
+    ) -> vqs.Topic[bytes]:
+        base = vqs.sanitize_name(f"{self.queue_name_prefix}{queue_name}")
+        if limit_seconds is None:
+            return vqs.Topic[bytes](base)
+        return vqs.Topic[bytes](vqs.SanitizedName(f"{base}_d{limit_seconds}"))
+
+    def max_duration_for_queue(self, queue_name: str) -> vqs.Duration | None:
+        parent_queue = q_name(queue_name)
+        option = self.max_duration
+        if option is not None:
+            if isinstance(option, (int, float, timedelta)):
+                return option
+            value = option.get(parent_queue)
+            if value is not None:
+                return value
+        limit_ms = self._user_time_limit_ms()
+        if limit_ms is None or not math.isfinite(limit_ms) or limit_ms <= 0:
+            return None
+        return _capped_limit_seconds(
+            math.ceil(limit_ms / 1000),
+            f"TimeLimit middleware time_limit={limit_ms!r} ms",
         )
+
+    def _user_time_limit_ms(self) -> float | None:
+        limits: list[float] = []
+        for entry in self.middleware:
+            if not isinstance(entry, TimeLimit):
+                continue
+            if (
+                entry is self._framework_time_limit_middleware
+                and entry.time_limit == self._framework_time_limit_ms
+            ):
+                continue
+            limits.append(entry.time_limit)
+        if not limits:
+            return None
+        # Every TimeLimit middleware enforces its own limit, so the smallest
+        # one is the effective default.
+        return min(limits)
+
+    def _explicit_actor_limit_seconds(self, actor: Any, *, warn: bool = False) -> int | None:
+        options = getattr(actor, "options", None)
+        if not isinstance(options, Mapping):
+            return None
+        limit_ms = options.get("time_limit")
+        if (
+            limit_ms is None
+            or isinstance(limit_ms, bool)
+            or not isinstance(limit_ms, (int, float))
+            or not math.isfinite(limit_ms)
+            or limit_ms <= 0
+        ):
+            # An explicitly unlimited (or nonsensical) actor stays in the
+            # queue's default group; there is no bound to shard on.
+            return None
+        limit_seconds = math.ceil(limit_ms / 1000)
+        if warn:
+            return _capped_limit_seconds(
+                limit_seconds,
+                f"actor {getattr(actor, 'actor_name', actor)!r} time_limit={limit_ms!r} ms",
+            )
+        return min(limit_seconds, _MAX_DURATION_MAXIMUM_SECONDS)
+
+    def _queue_subscription_groups(self, queue_name: str) -> list[int | None]:
+        shard_limits: set[int] = set()
+        has_default_group = False
+        for actor in list(self.actors.values()):
+            if actor.queue_name != queue_name:
+                continue
+            limit = self._explicit_actor_limit_seconds(actor)
+            if limit is None:
+                has_default_group = True
+            else:
+                shard_limits.add(limit)
+        groups: list[int | None] = [None] if has_default_group else []
+        groups.extend(sorted(shard_limits))
+        return groups
+
+    def _delivery_topic(
+        self,
+        message: DramatiqMessage[Any],
+        queue_name: str,
+    ) -> vqs.Topic[bytes]:
+        actor = self.actors.get(message.actor_name)
+        if actor is not None:
+            limit = self._explicit_actor_limit_seconds(actor)
+            return self.topic_for_queue(queue_name, limit)
+        base = self.topic_for_queue(queue_name)
+        with self._subscriptions_lock:
+            queue_is_subscribed = any(
+                mapped_queue == queue_name for _, mapped_queue in self._registered_topics.values()
+            )
+            base_registered = str(base.name) in self._registered_callbacks
+        if queue_is_subscribed and not base_registered:
+            raise ActorNotFound(message.actor_name)
+        return base
+
+    def _topics_for_queue(self, queue_name: str) -> list[vqs.Topic[bytes]]:
+        with self._subscriptions_lock:
+            topics = [
+                topic
+                for topic, mapped_queue in self._registered_topics.values()
+                if mapped_queue == queue_name
+            ]
+        # A queue can be consumed before any subscription is registered
+        # (e.g. declared without actors); poll its base topic.
+        return topics or [self.topic_for_queue(queue_name)]
 
     def remove_consumer(self, consumer: _VercelQueueConsumer) -> None:
         with self._consumers_lock:
@@ -486,23 +674,43 @@ class VercelQueueBroker(Broker):
         proxy.settlement.wait()
 
     def _queue_for_topic(self, topic: str) -> str | None:
+        registered = self._registered_topics.get(topic)
+        if registered is not None:
+            return registered[1]
+        # Base topics stay resolvable even before their subscription exists.
         for queue_name in self.queues:
             if self.topic_for_queue(queue_name).name == topic:
                 return queue_name
         return None
 
     def register_queue_callbacks(self) -> None:
-        queue_names = sorted(
-            self.get_declared_queues(),
-            key=lambda queue_name: (queue_name.endswith(".DQ"), queue_name),
-        )
-        for queue_name in queue_names:
-            self._register_queue_callback(queue_name)
+        self._sync_queue_subscriptions()
 
-    def _register_queue_callback(self, queue_name: str) -> None:
-        if queue_name in self._registered_callbacks:
-            return
-        topic = self.topic_for_queue(queue_name)
+    def _sync_queue_subscriptions(self) -> None:
+        with self._subscriptions_lock:
+            parent_queues = sorted(
+                queue_name
+                for queue_name in self.get_declared_queues()
+                if q_name(queue_name) == queue_name
+            )
+            desired: set[str] = set()
+            for queue_name in parent_queues:
+                for limit in self._queue_subscription_groups(queue_name):
+                    desired.add(self._register_queue_callback(queue_name, limit))
+                    desired.add(self._register_queue_callback(dq_name(queue_name), limit))
+            for topic_key in [key for key in self._registered_topics if key not in desired]:
+                del self._registered_callbacks[topic_key]
+                del self._registered_topics[topic_key]
+
+    def _register_queue_callback(
+        self,
+        queue_name: str,
+        limit_seconds: int | None = None,
+    ) -> str:
+        topic = self.topic_for_queue(queue_name, limit_seconds)
+        topic_key = str(topic.name)
+        if topic_key in self._registered_callbacks:
+            return topic_key
 
         def handle_queue_delivery(
             message: vqs.Message[bytes],
@@ -513,12 +721,33 @@ class VercelQueueBroker(Broker):
             broker.handle_push_message(message)
 
         handle_queue_delivery.__name__ = f"vercel_dramatiq_{topic.name}_subscriber"
+
+        max_duration: vqs.MaxDuration | None
+        if limit_seconds is None:
+            # TimeLimit middleware may be configured after this registration
+            # runs, so resolve the default group's limit at introspection
+            # time, referencing the broker weakly to not keep it alive.
+            broker_ref = ref(self)
+
+            def resolve_max_duration() -> vqs.Duration | None:
+                broker = broker_ref()
+                if broker is None:
+                    return None
+                return broker.max_duration_for_queue(queue_name)
+
+            max_duration = resolve_max_duration
+        else:
+            max_duration = limit_seconds
+
         vqs.subscribe(
             topic=topic,
             consumer_group=self.consumer_group,
             retry_after=self.push_retry_delay_seconds,
+            max_duration=max_duration,
         )(handle_queue_delivery)
-        self._registered_callbacks[queue_name] = handle_queue_delivery
+        self._registered_callbacks[topic_key] = handle_queue_delivery
+        self._registered_topics[topic_key] = (topic, queue_name)
+        return topic_key
 
 
 @dataclass
