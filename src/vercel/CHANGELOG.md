@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.11.2 - 2026-09-14
+
+> **Release note:** Supersedes repository-declared versions `0.11.1` and `0.11.0`,
+> which were not published to PyPI. The complete changes since published `0.10.0`
+> are included below.
+
+### Features
+
+- Expose `get_deadline()` for reading the current Function invocation deadline. (#306)
+- Answer workflow health checks for both queue-based transport and HTTP. (#292)
+- Add support to read the sealed (`encp`) workflow payloads (X25519 + AES-GCM) an outside writer addresses to a run, under the `encryption` extra. (#297)
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor while retaining runtime-only support for explicitly installed legacy clients returned by the session factory. (#356)
+
+### Bug Fixes
+
+- Remove upper bounds on aggregate Sandbox and Workflow dependencies so sibling releases cannot make the `vercel` package un-installable. (#334)
+
+- Start a workflow run even when its queue message arrives before the
+  `run_created` event has landed. (#284)
+
+- Restore `vercel.env` to the main SDK after dropping the standalone `vercel-env` distribution. (#388)
+
+### Internal
+
+- The Workflows implementation now ships in the separate `vercel-workflow`
+  distribution, which `vercel` depends on, so `vercel.workflow` imports keep
+  working without installing anything extra. (#299)
+
+- Require `vercel-internal-core>=0.2.0,<0.3.0` for the coordinated `httpx2` release.
+
 ## 0.11.1 - 2026-09-09
 
 > **Release note:** Version 0.11.0 was declared in repository history but was

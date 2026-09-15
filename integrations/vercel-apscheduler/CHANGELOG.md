@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2 - 2026-09-14
+
+> **Release note:** Supersedes repository-declared versions `0.3.1` and `0.3.0`,
+> which were not published to PyPI. The complete changes since published `0.2.0`
+> are included below.
+
+### Breaking Changes
+
+- The managed Redis backend was removed. The integration now always runs on its
+  managed job store (Vercel Runtime Cache); a configured default `RedisJobStore`
+  is rejected at import, `VERCEL_APSCHEDULER_BACKEND` accepts only `cache`, and
+  the `redis` dependency is gone. The scheduler's durable identity now always
+  derives from the builder-assigned subscriber id (previously the Redis
+  `jobs_key`); the `scheduler_id` option still pins an identity explicitly. (#286)
+
+### Internal
+
+- Update dependencies.
+
 ## 0.3.1 - 2026-09-09
 
 > **Release note:** Version 0.3.0 was declared in repository history but was

@@ -1,5 +1,146 @@
 # Changelog
 
+## 0.10.2 - 2026-09-14
+
+> **Release note:** Supersedes repository-declared versions `0.10.1` and `0.10.0`,
+> which were not published to PyPI. The complete changes since published `0.9.0`
+> are included below.
+
+### Breaking Changes
+
+- Make `SerializationError` inherit from `FatalError` instead of `RuntimeError`, so serialization failures fail steps without retrying. (#390)
+
+- Make `await hook` never return `None` (#353)
+
+  Raises a new `HookDisposedError` instead of returning `None` when the hook has been disposed. It is now typed to return `T` instead of `T | None`. `async for` over a hook will stop iterating on disposal, still.
+
+- Make sleep() and retry delays treat numbers as seconds, not ms (#346)
+
+  This matches Python standard library APIs.
+
+- Use type annotations on workflows and step to allow passing Pydantic models and dataclasses. (#317)
+
+  This is a breaking change, because type annotations will now be
+  enforced. Passing a `dict` when the declaration expects a `list` will
+  fail.
+
+  Pydantic models and dataclasses can no longer be passed to
+  `@serializable` or `register_serializable()`. Annotate the workflow or step
+  parameter or return value with their type instead.
+
+### Features
+
+- Expose a read-only `token` property on hook events so workflows can share generated tokens with external callers. (#393)
+
+- Support `call_later`, `call_at`, and `now` in the event loop implementation. (#343)
+
+  This enables use of `asyncio.sleep()` as well as `asyncio.timeout` and
+  the `timeout` parameter of `asyncio.wait_for`.
+
+- Add opt-in cancellable steps: `@workflows.step(cancellable=True)`.
+
+  When `cancel()` is called on a cancellable step, we send a message on
+  a stream that the step will listen for. If it gets a message, it will
+  exit.
+
+  Note that like regular asyncio tasks, `cancel()` does not cause the
+  step to immediately become "cancelled". Waiting on it will still wait
+  for the step to actually terminate.
+
+  If there are still cancellable steps running when a workflow function
+  completes, they will be cancelled and the workflow will wait for them
+  to finish before terminating.
+
+- `get_workflow_metadata()` returns the current run's `WorkflowInfo` (run id,
+  workflow name, start time, deployment URL, and feature flags), callable from a
+  workflow body or a step body — mirroring the JS SDK's `getWorkflowMetadata()`. (#320)
+
+  One current limitation is that `started_at` is `None` from inside a step.
+
+- Make `HookEvent` an async context manager (#354)
+
+  This matches TS, which supports `using`.
+  ```
+  # disposes the hook on block exit
+  async with SomeHook.wait(...) as hook:
+      res = await hook
+  ```
+
+- Add `HookEvent.get_conflict()` to check for a token conflict without waiting for hook data.
+- `BaseHook.wait()` accepts `metadata` to record on the hook, and `get_hook_by_token()` reads it back for a resumer. (#301)
+- A step can raise `RetryableError` to control when its next attempt runs. (#302)
+- Accept `specVersion` 7 sealed noop event logs. (#319)
+- Failed run and step events now preserve serialized error classes, messages, stacks, and causes. Failed runs also expose a plaintext `errorCode`. (#304)
+- A workflow or step can attach plaintext metadata to its run with `set_attributes()`. (#303)
+- Add a `share_sandboxes` parameter to `SandboxPolicy` to enable reusing already created sandboxes instead of creating a new one on each invocation. This speeds up workflows but means that modifications to global state may persist between invocations. (#310)
+- Support `timedelta` arguments for workflow `sleep()` and retry delays. (#342)
+- Expose unstable API to serve workflow HTTP endpoint from your own web framework. (#294)
+- Added semi-internal manifest API for TS tools and e2e test. (#296)
+
+- Read gzip- and zstd-compressed workflow payloads. (#369)
+- Write gzip- and zstd-compressed workflow payloads when the run supports them. (#372)
+- Encrypt workflow payload writes and seal external hook resumes to the run's public key. (#374)
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor. (#356)
+
+- Streams can now carry typed data. (#375)
+
+  `get_writable(type=Token)` returns a `WorkflowWritable[Token]` whose writes are dumped through pydantic the way typed step arguments are; then `run.readable(type=Token)` and `read_stream(run_id, name, type=Token)` validate each chunk on the way back, raising `TypeValidationError` on a mismatch.
+
+  `WorkflowWritable` is now generic, defaulting to `Any`; a step parameter annotated `WorkflowWritable[Token]` becomes a handle the workflow passed in as a writer of that type, and `writable.with_type(Token)` gives a typed view of any writable.
+
+### Bug Fixes
+
+- Reject empty string hook tokens with `ValueError` instead of silently generating a token, matching the TypeScript SDK. (#392)
+
+- Fix failing or even crashing cipher calls inside the workflow sandbox. (#305)
+- Fail a workflow run with `HookConflictError` when another run already owns its hook token instead of leaving it running indefinitely. (#327)
+- Fix a bug that caused reusing a hook token after disposing the previous hook to conflict with the same workflow run.
+- Support resuming hooks with payload in the queue message. (#300)
+- Prevent recursive workflow sandbox imports on Windows and decode Node CLI output as UTF-8.
+
+- Fix some bugs involving hooks arriving when the workflow was not yet
+  blocked on them. (#339)
+
+- Fixed nulls rejected by server, requiring Pydantic 2.12 or newer. (#321)
+
+- Prevent workflows from having side effects while suspending. (#332)
+
+  `hook.dispose()` will now work properly in a `finally` block.  (That
+  is, the hook will be disposed only when the workflow is actually
+  terminating, and not every time it gets replayed.)
+
+- Fail an unregistered workflow step permanently and resume its workflow with a
+  clear error instead of returning a `KeyError` and redelivering forever.
+
+- More reliably fail runs whose replay diverges from the event log. (#347)
+
+  Runs will now fail even in the case where the main thread of execution
+  is not directly blocked on the suspension that is erroring.
+
+- Fixed workflow and step calls with both positional-or-keyword parameters and `*args` failing during replay because their arguments were recorded in an unbindable shape. (#312)
+
+- Treat an already-closed cancellation stream as a successful cancellation signal. (#362)
+- Add a bunch of incorrectly missing `asyncio` methods to the sandbox blacklist. (#378)
+- Properly handle hook resumes that arrive after calling `get_conflict()` but before waiting. (#380)
+- Fix `BaseHook.wait` to create the hook when the run next suspends rather then when it blocks on the hook. So that hooks are created before their tokens are published, make sure that steps are launched after any hooks are registered. (#380)
+- Block `open`, `open_code`, and `FileIO` in `io` and `_io` in sandbox. This will block `Path.read_text()` and similar also. (#379)
+- Forward the ambient Vercel request ID with workflow events so Dashboard logs can be correlated with the function invocation that produced them. (#361)
+- Make `zstandard` a sandbox passthrough while blocking `zstandard.open` to allow importing packages like `httpx2`. (#356)
+
+- Deliver hook payload deserialization and validation errors to the hook awaiter so workflows can catch them. (#383)
+
+### Internal
+
+- Remove a just-added return from a finally block. (#344)
+- Correct internal workflow type annotations found by checking untyped function bodies. (#337)
+- Refactored event replay. (#341)
+- Construct the protocol models by Python field name. (#322)
+
+- Get rid of `ooo_hook_received_events` (#381)
+- Refactor workflow payload serialization behind an encoder context. (#370)
+
+- Require `vercel-internal-core>=0.2.0,<0.3.0` for the coordinated `httpx2` release.
+
 ## 0.10.1 - 2026-09-09
 
 > **Release note:** Version 0.10.0 was declared in repository history but was

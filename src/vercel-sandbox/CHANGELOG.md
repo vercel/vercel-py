@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.2 - 2026-09-14
+
+> **Release note:** Supersedes repository-declared versions `0.5.1` and `0.5.0`,
+> which were not published to PyPI. The complete changes since published `0.4.0`
+> are included below.
+
+### Features
+
+- Add sync and async `fork_sandbox(...)` support for creating a sandbox from an
+  existing named sandbox with optional configuration overrides. (#257)
+
+- Add `region` and `failover_regions` configuration for sandbox creation, forks,
+  and updates, plus multi-region snapshot availability reporting. (#308)
+
+- Forward private ``__``-prefixed parameters to the Sandbox API. (#350)
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor while retaining runtime-only support for explicitly installed legacy clients returned by the session factory. (#356)
+
+### Bug Fixes
+
+- Allow Sandbox process waits and log streams to remain idle longer than the session HTTP timeout. (#307)
+- Expose Linux process signals consistently on every SDK host platform. (#352)
+
+- Read `VERCEL_REGION` directly so Sandbox does not depend on the unavailable `vercel-env` distribution. (#388)
+
+### Internal
+
+- Require `vercel-internal-core>=0.2.0,<0.3.0` for the coordinated `httpx2` release.
+
 ## 0.5.1 - 2026-09-09
 
 > **Release note:** Version 0.5.0 was declared in repository history but was

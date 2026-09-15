@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.5 - 2026-09-14
+
+> **Release note:** Supersedes repository-declared versions `0.7.4` and `0.7.3`,
+> which were not published to PyPI. The complete changes since published `0.7.2`
+> are included below.
+
+### Features
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor. (#356)
+
+### Internal
+
+- Update dependencies.
+
 ## 0.7.4 - 2026-09-09
 
 > **Release note:** Version 0.7.3 was declared in repository history but was

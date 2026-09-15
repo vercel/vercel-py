@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 - 2026-09-14
+
+### Features
+
+- Replace the unmaintained `httpx` dependency with its maintained `httpx2` successor. (#356)
+
+### Internal
+
+- Require `vercel-internal-core>=0.2.0,<0.3.0` for the coordinated `httpx2` release.
+
 ## 0.1.1 - 2026-09-01
 
 - Update dependencies.
