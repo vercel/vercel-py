@@ -21,7 +21,9 @@ from vercel._internal.core.http import (
 from vercel._internal.core.http.transport import HeaderTypes, QueryParamTypes
 from vercel.schedules import (
     CronExpression,
+    FunctionTarget,
     OneOffExpression,
+    QueueTarget,
     ScheduleNotFoundError,
     SchedulesApiError,
     ScheduleSource,
@@ -133,6 +135,7 @@ async def test_get_percent_encodes_the_id_and_maps_the_schedule() -> None:
     assert str(transport.requests[0].url) == "https://schedules.test/v1/schedules/sch%2F1%202"
     assert schedule.schedule_id == "sch_123"
     assert schedule.expression == CronExpression(cron="0 * * * *")
+    assert isinstance(schedule.target, QueueTarget)
     assert schedule.target.topic == "scheduled-cleanup"
     assert schedule.state is ScheduleState.ACTIVE
     assert schedule.source is ScheduleSource.DYNAMIC
@@ -156,7 +159,23 @@ async def test_one_off_expression_is_parsed_to_an_aware_datetime() -> None:
     assert schedule.expression == OneOffExpression(at=datetime(2026, 10, 1, 9, tzinfo=timezone.utc))
 
 
-async def test_non_queue_target_is_a_malformed_response() -> None:
+async def test_function_target_is_parsed() -> None:
+    client, _ = make_client(
+        httpx.Response(
+            200,
+            json={
+                **SCHEDULE_JSON,
+                "target": {"type": "function", "function": "jobs/nightly"},
+            },
+        )
+    )
+
+    schedule = await client.get_schedule("sch_123")
+
+    assert schedule.target == FunctionTarget(function="jobs/nightly")
+
+
+async def test_unknown_target_is_a_malformed_response() -> None:
     client, _ = make_client(
         httpx.Response(
             200,

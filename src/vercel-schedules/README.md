@@ -3,8 +3,8 @@
 Python SDK for Vercel Schedules.
 
 A schedule fires on a cron cadence or once at a fixed instant, and dispatches
-to a Vercel Queue topic. This package manages schedules and receives their
-firings in a Python function.
+to a Vercel Queue topic or function. This package manages queue-targeted
+schedules and parses function-targeted schedule events.
 
 ```sh
 pip install vercel-schedules
@@ -17,7 +17,7 @@ from datetime import timedelta
 from vercel.schedules import create_schedule, list_schedules
 
 schedule_id = await create_schedule(
-    "scheduled-cleanup",
+    topic="scheduled-cleanup",
     cron="0 * * * *",
     name="cleanup",
     jitter=timedelta(seconds=30),
@@ -34,7 +34,10 @@ timezone-aware `datetime`:
 ```python
 from datetime import datetime, timezone
 
-await create_schedule("send-report", at=datetime(2026, 10, 1, 9, tzinfo=timezone.utc))
+await create_schedule(
+    topic="send-report",
+    at=datetime(2026, 10, 1, 9, tzinfo=timezone.utc),
+)
 ```
 
 `get_schedule`, `enable_schedule`, `disable_schedule`, and `delete_schedule`
@@ -46,43 +49,53 @@ The same surface is available synchronously, with identical names and arguments:
 ```python
 from vercel.schedules.sync import create_schedule, list_schedules
 
-schedule_id = create_schedule("scheduled-cleanup", cron="0 * * * *")
+schedule_id = create_schedule(topic="scheduled-cleanup", cron="0 * * * *")
 for schedule in list_schedules():
     ...
 ```
 
-## Handle a scheduled function
+## Handle a function-targeted schedule
 
-A firing arrives as a `POST` carrying CloudEvent headers and the configured
-payload as JSON. `schedule_handler` turns a function into an ASGI app that
-parses the dispatch, runs your code, and answers `200`:
+Point a static schedule at a Python callable with a module entrypoint:
+
+```json
+{
+  "schedules": [
+    {
+      "name": "cleanup",
+      "expression": { "cron": "0 * * * *" },
+      "payload": { "max_age_days": 30 },
+      "target": { "entrypoint": "jobs.cleanup:run" }
+    }
+  ]
+}
+```
+
+The callable receives a `ScheduleEvent`. Its generic argument controls payload
+validation:
 
 ```python
-# api/cleanup.py
+# jobs/cleanup.py
 from pydantic import BaseModel
-from vercel.schedules import ScheduleEvent, schedule_handler
+from vercel.schedules import ScheduleEvent
 
 
 class CleanupPayload(BaseModel):
     max_age_days: int
 
 
-@schedule_handler(payload_type=CleanupPayload)
-async def app(event: ScheduleEvent[CleanupPayload]) -> None:
+async def run(event: ScheduleEvent[CleanupPayload]) -> None:
     print(f"Running {event.name}, fired at {event.fired_at}")
     if event.payload:
         await delete_expired_records(event.payload.max_age_days)
 ```
 
-Plain `def` handlers work too and run in a worker thread. Without
-`payload_type`, `event.payload` is the decoded JSON as-is.
+The Vercel Python runtime receives the schedule's CloudEvent `POST`, validates
+the payload, and invokes the entrypoint. An unparameterized `ScheduleEvent`
+receives the decoded JSON as-is.
 
-Malformed schedule dispatches get `400`, non-`POST` requests get `405`, and a
-handler that raises gets `500`, with the exception logged under
-`vercel.schedules`.
-
-For any other framework, `parse_schedule_event(headers, body)` does the parsing
-and returns the same `ScheduleEvent`.
+When handling the request in your own framework, use
+`parse_schedule_event(headers, body, payload_type=...)` to parse the same event.
 
 ## Configuration
 

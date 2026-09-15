@@ -2881,20 +2881,16 @@ requires-dist = [
 name = "vercel-schedules"
 source = { editable = "src/vercel-schedules" }
 dependencies = [
-    { name = "anyio" },
     { name = "httpx2" },
     { name = "pydantic" },
-    { name = "vercel-headers" },
     { name = "vercel-internal-core" },
     { name = "vercel-oidc" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0.0" },
     { name = "httpx2", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2.7.0,<3" },
-    { name = "vercel-headers", editable = "src/vercel-headers" },
     { name = "vercel-internal-core", editable = "src/vercel-internal-core" },
     { name = "vercel-oidc", editable = "src/vercel-oidc" },
 ]

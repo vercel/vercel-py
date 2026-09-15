@@ -31,6 +31,7 @@ from vercel.schedules._internal.errors import (
 )
 from vercel.schedules._internal.models import (
     CronExpression,
+    FunctionTarget,
     OneOffExpression,
     QueueTarget,
     Schedule,
@@ -75,9 +76,14 @@ class _SingleExpressionModel(_ApiModel):
     at: datetime
 
 
-class _TargetModel(_ApiModel):
+class _QueueTargetModel(_ApiModel):
     type: Literal["queue"]
     topic: str
+
+
+class _FunctionTargetModel(_ApiModel):
+    type: Literal["function"]
+    function: str
 
 
 class _StateOverrideModel(_ApiModel):
@@ -94,7 +100,7 @@ class _ScheduleModel(_ApiModel):
     namespace: str
     expression: _CronExpressionModel | _SingleExpressionModel = Field(discriminator="type")
     jitter: int | float | None = None
-    target: _TargetModel
+    target: _QueueTargetModel | _FunctionTargetModel = Field(discriminator="type")
     state: ScheduleState
     state_override: _StateOverrideModel | None = Field(default=None, alias="stateOverride")
     source: ScheduleSource
@@ -116,7 +122,11 @@ class _ScheduleModel(_ApiModel):
             namespace=self.namespace,
             expression=expression,
             jitter=None if self.jitter is None else self.jitter * _JITTER_UNIT,
-            target=QueueTarget(topic=self.target.topic),
+            target=(
+                QueueTarget(topic=self.target.topic)
+                if isinstance(self.target, _QueueTargetModel)
+                else FunctionTarget(function=self.target.function)
+            ),
             state=self.state,
             state_override=(
                 None

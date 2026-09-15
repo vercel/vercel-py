@@ -4,13 +4,21 @@ A schedule fires as a binary-mode CloudEvent: the event attributes travel as
 `ce-*` request headers and the configured payload, if any, is the JSON body.
 """
 
+from __future__ import annotations
+
+import inspect
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
-from typing import Any, TypeAlias, TypeVar, overload
+from typing import Any, Protocol, TypeAlias, TypeVar, overload
 
 from pydantic import TypeAdapter, ValidationError
 
+from vercel._internal.core.typeutils import (
+    TypeAnnotationResolutionError,
+    resolve_annotation_with_namespace_from_call_stack,
+    strip_annotated,
+)
 from vercel.schedules._internal.errors import ScheduleEventParseError
 from vercel.schedules._internal.models import ScheduleEvent
 
@@ -30,6 +38,14 @@ SCHEDULE_SOURCE_HEADER = "ce-vssschedulesource"
 _SUPPORTED_SPEC_VERSION = "1.0"
 
 T = TypeVar("T")
+HandlerT = TypeVar("HandlerT")
+
+
+class ScheduleHandler(Protocol[HandlerT]):
+    """A function invoked for each firing of a function-targeted schedule."""
+
+    def __call__(self, event: ScheduleEvent[HandlerT], /) -> Awaitable[None] | None: ...
+
 
 RequestBody: TypeAlias = bytes | bytearray | memoryview | str | None
 """A fully-read request body, or `None` when the request carried none."""
@@ -84,6 +100,51 @@ def _decode_payload(headers: Mapping[str, str], body: RequestBody) -> tuple[bool
         return True, json.loads(raw)
     except ValueError as exc:
         raise ScheduleEventParseError("Schedule dispatch payload is not valid JSON") from exc
+
+
+def resolve_payload_type(handler: Callable[..., Any]) -> Any | None:
+    """Return `T` from a handler's `ScheduleEvent[T]` parameter annotation.
+
+    An unannotated parameter, bare `ScheduleEvent`, or `ScheduleEvent[Any]`
+    leaves the JSON payload untyped and returns `None`. Custom `ScheduleEvent`
+    subclasses are rejected because their generic binding can be ambiguous.
+    """
+    try:
+        signature = inspect.signature(handler)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("schedule handler must be an inspectable callable") from exc
+
+    parameters = list(signature.parameters.values())
+    if len(parameters) != 1 or parameters[0].kind not in {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    }:
+        raise TypeError("schedule handler must accept exactly one event parameter")
+
+    annotation = parameters[0].annotation
+    if annotation is inspect.Signature.empty or annotation is Any:
+        return None
+    try:
+        annotation = resolve_annotation_with_namespace_from_call_stack(
+            annotation,
+            globalns=getattr(handler, "__globals__", {}),
+        ).annotation
+    except TypeAnnotationResolutionError as exc:
+        raise TypeError("could not resolve schedule handler event annotation") from exc
+
+    annotation = strip_annotated(annotation)
+    if annotation is ScheduleEvent:
+        return None
+    if not isinstance(annotation, type) or not issubclass(annotation, ScheduleEvent):
+        raise TypeError("schedule handler parameter must be annotated as ScheduleEvent[T]")
+
+    generic_metadata = getattr(annotation, "__pydantic_generic_metadata__", {})
+    if generic_metadata.get("origin") is not ScheduleEvent:
+        raise TypeError("schedule handler parameter must be annotated directly as ScheduleEvent[T]")
+    payload_types = generic_metadata.get("args", ())
+    if len(payload_types) != 1 or payload_types[0] is Any:
+        return None
+    return payload_types[0]
 
 
 @overload
@@ -187,5 +248,7 @@ __all__ = [
     "SCHEDULE_NAME_HEADER",
     "SCHEDULE_SOURCE_HEADER",
     "RequestBody",
+    "ScheduleHandler",
     "parse_schedule_event",
+    "resolve_payload_type",
 ]

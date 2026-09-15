@@ -48,6 +48,16 @@ class QueueTarget(SchedulesModel):
     topic: str
 
 
+class FunctionTarget(SchedulesModel):
+    """Where a schedule dispatches: a function build output."""
+
+    function: str
+
+
+ScheduleTarget: TypeAlias = QueueTarget | FunctionTarget
+"""Where each schedule firing is dispatched."""
+
+
 class StateOverride(SchedulesModel):
     """A temporary state that supersedes `Schedule.state` until it expires."""
 
@@ -83,7 +93,7 @@ class Schedule(SchedulesModel):
     namespace: str
     expression: ScheduleExpression
     jitter: timedelta | None = None
-    target: QueueTarget
+    target: ScheduleTarget
     state: ScheduleState
     state_override: StateOverride | None = None
     source: ScheduleSource
@@ -131,6 +141,7 @@ JSONValue: TypeAlias = Any
 
 __all__ = [
     "CronExpression",
+    "FunctionTarget",
     "JSONValue",
     "OneOffExpression",
     "PayloadT",
@@ -140,5 +151,6 @@ __all__ = [
     "ScheduleExpression",
     "ScheduleSource",
     "ScheduleState",
+    "ScheduleTarget",
     "StateOverride",
 ]

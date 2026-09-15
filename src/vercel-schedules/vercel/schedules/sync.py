@@ -9,8 +9,8 @@ inside an `async with vercel.api.session(...)` block is rejected outright, since
 mixing modes in one session is a bug.
 
 Schedules fire on a cron cadence or once at a fixed instant, and dispatch to a
-Vercel Queue topic. Manage them with `create_schedule` and friends; receive
-firings in a function with `schedule_handler` or `parse_schedule_event`.
+Vercel Queue topic or function. Manage them with `create_schedule` and friends;
+parse function dispatches with `parse_schedule_event`.
 
 Requests authenticate with the deployment's Vercel OIDC token. Locally, run
 `vercel env pull` or pass `SchedulesServiceOptions(token=...)` in a session.
@@ -20,11 +20,6 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta
 
 from vercel._internal.core.session import get_active_sync_session
-from vercel.schedules._internal.asgi import (
-    ScheduleAsgiApp,
-    ScheduleHandler,
-    schedule_handler,
-)
 from vercel.schedules._internal.errors import (
     ScheduleEventParseError,
     ScheduleNotFoundError,
@@ -45,10 +40,13 @@ from vercel.schedules._internal.events import (
     SCHEDULE_NAME_HEADER,
     SCHEDULE_NAMESPACE_HEADER,
     SCHEDULE_SOURCE_HEADER,
+    ScheduleHandler,
     parse_schedule_event,
+    resolve_payload_type,
 )
 from vercel.schedules._internal.models import (
     CronExpression,
+    FunctionTarget,
     JSONValue,
     OneOffExpression,
     QueueTarget,
@@ -57,6 +55,7 @@ from vercel.schedules._internal.models import (
     ScheduleExpression,
     ScheduleSource,
     ScheduleState,
+    ScheduleTarget,
     StateOverride,
 )
 from vercel.schedules._internal.options import (
@@ -82,8 +81,8 @@ def _service() -> SchedulesService:
 
 
 def create_schedule(
-    topic: str,
     *,
+    topic: str,
     cron: str | None = None,
     at: datetime | None = None,
     name: str | None = None,
@@ -200,11 +199,11 @@ __all__ = [
     "SCHEDULE_NAME_HEADER",
     "SCHEDULE_SOURCE_HEADER",
     "CronExpression",
+    "FunctionTarget",
     "JSONValue",
     "OneOffExpression",
     "QueueTarget",
     "Schedule",
-    "ScheduleAsgiApp",
     "ScheduleEvent",
     "ScheduleEventParseError",
     "ScheduleExpression",
@@ -212,6 +211,7 @@ __all__ = [
     "ScheduleNotFoundError",
     "ScheduleSource",
     "ScheduleState",
+    "ScheduleTarget",
     "SchedulesApiError",
     "SchedulesCredentialsError",
     "SchedulesCredentialsFactory",
@@ -228,5 +228,5 @@ __all__ = [
     "get_schedule",
     "list_schedules",
     "parse_schedule_event",
-    "schedule_handler",
+    "resolve_payload_type",
 ]

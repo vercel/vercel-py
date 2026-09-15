@@ -80,7 +80,7 @@ async def test_create_cron_schedule_async(mock_env_clear: None) -> None:
 
     async with session(service_options=session_options()):
         schedule_id = await create_schedule(
-            "scheduled-cleanup",
+            topic="scheduled-cleanup",
             cron="0 * * * *",
             name="cleanup",
             namespace="jobs",
@@ -106,7 +106,7 @@ def test_create_cron_schedule_sync_sends_the_same_body(mock_env_clear: None) -> 
 
     with session(service_options=session_options()):
         schedule_id = schedules_sync.create_schedule(
-            "scheduled-cleanup",
+            topic="scheduled-cleanup",
             cron="0 * * * *",
             name="cleanup",
             namespace="jobs",
@@ -131,7 +131,7 @@ async def test_create_one_off_schedule_renders_utc_iso(mock_env_clear: None) -> 
     local = AT.astimezone(timezone(timedelta(hours=-5)))
 
     async with session(service_options=session_options()):
-        await create_schedule("send-report", at=local)
+        await create_schedule(topic="send-report", at=local)
 
     assert sent_body(route) == {
         "expression": {"type": "single", "at": "2026-10-01T09:30:00.000Z"},
@@ -144,7 +144,7 @@ async def test_create_omits_optional_fields(mock_env_clear: None) -> None:
     route = create_route()
 
     async with session(service_options=session_options()):
-        await create_schedule("t", cron="* * * * *")
+        await create_schedule(topic="t", cron="* * * * *")
 
     assert sent_body(route) == {
         "expression": {"type": "cron", "cron": "* * * * *"},
@@ -157,7 +157,7 @@ async def test_create_preserves_explicit_json_null_payload(mock_env_clear: None)
     route = create_route()
 
     async with session(service_options=session_options()):
-        await create_schedule("t", cron="* * * * *", payload=None)
+        await create_schedule(topic="t", cron="* * * * *", payload=None)
 
     assert sent_body(route)["payload"] is None
 
@@ -182,9 +182,9 @@ async def test_create_rejects_bad_arguments_before_any_request(
 
     async with session(service_options=session_options()):
         with pytest.raises(SchedulesValidationError, match=match):
-            await create_schedule("t", **kwargs)
+            await create_schedule(topic="t", **kwargs)
         with pytest.raises(ValueError, match=match):
-            await create_schedule("t", **kwargs)
+            await create_schedule(topic="t", **kwargs)
 
     assert not route.called
 
@@ -193,7 +193,7 @@ async def test_create_rejects_bad_arguments_before_any_request(
 async def test_create_rejects_empty_topic(mock_env_clear: None) -> None:
     async with session(service_options=session_options()):
         with pytest.raises(SchedulesValidationError, match="topic"):
-            await create_schedule("", cron="* * * * *")
+            await create_schedule(topic="", cron="* * * * *")
 
 
 # --- list ------------------------------------------------------------------

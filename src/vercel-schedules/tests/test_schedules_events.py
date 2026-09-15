@@ -1,6 +1,9 @@
 """Parsing of inbound schedule dispatches, ported from the TypeScript suite."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
+from typing import Annotated, Any, get_origin
 
 import pytest
 from conftest import DISPATCH_HEADERS
@@ -10,7 +13,9 @@ from vercel.schedules import (
     SCHEDULE_CLOUD_EVENT_TYPE,
     ScheduleEvent,
     ScheduleEventParseError,
+    ScheduleHandler,
     parse_schedule_event,
+    resolve_payload_type,
 )
 
 JSON = {"content-type": "application/json"}
@@ -76,6 +81,75 @@ def test_payload_type_is_skipped_when_there_is_no_payload() -> None:
         max_age_days: int
 
     assert parse_schedule_event(DISPATCH_HEADERS, payload_type=Cleanup).payload is None
+
+
+def test_resolves_payload_type_from_handler_annotation() -> None:
+    class Cleanup(BaseModel):
+        max_age_days: int
+
+    async def handler(event: ScheduleEvent[Cleanup]) -> None:
+        pass
+
+    assert resolve_payload_type(handler) is Cleanup
+
+
+def test_schedule_handler_type_is_runtime_generic() -> None:
+    assert get_origin(ScheduleHandler[object]) is ScheduleHandler
+
+
+def test_rejects_event_subclass_annotation() -> None:
+    class Cleanup(BaseModel):
+        max_age_days: int
+
+    class CleanupEvent(ScheduleEvent[Cleanup]):
+        pass
+
+    async def handler(event: CleanupEvent) -> None:
+        pass
+
+    with pytest.raises(TypeError, match="annotated directly"):
+        resolve_payload_type(handler)
+
+
+def test_resolves_annotated_event_with_unhashable_metadata() -> None:
+    class Cleanup(BaseModel):
+        max_age_days: int
+
+    async def handler(
+        event: Annotated[ScheduleEvent[Cleanup], {"source": "runtime"}],
+    ) -> None:
+        pass
+
+    assert resolve_payload_type(handler) is Cleanup
+
+
+@pytest.mark.parametrize("annotation", [None, ScheduleEvent, ScheduleEvent[Any]])
+def test_untyped_handler_payload_resolves_to_none(annotation: object) -> None:
+    async def handler(event: ScheduleEvent) -> None:
+        pass
+
+    if annotation is None:
+        del handler.__annotations__["event"]
+    else:
+        handler.__annotations__["event"] = annotation
+
+    assert resolve_payload_type(handler) is None
+
+
+def test_rejects_non_event_handler_annotation() -> None:
+    async def handler(event: str) -> None:
+        pass
+
+    with pytest.raises(TypeError, match=r"ScheduleEvent\[T\]"):
+        resolve_payload_type(handler)  # type: ignore[arg-type]
+
+
+def test_rejects_handler_with_wrong_signature() -> None:
+    async def handler() -> None:
+        pass
+
+    with pytest.raises(TypeError, match="exactly one event parameter"):
+        resolve_payload_type(handler)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("method", ["GET", "put"])
