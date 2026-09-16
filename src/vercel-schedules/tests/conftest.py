@@ -19,6 +19,7 @@ SCHEDULE_JSON: dict[str, Any] = {
     "trackId": "production",
     "namespace": "jobs",
     "name": "cleanup",
+    "timezone": "UTC",
     "expression": {"type": "cron", "cron": "0 * * * *"},
     "target": {"type": "queue", "topic": "scheduled-cleanup"},
     "state": "active",

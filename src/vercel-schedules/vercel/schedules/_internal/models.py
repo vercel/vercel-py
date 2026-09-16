@@ -27,13 +27,22 @@ class ScheduleSource(StrEnum):
 
 
 class CronExpression(SchedulesModel):
-    """A recurring schedule, in standard five-field cron syntax."""
+    """A recurring schedule, in standard five-field cron syntax.
+
+    The expression is evaluated in the schedule's `timezone`.
+    """
 
     cron: str
 
 
 class OneOffExpression(SchedulesModel):
-    """A schedule that fires once, at a fixed instant."""
+    """A schedule that fires once, at a fixed instant.
+
+    Attributes:
+        at: Wall-clock time of the firing, as stored by the service. When the
+            service reports it without an offset, it is naive and reads in the
+            schedule's `timezone`.
+    """
 
     at: datetime
 
@@ -58,28 +67,24 @@ ScheduleTarget: TypeAlias = QueueTarget | FunctionTarget
 """Where each schedule firing is dispatched."""
 
 
-class StateOverride(SchedulesModel):
-    """A temporary state that supersedes `Schedule.state` until it expires."""
-
-    state: ScheduleState
-    until: datetime
-
-
 class Schedule(SchedulesModel):
     """A schedule as stored by the Schedules service.
 
+    A schedule is identified by its `name` within a `namespace`; `schedule_id`
+    is the service's internal identifier and is informational.
+
     Attributes:
-        schedule_id: Unique identifier of the schedule.
+        schedule_id: Unique identifier assigned by the service.
         owner_id: Team that owns the schedule.
         project_id: Project the schedule belongs to.
         track_id: Deployment track the schedule dispatches into.
         name: Schedule name, unique within its project and namespace.
         namespace: Namespace the schedule belongs to.
         expression: When the schedule fires.
+        timezone: IANA timezone the expression is evaluated in.
         jitter: Random delay added to each firing, if configured.
         target: Where each firing is dispatched.
-        state: Configured state. See `effective_state` for what applies now.
-        state_override: A temporary state with an expiry, if one is set.
+        state: Whether the schedule fires.
         source: Whether the schedule is static or dynamic.
         created_at: When the schedule was created.
         updated_at: When the schedule was last changed.
@@ -92,26 +97,18 @@ class Schedule(SchedulesModel):
     name: str
     namespace: str
     expression: ScheduleExpression
+    timezone: str
     jitter: timedelta | None = None
     target: ScheduleTarget
     state: ScheduleState
-    state_override: StateOverride | None = None
     source: ScheduleSource
     created_at: datetime
     updated_at: datetime
 
     @property
-    def effective_state(self) -> ScheduleState:
-        """The state in force right now, honoring an unexpired override."""
-        override = self.state_override
-        if override is not None and override.until > datetime.now(override.until.tzinfo):
-            return override.state
-        return self.state
-
-    @property
     def is_active(self) -> bool:
-        """Whether the schedule fires right now."""
-        return self.effective_state is ScheduleState.ACTIVE
+        """Whether the schedule fires."""
+        return self.state is ScheduleState.ACTIVE
 
 
 class ScheduleEvent(SchedulesModel, Generic[PayloadT]):
@@ -152,5 +149,4 @@ __all__ = [
     "ScheduleSource",
     "ScheduleState",
     "ScheduleTarget",
-    "StateOverride",
 ]

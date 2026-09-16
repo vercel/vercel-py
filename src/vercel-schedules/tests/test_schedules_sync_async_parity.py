@@ -10,9 +10,11 @@ from vercel.schedules import sync as schedules_sync
 ASYNC_OPERATIONS = [
     "create_schedule",
     "get_schedule",
+    "update_schedule",
     "delete_schedule",
     "enable_schedule",
     "disable_schedule",
+    "invoke_schedule",
 ]
 ITERATOR_OPERATIONS = ["list_schedules"]
 OPERATIONS = ASYNC_OPERATIONS + ITERATOR_OPERATIONS

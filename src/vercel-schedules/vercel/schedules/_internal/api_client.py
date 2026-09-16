@@ -2,6 +2,9 @@
 
 Owns request/response wire models, camelCase aliasing, the user agent, and the
 mapping of non-2xx responses onto the `SchedulesApiError` taxonomy.
+
+Schedules are addressed by name, scoped by an optional namespace query
+parameter, matching `@vercel/schedules`.
 """
 
 import platform
@@ -38,7 +41,6 @@ from vercel.schedules._internal.models import (
     ScheduleExpression,
     ScheduleSource,
     ScheduleState,
-    StateOverride,
 )
 from vercel.schedules._internal.options import SchedulesCredentialsFactory
 
@@ -58,6 +60,12 @@ USER_AGENT = (
 # Jitter is an undocumented `number` on the wire. Seconds is the assumption;
 # this is the one place to change if that turns out to be wrong.
 _JITTER_UNIT = timedelta(seconds=1)
+
+MIN_JITTER = timedelta(minutes=1)
+"""Smallest jitter the service accepts."""
+
+MAX_JITTER = timedelta(minutes=15)
+"""Largest jitter the service accepts."""
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
@@ -86,11 +94,6 @@ class _FunctionTargetModel(_ApiModel):
     function: str
 
 
-class _StateOverrideModel(_ApiModel):
-    state: ScheduleState
-    until: int | float
-
-
 class _ScheduleModel(_ApiModel):
     schedule_id: str = Field(alias="scheduleId")
     owner_id: str = Field(alias="ownerId")
@@ -99,10 +102,10 @@ class _ScheduleModel(_ApiModel):
     name: str
     namespace: str
     expression: _CronExpressionModel | _SingleExpressionModel = Field(discriminator="type")
+    timezone: str = "UTC"
     jitter: int | float | None = None
     target: _QueueTargetModel | _FunctionTargetModel = Field(discriminator="type")
     state: ScheduleState
-    state_override: _StateOverrideModel | None = Field(default=None, alias="stateOverride")
     source: ScheduleSource
     created_at: int | float = Field(alias="createdAt")
     updated_at: int | float = Field(alias="updatedAt")
@@ -121,6 +124,7 @@ class _ScheduleModel(_ApiModel):
             name=self.name,
             namespace=self.namespace,
             expression=expression,
+            timezone=self.timezone,
             jitter=None if self.jitter is None else self.jitter * _JITTER_UNIT,
             target=(
                 QueueTarget(topic=self.target.topic)
@@ -128,22 +132,10 @@ class _ScheduleModel(_ApiModel):
                 else FunctionTarget(function=self.target.function)
             ),
             state=self.state,
-            state_override=(
-                None
-                if self.state_override is None
-                else StateOverride(
-                    state=self.state_override.state,
-                    until=from_epoch_ms(self.state_override.until),
-                )
-            ),
             source=self.source,
             created_at=from_epoch_ms(self.created_at),
             updated_at=from_epoch_ms(self.updated_at),
         )
-
-
-class _CreateScheduleResponseModel(_ApiModel):
-    schedule_id: str = Field(alias="scheduleId")
 
 
 class _ListSchedulesResponseModel(_ApiModel):
@@ -203,10 +195,10 @@ class SchedulesApiClient:
         self._transport = transport
         self._timeout = timeout
 
-    async def create_schedule(self, body: Mapping[str, Any]) -> str:
+    async def create_schedule(self, body: Mapping[str, Any]) -> Schedule:
         """POST /v1/schedules."""
         response = await self._request("POST", "/v1/schedules", body=JSONBody(dict(body)))
-        return self._parse(response, _CreateScheduleResponseModel).schedule_id
+        return self._parse(response, _ScheduleModel).to_schedule()
 
     async def list_schedules(
         self,
@@ -230,25 +222,49 @@ class SchedulesApiClient:
             next_cursor=page.cursor,
         )
 
-    async def get_schedule(self, schedule_id: str) -> Schedule:
-        """GET /v1/schedules/:id."""
-        response = await self._request("GET", f"/v1/schedules/{_encode(schedule_id)}")
+    async def get_schedule(self, name: str, *, namespace: str | None) -> Schedule:
+        """GET /v1/schedules/:name."""
+        response = await self._request(
+            "GET", _schedule_path(name), params=_namespace_params(namespace)
+        )
         return self._parse(response, _ScheduleModel).to_schedule()
 
-    async def delete_schedule(self, schedule_id: str) -> None:
-        """DELETE /v1/schedules/:id."""
+    async def update_schedule(
+        self, name: str, *, namespace: str | None, body: Mapping[str, Any]
+    ) -> Schedule:
+        """PATCH /v1/schedules/:name."""
+        response = await self._request(
+            "PATCH",
+            _schedule_path(name),
+            params=_namespace_params(namespace),
+            body=JSONBody(dict(body)),
+        )
+        return self._parse(response, _ScheduleModel).to_schedule()
+
+    async def delete_schedule(self, name: str, *, namespace: str | None) -> None:
+        """DELETE /v1/schedules/:name."""
         # The service answers with `{scheduleId}` or 204; neither carries news.
-        await self._request("DELETE", f"/v1/schedules/{_encode(schedule_id)}")
+        await self._request("DELETE", _schedule_path(name), params=_namespace_params(namespace))
 
-    async def enable_schedule(self, schedule_id: str) -> Schedule:
-        """POST /v1/schedules/:id/enable."""
-        response = await self._request("POST", f"/v1/schedules/{_encode(schedule_id)}/enable")
+    async def enable_schedule(self, name: str, *, namespace: str | None) -> Schedule:
+        """POST /v1/schedules/:name/enable."""
+        response = await self._request(
+            "POST", _schedule_path(name, "/enable"), params=_namespace_params(namespace)
+        )
         return self._parse(response, _ScheduleModel).to_schedule()
 
-    async def disable_schedule(self, schedule_id: str) -> Schedule:
-        """POST /v1/schedules/:id/disable."""
-        response = await self._request("POST", f"/v1/schedules/{_encode(schedule_id)}/disable")
+    async def disable_schedule(self, name: str, *, namespace: str | None) -> Schedule:
+        """POST /v1/schedules/:name/disable."""
+        response = await self._request(
+            "POST", _schedule_path(name, "/disable"), params=_namespace_params(namespace)
+        )
         return self._parse(response, _ScheduleModel).to_schedule()
+
+    async def invoke_schedule(self, name: str, *, namespace: str | None) -> None:
+        """POST /v1/schedules/:name/invoke."""
+        await self._request(
+            "POST", _schedule_path(name, "/invoke"), params=_namespace_params(namespace)
+        )
 
     async def _request(
         self,
@@ -288,8 +304,19 @@ class SchedulesApiClient:
             ) from exc
 
 
-def _encode(schedule_id: str) -> str:
-    return quote(schedule_id, safe="")
+def _schedule_path(name: str, suffix: str = "") -> str:
+    return f"/v1/schedules/{quote(name, safe='')}{suffix}"
 
 
-__all__ = ["USER_AGENT", "SchedulesApiClient", "SchedulesPage", "jitter_to_wire"]
+def _namespace_params(namespace: str | None) -> dict[str, str]:
+    return {} if namespace is None else {"namespace": namespace}
+
+
+__all__ = [
+    "MAX_JITTER",
+    "MIN_JITTER",
+    "USER_AGENT",
+    "SchedulesApiClient",
+    "SchedulesPage",
+    "jitter_to_wire",
+]

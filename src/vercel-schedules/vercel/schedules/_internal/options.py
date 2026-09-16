@@ -16,7 +16,7 @@ from vercel.schedules._internal.errors import (
     SchedulesValidationError,
 )
 
-DEFAULT_SCHEDULES_BASE_URL = "https://vss-server.vercel.sh"
+DEFAULT_SCHEDULES_BASE_URL = "https://vercel-schedules.com"
 """The public Schedules service endpoint."""
 
 BASE_URL_ENV = "VERCEL_SCHEDULE_BASE_URL"

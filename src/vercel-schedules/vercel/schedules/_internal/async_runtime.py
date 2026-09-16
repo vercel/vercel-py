@@ -11,20 +11,22 @@ from vercel.schedules._internal.service import SchedulesService
 
 async def create_schedule(
     service: SchedulesService,
-    topic: str,
+    name: str,
     *,
+    topic: str,
     cron: str | None = None,
     at: datetime | None = None,
-    name: str | None = None,
+    timezone: str | None = None,
     namespace: str | None = None,
     jitter: timedelta | None = None,
     payload: Any = UNSET,
-) -> str:
+) -> Schedule:
     return await service.create_schedule(
-        topic,
+        name,
+        topic=topic,
         cron=cron,
         at=at,
-        name=name,
+        timezone=timezone,
         namespace=namespace,
         jitter=jitter,
         payload=payload,
@@ -52,20 +54,58 @@ def list_schedules(
     return iterate()
 
 
-async def get_schedule(service: SchedulesService, schedule_id: str) -> Schedule:
-    return await service.get_schedule(schedule_id)
+async def get_schedule(
+    service: SchedulesService, name: str, *, namespace: str | None = None
+) -> Schedule:
+    return await service.get_schedule(name, namespace=namespace)
 
 
-async def delete_schedule(service: SchedulesService, schedule_id: str) -> None:
-    await service.delete_schedule(schedule_id)
+async def update_schedule(
+    service: SchedulesService,
+    name: str,
+    *,
+    namespace: str | None = None,
+    cron: str | None = None,
+    at: datetime | None = None,
+    timezone: str | None = None,
+    topic: str | None = None,
+    jitter: Any = UNSET,
+    payload: Any = UNSET,
+) -> Schedule:
+    return await service.update_schedule(
+        name,
+        namespace=namespace,
+        cron=cron,
+        at=at,
+        timezone=timezone,
+        topic=topic,
+        jitter=jitter,
+        payload=payload,
+    )
 
 
-async def enable_schedule(service: SchedulesService, schedule_id: str) -> Schedule:
-    return await service.enable_schedule(schedule_id)
+async def delete_schedule(
+    service: SchedulesService, name: str, *, namespace: str | None = None
+) -> None:
+    await service.delete_schedule(name, namespace=namespace)
 
 
-async def disable_schedule(service: SchedulesService, schedule_id: str) -> Schedule:
-    return await service.disable_schedule(schedule_id)
+async def enable_schedule(
+    service: SchedulesService, name: str, *, namespace: str | None = None
+) -> Schedule:
+    return await service.enable_schedule(name, namespace=namespace)
+
+
+async def disable_schedule(
+    service: SchedulesService, name: str, *, namespace: str | None = None
+) -> Schedule:
+    return await service.disable_schedule(name, namespace=namespace)
+
+
+async def invoke_schedule(
+    service: SchedulesService, name: str, *, namespace: str | None = None
+) -> None:
+    await service.invoke_schedule(name, namespace=namespace)
 
 
 __all__ = [
@@ -74,5 +114,7 @@ __all__ = [
     "disable_schedule",
     "enable_schedule",
     "get_schedule",
+    "invoke_schedule",
     "list_schedules",
+    "update_schedule",
 ]

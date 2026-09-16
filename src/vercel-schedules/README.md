@@ -3,8 +3,9 @@
 Python SDK for Vercel Schedules.
 
 A schedule fires on a cron cadence or once at a fixed instant, and dispatches
-to a Vercel Queue topic or function. This package manages queue-targeted
-schedules and parses function-targeted schedule events.
+to a Vercel Queue topic or function. A schedule is identified by its name
+within a namespace. This package manages queue-targeted schedules and parses
+function-targeted schedule events.
 
 ```sh
 pip install vercel-schedules
@@ -16,11 +17,11 @@ pip install vercel-schedules
 from datetime import timedelta
 from vercel.schedules import create_schedule, list_schedules
 
-schedule_id = await create_schedule(
+schedule = await create_schedule(
+    "cleanup",
     topic="scheduled-cleanup",
     cron="0 * * * *",
-    name="cleanup",
-    jitter=timedelta(seconds=30),
+    jitter=timedelta(minutes=2),
     payload={"max_age_days": 30},
 )
 
@@ -28,28 +29,68 @@ async for schedule in list_schedules(namespace="default"):
     print(schedule.name, schedule.expression, schedule.is_active)
 ```
 
-Pass `at=` instead of `cron=` for a schedule that fires once. It must be a
-timezone-aware `datetime`:
+`jitter` adds a random delay to each firing. It is a whole number of seconds
+between one and fifteen minutes inclusive.
+
+### Timezones
+
+Cron expressions are evaluated in UTC unless you pass an IANA `timezone`:
 
 ```python
-from datetime import datetime, timezone
-
 await create_schedule(
-    topic="send-report",
-    at=datetime(2026, 10, 1, 9, tzinfo=timezone.utc),
+    "daily-cleanup",
+    topic="scheduled-cleanup",
+    cron="0 9 * * *",
+    timezone="America/Los_Angeles",
 )
 ```
 
-`get_schedule`, `enable_schedule`, `disable_schedule`, and `delete_schedule`
-take the schedule id. A missing id raises `ScheduleNotFoundError`, which is also
-a `LookupError`.
+Pass `at=` instead of `cron=` for a schedule that fires once. An aware
+`datetime` carrying a `ZoneInfo` (or UTC) supplies the timezone itself; a naive
+`datetime` needs an explicit `timezone=`:
+
+```python
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+await create_schedule(
+    "one-time-cleanup",
+    topic="scheduled-cleanup",
+    at=datetime(2026, 9, 16, 9, tzinfo=ZoneInfo("America/Los_Angeles")),
+)
+
+await create_schedule(
+    "one-time-report",
+    topic="send-report",
+    at=datetime(2026, 9, 16, 9),
+    timezone="Europe/Berlin",
+)
+```
+
+Given both an aware `at` and `timezone`, `at` is converted into that timezone,
+so the instant is preserved. Fixed-offset datetimes other than UTC are rejected
+because they carry no IANA name.
+
+### Manage schedules
+
+`get_schedule`, `update_schedule`, `enable_schedule`, `disable_schedule`,
+`invoke_schedule`, and `delete_schedule` take the schedule name and an optional
+`namespace=`. A missing schedule raises `ScheduleNotFoundError`, which is also a
+`LookupError`.
+
+```python
+from vercel.schedules import invoke_schedule, update_schedule
+
+await update_schedule("cleanup", cron="0 2 * * *", jitter=None)  # jitter=None clears it
+await invoke_schedule("cleanup")  # fire now, outside the cadence
+```
 
 The same surface is available synchronously, with identical names and arguments:
 
 ```python
 from vercel.schedules.sync import create_schedule, list_schedules
 
-schedule_id = create_schedule(topic="scheduled-cleanup", cron="0 * * * *")
+schedule = create_schedule("cleanup", topic="scheduled-cleanup", cron="0 * * * *")
 for schedule in list_schedules():
     ...
 ```
@@ -108,7 +149,7 @@ from vercel.api import session
 from vercel.schedules import SchedulesServiceOptions, get_schedule
 
 async with session(service_options=[SchedulesServiceOptions(token="...", base_url="...")]):
-    schedule = await get_schedule("sch_123")
+    schedule = await get_schedule("cleanup")
 ```
 
 Use a plain `with` block and `vercel.schedules.sync` together; mixing an async
