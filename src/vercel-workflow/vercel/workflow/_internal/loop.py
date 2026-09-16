@@ -49,10 +49,10 @@ class WorkflowLoop(asyncio.BaseEventLoop):
         if not self._stopping:
             self.workflow.resume()
 
-    def _write_to_self(self) -> None:
-        # The loop has no way to suspend so we don't need to do
-        # anything to wake it up.
-        pass
+    def _asyncgen_finalizer_hook(self, agen):
+        self._asyncgens.discard(agen)  # type: ignore
+        if not self.is_closed():
+            self.call_soon(self.create_task, agen.aclose())
 
     def _timer_handle_cancelled(self, handle: asyncio.TimerHandle) -> None:
         if handle in self._timers:
