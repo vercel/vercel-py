@@ -16,7 +16,9 @@ The primary API at `vercel.blob` is asynchronous:
 ```python
 from vercel import blob
 
-async with blob.open("reports/today.txt", "w", content_type="text/plain") as writer:
+async with blob.open(
+    "reports/today.txt", "w", metadata={"content_type": "text/plain"}
+) as writer:
     await writer.write("ready\n")
 
 async with blob.open("reports/today.txt") as reader:
@@ -41,8 +43,8 @@ blob.remove("artifacts/data.bin")
 ```
 
 Currently supports `r`, `rb`, `w`, and `wb`. Text modes accept `encoding`, `errors`, and
-`newline`; binary modes reject those arguments. Pass `access="private"` when writing to a
-private Blob store.
+`newline`; binary modes reject those arguments. Pass publication metadata through `metadata`.
+Pass `access=blob.Access.PRIVATE` when opening an object in a private Blob store.
 
 Writers stage data locally and publish it when `close()` succeeds. A normal context-manager
 exit closes and publishes the object. An exceptional exit aborts the staged write, so use a

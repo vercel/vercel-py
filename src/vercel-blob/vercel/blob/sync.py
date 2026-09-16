@@ -10,8 +10,9 @@ from vercel._internal.core.session import get_active_sync_session
 from vercel.blob._internal.models import (
     Access,
     BlobCredentials,
+    BlobMetadata,
     BlobStatResult,
-    DurationInput,
+    CredentialKind,
     SyncBlobCredentialsFactory,
 )
 from vercel.blob._internal.options import SyncBlobServiceOptions as BlobServiceOptions
@@ -49,12 +50,11 @@ def open(
     pathname: StrPath,
     mode: Literal["r"] = "r",
     *,
-    access: Access | None = None,
     encoding: str | None = None,
     errors: str | None = None,
     newline: str | None = None,
-    content_type: str | None = None,
-    cache_control_max_age: DurationInput = None,
+    metadata: BlobMetadata | None = None,
+    access: Access | None = None,
 ) -> SyncBlobTextStream: ...
 
 
@@ -63,12 +63,11 @@ def open(
     pathname: StrPath,
     mode: Literal["rb"],
     *,
-    access: Access | None = None,
     encoding: None = None,
     errors: None = None,
     newline: None = None,
-    content_type: str | None = None,
-    cache_control_max_age: DurationInput = None,
+    metadata: BlobMetadata | None = None,
+    access: Access | None = None,
 ) -> SyncBlobBinaryStream: ...
 
 
@@ -77,12 +76,11 @@ def open(
     pathname: StrPath,
     mode: Literal["wb"],
     *,
-    access: Access | None = None,
     encoding: None = None,
     errors: None = None,
     newline: None = None,
-    content_type: str | None = None,
-    cache_control_max_age: DurationInput = None,
+    metadata: BlobMetadata | None = None,
+    access: Access | None = None,
 ) -> SyncBlobBinaryWriter: ...
 
 
@@ -91,12 +89,11 @@ def open(
     pathname: StrPath,
     mode: Literal["w"],
     *,
-    access: Access | None = None,
     encoding: str | None = None,
     errors: str | None = None,
     newline: str | None = None,
-    content_type: str | None = None,
-    cache_control_max_age: DurationInput = None,
+    metadata: BlobMetadata | None = None,
+    access: Access | None = None,
 ) -> SyncBlobTextWriter: ...
 
 
@@ -104,14 +101,16 @@ def open(
     pathname: StrPath,
     mode: str = "r",
     *,
-    access: Access | None = None,
     encoding: str | None = None,
     errors: str | None = None,
     newline: str | None = None,
-    content_type: str | None = None,
-    cache_control_max_age: DurationInput = None,
+    metadata: BlobMetadata | None = None,
+    access: Access | None = None,
 ) -> Any:
     """Open a Blob object as a synchronous file-like stream."""
+    metadata = {} if metadata is None else metadata
+    content_type = metadata.get("content_type")
+    cache_control_max_age = metadata.get("cache_control_max_age")
     path, parsed_mode, _, normalized_cache_control_max_age = validate_open(
         pathname,
         mode,
@@ -121,8 +120,11 @@ def open(
         content_type=content_type,
         cache_control_max_age=cache_control_max_age,
     )
-    if access is not None and access not in ("public", "private"):
-        raise ValueError("access must be 'public' or 'private'")
+    if access is not None:
+        try:
+            access = Access(access)
+        except ValueError:
+            raise ValueError("access must be 'public' or 'private'") from None
     service = get_sync_blob_service(get_active_sync_session())
     resolved_access = service.options.default_access if access is None else access
     return open_sync_stream(
@@ -153,10 +155,13 @@ def remove(pathname: StrPath, *, missing_ok: bool = False) -> None:
 
 
 __all__ = [
+    "Access",
     "BlobAccessError",
     "BlobContentTypeNotAllowedError",
     "BlobCredentials",
     "BlobCredentialsError",
+    "BlobMetadata",
+    "CredentialKind",
     "BlobError",
     "BlobFileTooLargeError",
     "BlobNotFoundError",

@@ -31,7 +31,7 @@ async def test_basic_text_and_binary_lifecycle() -> None:
     async with session():
         failure: BaseException | None = None
         try:
-            async with blob.open(text_path, "w", content_type="text/plain") as writer:
+            async with blob.open(text_path, "w", metadata={"content_type": "text/plain"}) as writer:
                 await writer.write("hello, Blob!\n")
             async with blob.open(binary_path, "wb") as writer:
                 await writer.write(bytes(range(64)))

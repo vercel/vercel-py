@@ -14,7 +14,7 @@ async def main() -> None:
     pathname = f"vercel-py-examples/{uuid4().hex}/message.txt"
     async with session():
         try:
-            async with blob.open(pathname, "w", content_type="text/plain") as writer:
+            async with blob.open(pathname, "w", metadata={"content_type": "text/plain"}) as writer:
                 await writer.write("Hello from vercel-blob.\n")
 
             metadata = await blob.stat(pathname)

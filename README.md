@@ -28,7 +28,7 @@ Configure the credentials via environment variables based on your app's needs:
 - `VERCEL_OIDC_TOKEN` for local OIDC testing. On Vercel, OIDC helpers can read
   the request token after you register request headers with
   `vercel.headers.set_headers()`.
-
+~
 For local OIDC development, you can load a short-lived token dynamically with
 the Vercel CLI:
 

@@ -11,7 +11,7 @@ import pytest
 
 from vercel._internal.core.session import get_active_session, get_active_sync_session
 from vercel.api import session
-from vercel.blob import BlobCredentials, BlobServiceOptions
+from vercel.blob import Access, BlobCredentials, BlobServiceOptions, CredentialKind
 from vercel.blob._internal.service import get_blob_service, get_sync_blob_service
 from vercel.blob.sync import BlobServiceOptions as SyncBlobServiceOptions
 from vercel.errors import VercelServiceOptionsError
@@ -35,7 +35,7 @@ def payload(path: str, data: bytes, *, etag: str = '"v1"') -> dict[str, Any]:
 
 def options(*, read_buffer_size: int = 2) -> BlobServiceOptions:
     async def credentials() -> BlobCredentials:
-        return BlobCredentials("oidc", "store", "oidc")
+        return BlobCredentials("oidc", "store", CredentialKind.OIDC)
 
     return BlobServiceOptions(
         base_url=BASE_URL,
@@ -46,7 +46,7 @@ def options(*, read_buffer_size: int = 2) -> BlobServiceOptions:
 
 def sync_options(*, read_buffer_size: int = 2) -> SyncBlobServiceOptions:
     def credentials() -> BlobCredentials:
-        return BlobCredentials("oidc", "store", "oidc")
+        return BlobCredentials("oidc", "store", CredentialKind.OIDC)
 
     return SyncBlobServiceOptions(
         base_url=BASE_URL,
@@ -148,7 +148,7 @@ async def test_async_binary_lifecycle_is_file_like_and_uses_control_headers() ->
             transport=httpx.MockTransport(store.async_handler)
         ),
     ):
-        operation = blob.open("folder/file.bin", "wb", cache_control_max_age=120)
+        operation = blob.open("folder/file.bin", "wb", metadata={"cache_control_max_age": 120})
         assert store.requests == []
         async with operation as writer:
             with pytest.raises(TypeError, match="bytes-like"):
@@ -259,14 +259,16 @@ async def test_delivery_auth_is_scoped_to_object_access(
         )
 
     async def credentials() -> BlobCredentials:
-        return BlobCredentials("secret", "store", "oidc")
+        return BlobCredentials("secret", "store", CredentialKind.OIDC)
 
     configured = BlobServiceOptions(base_url=BASE_URL, credentials_factory=credentials)
     async with session(
         service_options=[configured],
         httpx_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     ):
-        async with blob.open("object", "rb", access=access) as reader:  # type: ignore[call-overload]
+        async with blob.open(  # type: ignore[call-overload]
+            "object", "rb", access=Access(access)
+        ) as reader:
             assert await reader.read() == b"data"
 
     headers = delivery_requests[0].headers
@@ -498,7 +500,11 @@ def test_sync_open_validates_access_before_constructing_transport() -> None:
 
     with session(httpx_client_factory=fail_factory):
         with pytest.raises(ValueError, match="access must be"):
-            blob.open("object", "rb", access="invalid")  # type: ignore[call-overload]
+            blob.open(  # type: ignore[call-overload]
+                "object",
+                "rb",
+                access="invalid",
+            )
 
 
 def test_sync_rejects_async_credentials_factory_without_warning() -> None:
@@ -507,7 +513,7 @@ def test_sync_rejects_async_credentials_factory_without_warning() -> None:
     import vercel.blob.sync as blob
 
     async def credentials() -> BlobCredentials:
-        return BlobCredentials("oidc", "store", "oidc")
+        return BlobCredentials("oidc", "store", CredentialKind.OIDC)
 
     configured = SyncBlobServiceOptions(
         base_url=BASE_URL,

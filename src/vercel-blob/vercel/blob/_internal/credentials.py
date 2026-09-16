@@ -6,7 +6,7 @@ import os
 
 from vercel.blob.errors import BlobCredentialsError
 
-from .models import BlobCredentials
+from .models import BlobCredentials, CredentialKind
 
 
 def _store_from_read_write_token(token: str) -> str:
@@ -29,13 +29,15 @@ def _normalize_credentials(credentials: BlobCredentials) -> BlobCredentials:
     store_id = credentials.store_id.removeprefix("store_")
     if not store_id.strip():
         raise BlobCredentialsError("Blob credentials must identify a non-empty store")
-    if credentials.kind == "read_write":
+    try:
+        kind = CredentialKind(credentials.kind)
+    except ValueError:
+        raise BlobCredentialsError(f"Unknown Blob credential kind: {credentials.kind!r}") from None
+    if kind == CredentialKind.READ_WRITE:
         embedded = _store_from_read_write_token(credentials.token)
         if embedded != store_id:
             raise BlobCredentialsError("Blob read-write token store ID does not match credentials")
-    elif credentials.kind != "oidc":
-        raise BlobCredentialsError(f"Unknown Blob credential kind: {credentials.kind!r}")
-    return BlobCredentials(credentials.token, store_id, credentials.kind)
+    return BlobCredentials(credentials.token, store_id, kind)
 
 
 async def _default_async_credentials() -> BlobCredentials:
@@ -51,12 +53,14 @@ async def _default_async_credentials() -> BlobCredentials:
             raise
     store_id = os.environ.get("BLOB_STORE_ID", "").removeprefix("store_")
     if oidc_token and store_id.strip():
-        return BlobCredentials(oidc_token, store_id, "oidc")
+        return BlobCredentials(oidc_token, store_id, CredentialKind.OIDC)
     token = os.environ.get("BLOB_READ_WRITE_TOKEN") or os.environ.get(
         "VERCEL_BLOB_READ_WRITE_TOKEN"
     )
     if token:
-        return BlobCredentials(token, _store_from_read_write_token(token), "read_write")
+        return BlobCredentials(
+            token, _store_from_read_write_token(token), CredentialKind.READ_WRITE
+        )
     if oidc_token:
         raise BlobCredentialsError("BLOB_STORE_ID is required with Vercel OIDC credentials")
     raise BlobCredentialsError("Missing Blob credentials")
@@ -73,12 +77,14 @@ def _default_sync_credentials() -> BlobCredentials:
             raise
     store_id = os.environ.get("BLOB_STORE_ID", "").removeprefix("store_")
     if oidc_token and store_id.strip():
-        return BlobCredentials(oidc_token, store_id, "oidc")
+        return BlobCredentials(oidc_token, store_id, CredentialKind.OIDC)
     token = os.environ.get("BLOB_READ_WRITE_TOKEN") or os.environ.get(
         "VERCEL_BLOB_READ_WRITE_TOKEN"
     )
     if token:
-        return BlobCredentials(token, _store_from_read_write_token(token), "read_write")
+        return BlobCredentials(
+            token, _store_from_read_write_token(token), CredentialKind.READ_WRITE
+        )
     if oidc_token:
         raise BlobCredentialsError("BLOB_STORE_ID is required with Vercel OIDC credentials")
     raise BlobCredentialsError("Missing Blob credentials")

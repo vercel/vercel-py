@@ -39,11 +39,13 @@ class BlobServiceOptions(_BlobServiceOptionsKey):
         *,
         base_url: str | None = None,
         credentials_factory: BlobCredentialsFactory | None = None,
-        default_access: Access = "public",
+        default_access: Access = Access.PUBLIC,
         read_buffer_size: int = 256 * 1024,
     ) -> None:
-        if default_access not in ("public", "private"):
-            raise ValueError("default_access must be 'public' or 'private'")
+        try:
+            default_access = Access(default_access)
+        except ValueError:
+            raise ValueError("default_access must be 'public' or 'private'") from None
         if isinstance(read_buffer_size, bool) or not isinstance(read_buffer_size, int):
             raise TypeError("read_buffer_size must be an integer")
         if read_buffer_size <= 0:
@@ -80,11 +82,13 @@ class SyncBlobServiceOptions(_BlobServiceOptionsKey):
         *,
         base_url: str | None = None,
         credentials_factory: SyncBlobCredentialsFactory | None = None,
-        default_access: Access = "public",
+        default_access: Access = Access.PUBLIC,
         read_buffer_size: int = 256 * 1024,
     ) -> None:
-        if default_access not in ("public", "private"):
-            raise ValueError("default_access must be 'public' or 'private'")
+        try:
+            default_access = Access(default_access)
+        except ValueError:
+            raise ValueError("default_access must be 'public' or 'private'") from None
         if isinstance(read_buffer_size, bool) or not isinstance(read_buffer_size, int):
             raise TypeError("read_buffer_size must be an integer")
         if read_buffer_size <= 0:

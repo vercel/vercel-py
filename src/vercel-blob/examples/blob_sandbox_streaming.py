@@ -49,7 +49,7 @@ async def main() -> None:
                 # Local -> Blob.
                 async with (
                     await anyio.open_file(local_source, "rb") as source,
-                    blob.open(source_blob, "wb", content_type="text/plain") as target,
+                    blob.open(source_blob, "wb", metadata={"content_type": "text/plain"}) as target,
                 ):
                     await copy_stream(source, target)
 
@@ -81,7 +81,11 @@ async def main() -> None:
                     # Sandbox -> Blob. Blob publishes the result when the writer closes.
                     async with (
                         box.fs.open("workspace/uppercase.txt", "rb") as source,
-                        blob.open(transformed_blob, "wb", content_type="text/plain") as target,
+                        blob.open(
+                            transformed_blob,
+                            "wb",
+                            metadata={"content_type": "text/plain"},
+                        ) as target,
                     ):
                         await copy_stream(source, target)
 

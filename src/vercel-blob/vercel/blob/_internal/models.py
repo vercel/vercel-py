@@ -4,11 +4,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal, Protocol, TypeAlias
+from typing import Protocol, TypeAlias, TypedDict
 
-Access: TypeAlias = Literal["public", "private"]
-CredentialKind: TypeAlias = Literal["read_write", "oidc"]
+from vercel._internal.core.polyfills import StrEnum
+
+
+class Access(StrEnum):
+    PUBLIC = "public"
+    PRIVATE = "private"
+
+
+class CredentialKind(StrEnum):
+    READ_WRITE = "read_write"
+    OIDC = "oidc"
+
+
 DurationInput: TypeAlias = int | float | timedelta | None
+
+
+class BlobMetadata(TypedDict, total=False):
+    """Metadata to publish with a writable Blob."""
+
+    content_type: str | None
+    cache_control_max_age: DurationInput
 
 
 @dataclass(frozen=True, slots=True)
