@@ -133,7 +133,7 @@ async def test_get_percent_encodes_the_name_and_maps_the_schedule() -> None:
     client, transport = make_client(
         httpx.Response(
             200,
-            json={**SCHEDULE_JSON, "jitter": 120, "timezone": "America/New_York"},
+            json={**SCHEDULE_JSON, "jitter": 2, "timezone": "America/New_York"},
         )
     )
 

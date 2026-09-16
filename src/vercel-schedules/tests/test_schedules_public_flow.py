@@ -104,7 +104,7 @@ async def test_create_cron_schedule_async(mock_env_clear: None) -> None:
         "namespace": "jobs",
         "expression": {"type": "cron", "cron": "0 * * * *"},
         "timezone": "America/New_York",
-        "jitter": 120,
+        "jitter": 2,
         "target": {"type": "queue", "topic": "scheduled-cleanup"},
         "payload": {"maxAgeDays": 30},
     }
@@ -131,7 +131,7 @@ def test_create_cron_schedule_sync_sends_the_same_body(mock_env_clear: None) -> 
         "namespace": "jobs",
         "expression": {"type": "cron", "cron": "0 * * * *"},
         "timezone": "America/New_York",
-        "jitter": 120,
+        "jitter": 2,
         "target": {"type": "queue", "topic": "scheduled-cleanup"},
         "payload": {"maxAgeDays": 30},
     }
@@ -233,7 +233,7 @@ async def test_create_preserves_explicit_json_null_payload(mock_env_clear: None)
         ({"cron": "* * * * *", "jitter": timedelta(seconds=-1)}, "between"),
         ({"cron": "* * * * *", "jitter": timedelta(seconds=59)}, "between"),
         ({"cron": "* * * * *", "jitter": timedelta(minutes=15, seconds=1)}, "between"),
-        ({"cron": "* * * * *", "jitter": timedelta(minutes=1, milliseconds=500)}, "whole number"),
+        ({"cron": "* * * * *", "jitter": timedelta(minutes=1, seconds=1)}, "whole number"),
         ({"cron": "* * * * *", "jitter": 120}, "jitter must be a timedelta"),
     ],
 )
@@ -262,7 +262,7 @@ async def test_create_accepts_jitter_bounds_inclusive(
     async with session(service_options=session_options()):
         await create_schedule("tick", topic="t", cron="* * * * *", jitter=jitter)
 
-    assert sent_body(route)["jitter"] == int(jitter.total_seconds())
+    assert sent_body(route)["jitter"] == int(jitter / timedelta(minutes=1))
 
 
 @respx.mock
@@ -423,7 +423,7 @@ def test_update_single_field_sync(mock_env_clear: None) -> None:
     with session(service_options=session_options()):
         schedules_sync.update_schedule("cleanup", jitter=timedelta(minutes=5))
 
-    assert sent_body(route) == {"jitter": 300}
+    assert sent_body(route) == {"jitter": 5}
 
 
 @respx.mock

@@ -29,8 +29,8 @@ async for schedule in list_schedules(namespace="default"):
     print(schedule.name, schedule.expression, schedule.is_active)
 ```
 
-`jitter` adds a random delay to each firing. It is a whole number of seconds
-between one and fifteen minutes inclusive.
+`jitter` adds a random delay to each firing. The service represents it as a
+whole number of minutes between one and fifteen inclusive.
 
 ### Timezones
 

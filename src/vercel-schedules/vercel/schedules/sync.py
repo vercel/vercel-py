@@ -110,7 +110,7 @@ def create_schedule(
         timezone: IANA timezone name, such as `"America/Los_Angeles"`. The
             service defaults to UTC.
         namespace: Namespace to group schedules under.
-        jitter: Random delay added to each firing, in whole seconds, between
+        jitter: Random delay added to each firing, in whole minutes, between
             one and fifteen minutes inclusive.
         payload: JSON-serializable value delivered with each firing. Passing
             `None` explicitly configures a JSON `null`; omitting it configures

@@ -114,12 +114,12 @@ def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:
 def _check_jitter(jitter: timedelta) -> None:
     if not isinstance(jitter, timedelta):
         raise SchedulesValidationError("jitter must be a timedelta")
-    if jitter.microseconds:
-        raise SchedulesValidationError("jitter must be a whole number of seconds")
     if not MIN_JITTER <= jitter <= MAX_JITTER:
         raise SchedulesValidationError(
             f"jitter must be between {MIN_JITTER} and {MAX_JITTER} inclusive, got {jitter}"
         )
+    if jitter % timedelta(minutes=1):
+        raise SchedulesValidationError("jitter must be a whole number of minutes")
 
 
 def _expression(cron: str | None, at: datetime | None, timezone: str | None) -> dict[str, Any]:

@@ -57,9 +57,9 @@ USER_AGENT = (
     f"vercel-schedules/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
 
-# Jitter is an undocumented `number` on the wire. Seconds is the assumption;
-# this is the one place to change if that turns out to be wrong.
-_JITTER_UNIT = timedelta(seconds=1)
+# VSS stores and validates jitter as the AWS EventBridge Scheduler flexible
+# time window: an integer number of minutes.
+_JITTER_UNIT = timedelta(minutes=1)
 
 MIN_JITTER = timedelta(minutes=1)
 """Smallest jitter the service accepts."""
@@ -103,12 +103,12 @@ class _ScheduleModel(_ApiModel):
     namespace: str
     expression: _CronExpressionModel | _SingleExpressionModel = Field(discriminator="type")
     timezone: str = "UTC"
-    jitter: int | float | None = None
+    jitter: int | None = None
     target: _QueueTargetModel | _FunctionTargetModel = Field(discriminator="type")
     state: ScheduleState
     source: ScheduleSource
-    created_at: int | float = Field(alias="createdAt")
-    updated_at: int | float = Field(alias="updatedAt")
+    created_at: int = Field(alias="createdAt")
+    updated_at: int = Field(alias="updatedAt")
 
     def to_schedule(self) -> Schedule:
         expression: ScheduleExpression
