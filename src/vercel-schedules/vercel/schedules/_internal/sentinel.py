@@ -1,12 +1,16 @@
-"""Private sentinels shared by the public and internal call layers."""
+"""Sentinel for "argument not supplied", where `None` is itself a valid value."""
 
 
-class _UnsetType:
+class UnsetType:
+    """Type of `UNSET`, for annotating parameters that accept it."""
+
+    __slots__ = ()
+
     def __repr__(self) -> str:
         return "UNSET"
 
 
-UNSET = _UnsetType()
+UNSET = UnsetType()
 
 
-__all__ = ["UNSET"]
+__all__ = ["UNSET", "UnsetType"]

@@ -156,14 +156,11 @@ async def test_list_stops_on_an_empty_page_even_with_a_cursor(mock_env_clear: No
     assert route.call_count == 1
 
 
-@pytest.mark.parametrize("page_size", [0, True, 1.5, "10"])
 @respx.mock
-async def test_list_rejects_non_positive_integer_page_size(
-    mock_env_clear: None, page_size: Any
-) -> None:
+async def test_list_rejects_non_positive_page_size(mock_env_clear: None) -> None:
     async with session(service_options=session_options()):
         with pytest.raises(SchedulesValidationError, match="positive integer"):
-            async for _ in list_schedules(page_size=page_size):
+            async for _ in list_schedules(page_size=0):
                 pass
 
 

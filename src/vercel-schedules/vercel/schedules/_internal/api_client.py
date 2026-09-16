@@ -33,6 +33,7 @@ from vercel.schedules._internal.errors import (
     SchedulesResponseError,
 )
 from vercel.schedules._internal.models import (
+    JITTER_UNIT,
     CronExpression,
     FunctionTarget,
     OneOffExpression,
@@ -56,16 +57,6 @@ PLATFORM = platform.uname()
 USER_AGENT = (
     f"vercel-schedules/{VERSION} (Python/{sys.version}; {PLATFORM.system}/{PLATFORM.machine})"
 )
-
-# VSS stores and validates jitter as the AWS EventBridge Scheduler flexible
-# time window: an integer number of minutes.
-_JITTER_UNIT = timedelta(minutes=1)
-
-MIN_JITTER = timedelta(minutes=1)
-"""Smallest jitter the service accepts."""
-
-MAX_JITTER = timedelta(minutes=15)
-"""Largest jitter the service accepts."""
 
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
 
@@ -125,7 +116,7 @@ class _ScheduleModel(_ApiModel):
             namespace=self.namespace,
             expression=expression,
             timezone=self.timezone,
-            jitter=None if self.jitter is None else self.jitter * _JITTER_UNIT,
+            jitter=None if self.jitter is None else self.jitter * JITTER_UNIT,
             target=(
                 QueueTarget(topic=self.target.topic)
                 if isinstance(self.target, _QueueTargetModel)
@@ -151,9 +142,17 @@ class SchedulesPage:
     next_cursor: str | None
 
 
-def jitter_to_wire(jitter: timedelta) -> int:
-    """Render a jitter duration in the unit the service expects."""
-    return int(jitter / _JITTER_UNIT)
+def _parse(response: Response, model: type[ResponseModelT]) -> ResponseModelT:
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise SchedulesResponseError("Schedules API returned a non-JSON success response") from exc
+    try:
+        return model.model_validate(payload)
+    except ValidationError as exc:
+        raise SchedulesResponseError(
+            "Schedules API returned a malformed success response", data=payload
+        ) from exc
 
 
 def _raise_api_error(response: Response) -> None:
@@ -198,7 +197,7 @@ class SchedulesApiClient:
     async def create_schedule(self, body: Mapping[str, Any]) -> Schedule:
         """POST /v1/schedules."""
         response = await self._request("POST", "/v1/schedules", body=JSONBody(dict(body)))
-        return self._parse(response, _ScheduleModel).to_schedule()
+        return _parse(response, _ScheduleModel).to_schedule()
 
     async def list_schedules(
         self,
@@ -216,7 +215,7 @@ class SchedulesApiClient:
         if limit is not None:
             params["limit"] = str(limit)
         response = await self._request("GET", "/v1/schedules", params=params)
-        page = self._parse(response, _ListSchedulesResponseModel)
+        page = _parse(response, _ListSchedulesResponseModel)
         return SchedulesPage(
             schedules=[item.to_schedule() for item in page.data],
             next_cursor=page.cursor,
@@ -227,7 +226,7 @@ class SchedulesApiClient:
         response = await self._request(
             "GET", _schedule_path(name), params=_namespace_params(namespace)
         )
-        return self._parse(response, _ScheduleModel).to_schedule()
+        return _parse(response, _ScheduleModel).to_schedule()
 
     async def update_schedule(
         self, name: str, *, namespace: str | None, body: Mapping[str, Any]
@@ -239,7 +238,7 @@ class SchedulesApiClient:
             params=_namespace_params(namespace),
             body=JSONBody(dict(body)),
         )
-        return self._parse(response, _ScheduleModel).to_schedule()
+        return _parse(response, _ScheduleModel).to_schedule()
 
     async def delete_schedule(self, name: str, *, namespace: str | None) -> None:
         """DELETE /v1/schedules/:name."""
@@ -251,14 +250,14 @@ class SchedulesApiClient:
         response = await self._request(
             "POST", _schedule_path(name, "/enable"), params=_namespace_params(namespace)
         )
-        return self._parse(response, _ScheduleModel).to_schedule()
+        return _parse(response, _ScheduleModel).to_schedule()
 
     async def disable_schedule(self, name: str, *, namespace: str | None) -> Schedule:
         """POST /v1/schedules/:name/disable."""
         response = await self._request(
             "POST", _schedule_path(name, "/disable"), params=_namespace_params(namespace)
         )
-        return self._parse(response, _ScheduleModel).to_schedule()
+        return _parse(response, _ScheduleModel).to_schedule()
 
     async def invoke_schedule(self, name: str, *, namespace: str | None) -> None:
         """POST /v1/schedules/:name/invoke."""
@@ -289,20 +288,6 @@ class SchedulesApiClient:
             _raise_api_error(response)
         return response
 
-    def _parse(self, response: Response, model: type[ResponseModelT]) -> ResponseModelT:
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise SchedulesResponseError(
-                "Schedules API returned a non-JSON success response"
-            ) from exc
-        try:
-            return model.model_validate(payload)
-        except ValidationError as exc:
-            raise SchedulesResponseError(
-                "Schedules API returned a malformed success response", data=payload
-            ) from exc
-
 
 def _schedule_path(name: str, suffix: str = "") -> str:
     return f"/v1/schedules/{quote(name, safe='')}{suffix}"
@@ -313,10 +298,7 @@ def _namespace_params(namespace: str | None) -> dict[str, str]:
 
 
 __all__ = [
-    "MAX_JITTER",
-    "MIN_JITTER",
     "USER_AGENT",
     "SchedulesApiClient",
     "SchedulesPage",
-    "jitter_to_wire",
 ]

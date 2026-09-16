@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from vercel.schedules._internal.models import Schedule
-from vercel.schedules._internal.sentinel import UNSET
+from vercel.schedules._internal.sentinel import UNSET, UnsetType
 from vercel.schedules._internal.service import SchedulesService
 
 
@@ -69,7 +69,7 @@ async def update_schedule(
     at: datetime | None = None,
     timezone: str | None = None,
     topic: str | None = None,
-    jitter: Any = UNSET,
+    jitter: timedelta | None | UnsetType = UNSET,
     payload: Any = UNSET,
 ) -> Schedule:
     return await service.update_schedule(

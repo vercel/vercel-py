@@ -8,6 +8,16 @@ from vercel.schedules._internal.base import SchedulesModel
 
 PayloadT = TypeVar("PayloadT")
 
+# VSS stores and validates jitter as the AWS EventBridge Scheduler flexible
+# time window: an integer number of minutes.
+JITTER_UNIT = timedelta(minutes=1)
+
+MIN_JITTER = timedelta(minutes=1)
+"""Smallest jitter the service accepts."""
+
+MAX_JITTER = timedelta(minutes=15)
+"""Largest jitter the service accepts."""
+
 
 class ScheduleState(StrEnum):
     """Whether a schedule currently fires."""
@@ -137,6 +147,9 @@ JSONValue: TypeAlias = Any
 
 
 __all__ = [
+    "JITTER_UNIT",
+    "MAX_JITTER",
+    "MIN_JITTER",
     "CronExpression",
     "FunctionTarget",
     "JSONValue",

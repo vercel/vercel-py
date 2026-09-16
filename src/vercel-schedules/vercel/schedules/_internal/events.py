@@ -84,15 +84,17 @@ def _media_type(content_type: str | None) -> str | None:
     return content_type.split(";", 1)[0].strip().lower()
 
 
-def _decode_payload(headers: Mapping[str, str], body: RequestBody) -> tuple[bool, Any]:
-    """Return `(present, value)`, so a JSON `null` payload stays distinguishable."""
+def _decode_payload(lowered_headers: Mapping[str, str], body: RequestBody) -> tuple[bool, Any]:
+    """Return `(present, value)`, so a JSON `null` payload stays distinguishable.
+
+    `lowered_headers` must already have lower-cased names.
+    """
     if body is None:
         return False, None
     raw = body.encode() if isinstance(body, str) else bytes(body)
     if not raw:
         return False, None
-    content_type = headers.get("content-type")
-    if _media_type(content_type) != "application/json":
+    if _media_type(lowered_headers.get("content-type")) != "application/json":
         raise ScheduleEventParseError(
             "Schedule dispatch payload must use the application/json content type"
         )

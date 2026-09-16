@@ -9,17 +9,11 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from vercel.schedules._internal.api_client import (
-    MAX_JITTER,
-    MIN_JITTER,
-    SchedulesApiClient,
-    SchedulesPage,
-    jitter_to_wire,
-)
+from vercel.schedules._internal.api_client import SchedulesApiClient, SchedulesPage
 from vercel.schedules._internal.errors import SchedulesValidationError
-from vercel.schedules._internal.models import Schedule
+from vercel.schedules._internal.models import JITTER_UNIT, MAX_JITTER, MIN_JITTER, Schedule
 from vercel.schedules._internal.options import SchedulesServiceOptions
-from vercel.schedules._internal.sentinel import UNSET
+from vercel.schedules._internal.sentinel import UNSET, UnsetType
 
 if TYPE_CHECKING:
     from vercel._internal.core.session import SdkSession, SyncSdkSession
@@ -27,33 +21,24 @@ if TYPE_CHECKING:
 UTC_NAME = "UTC"
 
 
-def _require_name(name: str) -> str:
-    if not isinstance(name, str) or not name:
-        raise SchedulesValidationError("name must be a non-empty string")
-    return name
+def _require_non_empty(value: str, label: str) -> str:
+    if not value.strip():
+        raise SchedulesValidationError(f"{label} must be a non-empty string")
+    return value
 
 
 def _check_namespace(namespace: str | None) -> None:
-    if namespace is not None and (not isinstance(namespace, str) or not namespace):
-        raise SchedulesValidationError("namespace must be a non-empty string")
-
-
-def _check_topic(topic: str) -> None:
-    if not isinstance(topic, str) or not topic:
-        raise SchedulesValidationError("topic must be a non-empty string")
-
-
-def _check_cron(cron: str) -> None:
-    if not isinstance(cron, str) or not cron.strip():
-        raise SchedulesValidationError("cron must be a non-empty string")
+    if namespace is not None:
+        _require_non_empty(namespace, "namespace")
 
 
 def _check_timezone(timezone: str) -> None:
-    if not isinstance(timezone, str) or not timezone:
+    if not timezone:
         raise SchedulesValidationError("timezone must be a non-empty IANA timezone name")
 
 
 def _zone(timezone: str) -> ZoneInfo:
+    _check_timezone(timezone)
     try:
         return ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -88,9 +73,6 @@ def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:
     itself; a naive `at` needs an explicit `timezone`. When both are given,
     `at` is converted into `timezone`, so the instant is preserved.
     """
-    if not isinstance(at, datetime):
-        raise SchedulesValidationError("at must be a datetime")
-
     if at.tzinfo is None or at.utcoffset() is None:
         if timezone is None:
             raise SchedulesValidationError(
@@ -100,7 +82,6 @@ def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:
         return _wall_clock(at), timezone
 
     if timezone is not None:
-        _check_timezone(timezone)
         return _wall_clock(at.astimezone(_zone(timezone))), timezone
 
     name = _timezone_name(at)
@@ -111,32 +92,40 @@ def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:
     return _wall_clock(at), name
 
 
-def _check_jitter(jitter: timedelta) -> None:
-    if not isinstance(jitter, timedelta):
-        raise SchedulesValidationError("jitter must be a timedelta")
+def _jitter_to_wire(jitter: timedelta) -> int:
+    """Validate a jitter and render it in the unit the service expects."""
     if not MIN_JITTER <= jitter <= MAX_JITTER:
         raise SchedulesValidationError(
             f"jitter must be between {MIN_JITTER} and {MAX_JITTER} inclusive, got {jitter}"
         )
-    if jitter % timedelta(minutes=1):
+    if jitter % JITTER_UNIT:
         raise SchedulesValidationError("jitter must be a whole number of minutes")
+    return jitter // JITTER_UNIT
 
 
-def _expression(cron: str | None, at: datetime | None, timezone: str | None) -> dict[str, Any]:
-    """Render `expression` and, when derived from `at`, `timezone`."""
-    body: dict[str, Any] = {}
-    if cron is not None:
-        _check_cron(cron)
-        body["expression"] = {"type": "cron", "cron": cron}
-        if timezone is not None:
-            _check_timezone(timezone)
-            body["timezone"] = timezone
-    else:
-        assert at is not None
-        wire_at, zone_name = resolve_one_off(at, timezone)
-        body["expression"] = {"type": "single", "at": wire_at}
-        body["timezone"] = zone_name
-    return body
+def _cron_fields(cron: str, timezone: str | None) -> dict[str, Any]:
+    """`expression` for a cron schedule, plus `timezone` when the caller gave one."""
+    _require_non_empty(cron, "cron")
+    fields: dict[str, Any] = {"expression": {"type": "cron", "cron": cron}}
+    if timezone is not None:
+        _check_timezone(timezone)
+        fields["timezone"] = timezone
+    return fields
+
+
+def _one_off_fields(at: datetime, timezone: str | None) -> dict[str, Any]:
+    """`expression` for a one-off schedule, plus the `timezone` it resolved to.
+
+    Unlike cron, a one-off always sends `timezone`: the wire `at` is a wall-clock
+    time, which means nothing without the zone it was rendered in.
+    """
+    wire_at, zone_name = resolve_one_off(at, timezone)
+    return {"expression": {"type": "single", "at": wire_at}, "timezone": zone_name}
+
+
+def _queue_target(topic: str) -> dict[str, str]:
+    _require_non_empty(topic, "topic")
+    return {"type": "queue", "topic": topic}
 
 
 def build_create_body(
@@ -151,20 +140,21 @@ def build_create_body(
     payload: Any,
 ) -> dict[str, Any]:
     """Validate `create_schedule` arguments and render the request body."""
-    _require_name(name)
+    _require_non_empty(name, "name")
     _check_namespace(namespace)
-    _check_topic(topic)
-    if (cron is None) == (at is None):
-        raise SchedulesValidationError("pass exactly one of cron or at")
 
     body: dict[str, Any] = {"name": name}
     if namespace is not None:
         body["namespace"] = namespace
-    body.update(_expression(cron, at, timezone))
+    if cron is not None and at is None:
+        body.update(_cron_fields(cron, timezone))
+    elif at is not None and cron is None:
+        body.update(_one_off_fields(at, timezone))
+    else:
+        raise SchedulesValidationError("pass exactly one of cron or at")
     if jitter is not None:
-        _check_jitter(jitter)
-        body["jitter"] = jitter_to_wire(jitter)
-    body["target"] = {"type": "queue", "topic": topic}
+        body["jitter"] = _jitter_to_wire(jitter)
+    body["target"] = _queue_target(topic)
     if payload is not UNSET:
         body["payload"] = payload
     return body
@@ -176,33 +166,37 @@ def build_update_body(
     at: datetime | None,
     timezone: str | None,
     topic: str | None,
-    jitter: Any,
+    jitter: timedelta | None | UnsetType,
     payload: Any,
 ) -> dict[str, Any]:
     """Validate `update_schedule` arguments and render the PATCH body.
 
     Only supplied fields are sent. `jitter=None` clears the jitter; omitting it
     leaves it unchanged.
+
+    `timezone` rides along with whichever expression is being set: verbatim next
+    to a new cron, or as the zone a new `at` was resolved into. On its own it
+    re-zones the existing expression.
     """
     if cron is not None and at is not None:
         raise SchedulesValidationError("pass at most one of cron or at")
 
     body: dict[str, Any] = {}
-    if cron is not None or at is not None:
-        body.update(_expression(cron, at, timezone))
+    if cron is not None:
+        body.update(_cron_fields(cron, timezone))
+    elif at is not None:
+        body.update(_one_off_fields(at, timezone))
     elif timezone is not None:
         _check_timezone(timezone)
         body["timezone"] = timezone
 
     if topic is not None:
-        _check_topic(topic)
-        body["target"] = {"type": "queue", "topic": topic}
+        body["target"] = _queue_target(topic)
 
     if jitter is None:
         body["jitter"] = None
-    elif jitter is not UNSET:
-        _check_jitter(jitter)
-        body["jitter"] = jitter_to_wire(jitter)
+    elif not isinstance(jitter, UnsetType):
+        body["jitter"] = _jitter_to_wire(jitter)
 
     if payload is not UNSET:
         body["payload"] = payload
@@ -264,9 +258,7 @@ class SchedulesService:
     ) -> SchedulesPage:
         self._ensure_open()
         _check_namespace(namespace)
-        if page_size is not None and (
-            isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1
-        ):
+        if page_size is not None and page_size < 1:
             raise SchedulesValidationError("page_size must be a positive integer")
         return await self._api_client.list_schedules(
             namespace=namespace, cursor=cursor, limit=page_size
@@ -275,7 +267,9 @@ class SchedulesService:
     async def get_schedule(self, name: str, *, namespace: str | None) -> Schedule:
         self._ensure_open()
         _check_namespace(namespace)
-        return await self._api_client.get_schedule(_require_name(name), namespace=namespace)
+        return await self._api_client.get_schedule(
+            _require_non_empty(name, "name"), namespace=namespace
+        )
 
     async def update_schedule(
         self,
@@ -286,11 +280,11 @@ class SchedulesService:
         at: datetime | None,
         timezone: str | None,
         topic: str | None,
-        jitter: Any,
+        jitter: timedelta | None | UnsetType,
         payload: Any,
     ) -> Schedule:
         self._ensure_open()
-        _require_name(name)
+        _require_non_empty(name, "name")
         _check_namespace(namespace)
         body = build_update_body(
             cron=cron, at=at, timezone=timezone, topic=topic, jitter=jitter, payload=payload
@@ -300,22 +294,30 @@ class SchedulesService:
     async def delete_schedule(self, name: str, *, namespace: str | None) -> None:
         self._ensure_open()
         _check_namespace(namespace)
-        await self._api_client.delete_schedule(_require_name(name), namespace=namespace)
+        await self._api_client.delete_schedule(
+            _require_non_empty(name, "name"), namespace=namespace
+        )
 
     async def enable_schedule(self, name: str, *, namespace: str | None) -> Schedule:
         self._ensure_open()
         _check_namespace(namespace)
-        return await self._api_client.enable_schedule(_require_name(name), namespace=namespace)
+        return await self._api_client.enable_schedule(
+            _require_non_empty(name, "name"), namespace=namespace
+        )
 
     async def disable_schedule(self, name: str, *, namespace: str | None) -> Schedule:
         self._ensure_open()
         _check_namespace(namespace)
-        return await self._api_client.disable_schedule(_require_name(name), namespace=namespace)
+        return await self._api_client.disable_schedule(
+            _require_non_empty(name, "name"), namespace=namespace
+        )
 
     async def invoke_schedule(self, name: str, *, namespace: str | None) -> None:
         self._ensure_open()
         _check_namespace(namespace)
-        await self._api_client.invoke_schedule(_require_name(name), namespace=namespace)
+        await self._api_client.invoke_schedule(
+            _require_non_empty(name, "name"), namespace=namespace
+        )
 
 
 def get_schedules_service(session: "SdkSession | SyncSdkSession") -> SchedulesService:

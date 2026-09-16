@@ -13,7 +13,6 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 
 from vercel._internal.core.session import get_active_session
-from vercel.schedules._internal.api_client import MAX_JITTER, MIN_JITTER
 from vercel.schedules._internal.async_runtime import (
     create_schedule as _create_schedule,
     delete_schedule as _delete_schedule,
@@ -49,6 +48,8 @@ from vercel.schedules._internal.events import (
     resolve_payload_type,
 )
 from vercel.schedules._internal.models import (
+    MAX_JITTER,
+    MIN_JITTER,
     CronExpression,
     FunctionTarget,
     JSONValue,
@@ -66,7 +67,7 @@ from vercel.schedules._internal.options import (
     SchedulesCredentialsFactory,
     SchedulesServiceOptions,
 )
-from vercel.schedules._internal.sentinel import UNSET, _UnsetType
+from vercel.schedules._internal.sentinel import UNSET, UnsetType
 from vercel.schedules._internal.service import SchedulesService, get_schedules_service
 from vercel.schedules.version import __version__
 
@@ -171,7 +172,7 @@ async def update_schedule(
     at: datetime | None = None,
     timezone: str | None = None,
     topic: str | None = None,
-    jitter: timedelta | None | _UnsetType = UNSET,
+    jitter: timedelta | None | UnsetType = UNSET,
     payload: JSONValue = UNSET,
 ) -> Schedule:
     """Change a schedule's configuration. Omitted fields are left as they are.
