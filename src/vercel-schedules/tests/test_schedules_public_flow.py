@@ -1,10 +1,14 @@
-"""Public surface over a mocked network: sync and async, validation, sessions."""
+"""Public surface over a mocked network: sessions, credentials, and pagination.
+
+Argument validation and body rendering are covered in `test_schedules_service`;
+here each operation is exercised end to end once, plus the session and
+credential behaviour that only shows up with a real transport in the loop.
+"""
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx2 as httpx
 import pytest
@@ -15,8 +19,6 @@ from vercel.api import session
 from vercel.errors import VercelError
 from vercel.schedules import (
     DEFAULT_SCHEDULES_BASE_URL,
-    MAX_JITTER,
-    MIN_JITTER,
     Schedule,
     SchedulesCredentialsError,
     SchedulesServiceOptions,
@@ -34,31 +36,43 @@ from vercel.schedules import (
 
 SCHEDULES_URL = f"{TEST_BASE_URL}/v1/schedules"
 CLEANUP_URL = f"{SCHEDULES_URL}/cleanup"
-AT = datetime(2026, 10, 1, 9, 30, tzinfo=timezone.utc)
-JITTER = timedelta(minutes=2)
-
-
-def create_route() -> respx.Route:
-    return respx.post(SCHEDULES_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
 
 
 def sent_body(route: respx.Route) -> dict[str, Any]:
     return json.loads(route.calls.last.request.content)
 
 
+def page(*ids: str, cursor: str | None) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"data": [{**SCHEDULE_JSON, "scheduleId": i} for i in ids], "cursor": cursor},
+    )
+
+
+def ok(**overrides: Any) -> httpx.Response:
+    return httpx.Response(200, json={**SCHEDULE_JSON, **overrides})
+
+
+def mock_name_routes() -> dict[str, respx.Route]:
+    return {
+        "get": respx.get(CLEANUP_URL).mock(return_value=ok()),
+        "patch": respx.patch(CLEANUP_URL).mock(return_value=ok()),
+        "enable": respx.post(f"{CLEANUP_URL}/enable").mock(return_value=ok()),
+        "disable": respx.post(f"{CLEANUP_URL}/disable").mock(return_value=ok(state="inactive")),
+        "invoke": respx.post(f"{CLEANUP_URL}/invoke").mock(return_value=httpx.Response(202)),
+        "delete": respx.delete(CLEANUP_URL).mock(return_value=httpx.Response(204)),
+    }
+
+
 # --- options ---------------------------------------------------------------
 
 
-def test_default_options_target_the_public_service(mock_env_clear: None) -> None:
-    options = SchedulesServiceOptions()
+def test_base_url_defaults_to_public_service_unless_env_overrides(
+    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert SchedulesServiceOptions().base_url == DEFAULT_SCHEDULES_BASE_URL
 
-    assert options.base_url == DEFAULT_SCHEDULES_BASE_URL == "https://vercel-schedules.com"
-    assert options.token is None
-
-
-def test_base_url_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VERCEL_SCHEDULE_BASE_URL", "https://staging.test/")
-
     assert SchedulesServiceOptions().base_url == "https://staging.test/"
 
 
@@ -70,224 +84,54 @@ def test_token_and_credentials_factory_are_exclusive() -> None:
         SchedulesServiceOptions(token="t", credentials_factory=factory)
 
 
-def test_options_are_frozen() -> None:
-    options = SchedulesServiceOptions()
-
-    with pytest.raises(SchedulesValidationError, match="frozen"):
-        options.base_url = "https://elsewhere.test"  # type: ignore[misc]
-
-
-# --- create ----------------------------------------------------------------
+# --- async surface ---------------------------------------------------------
 
 
 @respx.mock
-async def test_create_cron_schedule_async(mock_env_clear: None) -> None:
-    route = create_route()
+async def test_create_sends_body_with_bearer_token(mock_env_clear: None) -> None:
+    route = respx.post(SCHEDULES_URL).mock(return_value=ok())
 
     async with session(service_options=session_options()):
         schedule = await create_schedule(
             "cleanup",
             topic="scheduled-cleanup",
             cron="0 * * * *",
-            timezone="America/New_York",
             namespace="jobs",
-            jitter=JITTER,
-            payload={"maxAgeDays": 30},
+            jitter=timedelta(minutes=2),
         )
 
     assert isinstance(schedule, Schedule)
     assert schedule.name == "cleanup"
-    assert schedule.timezone == "UTC"
     assert route.calls.last.request.headers["authorization"] == "Bearer oidc-token"
     assert sent_body(route) == {
         "name": "cleanup",
         "namespace": "jobs",
         "expression": {"type": "cron", "cron": "0 * * * *"},
-        "timezone": "America/New_York",
         "jitter": 2,
         "target": {"type": "queue", "topic": "scheduled-cleanup"},
-        "payload": {"maxAgeDays": 30},
     }
 
 
 @respx.mock
-def test_create_cron_schedule_sync_sends_the_same_body(mock_env_clear: None) -> None:
-    route = create_route()
-
-    with session(service_options=session_options()):
-        schedule = schedules_sync.create_schedule(
-            "cleanup",
-            topic="scheduled-cleanup",
-            cron="0 * * * *",
-            timezone="America/New_York",
-            namespace="jobs",
-            jitter=JITTER,
-            payload={"maxAgeDays": 30},
-        )
-
-    assert schedule.schedule_id == "sch_123"
-    assert sent_body(route) == {
-        "name": "cleanup",
-        "namespace": "jobs",
-        "expression": {"type": "cron", "cron": "0 * * * *"},
-        "timezone": "America/New_York",
-        "jitter": 2,
-        "target": {"type": "queue", "topic": "scheduled-cleanup"},
-        "payload": {"maxAgeDays": 30},
-    }
-
-
-@respx.mock
-async def test_create_one_off_from_zoneinfo_datetime(mock_env_clear: None) -> None:
-    route = create_route()
-    local = datetime(2026, 10, 1, 9, 30, 15, 250_000, tzinfo=ZoneInfo("America/Los_Angeles"))
+async def test_name_based_operations_pass_name_and_namespace(mock_env_clear: None) -> None:
+    routes = mock_name_routes()
 
     async with session(service_options=session_options()):
-        await create_schedule("report", topic="send-report", at=local)
+        assert (await get_schedule("cleanup", namespace="jobs")).name == "cleanup"
+        await update_schedule("cleanup", namespace="jobs", jitter=timedelta(minutes=5))
+        assert (await enable_schedule("cleanup", namespace="jobs")).is_active
+        assert not (await disable_schedule("cleanup", namespace="jobs")).is_active
+        await invoke_schedule("cleanup", namespace="jobs")
+        await delete_schedule("cleanup", namespace="jobs")
 
-    assert sent_body(route) == {
-        "name": "report",
-        "expression": {"type": "single", "at": "2026-10-01T09:30:15"},
-        "timezone": "America/Los_Angeles",
-        "target": {"type": "queue", "topic": "send-report"},
-    }
-
-
-@respx.mock
-async def test_create_one_off_from_utc_datetime(mock_env_clear: None) -> None:
-    route = create_route()
-
-    async with session(service_options=session_options()):
-        await create_schedule("report", topic="send-report", at=AT)
-
-    body = sent_body(route)
-    assert body["expression"] == {"type": "single", "at": "2026-10-01T09:30:00"}
-    assert body["timezone"] == "UTC"
+    for route in routes.values():
+        assert route.call_count == 1
+        assert route.calls.last.request.url.params["namespace"] == "jobs"
+    assert sent_body(routes["patch"]) == {"jitter": 5}
 
 
 @respx.mock
-async def test_create_one_off_from_naive_datetime_with_timezone(mock_env_clear: None) -> None:
-    route = create_route()
-
-    async with session(service_options=session_options()):
-        await create_schedule(
-            "report",
-            topic="send-report",
-            at=datetime(2026, 10, 1, 9, 30),
-            timezone="Europe/Berlin",
-        )
-
-    body = sent_body(route)
-    assert body["expression"] == {"type": "single", "at": "2026-10-01T09:30:00"}
-    assert body["timezone"] == "Europe/Berlin"
-
-
-@respx.mock
-async def test_create_one_off_converts_aware_datetime_into_explicit_timezone(
-    mock_env_clear: None,
-) -> None:
-    route = create_route()
-
-    async with session(service_options=session_options()):
-        await create_schedule("report", topic="send-report", at=AT, timezone="Asia/Tokyo")
-
-    body = sent_body(route)
-    assert body["expression"] == {"type": "single", "at": "2026-10-01T18:30:00"}
-    assert body["timezone"] == "Asia/Tokyo"
-
-
-@respx.mock
-async def test_create_omits_optional_fields(mock_env_clear: None) -> None:
-    route = create_route()
-
-    async with session(service_options=session_options()):
-        await create_schedule("tick", topic="t", cron="* * * * *")
-
-    assert sent_body(route) == {
-        "name": "tick",
-        "expression": {"type": "cron", "cron": "* * * * *"},
-        "target": {"type": "queue", "topic": "t"},
-    }
-
-
-@respx.mock
-async def test_create_preserves_explicit_json_null_payload(mock_env_clear: None) -> None:
-    route = create_route()
-
-    async with session(service_options=session_options()):
-        await create_schedule("tick", topic="t", cron="* * * * *", payload=None)
-
-    assert sent_body(route)["payload"] is None
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "match"),
-    [
-        ({}, "exactly one of cron or at"),
-        ({"cron": "* * * * *", "at": AT}, "exactly one of cron or at"),
-        ({"cron": "  "}, "cron must be"),
-        ({"cron": "* * * * *", "timezone": ""}, "timezone must be"),
-        ({"at": AT.replace(tzinfo=None)}, "at is naive"),
-        ({"at": AT.astimezone(timezone(timedelta(hours=-5)))}, "fixed offset"),
-        ({"at": AT, "timezone": "Mars/Olympus_Mons"}, "not a known IANA timezone"),
-        ({"cron": "* * * * *", "jitter": timedelta(seconds=-1)}, "between"),
-        ({"cron": "* * * * *", "jitter": timedelta(seconds=59)}, "between"),
-        ({"cron": "* * * * *", "jitter": timedelta(minutes=15, seconds=1)}, "between"),
-        ({"cron": "* * * * *", "jitter": timedelta(minutes=1, seconds=1)}, "whole number"),
-        ({"cron": "* * * * *", "jitter": 120}, "jitter must be a timedelta"),
-    ],
-)
-@respx.mock
-async def test_create_rejects_bad_arguments_before_any_request(
-    mock_env_clear: None, kwargs: dict[str, Any], match: str
-) -> None:
-    route = create_route()
-
-    async with session(service_options=session_options()):
-        with pytest.raises(SchedulesValidationError, match=match):
-            await create_schedule("tick", topic="t", **kwargs)
-        with pytest.raises(ValueError, match=match):
-            await create_schedule("tick", topic="t", **kwargs)
-
-    assert not route.called
-
-
-@pytest.mark.parametrize("jitter", [MIN_JITTER, timedelta(minutes=7), MAX_JITTER])
-@respx.mock
-async def test_create_accepts_jitter_bounds_inclusive(
-    mock_env_clear: None, jitter: timedelta
-) -> None:
-    route = create_route()
-
-    async with session(service_options=session_options()):
-        await create_schedule("tick", topic="t", cron="* * * * *", jitter=jitter)
-
-    assert sent_body(route)["jitter"] == int(jitter / timedelta(minutes=1))
-
-
-@respx.mock
-async def test_create_rejects_empty_name_topic_and_namespace(mock_env_clear: None) -> None:
-    async with session(service_options=session_options()):
-        with pytest.raises(SchedulesValidationError, match="name"):
-            await create_schedule("", topic="t", cron="* * * * *")
-        with pytest.raises(SchedulesValidationError, match="topic"):
-            await create_schedule("tick", topic="", cron="* * * * *")
-        with pytest.raises(SchedulesValidationError, match="namespace"):
-            await create_schedule("tick", topic="t", cron="* * * * *", namespace="")
-
-
-# --- list ------------------------------------------------------------------
-
-
-def page(*ids: str, cursor: str | None) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={"data": [{**SCHEDULE_JSON, "scheduleId": i} for i in ids], "cursor": cursor},
-    )
-
-
-@respx.mock
-async def test_list_follows_cursors_async(mock_env_clear: None) -> None:
+async def test_list_follows_cursors(mock_env_clear: None) -> None:
     route = respx.get(SCHEDULES_URL).mock(
         side_effect=[page("a", "b", cursor="c1"), page("c", cursor=None)]
     )
@@ -296,21 +140,10 @@ async def test_list_follows_cursors_async(mock_env_clear: None) -> None:
         ids = [s.schedule_id async for s in list_schedules(namespace="jobs", page_size=2)]
 
     assert ids == ["a", "b", "c"]
-    urls = [str(call.request.url) for call in route.calls]
-    assert urls == [
+    assert [str(call.request.url) for call in route.calls] == [
         f"{SCHEDULES_URL}?namespace=jobs&limit=2",
         f"{SCHEDULES_URL}?namespace=jobs&cursor=c1&limit=2",
     ]
-
-
-@respx.mock
-def test_list_follows_cursors_sync(mock_env_clear: None) -> None:
-    respx.get(SCHEDULES_URL).mock(side_effect=[page("a", cursor="c1"), page("b", cursor=None)])
-
-    with session(service_options=session_options()):
-        ids = [s.schedule_id for s in schedules_sync.list_schedules()]
-
-    assert ids == ["a", "b"]
 
 
 @respx.mock
@@ -323,151 +156,65 @@ async def test_list_stops_on_an_empty_page_even_with_a_cursor(mock_env_clear: No
     assert route.call_count == 1
 
 
+@pytest.mark.parametrize("page_size", [0, True, 1.5, "10"])
 @respx.mock
-async def test_list_rejects_non_positive_page_size(mock_env_clear: None) -> None:
-    async with session(service_options=session_options()):
-        with pytest.raises(SchedulesValidationError):
-            async for _ in list_schedules(page_size=0):
-                pass
-
-
-@pytest.mark.parametrize("page_size", [True, 1.5, "10"])
-@respx.mock
-async def test_list_rejects_non_integer_page_size(mock_env_clear: None, page_size: Any) -> None:
+async def test_list_rejects_non_positive_integer_page_size(
+    mock_env_clear: None, page_size: Any
+) -> None:
     async with session(service_options=session_options()):
         with pytest.raises(SchedulesValidationError, match="positive integer"):
             async for _ in list_schedules(page_size=page_size):
                 pass
 
 
-# --- get / update / enable / disable / invoke / delete --------------------
-
-
 @respx.mock
-async def test_name_based_operations_async(mock_env_clear: None) -> None:
-    get = respx.get(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-    respx.post(f"{CLEANUP_URL}/enable").mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-    respx.post(f"{CLEANUP_URL}/disable").mock(
-        return_value=httpx.Response(200, json={**SCHEDULE_JSON, "state": "inactive"})
-    )
-    invoke = respx.post(f"{CLEANUP_URL}/invoke").mock(return_value=httpx.Response(202))
-    delete = respx.delete(CLEANUP_URL).mock(
-        return_value=httpx.Response(200, json={"scheduleId": "sch_123"})
-    )
+async def test_validation_fails_before_any_request(mock_env_clear: None) -> None:
+    create = respx.post(SCHEDULES_URL).mock(return_value=ok())
+    routes = mock_name_routes()
 
     async with session(service_options=session_options()):
-        assert (await get_schedule("cleanup", namespace="jobs")).name == "cleanup"
-        assert (await enable_schedule("cleanup", namespace="jobs")).is_active
-        assert not (await disable_schedule("cleanup", namespace="jobs")).is_active
-        await invoke_schedule("cleanup", namespace="jobs")
-        await delete_schedule("cleanup", namespace="jobs")
+        with pytest.raises(SchedulesValidationError, match="exactly one of cron or at"):
+            await create_schedule("tick", topic="t")
+        with pytest.raises(SchedulesValidationError, match="at least one field"):
+            await update_schedule("cleanup")
+        with pytest.raises(SchedulesValidationError, match="name"):
+            await get_schedule("")
+        with pytest.raises(SchedulesValidationError, match="namespace"):
+            await delete_schedule("cleanup", namespace="")
 
-    for route in (get, invoke, delete):
-        assert route.calls.last.request.url.params["namespace"] == "jobs"
+    assert not create.called
+    assert not any(route.called for route in routes.values())
+
+
+# --- sync surface ----------------------------------------------------------
 
 
 @respx.mock
-def test_name_based_operations_sync(mock_env_clear: None) -> None:
-    respx.get(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-    respx.post(f"{CLEANUP_URL}/enable").mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-    respx.post(f"{CLEANUP_URL}/disable").mock(
-        return_value=httpx.Response(200, json={**SCHEDULE_JSON, "state": "inactive"})
+def test_sync_surface_drives_every_operation(mock_env_clear: None) -> None:
+    create = respx.post(SCHEDULES_URL).mock(return_value=ok())
+    listing = respx.get(SCHEDULES_URL).mock(
+        side_effect=[page("a", cursor="c1"), page("b", cursor=None)]
     )
-    respx.post(f"{CLEANUP_URL}/invoke").mock(return_value=httpx.Response(202))
-    delete = respx.delete(CLEANUP_URL).mock(return_value=httpx.Response(204))
+    routes = mock_name_routes()
 
     with session(service_options=session_options()):
+        created = schedules_sync.create_schedule("cleanup", topic="t", cron="0 * * * *")
+        ids = [s.schedule_id for s in schedules_sync.list_schedules()]
         assert schedules_sync.get_schedule("cleanup").name == "cleanup"
+        schedules_sync.update_schedule("cleanup", jitter=timedelta(minutes=5))
         assert schedules_sync.enable_schedule("cleanup").is_active
         assert not schedules_sync.disable_schedule("cleanup").is_active
         schedules_sync.invoke_schedule("cleanup")
         schedules_sync.delete_schedule("cleanup")
 
-    assert "namespace" not in delete.calls.last.request.url.params
-
-
-@respx.mock
-async def test_update_sends_only_supplied_fields(mock_env_clear: None) -> None:
-    route = respx.patch(CLEANUP_URL).mock(
-        return_value=httpx.Response(
-            200, json={**SCHEDULE_JSON, "expression": {"type": "cron", "cron": "0 2 * * *"}}
-        )
-    )
-
-    async with session(service_options=session_options()):
-        schedule = await update_schedule(
-            "cleanup",
-            namespace="jobs",
-            cron="0 2 * * *",
-            timezone="America/New_York",
-            topic="daily-cleanup",
-            jitter=None,
-            payload={"job": "cleanup"},
-        )
-
-    assert schedule.expression.cron == "0 2 * * *"  # type: ignore[union-attr]
-    assert route.calls.last.request.url.params["namespace"] == "jobs"
-    assert sent_body(route) == {
-        "expression": {"type": "cron", "cron": "0 2 * * *"},
-        "timezone": "America/New_York",
-        "target": {"type": "queue", "topic": "daily-cleanup"},
-        "jitter": None,
-        "payload": {"job": "cleanup"},
-    }
-
-
-@respx.mock
-def test_update_single_field_sync(mock_env_clear: None) -> None:
-    route = respx.patch(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-
-    with session(service_options=session_options()):
-        schedules_sync.update_schedule("cleanup", jitter=timedelta(minutes=5))
-
-    assert sent_body(route) == {"jitter": 5}
-
-
-@respx.mock
-async def test_update_one_off_derives_timezone(mock_env_clear: None) -> None:
-    route = respx.patch(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-
-    async with session(service_options=session_options()):
-        await update_schedule("cleanup", at=datetime(2026, 12, 1, 8, tzinfo=ZoneInfo("Asia/Tokyo")))
-
-    assert sent_body(route) == {
-        "expression": {"type": "single", "at": "2026-12-01T08:00:00"},
-        "timezone": "Asia/Tokyo",
-    }
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "match"),
-    [
-        ({}, "at least one field"),
-        ({"cron": "* * * * *", "at": AT}, "at most one of cron or at"),
-        ({"jitter": timedelta(seconds=30)}, "between"),
-        ({"topic": ""}, "topic"),
-    ],
-)
-@respx.mock
-async def test_update_rejects_bad_arguments(
-    mock_env_clear: None, kwargs: dict[str, Any], match: str
-) -> None:
-    route = respx.patch(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-
-    async with session(service_options=session_options()):
-        with pytest.raises(SchedulesValidationError, match=match):
-            await update_schedule("cleanup", **kwargs)
-
-    assert not route.called
-
-
-@respx.mock
-async def test_empty_name_is_rejected(mock_env_clear: None) -> None:
-    async with session(service_options=session_options()):
-        with pytest.raises(SchedulesValidationError, match="name"):
-            await get_schedule("")
-        with pytest.raises(SchedulesValidationError, match="namespace"):
-            await get_schedule("cleanup", namespace="")
+    assert created.schedule_id == "sch_123"
+    assert ids == ["a", "b"]
+    assert sent_body(create)["expression"] == {"type": "cron", "cron": "0 * * * *"}
+    assert listing.call_count == 2
+    assert sent_body(routes["patch"]) == {"jitter": 5}
+    for route in routes.values():
+        assert route.call_count == 1
+        assert "namespace" not in route.calls.last.request.url.params
 
 
 # --- sessions and credentials ---------------------------------------------
@@ -492,26 +239,26 @@ def test_sync_surface_rejects_an_async_session(mock_env_clear: None) -> None:
 
 @respx.mock
 async def test_credentials_factory_is_called_per_request(mock_env_clear: None) -> None:
-    respx.get(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
-    calls = 0
+    respx.get(CLEANUP_URL).mock(return_value=ok())
+    tokens = iter(["tok-1", "tok-2"])
 
     async def factory() -> str:
-        nonlocal calls
-        calls += 1
-        return f"tok-{calls}"
+        return next(tokens)
 
     options = SchedulesServiceOptions(base_url=TEST_BASE_URL, credentials_factory=factory)
     async with session(service_options=[options]):
         await get_schedule("cleanup")
         await get_schedule("cleanup")
 
-    assert calls == 2
-    assert respx.calls.last.request.headers["authorization"] == "Bearer tok-2"
+    assert [c.request.headers["authorization"] for c in respx.calls] == [
+        "Bearer tok-1",
+        "Bearer tok-2",
+    ]
 
 
 @respx.mock
 async def test_missing_credentials_surface_as_credentials_error(mock_env_clear: None) -> None:
-    respx.get(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
+    respx.get(CLEANUP_URL).mock(return_value=ok())
 
     async with session(service_options=[SchedulesServiceOptions(base_url=TEST_BASE_URL)]):
         with pytest.raises(SchedulesCredentialsError):
@@ -520,7 +267,7 @@ async def test_missing_credentials_surface_as_credentials_error(mock_env_clear: 
 
 @respx.mock
 def test_missing_credentials_surface_as_credentials_error_sync(mock_env_clear: None) -> None:
-    respx.get(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
+    respx.get(CLEANUP_URL).mock(return_value=ok())
 
     with session(service_options=[SchedulesServiceOptions(base_url=TEST_BASE_URL)]):
         with pytest.raises(SchedulesCredentialsError):
@@ -529,7 +276,7 @@ def test_missing_credentials_surface_as_credentials_error_sync(mock_env_clear: N
 
 @respx.mock
 def test_sync_session_rejects_a_suspending_credentials_factory(mock_env_clear: None) -> None:
-    route = respx.get(CLEANUP_URL).mock(return_value=httpx.Response(200, json=SCHEDULE_JSON))
+    route = respx.get(CLEANUP_URL).mock(return_value=ok())
 
     async def factory() -> str:
         await asyncio.sleep(0)

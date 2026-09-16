@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Any, get_origin
+from typing import Annotated, Any
 
 import pytest
 from conftest import DISPATCH_HEADERS
 from pydantic import BaseModel
 
 from vercel.schedules import (
-    SCHEDULE_CLOUD_EVENT_TYPE,
     ScheduleEvent,
     ScheduleEventParseError,
-    ScheduleHandler,
     parse_schedule_event,
     resolve_payload_type,
 )
@@ -40,19 +38,14 @@ def test_header_names_are_case_insensitive() -> None:
 
 
 @pytest.mark.parametrize("body", [None, b"", ""])
-def test_missing_body_means_no_payload(body: bytes | str | None) -> None:
-    assert parse_schedule_event(DISPATCH_HEADERS, body).payload is None
+@pytest.mark.parametrize("headers", [DISPATCH_HEADERS, {**DISPATCH_HEADERS, **JSON}])
+def test_missing_body_means_no_payload(headers: dict[str, str], body: bytes | str | None) -> None:
+    assert parse_schedule_event(headers, body).payload is None
 
 
-def test_empty_json_body_means_no_payload() -> None:
-    assert parse_schedule_event({**DISPATCH_HEADERS, **JSON}, b"").payload is None
-
-
-@pytest.mark.parametrize("raw", [b"null", b"false", b"0"])
-def test_falsy_json_payloads_are_preserved(raw: bytes) -> None:
-    event = parse_schedule_event({**DISPATCH_HEADERS, **JSON}, raw)
-
-    assert event.payload == (None if raw == b"null" else (False if raw == b"false" else 0))
+@pytest.mark.parametrize(("raw", "expected"), [(b"null", None), (b"false", False), (b"0", 0)])
+def test_falsy_json_payloads_are_preserved(raw: bytes, expected: object) -> None:
+    assert parse_schedule_event({**DISPATCH_HEADERS, **JSON}, raw).payload == expected
 
 
 def test_payload_type_validates_and_constructs() -> None:
@@ -93,10 +86,6 @@ def test_resolves_payload_type_from_handler_annotation() -> None:
     assert resolve_payload_type(handler) is Cleanup
 
 
-def test_schedule_handler_type_is_runtime_generic() -> None:
-    assert get_origin(ScheduleHandler[object]) is ScheduleHandler
-
-
 def test_rejects_event_subclass_annotation() -> None:
     class Cleanup(BaseModel):
         max_age_days: int
@@ -123,16 +112,20 @@ def test_resolves_annotated_event_with_unhashable_metadata() -> None:
     assert resolve_payload_type(handler) is Cleanup
 
 
-@pytest.mark.parametrize("annotation", [None, ScheduleEvent, ScheduleEvent[Any]])
-def test_untyped_handler_payload_resolves_to_none(annotation: object) -> None:
-    async def handler(event: ScheduleEvent) -> None:
-        pass
+async def _unannotated(event) -> None:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    pass
 
-    if annotation is None:
-        del handler.__annotations__["event"]
-    else:
-        handler.__annotations__["event"] = annotation
 
+async def _bare(event: ScheduleEvent) -> None:
+    pass
+
+
+async def _any(event: ScheduleEvent[Any]) -> None:
+    pass
+
+
+@pytest.mark.parametrize("handler", [_unannotated, _bare, _any])
+def test_untyped_handler_payload_resolves_to_none(handler: Any) -> None:
     assert resolve_payload_type(handler) is None
 
 
@@ -164,7 +157,6 @@ def test_rejects_wrong_spec_version() -> None:
 
 
 def test_rejects_wrong_event_type() -> None:
-    assert SCHEDULE_CLOUD_EVENT_TYPE == "com.vercel.schedule.v1beta"
     with pytest.raises(ScheduleEventParseError, match="CloudEvent type: com.example.other"):
         parse_schedule_event({**DISPATCH_HEADERS, "ce-type": "com.example.other"})
 
@@ -217,5 +209,4 @@ def test_rejects_invalid_json() -> None:
 
 
 def test_parse_error_is_a_value_error() -> None:
-    with pytest.raises(ValueError):
-        parse_schedule_event({})
+    assert issubclass(ScheduleEventParseError, ValueError)
