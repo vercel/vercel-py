@@ -160,13 +160,14 @@ async def test_get_without_namespace_sends_no_query() -> None:
     assert str(transport.requests[0].url) == f"{BASE}/cleanup"
 
 
-async def test_missing_timezone_defaults_to_utc() -> None:
+async def test_missing_timezone_is_a_malformed_response() -> None:
+    # The service always resolves and stores a timezone (UTC when unspecified),
+    # so a response without one is a contract violation, not a default.
     body = {k: v for k, v in SCHEDULE_JSON.items() if k != "timezone"}
     client, _ = make_client(httpx.Response(200, json=body))
 
-    schedule = await client.get_schedule("cleanup", namespace=None)
-
-    assert schedule.timezone == "UTC"
+    with pytest.raises(SchedulesResponseError):
+        await client.get_schedule("cleanup", namespace=None)
 
 
 async def test_one_off_expression_keeps_the_wall_clock_time() -> None:

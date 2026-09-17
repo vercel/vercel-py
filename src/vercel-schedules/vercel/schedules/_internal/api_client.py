@@ -93,7 +93,7 @@ class _ScheduleModel(_ApiModel):
     name: str
     namespace: str
     expression: _CronExpressionModel | _SingleExpressionModel = Field(discriminator="type")
-    timezone: str = "UTC"
+    timezone: str
     jitter: int | None = None
     target: _QueueTargetModel | _FunctionTargetModel = Field(discriminator="type")
     state: ScheduleState
