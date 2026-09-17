@@ -134,8 +134,11 @@ cache = await sandbox.get_or_create_drive(
 async with sandbox.create_sandbox(
     region=cache.region,
     mounts={
+        # Mount a read-write drive
         "/cache": cache,
+        # You can mount an existing drive by name as a point-in-time read-only snapshot
         "/readonly": DriveMount("shared-source", mode="snapshot"),
+        # You can also provide a PurePosixPath as the mount point
         PurePosixPath("/scratch"): "scratch",
     },
 ) as workspace:
@@ -145,27 +148,18 @@ async with sandbox.create_sandbox(
 await cache.delete()
 ```
 
-Stop and destroy every sandbox that mounts a Drive before deleting it. Prefer
-`drive.delete()` when you have a handle. Deletion uses the handle's project and
-name, not its ID, so a stale handle can delete a replacement Drive with the same
-name. Use `delete_drive(name=..., project_id=...)` when creation may have
-succeeded without returning a handle.
+Drives must be unmounted from any running Sandbox before they are able to be
+deleted. You can either call the `delete` method on the Drive handle, or use the
+`delete_drive(name=..., project_id=...)` function to delete a drive by name if
+you do not have a drive handle already.
 
-A `Drive` handle or Drive name mounts it read-write. Use `drive.snapshot()` or
-`DriveMount(name, mode="snapshot")` for a point-in-time read-only mount.
+By default, a `Drive` handle or Drive name mounts it read-write. Use
+`drive.snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
+read-only mount.
 
-Forks never inherit the source sandbox's mounts. Omitting `mounts` or passing
-`{}` creates an unmounted fork. Pass a non-empty mapping to attach Drives
-explicitly to the fork. A read-write Drive still attached to another sandbox
-causes the API to return `409 drive_attached`.
-
-`Sandbox.mounts` reports `"snapshot"` or `"read-write"`.
-
-A Drive handle does not select the sandbox region. Pass `region=drive.region`
-when you want to place the sandbox with that Drive. The SDK rejects conflicts
-with an explicit or session-default sandbox region. It checks project identity
-when the sandbox project has a canonical `prj_` ID. The backend remains
-authoritative for project-name resolution and name-addressed mounts.
+Forks cannot inherit the source sandbox's mounts. Pass a non-empty mapping to
+attach Drives explicitly to the fork. A read-write Drive still attached to
+another sandbox causes the API to return `409 drive_attached`.
 
 Use `query_drives(...)` with `DriveQueryByCreatedAt`,
 `DriveQueryByUpdatedAt`, or `DriveQueryByName` to list Drives in a project.
@@ -174,13 +168,12 @@ recreates the sandbox. If the sandbox already exists, the call leaves its mounts
 unchanged. Use `await box.update(mounts=...)` to replace the mount map for the
 next session. Pass `None` to leave mounts unchanged or `{}` to remove all mounts.
 
-A sandbox can mount at most four Drives. The SDK canonicalizes repeated
-slashes, trailing slashes, and `.` components. Paths must be absolute and
-non-overlapping. They cannot contain `..` or NUL characters, target `/`, exceed
-256 characters after canonicalization, or equal `/run/cell` or
-`/run/vercel/share`. Each Drive name may appear only once. Mounted sandboxes
-cannot use failover regions, and each Drive must use the sandbox region. Drives
-default to `iad1` when `region` is omitted.
+The SDK canonicalizes repeated slashes, trailing slashes, and `.` components.
+Paths must be absolute and non-overlapping. They cannot contain `..` or NUL
+characters, target `/`, or exceed 256 characters after canonicalization. Each
+Drive name may appear only once. Mounted sandboxes cannot use failover regions,
+and each Drive must use the sandbox region. Drives default to `iad1` when
+`region` is omitted.
 
 ## Session lifecycles
 
