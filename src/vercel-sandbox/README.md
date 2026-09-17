@@ -114,6 +114,67 @@ with sandbox.fork_sandbox(source_sandbox="production-agent") as forked:
     result = forked.run_process("python", ["script.py"], capture_output=True)
 ```
 
+## Sandbox Drives
+
+Sandbox Drives are named persistent filesystems. A Drive belongs to one project
+and one region. Create or retrieve a Drive, then mount it when you create a
+sandbox:
+
+```python
+from pathlib import PurePosixPath
+
+from vercel import sandbox
+from vercel.sandbox import DriveMount
+
+cache = await sandbox.get_or_create_drive(
+    name="cache",
+    region="sfo1",
+    max_size_bytes=10 * 1024**3,
+)
+async with sandbox.create_sandbox(
+    region=cache.region,
+    mounts={
+        # Mount a read-write drive
+        "/cache": cache,
+        # You can mount an existing drive by name as a point-in-time read-only snapshot
+        "/readonly": DriveMount("shared-source", mode="snapshot"),
+        # You can also provide a PurePosixPath as the mount point
+        PurePosixPath("/scratch"): "scratch",
+    },
+) as workspace:
+    print(cache.id)
+    print(workspace.mounts)
+
+await cache.delete()
+```
+
+Drives must be unmounted from any running Sandbox before they are able to be
+deleted. You can either call the `delete` method on the Drive handle, or use the
+`delete_drive(name=..., project_id=...)` function to delete a drive by name if
+you do not have a drive handle already.
+
+By default, a `Drive` handle or Drive name mounts it read-write. Use
+`drive.snapshot()` or `DriveMount(name, mode="snapshot")` for a point-in-time
+read-only mount.
+
+Forks cannot inherit the source sandbox's mounts. Pass a non-empty mapping to
+attach Drives explicitly to the fork. A read-write Drive still attached to
+another sandbox causes the API to return `409 drive_attached`.
+
+Use `query_drives(...)` with `DriveQueryByCreatedAt`,
+`DriveQueryByUpdatedAt`, or `DriveQueryByName` to list Drives in a project.
+`get_or_create_sandbox(..., mounts=...)` uses `mounts` only when it creates or
+recreates the sandbox. If the sandbox already exists, the call leaves its mounts
+unchanged. Use `await box.update(mounts=...)` to replace the mount map for the
+next session. Pass `None` to leave mounts unchanged or `{}` to remove all mounts.
+
+The SDK canonicalizes repeated slashes, trailing slashes, and `.` components.
+Paths must be absolute and non-overlapping. They cannot contain `..` or NUL
+characters, target `/`, or exceed 256 characters after canonicalization. Each
+Drive name may appear only once. Mounted sandboxes cannot use failover regions,
+and each Drive must use the sandbox region. Drives default to `iad1` when
+`region` is omitted.
+
 ## Session lifecycles
 
 Sandbox-level process and filesystem operations resume a stopped sandbox

@@ -5,12 +5,14 @@ import hashlib
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+import anyio
 
 from vercel import sandbox
 from vercel.api import session
@@ -20,10 +22,12 @@ from vercel.sandbox import (
     NetworkPolicySubnets,
     NetworkPolicyTransform,
     SandboxApiError,
+    SandboxCleanupError,
     SandboxFilesystemWriteError,
     SandboxPathNotFoundError,
     SandboxQueryByName,
     SandboxStatus,
+    SandboxTerminalStateError,
     SnapshotSource,
     TagFilter,
     sync as sandbox_sync,
@@ -31,6 +35,100 @@ from vercel.sandbox import (
 
 _SESSION_STOP_TIMEOUT_SECONDS = 60
 _SESSION_STOP_POLL_INTERVAL_SECONDS = 0.5
+
+
+async def reconcile_sandbox_drive_cleanup(
+    *,
+    names: Iterable[str],
+    known_sandboxes: Mapping[str, Any],
+    drive_name: str,
+    project_id: str | None,
+    original_error: BaseException | None,
+    cleanup_timeout: float = _SESSION_STOP_TIMEOUT_SECONDS,
+    get_sandbox: Callable[..., Awaitable[Any]] = sandbox.get_sandbox,
+    delete_drive: Callable[..., Awaitable[Any]] = sandbox.delete_drive,
+) -> None:
+    """Attempt to remove every sandbox and then its Drive without masking test failures."""
+    names = tuple(names)
+    operation_timeout = cleanup_timeout / (len(names) * 3 + 1)
+
+    async def cleanup() -> list[Exception]:
+        errors: list[Exception] = []
+
+        def is_missing(error: Exception) -> bool:
+            return isinstance(error, SandboxApiError) and error.status_code == 404
+
+        async def attempt(label: str, operation: Callable[[], Awaitable[Any]]) -> Any:
+            try:
+                with anyio.move_on_after(operation_timeout) as scope:
+                    result = await operation()
+                if scope.cancel_called:
+                    errors.append(TimeoutError(f"Timed out cleaning up {label}"))
+                    return None
+                return result
+            except Exception as error:
+                if not is_missing(error):
+                    errors.append(error)
+                return None
+
+        for name in names:
+            box = known_sandboxes.get(name)
+            if box is None:
+                try:
+                    with anyio.move_on_after(operation_timeout) as scope:
+                        box = await get_sandbox(name=name)
+                    if scope.cancel_called:
+                        errors.append(TimeoutError(f"Timed out finding sandbox {name!r}"))
+                        continue
+                except SandboxTerminalStateError as error:
+                    box = cast(Any, error.sandbox)
+                except Exception as error:
+                    if not is_missing(error):
+                        errors.append(error)
+                    continue
+
+            if box is not None:
+                await attempt(f"sandbox {name!r} session", box.stop)
+                await attempt(f"sandbox {name!r}", box.destroy)
+
+        await attempt(
+            f"Drive {drive_name!r}",
+            lambda: delete_drive(name=drive_name, project_id=project_id),
+        )
+        return errors
+
+    task = asyncio.create_task(cleanup(), name="sandbox-drive-cleanup")
+    cancellation: asyncio.CancelledError | None = None
+    try:
+        errors = await asyncio.shield(task)
+    except asyncio.CancelledError as error:
+        cancellation = error
+        errors = await task
+
+    if errors:
+        cleanup_error = SandboxCleanupError(
+            f"Failed to clean up sandbox Drive resources {drive_name}",
+            resource_type="sandbox-drive",
+            resource_id=drive_name,
+            cause=errors[0],
+        )
+        if original_error is None and cancellation is None:
+            raise cleanup_error from errors[0]
+
+        owner = original_error if original_error is not None else cancellation
+        assert owner is not None
+        try:
+            add_note = getattr(owner, "add_note", None)
+            if callable(add_note):
+                add_note(
+                    f"Sandbox Drive cleanup had {len(errors)} failure(s); "
+                    f"first was {type(errors[0]).__name__}"
+                )
+        except Exception:
+            pass
+
+    if cancellation is not None and original_error is None:
+        raise cancellation
 
 
 @dataclass(frozen=True, slots=True)

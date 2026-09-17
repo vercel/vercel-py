@@ -18,11 +18,14 @@ from vercel.sandbox._internal.models import (
     NetworkPolicy,
     ProcessSignal,
     ProcessStatus,
+    RemotePath,
+    SandboxMount,
     SandboxStatus,
     _WriteFile,
 )
 from vercel.sandbox._internal.recovery import SandboxRecoveryTarget
 from vercel.sandbox._internal.state import (
+    DriveState,
     ProcessState,
     RuntimeSessionStopState,
     SandboxRouteState,
@@ -33,7 +36,6 @@ from vercel.sandbox._internal.state import (
 )
 
 RuntimeSessionHandleT = TypeVar("RuntimeSessionHandleT", bound="RuntimeSessionHandleBase")
-RemotePath: TypeAlias = str | PurePosixPath
 _SourceT = TypeVar("_SourceT")
 
 
@@ -309,6 +311,57 @@ class SnapshotHandleBase:
         self._payload = payload
 
 
+class DriveHandleBase:
+    __slots__ = ("_payload",)
+
+    def __init__(self, payload: DriveState) -> None:
+        self._payload = payload
+
+    @property
+    def id(self) -> str:
+        return self._payload.id
+
+    @property
+    def name(self) -> str:
+        return self._payload.name
+
+    @property
+    def project_id(self) -> str:
+        return self._payload.project_id
+
+    @property
+    def region(self) -> str:
+        return self._payload.region
+
+    @property
+    def max_size_bytes(self) -> int:
+        return self._payload.max_size_bytes
+
+    @property
+    def current_session_id(self) -> str | None:
+        return self._payload.current_session_id
+
+    @property
+    def current_sandbox_name(self) -> str | None:
+        return self._payload.current_sandbox_name
+
+    @property
+    def created_at(self) -> int:
+        return self._payload.created_at
+
+    @property
+    def updated_at(self) -> int:
+        return self._payload.updated_at
+
+    def _apply_payload(self, payload: DriveState) -> None:
+        if payload.name != self.name or payload.project_id != self.project_id:
+            raise SandboxResponseError(
+                "Drive mutation response returned a different name or project",
+                data=payload,
+            )
+        self._payload = payload
+
+
 class RuntimeSessionHandleBase:
     __slots__ = ("_parent_ref", "_payload")
 
@@ -513,6 +566,10 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
         return None if self._payload.tags is None else dict(self._payload.tags)
 
     @property
+    def mounts(self) -> dict[str, SandboxMount] | None:
+        return None if self._payload.mounts is None else dict(self._payload.mounts)
+
+    @property
     def routes(self) -> tuple[SandboxRouteState, ...]:
         return self._payload.routes
 
@@ -548,10 +605,12 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
             self._current_session = None
         self._payload = replace(
             payload,
+            mounts=payload.mounts if payload._mounts_attached else self._payload.mounts,
             routes=payload.routes if payload._routes_attached else self._payload.routes,
             current_session=(
                 None if self._current_session is None else self._current_session._payload
             ),
+            _mounts_attached=True,
             _routes_attached=True,
             _current_session_attached=True,
         )

@@ -36,12 +36,16 @@ from vercel.sandbox._internal.models import (
     NO_PRIVATE_PARAMETERS,
     CompletedProcess,
     DirectoryEntry,
+    DriveMount,
+    DriveMountsInput,
+    DriveQuery,
     DurationInput,
     FailoverRegionsInput,
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
     ProcessSignal,
+    RemotePath,
     SandboxQuery,
     SandboxResources,
     SandboxSource,
@@ -50,10 +54,13 @@ from vercel.sandbox._internal.models import (
     SnapshotRetention,
     SnapshotRetentionUpdate,
     _parse_snapshot_expiration,
+    _RemotePathT,
     _WriteFile,
     normalize_failover_regions,
 )
 from vercel.sandbox._internal.pagination import (
+    QueryDrivesPage,
+    QueryDrivesParams,
     QuerySandboxesPage,
     QuerySandboxesParams,
     QuerySessionsPage,
@@ -74,7 +81,7 @@ from vercel.sandbox._internal.recovery import (
     execute_with_sandbox_recovery,
 )
 from vercel.sandbox._internal.runtime_common import (
-    RemotePath,
+    DriveHandleBase,
     RuntimeSessionHandleBase,
     SandboxHandleBase,
     SnapshotHandleBase,
@@ -88,6 +95,7 @@ from vercel.sandbox._internal.runtime_common import (
 )
 from vercel.sandbox._internal.service import SandboxService, _SandboxTerminalState
 from vercel.sandbox._internal.state import (
+    DriveState,
     ProcessState,
     RuntimeSessionStopState,
     SandboxRuntimeSessionState,
@@ -229,6 +237,32 @@ class SyncSnapshot(SnapshotHandleBase):
     def delete(self) -> Self:
         """Delete the snapshot and refresh this handle."""
         payload = iter_coroutine(self._service.delete_snapshot(snapshot_id=self.id))
+        self._apply_payload(payload)
+        return self
+
+
+class SyncDrive(DriveHandleBase):
+    """Operate synchronously on a project-local persistent Drive."""
+
+    __slots__ = ("_service",)
+
+    def __init__(self, *, payload: DriveState, service: SandboxService) -> None:
+        super().__init__(payload)
+        self._service = service
+
+    def snapshot(self) -> DriveMount:
+        """Return a read-only snapshot mount for this Drive."""
+        return DriveMount(self, mode="snapshot")
+
+    def delete(self) -> Self:
+        """Delete by project and name, then refresh this handle from the response.
+
+        Deletion does not use the Drive ID. If the name now refers to a replacement
+        Drive, this method deletes that replacement and updates this handle to it.
+        """
+        payload = iter_coroutine(
+            self._service.delete_drive(name=self.name, project_id=self.project_id)
+        )
         self._apply_payload(payload)
         return self
 
@@ -1412,6 +1446,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         network_policy: NetworkPolicy | None = None,
         env: Mapping[str, str] | None = None,
         tags: Mapping[str, str] | None = None,
+        mounts: DriveMountsInput[_RemotePathT] | None = None,
         snapshot_expiration: SnapshotExpirationInput = None,
         snapshot_retention: SnapshotRetentionUpdate = _OMITTED,
         current_snapshot_id: str | None = None,
@@ -1424,6 +1459,9 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
         explicitly passing ``None`` removes the retention policy.
 
         Args:
+            mounts: Complete Drive mount replacement for the next session.
+                Pass ``None`` to leave mounts unchanged or ``{}`` to remove all
+                mounts.
             current_snapshot_id: Snapshot the sandbox restores from on its
                 next resume.
 
@@ -1441,6 +1479,7 @@ class SyncSandbox(SandboxHandleBase[SyncSandboxRuntimeSession]):
                 network_policy=network_policy,
                 env=env,
                 tags=tags,
+                mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
                 region=region,
@@ -1519,6 +1558,7 @@ def create_sandbox(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -1540,6 +1580,7 @@ def create_sandbox(
                 network_policy=network_policy,
                 env=env,
                 tags=tags,
+                mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
                 region=region,
@@ -1570,6 +1611,7 @@ def fork_sandbox(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -1591,6 +1633,7 @@ def fork_sandbox(
                 network_policy=network_policy,
                 env=env,
                 tags=tags,
+                mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
                 region=region,
@@ -1647,6 +1690,7 @@ def get_or_create_sandbox(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -1669,6 +1713,7 @@ def get_or_create_sandbox(
                 network_policy=network_policy,
                 env=env,
                 tags=tags,
+                mounts=mounts,
                 snapshot_expiration=_parse_snapshot_expiration(snapshot_expiration),
                 snapshot_retention=snapshot_retention,
                 region=region,
@@ -1716,6 +1761,65 @@ def resume_sandbox(
         destroy_on_exit=False,
         include_system_routes=include_system_routes,
     )
+
+
+def get_or_create_drive(
+    service: SandboxService,
+    *,
+    name: str,
+    project_id: str | None = None,
+    max_size_bytes: int | None = None,
+    region: str | None = None,
+) -> SyncDrive:
+    return SyncDrive(
+        payload=iter_coroutine(
+            service.get_or_create_drive(
+                name=name,
+                project_id=project_id,
+                max_size_bytes=max_size_bytes,
+                region=region,
+            )
+        ),
+        service=service,
+    )
+
+
+def delete_drive(service: SandboxService, *, name: str, project_id: str | None = None) -> SyncDrive:
+    return SyncDrive(
+        payload=iter_coroutine(service.delete_drive(name=name, project_id=project_id)),
+        service=service,
+    )
+
+
+def query_drives_page(service: SandboxService, **kwargs: Any) -> QueryDrivesPage[SyncDrive]:
+    page = iter_coroutine(service.query_drives_page(**kwargs))
+    return QueryDrivesPage(
+        drives=[SyncDrive(payload=state, service=service) for state in page.drives],
+        next_cursor=page.next_cursor,
+    )
+
+
+def query_drives(
+    service: SandboxService,
+    *,
+    query: DriveQuery | None = None,
+    project_id: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+) -> Iterator[SyncDrive]:
+    params = QueryDrivesParams(page_size=page_size, cursor=cursor)
+    while True:
+        page = query_drives_page(
+            service,
+            query=query,
+            project_id=project_id,
+            page_size=params.page_size,
+            cursor=params.cursor,
+        )
+        yield from page.drives
+        if page.next_cursor is None or not page.drives:
+            return
+        params = params.with_cursor(page.next_cursor)
 
 
 def query_sandboxes_page(service: SandboxService, **kwargs: Any) -> QuerySandboxesPage[SyncSandbox]:

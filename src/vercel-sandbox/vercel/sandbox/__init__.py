@@ -11,6 +11,7 @@ from vercel.sandbox._internal.async_filesystem_handle import (
 )
 from vercel.sandbox._internal.async_runtime import (
     CreateSandboxOperation,
+    Drive,
     ForkSandboxOperation,
     Process,
     ResumeSandboxOperation,
@@ -21,10 +22,13 @@ from vercel.sandbox._internal.async_runtime import (
     SandboxSessionOperation,
     Snapshot,
     create_sandbox_operation as _create_sandbox_operation,
+    delete_drive as _delete_drive,
     fork_sandbox_operation as _fork_sandbox_operation,
+    get_or_create_drive as _get_or_create_drive,
     get_or_create_sandbox as _get_or_create_sandbox,
     get_sandbox as _get_sandbox,
     get_snapshot as _get_snapshot,
+    query_drives as _query_drives,
     query_sandboxes as _query_sandboxes,
     query_sessions as _query_sessions,
     query_snapshots as _query_snapshots,
@@ -50,6 +54,14 @@ from vercel.sandbox._internal.errors import (
 from vercel.sandbox._internal.models import (
     CompletedProcess,
     DirectoryEntry,
+    DriveHandle,
+    DriveMount,
+    DriveMountsInput,
+    DriveQuery,
+    DriveQueryByCreatedAt,
+    DriveQueryByName,
+    DriveQueryByUpdatedAt,
+    DriveReference,
     DurationInput,
     FailoverRegionsInput,
     GitSource,
@@ -63,6 +75,7 @@ from vercel.sandbox._internal.models import (
     NetworkPolicyTransform,
     ProcessSignal,
     ProcessStatus,
+    SandboxMount,
     SandboxQuery,
     SandboxQueryByCreatedAt,
     SandboxQueryByCurrentSnapshotId,
@@ -77,6 +90,7 @@ from vercel.sandbox._internal.models import (
     SnapshotSource,
     TagFilter,
     TarballSource,
+    _RemotePathT,
     normalize_private_parameters as _normalize_private_parameters,
 )
 from vercel.sandbox._internal.options import (
@@ -108,6 +122,7 @@ def create_sandbox(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -136,6 +151,7 @@ def create_sandbox(
         network_policy: Network access policy sent to the Sandbox API.
         env: Environment variables for the sandbox.
         tags: Metadata tags used to organize and query sandboxes.
+        mounts: Drive names or handles keyed by absolute mount path.
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
@@ -164,6 +180,7 @@ def create_sandbox(
         network_policy=network_policy,
         env=env,
         tags=tags,
+        mounts=mounts,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
         region=region,
@@ -186,6 +203,7 @@ def fork_sandbox(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -217,6 +235,9 @@ def fork_sandbox(
         network_policy: Network access policy override.
         env: Environment variable override.
         tags: Metadata tag override.
+        mounts: Drives to attach explicitly to the fork. Forks never inherit
+            source mounts; omit this argument or pass an empty mapping for an
+            unmounted fork.
         snapshot_expiration: Default snapshot lifetime override.
         snapshot_retention: Automatic snapshot retention override.
         region: Preferred region override.
@@ -243,6 +264,7 @@ def fork_sandbox(
         network_policy=network_policy,
         env=env,
         tags=tags,
+        mounts=mounts,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
         region=region,
@@ -267,6 +289,7 @@ async def get_or_create_sandbox(
     network_policy: NetworkPolicy | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
+    mounts: DriveMountsInput[_RemotePathT] | None = None,
     snapshot_expiration: SnapshotExpirationInput = None,
     snapshot_retention: SnapshotRetention | None = None,
     region: str | None = None,
@@ -297,6 +320,7 @@ async def get_or_create_sandbox(
         network_policy: Network access policy sent to the Sandbox API.
         env: Environment variables for the sandbox.
         tags: Metadata tags used to organize and query sandboxes.
+        mounts: Drive names or handles keyed by absolute mount path.
         snapshot_expiration: Default lifetime for snapshots created from this
             sandbox.
         snapshot_retention: Automatic snapshot retention policy.
@@ -323,6 +347,7 @@ async def get_or_create_sandbox(
         network_policy=network_policy,
         env=env,
         tags=tags,
+        mounts=mounts,
         snapshot_expiration=snapshot_expiration,
         snapshot_retention=snapshot_retention,
         region=region,
@@ -396,6 +421,80 @@ def resume_sandbox(
         project_id=project_id,
         include_system_routes=include_system_routes,
         private_parameters=_normalize_private_parameters("resume_sandbox", private_parameters),
+    )
+
+
+async def get_or_create_drive(
+    *,
+    name: str,
+    project_id: str | None = None,
+    max_size_bytes: int | None = None,
+    region: str | None = None,
+) -> Drive:
+    """Return a named Drive, creating it when necessary.
+
+    Args:
+        name: Project-local Drive name.
+        project_id: Owning project ID or name. Uses the active project when
+            omitted.
+        max_size_bytes: Maximum size for a new Drive. Uses the project's default
+            when omitted.
+        region: Storage region for a new Drive. The backend defaults to ``"iad1"``.
+            An existing Drive must already use the requested region.
+
+    Returns:
+        The existing or newly created Drive.
+    """
+    return await _get_or_create_drive(
+        _service(),
+        name=name,
+        project_id=project_id,
+        max_size_bytes=max_size_bytes,
+        region=region,
+    )
+
+
+async def delete_drive(*, name: str, project_id: str | None = None) -> Drive:
+    """Delete a Drive by project-local name.
+
+    Use this function when no handle is available, such as after an uncertain
+    creation failure. Otherwise, prefer ``await drive.delete()``.
+
+    Args:
+        name: Project-local Drive name.
+        project_id: Owning project ID or name. Uses the active project when
+            omitted.
+
+    Returns:
+        The Drive returned by the deletion request.
+    """
+    return await _delete_drive(_service(), name=name, project_id=project_id)
+
+
+def query_drives(
+    *,
+    query: DriveQuery | None = None,
+    project_id: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+) -> AsyncIterator[Drive]:
+    """Iterate over Drives in a project.
+
+    Args:
+        query: Ordering and optional name-prefix filter.
+        project_id: Project whose Drives should be queried.
+        page_size: Maximum number of Drives fetched per API request.
+        cursor: Cursor at which to begin pagination.
+
+    Returns:
+        An async iterator that transparently follows pagination cursors.
+    """
+    return _query_drives(
+        _service(),
+        query=query,
+        project_id=project_id,
+        page_size=page_size,
+        cursor=cursor,
     )
 
 
@@ -508,6 +607,15 @@ __all__ = [
     "SandboxBinaryWriter",
     "SandboxTextReader",
     "SandboxTextWriter",
+    "Drive",
+    "DriveHandle",
+    "DriveMount",
+    "DriveReference",
+    "SandboxMount",
+    "DriveQuery",
+    "DriveQueryByCreatedAt",
+    "DriveQueryByName",
+    "DriveQueryByUpdatedAt",
     "Sandbox",
     "CreateSandboxOperation",
     "ForkSandboxOperation",
@@ -563,11 +671,14 @@ __all__ = [
     "TarballSource",
     "TextReader",
     "create_sandbox",
+    "delete_drive",
     "fork_sandbox",
     "get_or_create_sandbox",
     "get_sandbox",
+    "get_or_create_drive",
     "get_snapshot",
     "query_sandboxes",
+    "query_drives",
     "query_sessions",
     "query_snapshots",
     "resume_sandbox",

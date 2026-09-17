@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 from datetime import timedelta
+from pathlib import PurePosixPath
 
 from dotenv import load_dotenv
 
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--name")
     parser.add_argument(
         "--cwd",
-        help="working directory (defaults to the image working directory)",
+        help="working directory (defaults to the cloned repository)",
     )
     parser.add_argument("--reinstall", action="store_true")
     parser.add_argument("--destroy", action="store_true")
@@ -57,6 +58,15 @@ def sandbox_name(*, repo: str, ref: str | None, image: str, port: int) -> str:
     )
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
     return f"vercel-py-dev-{digest}"
+
+
+def git_checkout_cwd(*, repo: str, sandbox_cwd: str) -> str:
+    repo_name = repo.rstrip("/").rsplit("/", 1)[-1]
+    if repo_name.endswith(".git"):
+        repo_name = repo_name[:-4]
+    if not repo_name:
+        raise ValueError(f"could not derive a checkout directory from repository URL {repo!r}")
+    return str(PurePosixPath(sandbox_cwd) / repo_name)
 
 
 async def get_or_create_sandbox(
@@ -263,9 +273,12 @@ async def _main() -> None:
     )
 
     try:
-        cwd = cwd_override if cwd_override is not None else box.cwd
-        if cwd is None:
+        if cwd_override is not None:
+            cwd = cwd_override
+        elif box.cwd is None:
             raise RuntimeError("sandbox did not report a working directory; pass --cwd")
+        else:
+            cwd = git_checkout_cwd(repo=repo, sandbox_cwd=box.cwd)
 
         await install_dependencies(
             box,
