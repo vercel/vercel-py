@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 - 2026-09-17
+
+### Features
+
+- Add Sandbox Drive creation, listing, deletion, and mount support to the synchronous and asynchronous APIs. (#397)
+
 ## 0.5.2 - 2026-09-14
 
 > **Release note:** Supersedes repository-declared versions `0.5.1` and `0.5.0`,
