@@ -1745,7 +1745,7 @@ async def _cleanup_managed_sandbox(handle: Sandbox, *, destroy: bool) -> None:
 
     if destroy:
         try:
-            await handle.destroy()
+            await handle.destroy(delete_orphan_snapshots=True)
         except Exception as exc:
             if cleanup_error is None:
                 cleanup_error = exc

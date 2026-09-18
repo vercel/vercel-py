@@ -1508,7 +1508,7 @@ def _cleanup_managed_sandbox(handle: SyncSandbox, *, destroy: bool) -> None:
 
     if destroy:
         try:
-            handle.destroy()
+            handle.destroy(delete_orphan_snapshots=True)
         except Exception as exc:
             if cleanup_error is None:
                 cleanup_error = exc
