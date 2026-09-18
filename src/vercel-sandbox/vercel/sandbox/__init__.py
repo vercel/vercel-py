@@ -133,8 +133,8 @@ def create_sandbox(
     """Prepare an asynchronous sandbox creation operation.
 
     Awaiting the returned operation performs no automatic cleanup. Using it as
-    an async context manager stops the sandbox on exit and destroys it by
-    default.
+    an async context manager stops the sandbox on exit, then destroys it and
+    any snapshots that no other sandbox uses by default.
 
     Args:
         project_id: Project that owns the sandbox. Uses the active credentials
@@ -157,8 +157,9 @@ def create_sandbox(
         snapshot_retention: Automatic snapshot retention policy.
         region: Preferred region for the sandbox.
         failover_regions: Regions available if creation in ``region`` fails.
-        destroy: Whether context-manager exit destroys the sandbox after
-            stopping it. Awaiting the operation never triggers cleanup.
+        destroy: Whether context-manager exit destroys the sandbox and its
+            orphaned snapshots after stopping it. Awaiting the operation never
+            triggers cleanup.
 
     Returns:
         A single-use awaitable and async context manager for the new sandbox.

@@ -1310,9 +1310,17 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             session._apply_stop_result(result)
         return self
 
-    async def destroy(self) -> Self:
-        """Permanently destroy the sandbox and refresh this handle."""
-        payload = await self._service.destroy_sandbox(name=self.name, project_id=self.project_id)
+    async def destroy(self, *, delete_orphan_snapshots: bool = False) -> Self:
+        """Permanently destroy the sandbox and refresh this handle.
+
+        Set ``delete_orphan_snapshots`` to also delete snapshots that no other
+        sandbox uses. By default, snapshots are kept until they expire.
+        """
+        payload = await self._service.destroy_sandbox(
+            name=self.name,
+            project_id=self.project_id,
+            delete_orphan_snapshots=delete_orphan_snapshots,
+        )
         self._apply_payload(payload)
         return self
 
@@ -1737,7 +1745,7 @@ async def _cleanup_managed_sandbox(handle: Sandbox, *, destroy: bool) -> None:
 
     if destroy:
         try:
-            await handle.destroy()
+            await handle.destroy(delete_orphan_snapshots=True)
         except Exception as exc:
             if cleanup_error is None:
                 cleanup_error = exc

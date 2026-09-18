@@ -2105,7 +2105,8 @@ async def test_async_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None
             side_effect=lambda request, name=name: stop_handler(request, name=name)
         )
 
-    def destroy_handler(_request: httpx.Request) -> httpx.Response:
+    def destroy_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["deleteOrphanSnapshots"] == "true"
         events.append("destroy:default")
         return httpx.Response(
             200,
@@ -2187,7 +2188,8 @@ def test_sync_managed_sandbox_cleanup_modes(mock_env_clear: None) -> None:
             side_effect=lambda request, name=name: stop_handler(request, name=name)
         )
 
-    def destroy_handler(_request: httpx.Request) -> httpx.Response:
+    def destroy_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["deleteOrphanSnapshots"] == "true"
         events.append("destroy:default")
         return httpx.Response(
             200,

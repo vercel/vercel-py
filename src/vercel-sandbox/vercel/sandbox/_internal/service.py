@@ -482,9 +482,19 @@ class SandboxService:
             tag=criteria.tag,
         )
 
-    async def destroy_sandbox(self, *, name: str, project_id: str | None = None) -> SandboxState:
+    async def destroy_sandbox(
+        self,
+        *,
+        name: str,
+        project_id: str | None = None,
+        delete_orphan_snapshots: bool = False,
+    ) -> SandboxState:
         self._ensure_open()
-        return await self._api_client.destroy_sandbox(name=name, project_id=project_id)
+        return await self._api_client.destroy_sandbox(
+            name=name,
+            project_id=project_id,
+            delete_orphan_snapshots=delete_orphan_snapshots,
+        )
 
     async def update_sandbox(
         self,
