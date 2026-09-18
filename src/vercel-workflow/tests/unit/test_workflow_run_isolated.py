@@ -8,6 +8,7 @@ the outer task is still current.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -31,6 +32,28 @@ class _Workflow:
 
 def _loop_factory() -> asyncio.AbstractEventLoop:
     return loop.WorkflowLoop(workflow=_Workflow())
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+def test_dropped_async_generator_does_not_warn() -> None:
+    finalized = False
+
+    async def values() -> AsyncIterator[None]:
+        nonlocal finalized
+        try:
+            yield None
+        finally:
+            finalized = True
+
+    async def body() -> None:
+        generator = values()
+        await anext(generator)
+        del generator
+        await asyncio.sleep(0)
+
+    runtime._run_in_loop(body(), loop_factory=_loop_factory)
+
+    assert finalized
 
 
 def test_run_in_loop_cleans_up_tasks() -> None:
