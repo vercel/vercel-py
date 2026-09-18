@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from .utils import utf16_code_unit_length
+
 RESERVED_ATTRIBUTE_KEY_PREFIX = "$"
 """Reserved for framework and library code; user code has to opt in."""
 
@@ -22,15 +24,10 @@ class AttributeValidationError(Exception):
     pass
 
 
-def _key_length(key: str) -> int:
-    """Calculates the number of UTF-16 code units in the given key."""
-    return sum(2 if ord(char) > 0xFFFF else 1 for char in key)
-
-
 def validate_key(key: str, *, allow_reserved: bool = False) -> None:
     if not key:
         raise AttributeValidationError("Attribute key must not be empty")
-    length = _key_length(key)
+    length = utf16_code_unit_length(key)
     if length > ATTRIBUTE_KEY_MAX_LENGTH:
         raise AttributeValidationError(
             f"Attribute key length {length} exceeds limit {ATTRIBUTE_KEY_MAX_LENGTH}: {key[:32]}..."
