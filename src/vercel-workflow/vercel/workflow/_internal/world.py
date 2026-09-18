@@ -31,6 +31,7 @@ from vercel._internal.core.polyfills import UTC, Self
 from vercel.queue import SanitizedName
 
 from . import ulid
+from .utils import utf16_code_unit_length
 
 if TYPE_CHECKING:
     from .serialization import PayloadEncoder
@@ -630,8 +631,7 @@ class RunCancelledEventData(BaseModel):
     @pydantic.field_validator("cancel_reason")
     @classmethod
     def validate_cancel_reason(cls, value: str | None) -> str | None:
-        # Zod's string length limit counts UTF-16 code units, like JS strings.
-        if value is not None and sum(2 if ord(char) > 0xFFFF else 1 for char in value) > 512:
+        if value is not None and utf16_code_unit_length(value) > 512:
             raise ValueError("cancelReason must be at most 512 UTF-16 code units")
         return value
 
