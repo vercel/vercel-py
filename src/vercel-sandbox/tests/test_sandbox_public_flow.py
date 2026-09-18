@@ -363,7 +363,7 @@ def _authored_network_policy() -> NetworkPolicy:
                         headers={"X-Policy": "blocked"},
                         body='{"error":"forbidden"}',
                         content_type="application/json",
-                    )
+                    ),
                 ),
             ],
         },
@@ -935,7 +935,7 @@ async def test_network_policy_async_public_flow(mock_env_clear: None) -> None:
                         "headers": {"X-Policy": "blocked"},
                         "body": '{"error":"forbidden"}',
                         "contentType": "application/json",
-                    }
+                    },
                 },
             ],
         },
@@ -1050,7 +1050,7 @@ def test_network_policy_sync_public_parity(mock_env_clear: None) -> None:
                         "headers": {"X-Policy": "blocked"},
                         "body": '{"error":"forbidden"}',
                         "contentType": "application/json",
-                    }
+                    },
                 },
             ],
         },
