@@ -334,6 +334,38 @@ async def test_fork_sandbox_encodes_source_query_and_overrides() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("delete_orphan_snapshots", "expected_params"),
+    [
+        (False, {"teamId": "team_123", "projectId": "prj_123"}),
+        (
+            True,
+            {
+                "teamId": "team_123",
+                "projectId": "prj_123",
+                "deleteOrphanSnapshots": "true",
+            },
+        ),
+    ],
+)
+async def test_destroy_sandbox_forwards_delete_orphan_snapshots(
+    delete_orphan_snapshots: bool,
+    expected_params: dict[str, str],
+) -> None:
+    transport = RecordingJsonTransport(
+        {"sandbox": {"name": "preview", "currentSessionId": "sbx_123"}}
+    )
+    client = _sandbox_client(transport)
+
+    await client.destroy_sandbox(delete_orphan_snapshots=delete_orphan_snapshots, name="preview")
+
+    assert transport.request is not None
+    method, path, _, params, _ = transport.request
+    assert method == "DELETE"
+    assert path == "https://sandbox.test/v2/sandboxes/preview"
+    assert params == expected_params
+
+
 async def test_private_parameters_are_forwarded_to_sandbox_api() -> None:
     response = {
         "sandbox": {

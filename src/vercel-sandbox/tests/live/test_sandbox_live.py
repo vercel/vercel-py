@@ -151,6 +151,28 @@ async def test_persistent_snapshot_flow_has_sync_async_semantic_parity() -> None
     assert async_result == sync_result
 
 
+@requires_sandbox_credentials
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_destroy_can_delete_orphan_snapshots() -> None:
+    async with session():
+        box = await sandbox.create_sandbox(
+            name=_name("delete-orphan-snapshot", "async"),
+            persistent=True,
+        )
+        snapshot = await box.snapshot()
+
+        try:
+            await box.destroy(delete_orphan_snapshots=True)
+
+            with anyio.fail_after(30):
+                while (await sandbox.get_snapshot(snapshot_id=snapshot.id)).status != "deleted":
+                    await anyio.sleep(0.5)
+        finally:
+            if (await sandbox.get_snapshot(snapshot_id=snapshot.id)).status != "deleted":
+                await snapshot.delete()
+
+
 class _CleanupSandbox:
     def __init__(self, calls: list[str], *, stall_destroy: bool = False) -> None:
         self.calls = calls

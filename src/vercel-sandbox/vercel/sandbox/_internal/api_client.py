@@ -1292,13 +1292,17 @@ class SandboxApiClient:
         *,
         name: str,
         project_id: str | None = None,
+        delete_orphan_snapshots: bool = False,
     ) -> SandboxState:
         credentials = await self._credentials_factory()
         data = await self._request_json(
             "DELETE",
             format_url_path("v2/sandboxes/{name}", name=name),
             credentials=credentials,
-            params={"projectId": project_id or credentials.project_id},
+            params={
+                "projectId": project_id or credentials.project_id,
+                "deleteOrphanSnapshots": "true" if delete_orphan_snapshots else None,
+            },
         )
         return _validate_response(_SandboxResponse, data).to_sandbox()
 
