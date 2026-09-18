@@ -128,8 +128,9 @@ def create_sandbox(
     """Create a sandbox and wait until it is ready.
 
     The returned handle is also a context manager that stops the sandbox on
-    exit and destroys it by default. Calling this function without entering
-    the handle performs no automatic cleanup.
+    exit, then destroys it and any snapshots that no other sandbox uses by
+    default. Calling this function without entering the handle performs no
+    automatic cleanup.
 
     Args:
         project_id: Project that owns the sandbox. Uses the active credentials
@@ -152,8 +153,8 @@ def create_sandbox(
         snapshot_retention: Automatic snapshot retention policy.
         region: Preferred region for the sandbox.
         failover_regions: Regions available if creation in ``region`` fails.
-        destroy: Whether context-manager exit destroys the sandbox after
-            stopping it.
+        destroy: Whether context-manager exit destroys the sandbox and its
+            orphaned snapshots after stopping it.
 
     Returns:
         A handle for the newly created sandbox.
