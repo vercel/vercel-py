@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
+from vercel.workflow import start
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 
@@ -205,7 +206,7 @@ async def test_positional_or_keyword_parameters_before_varargs_survive_a_run(
     await world._get_queue_client()
 
     try:
-        run = await runtime.start(call_collect_arguments)
+        run = await start(call_collect_arguments)
         result = await asyncio.wait_for(run.return_value(), 30)
     finally:
         await world.aclose()
@@ -229,7 +230,7 @@ async def _start(wf: core.Workflow[Any, Any], *args: Any, **kwargs: Any) -> Any:
     world = _World()
     w.set_world(world)
     try:
-        run = await runtime.start(wf, *args, **kwargs)
+        run = await start(wf, *args, **kwargs)
         return await world.runs_get(run.run_id)
     finally:
         w.set_world(None)
@@ -309,7 +310,7 @@ async def test_start_refuses_a_call_that_does_not_fit_the_signature(tmp_path, mo
         return amount
 
     with pytest.raises(TypeError, match=r"checkout\(\) too many positional arguments"):
-        await runtime.start(checkout, 21)  # type: ignore[misc]
+        await start(checkout, 21)  # type: ignore[misc]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

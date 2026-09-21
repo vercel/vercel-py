@@ -395,7 +395,7 @@ async def test_cancelled_step_shuts_down_and_body_gets_its_error(tmp_path, monke
     await _invoke(run_id, cancel_and_wait.workflow_id)
     assert (await world.runs_get(run_id)).status == "completed"
     # The body's own cancel message comes back verbatim on the CancelledError.
-    assert await runtime.Run(run_id).return_value() == "quick+cancelled: no longer needed:second"
+    assert await Run(run_id).return_value() == "quick+cancelled: no longer needed:second"
 
 
 async def test_body_exit_with_cancelled_step_waits_for_it(tmp_path, monkeypatch) -> None:
@@ -423,7 +423,7 @@ async def test_body_exit_with_cancelled_step_waits_for_it(tmp_path, monkeypatch)
     events = await _events(world, run_id)
     types = [e.event_type for e in events]
     assert types.index("step_failed") < types.index("run_completed")
-    assert await runtime.Run(run_id).return_value() == "quick"
+    assert await Run(run_id).return_value() == "quick"
 
 
 async def test_body_exit_with_outstanding_step_cancels_and_waits(tmp_path, monkeypatch) -> None:
@@ -448,7 +448,7 @@ async def test_body_exit_with_outstanding_step_cancels_and_waits(tmp_path, monke
     events = await _events(world, run_id)
     (failed,) = _of_type(events, w.StepFailedEvent)
     assert "step cancelled by its workflow" in str(failed.event_data.error)
-    assert await runtime.Run(run_id).return_value() == "quick"
+    assert await Run(run_id).return_value() == "quick"
 
 
 async def test_repeat_cancel_is_a_no_op(tmp_path, monkeypatch) -> None:
@@ -498,7 +498,7 @@ async def test_shield_defers_cancellation_to_body_exit(tmp_path, monkeypatch) ->
 
     await _invoke_step(_queued_step(world, slow_step.name), cancel_shielded.workflow_id)
     await _invoke(run_id, cancel_shielded.workflow_id)
-    assert await runtime.Run(run_id).return_value() == "quick:second"
+    assert await Run(run_id).return_value() == "quick:second"
 
 
 async def test_step_that_survives_cancellation_keeps_its_result(tmp_path, monkeypatch) -> None:
@@ -518,7 +518,7 @@ async def test_step_that_survives_cancellation_keeps_its_result(tmp_path, monkey
     assert len(_of_type(events, w.HookReceivedEvent)) == 1  # the cancel was sent
     assert not _of_type(events, w.StepFailedEvent)
     assert len(_of_type(events, w.StepCompletedEvent)) == 2
-    assert await runtime.Run(run_id).return_value() == "quick:survived"
+    assert await Run(run_id).return_value() == "quick:survived"
 
 
 async def test_uncancelled_cancellable_step_runs_normally(tmp_path, monkeypatch) -> None:
@@ -534,7 +534,7 @@ async def test_uncancelled_cancellable_step_runs_normally(tmp_path, monkeypatch)
     events = await _events(world, run_id)
     assert not _of_type(events, w.HookCreatedEvent)
     assert len(_of_type(events, w.StepCompletedEvent)) == 1
-    assert await runtime.Run(run_id).return_value() == "ran"
+    assert await Run(run_id).return_value() == "ran"
 
 
 class _AbortListenerWorld:

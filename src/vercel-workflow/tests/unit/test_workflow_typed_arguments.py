@@ -28,7 +28,7 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
-from vercel.workflow import FatalError, TypeValidationError, register_serializable
+from vercel.workflow import FatalError, Run, TypeValidationError, register_serializable, start
 from vercel.workflow._internal import (
     core,
     runtime,
@@ -559,7 +559,7 @@ async def test_start_records_a_model_argument_as_an_object(tmp_path, monkeypatch
     w.set_world(world)
     try:
         order = Order(sku="abc", quantity=2, total=decimal.Decimal("19.99"))
-        run = await runtime.start(checkout, order=order)
+        run = await start(checkout, order=order)
         stored = await world.runs_get(run.run_id)
     finally:
         w.set_world(None)
@@ -584,7 +584,7 @@ async def test_return_value_validates_against_the_workflow_return(tmp_path, monk
     world = _World()
     w.set_world(world)
     try:
-        run = await runtime.start(checkout)
+        run = await start(checkout)
         await world.events_create(
             run.run_id,
             w.RunCompletedEventData(
@@ -620,7 +620,7 @@ async def test_a_run_built_without_a_workflow_reads_the_raw_output(tmp_path, mon
     world = _World()
     w.set_world(world)
     try:
-        started = await runtime.start(checkout)
+        started = await start(checkout)
         await world.events_create(
             started.run_id,
             w.RunCompletedEventData(
@@ -629,7 +629,7 @@ async def test_a_run_built_without_a_workflow_reads_the_raw_output(tmp_path, mon
                 )
             ).into_event(),
         )
-        result = await runtime.Run[Any](started.run_id).return_value()
+        result = await Run[Any](started.run_id).return_value()
     finally:
         w.set_world(None)
 
@@ -668,9 +668,7 @@ async def test_a_model_survives_a_real_run_through_the_sandbox(  # type: ignore[
     runtime.workflow_entrypoint(e2e)
 
     try:
-        run = await runtime.start(
-            checkout_e2e, Order(sku="abc", quantity=3, total=decimal.Decimal("1.50"))
-        )
+        run = await start(checkout_e2e, Order(sku="abc", quantity=3, total=decimal.Decimal("1.50")))
         result = await asyncio.wait_for(run.return_value(), 30)
         stored = await world.runs_get(run.run_id)
     finally:

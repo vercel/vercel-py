@@ -21,6 +21,7 @@ import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
+from vercel.workflow import Run
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -182,7 +183,7 @@ async def test_payload_received_before_the_body_awaits_is_kept(world, workflow) 
     await _invoke(run_id, workflow.workflow_id)
 
     assert (await world.runs_get(run_id)).status == "completed"
-    assert await runtime.Run(run_id).return_value() == {"approved": True, "step_result": "done"}
+    assert await Run(run_id).return_value() == {"approved": True, "step_result": "done"}
 
 
 class HookCheckingLocalWorld(RecordingLocalWorld):
@@ -291,4 +292,4 @@ async def test_a_workflow_can_recover_and_await_the_next_payload(world) -> None:
     await _invoke(run_id, recover_from_invalid_payload.workflow_id)
 
     assert (await world.runs_get(run_id)).status == "completed"
-    assert await runtime.Run(run_id).return_value() is True
+    assert await Run(run_id).return_value() is True

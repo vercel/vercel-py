@@ -27,7 +27,7 @@ import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel.workflow import HookConflictError, WorkflowRunFailedError, sleep
+from vercel.workflow import HookConflictError, Run, WorkflowRunFailedError, sleep
 from vercel.workflow._internal import core, runtime, serialization as ser, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -246,7 +246,7 @@ async def test_disposal_is_flushed_before_reusing_a_hook_token(tmp_path, monkeyp
         "hook_created",
         "run_completed",
     ]
-    assert await runtime.Run(run_id).return_value() == "available"
+    assert await Run(run_id).return_value() == "available"
 
 
 def test_hook_conflict_owner_id_round_trips_on_the_wire() -> None:
@@ -281,7 +281,7 @@ async def test_hook_conflict_replays_and_fails_the_losing_run(tmp_path, monkeypa
         "run_failed",
     ]
     with pytest.raises(WorkflowRunFailedError) as exc_info:
-        await runtime.Run(loser).return_value()
+        await Run(loser).return_value()
     cause = exc_info.value.__cause__
     assert isinstance(cause, HookConflictError)
     assert cause.token == TOKEN
@@ -303,7 +303,7 @@ async def test_get_conflict_registers_without_waiting_for_payload(tmp_path, monk
         "hook_created",
         "run_completed",
     ]
-    assert await runtime.Run(run_id).return_value() == {"conflicting_run_id": None}
+    assert await Run(run_id).return_value() == {"conflicting_run_id": None}
 
 
 async def test_get_conflict_returns_the_owner_but_awaiting_payload_fails(
@@ -318,7 +318,7 @@ async def test_get_conflict_returns_the_owner_but_awaiting_payload_fails(
     await _invoke(loser, inspect_claim_conflict.workflow_id)
 
     assert (await world.runs_get(loser)).status == "completed"
-    assert await runtime.Run(loser).return_value() == {
+    assert await Run(loser).return_value() == {
         "conflicting_run_id": winner,
         "same_run": True,
         "error_run_id": winner,
@@ -403,7 +403,7 @@ async def test_get_conflict_continues_while_a_parallel_step_runs(tmp_path, monke
     )
     await _invoke(run_id, register_claim_with_step.workflow_id)
 
-    assert await runtime.Run(run_id).return_value() == {
+    assert await Run(run_id).return_value() == {
         "conflicting_run_id": None,
         "step_result": "done",
     }

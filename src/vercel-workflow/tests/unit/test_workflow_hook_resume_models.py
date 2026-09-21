@@ -24,7 +24,8 @@ import pytest
 import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
-from vercel.workflow._internal import core, runtime, world as w
+from vercel.workflow import start
+from vercel.workflow._internal import core, world as w
 from vercel.workflow._internal.worlds.local import LocalWorld
 from vercel.workflow._internal.worlds.vercel import VercelWorld
 
@@ -277,7 +278,7 @@ async def test_a_run_we_create_says_its_consumer_writes_the_event(
 
     world = _World()
     w.set_world(world)
-    run = await runtime.start(example)
+    run = await start(example)
 
     stored = await world.runs_get(run.run_id)
     assert stored.execution_context is not None

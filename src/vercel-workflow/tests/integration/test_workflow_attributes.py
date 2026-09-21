@@ -27,6 +27,7 @@ from vercel.workflow import (
     WorkflowRunFailedError,
     remove_attributes,
     set_attributes,
+    start,
 )
 from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.worlds import local as local_mod
@@ -179,7 +180,7 @@ async def running_world(tmp_path, monkeypatch) -> AsyncIterator[local_mod.LocalW
 
 async def _run(world: local_mod.LocalWorld, wf: Any, *args: Any) -> tuple[str, Any]:
     """Run a workflow to completion and return its run id and return value."""
-    run = await runtime.start(wf, *args)
+    run = await start(wf, *args)
     result = await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
     return run.run_id, result
 
@@ -237,7 +238,7 @@ async def test_a_body_write_lands_on_the_run(tmp_path, monkeypatch) -> None:
 async def test_a_client_reads_them_back_off_the_run(tmp_path, monkeypatch) -> None:
     """The read side of the API: what a caller holding a `Run` can see."""
     async with running_world(tmp_path, monkeypatch):
-        run = await runtime.start(sets_attributes, 7)
+        run = await start(sets_attributes, 7)
         await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
 
         assert await run.attributes() == {"phase": "done"}
@@ -282,7 +283,7 @@ async def test_parallel_writes_of_disjoint_keys_all_land(tmp_path, monkeypatch) 
 
 async def test_a_run_that_fails_keeps_what_it_wrote(tmp_path, monkeypatch) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(throws_after_setting_attributes)
+        run = await start(throws_after_setting_attributes)
         with pytest.raises(WorkflowRunFailedError, match="intentional failure") as caught:
             await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
         assert isinstance(caught.value.__cause__, RuntimeError)

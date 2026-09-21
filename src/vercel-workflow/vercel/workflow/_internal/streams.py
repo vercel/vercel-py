@@ -36,7 +36,7 @@ import anyio
 import pydantic
 from pydantic_core import core_schema
 
-from . import serialization as ser, signature_codec
+from . import serialization as ser, signature_codec, world as w
 
 if sys.version_info >= (3, 13):
     from typing import TypeVar
@@ -49,12 +49,11 @@ if TYPE_CHECKING:
     from anyio.abc import TaskGroup
     from pydantic import GetCoreSchemaHandler
 
-    from . import world as w
-
 T = TypeVar("T", default=Any)
 """What a stream carries. Defaults to ``Any``: an unparametrized stream is untyped."""
 
 S = TypeVar("S")
+Chunk = TypeVar("Chunk")
 
 FRAME_HEADER_SIZE = 4
 """Bytes of big-endian length prefix in front of every frame."""
@@ -66,6 +65,69 @@ A length header advertising more than this is refused rather than allocated:
 past a certain size the far more likely explanation is a misframed wire than a
 100 MB chunk.
 """
+
+
+@overload
+def read_stream(
+    run_id: str, name: str, *, start_index: int | None = None
+) -> AsyncGenerator[Any, None]: ...
+
+
+@overload
+def read_stream(
+    run_id: str, name: str, *, type: type[Chunk], start_index: int | None = None
+) -> AsyncGenerator[Chunk, None]: ...
+
+
+@overload
+def read_stream(
+    run_id: str, name: str, *, type: Any, start_index: int | None = None
+) -> AsyncGenerator[Any, None]: ...
+
+
+def read_stream(
+    run_id: str, name: str, *, type: Any = None, start_index: int | None = None
+) -> AsyncGenerator[Any, None]:
+    """Read one of a run's streams by its full name.
+
+    :meth:`~vercel.workflow.Run.readable` derives the name from the run id and a namespace, so
+    it only reaches streams that follow that scheme. This takes the name
+    verbatim, which is what :meth:`~vercel.workflow.Run.list_streams` returns and what another
+    SDK may have used. *type* means what it does there.
+    """
+    return _read_stream(w.get_world(), run_id, name, type, start_index)
+
+
+async def _read_stream(
+    world: w.World,
+    run_id: str,
+    name: str,
+    type: Any,
+    start_index: int | None,
+    *,
+    key: bytes | None = None,
+    ignore_payload_errors: bool = False,
+) -> AsyncGenerator[Any, None]:
+    codec = None if type is None else signature_codec.TypeCodec(type)
+    frames = reconnecting_frames(world, run_id, name, start_index)
+    async with contextlib.aclosing(frames):
+        index = start_index or 0
+        async for payload in frames:
+            what = f"chunk {index} of stream {name}"
+            try:
+                value = ser.hydrate(payload, what=what, key=key)
+            except ser.SerializationError:
+                if ignore_payload_errors:
+                    # This is only used by cancellation streams: the payload carries
+                    # an optional cancel reason; the cancel happens anyway even if
+                    # the reason cannot be read.
+                    value = None
+                else:
+                    raise
+            if codec is not None:
+                value = codec.validate(value, what=what)
+            yield value
+            index += 1
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
