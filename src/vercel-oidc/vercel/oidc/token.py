@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx2 as httpx
+from anyio import to_thread
 
 from vercel.headers import get_headers
 
@@ -24,6 +27,12 @@ BASE_URL = "https://api.vercel.com/v1"
 _cached_oidc_token_lock = threading.Lock()
 _cached_oidc_token: str | None = None
 _cached_oidc_payload: dict[str, Any] | None = None
+_OIDC_TOKEN_PATH = Path("/var/run/secrets/vercel.com/token")
+_FILE_TOKEN_REFRESH_BUFFER = 60.0
+_FILE_TOKEN_RETRY_INTERVAL = 30.0
+_file_token_lock = threading.Lock()
+_cached_file_token: tuple[str, float] | None = None
+_file_token_retry_at: float | None = None
 
 
 class VercelOidcTokenError(Exception):
@@ -35,6 +44,16 @@ class VercelOidcTokenError(Exception):
 
 
 def get_vercel_oidc_token_from_context() -> str:
+    try:
+        return _get_ambient_oidc_token()
+    except VercelOidcTokenError:
+        token = _get_file_oidc_token()
+        if token is not None:
+            return token
+        raise
+
+
+def _get_ambient_oidc_token() -> str:
     # Prefer request header registered in the OIDC context,
     # fall back to environment variable like the TypeScript SDK.
     token_from_header = _token_from_headers(get_headers())
@@ -54,6 +73,48 @@ def get_vercel_oidc_token_from_context() -> str:
             "Do you have the OIDC option enabled in the Vercel project settings?"
         )
     return token_from_env
+
+
+def _read_file_oidc_token() -> tuple[str, float] | None:
+    try:
+        token = _OIDC_TOKEN_PATH.read_text(encoding="utf-8").strip()
+        payload = get_token_payload(token)
+        if not isinstance(payload, dict):
+            return None
+        exp = payload.get("exp")
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+            return None
+        expires_at = float(exp)
+        if not math.isfinite(expires_at):
+            return None
+        return token, expires_at
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def _get_file_oidc_token() -> str | None:
+    with _file_token_lock:
+        global _cached_file_token, _file_token_retry_at
+        now = time.time()
+        if _cached_file_token is not None and _cached_file_token[1] <= now:
+            _cached_file_token = None
+            _file_token_retry_at = None
+        refresh_due = (
+            _cached_file_token is None or now >= _cached_file_token[1] - _FILE_TOKEN_REFRESH_BUFFER
+        )
+        if refresh_due and (
+            _file_token_retry_at is None or time.monotonic() >= _file_token_retry_at
+        ):
+            candidate = _read_file_oidc_token()
+            now = time.time()
+            if _cached_file_token is not None and _cached_file_token[1] <= now:
+                _cached_file_token = None
+            if candidate is not None and candidate[1] > now and candidate != _cached_file_token:
+                _cached_file_token = candidate
+                _file_token_retry_at = None
+            else:
+                _file_token_retry_at = time.monotonic() + _FILE_TOKEN_RETRY_INTERVAL
+        return _cached_file_token[0] if _cached_file_token is not None else None
 
 
 def _token_from_headers(headers: object) -> str | None:
@@ -134,6 +195,10 @@ def _clear_cached_oidc_token() -> None:
         global _cached_oidc_payload, _cached_oidc_token
         _cached_oidc_token = None
         _cached_oidc_payload = None
+    with _file_token_lock:
+        global _cached_file_token, _file_token_retry_at
+        _cached_file_token = None
+        _file_token_retry_at = None
 
 
 # for TS parity
@@ -186,11 +251,14 @@ def get_vercel_oidc_token() -> str:
     token = ""
     err: Exception | None = None
     try:
-        token = get_vercel_oidc_token_from_context()
+        token = _get_ambient_oidc_token()
     except Exception as e:
         err = e
     try:
         if not token or is_expired(get_token_payload(token)):
+            file_token = _get_file_oidc_token()
+            if file_token is not None:
+                return file_token
             # Only attempt refresh in environments that look like local dev with a .vercel folder
             try:
                 _ = find_project_info()
@@ -215,11 +283,14 @@ async def get_vercel_oidc_token_async() -> str:
     token = ""
     err: Exception | None = None
     try:
-        token = get_vercel_oidc_token_from_context()
+        token = _get_ambient_oidc_token()
     except Exception as e:
         err = e
     try:
         if not token or is_expired(get_token_payload(token)):
+            file_token = await to_thread.run_sync(_get_file_oidc_token)
+            if file_token is not None:
+                return file_token
             # Only attempt refresh in environments that look like local dev with a .vercel folder
             try:
                 _ = find_project_info()
