@@ -29,6 +29,44 @@ with session():
         print(process.stdout)
 ```
 
+## Standalone clients
+
+Applications that use dependency injection can create a service-specific
+client without configuring the ambient `vercel.api.session` context:
+
+```python
+from vercel.sandbox import SandboxClient, SandboxServiceOptions
+
+client = SandboxClient.create(
+    options=SandboxServiceOptions(region="iad1"),
+)
+
+try:
+    async with client.create_sandbox() as instance:
+        ...
+finally:
+    await client.aclose()
+```
+
+Client construction is synchronous and performs no I/O. The client can be
+stored and shared by application components; the application that creates it
+must call `aclose()` during shutdown. The synchronous API follows the same
+ownership model:
+
+```python
+from vercel.sandbox.sync import SandboxServiceOptions, SyncSandboxClient
+
+client = SyncSandboxClient.create(options=SandboxServiceOptions(region="iad1"))
+try:
+    with client.create_sandbox() as instance:
+        ...
+finally:
+    client.close()
+```
+
+Standalone clients expose the same service operations as their module-level
+counterparts. They do not read or modify the active SDK session.
+
 ## Custom images
 
 Create a sandbox from a Vercel Container Registry (VCR) image with the

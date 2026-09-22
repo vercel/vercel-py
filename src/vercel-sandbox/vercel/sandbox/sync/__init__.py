@@ -1,4 +1,4 @@
-"""Sync mirror for the Sandbox SDK surface."""
+"""Synchronous mirror for the Sandbox SDK surface."""
 
 from collections.abc import Iterator, Mapping
 
@@ -98,6 +98,8 @@ from vercel.sandbox._internal.sync_runtime import (
     resume_sandbox as _resume_sandbox,
 )
 from vercel.sandbox._internal.text_reader import SyncTextReader
+
+from .client import SyncSandboxClient
 
 
 def _service() -> SandboxService:
@@ -649,6 +651,7 @@ __all__ = [
     "SnapshotRetentionState",
     "SnapshotSource",
     "SyncSandbox",
+    "SyncSandboxClient",
     "SyncSandboxBinaryReader",
     "SyncSandboxBinaryWriter",
     "SyncProcess",
