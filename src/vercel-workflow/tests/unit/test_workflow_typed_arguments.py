@@ -28,7 +28,7 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel._internal.core.polyfills import UTC
-from vercel.workflow import FatalError, TypeValidationError, register_serializable, start
+from vercel.workflow import FatalError, TypeValidationError, get_run, register_serializable, start
 from vercel.workflow._internal import (
     core,
     runtime,
@@ -603,6 +603,10 @@ async def test_a_model_survives_a_real_run_through_the_sandbox(  # type: ignore[
     try:
         run = await start(checkout_e2e, Order(sku="abc", quantity=3, total=decimal.Decimal("1.50")))
         result = await asyncio.wait_for(run.return_value(), 30)
+        assert await get_run(run.run_id, type=Order).return_value() == result
+        assert await get_run(run.run_id).return_value() == result.model_dump()
+        with pytest.raises(TypeValidationError, match="the return value of run"):
+            await get_run(run.run_id, type=int).return_value()
         stored = await world.runs_get(run.run_id)
     finally:
         # Closed here rather than in a teardown: the embedded service's cancel
