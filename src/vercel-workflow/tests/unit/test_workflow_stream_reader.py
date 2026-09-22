@@ -15,8 +15,8 @@ from typing import Any
 import pydantic
 import pytest
 
-from vercel.workflow import TypeValidationError
-from vercel.workflow._internal import runtime, serialization as ser, streams, world as w
+from vercel.workflow import Run, TypeValidationError, read_stream
+from vercel.workflow._internal import serialization as ser, streams, world as w
 
 from ..world_stubs import NoStreams
 
@@ -234,13 +234,13 @@ class TestRunApi:
         world = ReplayWorld(["hello", {"n": 1}])
         w.set_world(world)
 
-        assert [chunk async for chunk in runtime.Run(RUN_ID).readable()] == ["hello", {"n": 1}]
+        assert [chunk async for chunk in Run(RUN_ID).readable()] == ["hello", {"n": 1}]
 
     async def test_readable_bytes_yields_only_bytes(self) -> None:
         world = ReplayWorld([b"one", b"two"])
         w.set_world(world)
 
-        assert [b async for b in runtime.Run(RUN_ID).readable_bytes()] == [b"one", b"two"]
+        assert [b async for b in Run(RUN_ID).readable_bytes()] == [b"one", b"two"]
 
     async def test_readable_bytes_refuses_a_stream_of_values(self) -> None:
         # An HTTP body cannot carry a dict, and failing here names the problem
@@ -249,13 +249,13 @@ class TestRunApi:
         w.set_world(world)
 
         with pytest.raises(ser.SerializationError, match="not bytes"):
-            [b async for b in runtime.Run(RUN_ID).readable_bytes()]
+            [b async for b in Run(RUN_ID).readable_bytes()]
 
     async def test_a_namespace_reads_its_own_stream(self) -> None:
         world = ReplayWorld(["logged"])
         w.set_world(world)
 
-        run = runtime.Run[Any](RUN_ID)
+        run = Run[Any](RUN_ID)
         async with contextlib.aclosing(run.readable(namespace="logs")) as chunks:
             assert [c async for c in chunks] == ["logged"]
 
@@ -277,7 +277,7 @@ class TestRunApi:
 
         w.set_world(Watcher(["a", "b", "c"]))
 
-        chunks = runtime.Run(RUN_ID).readable()
+        chunks = Run(RUN_ID).readable()
         async with contextlib.aclosing(chunks):
             assert await chunks.__anext__() == "a"
 
@@ -292,7 +292,7 @@ class TestRunApi:
                 return [NAME]
 
         w.set_world(Meta([]))
-        run = runtime.Run[Any](RUN_ID)
+        run = Run[Any](RUN_ID)
 
         assert await run.stream_info() == w.StreamInfo(tail_index=4, done=True)
         assert await run.list_streams() == [NAME]
@@ -301,7 +301,7 @@ class TestRunApi:
         world = ReplayWorld(["x"])
         w.set_world(world)
 
-        assert [c async for c in runtime.read_stream(RUN_ID, "strm_someone_else")] == ["x"]
+        assert [c async for c in read_stream(RUN_ID, "strm_someone_else")] == ["x"]
 
     async def test_read_stream_exposes_payload_serialization_errors(self) -> None:
         world = ReplayWorld([])
@@ -309,7 +309,7 @@ class TestRunApi:
         w.set_world(world)
 
         with pytest.raises(ser.SerializationError) as raised:
-            [c async for c in runtime.read_stream(RUN_ID, NAME)]
+            [c async for c in read_stream(RUN_ID, NAME)]
 
         assert type(raised.value) is ser.SerializationError
 
@@ -326,7 +326,7 @@ class TestTypedReads:
         # What a typed writer put on the wire: plain dicts.
         w.set_world(ReplayWorld([{"text": "a", "index": 0}, {"text": "b", "index": 1}]))
 
-        chunks = runtime.Run(RUN_ID).readable(type=Token)
+        chunks = Run(RUN_ID).readable(type=Token)
         tokens: list[Token] = [token async for token in chunks]
 
         assert tokens == [Token(text="a", index=0), Token(text="b", index=1)]
@@ -334,12 +334,12 @@ class TestTypedReads:
     async def test_an_untyped_read_of_the_same_stream_gets_the_dicts(self) -> None:
         w.set_world(ReplayWorld([{"text": "a", "index": 0}]))
 
-        assert [c async for c in runtime.Run(RUN_ID).readable()] == [{"text": "a", "index": 0}]
+        assert [c async for c in Run(RUN_ID).readable()] == [{"text": "a", "index": 0}]
 
     async def test_a_chunk_that_does_not_match_names_its_index(self) -> None:
         w.set_world(ReplayWorld([{"text": "a", "index": 0}, "not a token"]))
 
-        chunks = runtime.Run(RUN_ID).readable(type=Token)
+        chunks = Run(RUN_ID).readable(type=Token)
         async with contextlib.aclosing(chunks):
             assert await chunks.__anext__() == Token(text="a", index=0)
             with pytest.raises(TypeValidationError, match=f"chunk 1 of stream {NAME}"):
@@ -350,18 +350,18 @@ class TestTypedReads:
         w.set_world(ReplayWorld([{}] * 5 + ["bad"]))
 
         with pytest.raises(TypeValidationError, match="chunk 5 of stream"):
-            [c async for c in runtime.Run(RUN_ID).readable(type=Token, start_index=5)]
+            [c async for c in Run(RUN_ID).readable(type=Token, start_index=5)]
 
     async def test_read_stream_takes_a_type_the_same_way(self) -> None:
         w.set_world(ReplayWorld([{"text": "x", "index": 9}]))
 
-        chunks = runtime.read_stream(RUN_ID, "strm_someone_else", type=Token)
+        chunks = read_stream(RUN_ID, "strm_someone_else", type=Token)
         assert [c async for c in chunks] == [Token(text="x", index=9)]
 
     async def test_a_generic_alias_validates_too(self) -> None:
         w.set_world(ReplayWorld([[{"text": "a", "index": 0}]]))
 
-        chunks = runtime.Run(RUN_ID).readable(type=list[Token])
+        chunks = Run(RUN_ID).readable(type=list[Token])
         assert [c async for c in chunks] == [[Token(text="a", index=0)]]
 
     async def test_a_union_validates_at_runtime(self) -> None:
@@ -369,5 +369,5 @@ class TestTypedReads:
         # adapter still runs.
         w.set_world(ReplayWorld([[{"text": "a", "index": 0}], None]))
 
-        chunks = runtime.Run(RUN_ID).readable(type=list[Token] | None)
+        chunks = Run(RUN_ID).readable(type=list[Token] | None)
         assert [c async for c in chunks] == [[Token(text="a", index=0)], None]

@@ -18,7 +18,7 @@ from .duration import DurationParam
 from .errors import HookDisposedError
 
 if TYPE_CHECKING:
-    from .runtime import Run
+    from .run import Run
 
 P = ParamSpec("P")
 T = TypeVar("T")

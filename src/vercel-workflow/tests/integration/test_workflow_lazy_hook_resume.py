@@ -34,7 +34,7 @@ import pytest
 import vercel.queue as vqs
 from tests.payloads import PLAIN_ENCODER
 from vercel.queue.testing import clear_subscriptions
-from vercel.workflow import WorkflowRunFailedError
+from vercel.workflow import WorkflowRunFailedError, start
 from vercel.workflow._internal import core, runtime, ulid, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -329,7 +329,7 @@ async def test_a_run_completes_on_carried_payloads_alone(tmp_path, monkeypatch) 
     producer publishes exactly one message and this delivery consumed it.
     """
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(collect)
+        run = await start(collect)
         hook = await wait_for_hook(world, TOKEN)
 
         await publish(world, Resume.of(hook, {"n": 1}))
@@ -350,7 +350,7 @@ async def test_a_run_completes_on_carried_payloads_alone(tmp_path, monkeypatch) 
 
 async def test_dispose_in_finally_does_not_dispose_a_suspended_hook(tmp_path, monkeypatch) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(receive_one_with_finally)
+        run = await start(receive_one_with_finally)
         hook = await wait_for_hook(world, FINALLY_TOKEN)
 
         await publish(world, Resume.of(hook, {"n": 7}))
@@ -360,7 +360,7 @@ async def test_dispose_in_finally_does_not_dispose_a_suspended_hook(tmp_path, mo
 
 async def test_a_step_in_finally_runs_after_the_hook_resumes(tmp_path, monkeypatch) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(receive_one_with_finally_step)
+        run = await start(receive_one_with_finally_step)
         hook = await wait_for_hook(world, FINALLY_STEP_TOKEN)
 
         await publish(world, Resume.of(hook, {"n": 7}))
@@ -374,7 +374,7 @@ async def test_exiting_an_async_with_block_disposes_the_hook(tmp_path, monkeypat
     suspending inside the block leaves the hook resumable (the resume landing at
     all proves that), and leaving it writes `hook_disposed`."""
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(receive_one_scoped)
+        run = await start(receive_one_scoped)
         hook = await wait_for_hook(world, SCOPED_TOKEN)
 
         await publish(world, Resume.of(hook, {"n": 7}))
@@ -388,7 +388,7 @@ async def test_awaiting_a_disposed_hook_fails_the_run(tmp_path, monkeypatch) -> 
     HookDisposedError instead of stalling the run forever (which is what
     upstream TypeScript does with this shape)."""
     async with running_world(tmp_path, monkeypatch):
-        run = await runtime.start(await_after_dispose)
+        run = await start(await_after_dispose)
 
         with pytest.raises(WorkflowRunFailedError) as exc_info:
             await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
@@ -399,7 +399,7 @@ async def test_catching_cancelled_error_cannot_complete_a_suspended_workflow(
     tmp_path, monkeypatch
 ) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(catch_cancelled_error)
+        run = await start(catch_cancelled_error)
         hook = await wait_for_hook_without_run_finishing(world, run.run_id, CANCELLED_ERROR_TOKEN)
 
         await publish(world, Resume.of(hook, {"n": 7}))
@@ -411,7 +411,7 @@ async def test_replacing_cancelled_error_cannot_fail_a_suspended_workflow(
     tmp_path, monkeypatch
 ) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(replace_cancelled_error)
+        run = await start(replace_cancelled_error)
         hook = await wait_for_hook_without_run_finishing(
             world, run.run_id, REPLACED_CANCELLED_ERROR_TOKEN
         )
@@ -425,7 +425,7 @@ async def test_out_of_order_repeated_hook_resumes_reach_the_matching_wait(
     tmp_path, monkeypatch
 ) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(wait_for_abab)
+        run = await start(wait_for_abab)
         hook_a = await wait_for_hook(world, "a")
 
         first_a = await publish(world, Resume.of(hook_a, {"n": 1}))
@@ -454,7 +454,7 @@ async def test_the_producers_own_write_converges_on_the_re_ensured_event(
     Both carry one identity, so there must still be one event -- two would hand
     the payload to the body twice, which is worse than the stall."""
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(collect)
+        run = await start(collect)
         hook = await wait_for_hook(world, TOKEN)
         resume = Resume.of(hook, {"n": 1})
 
@@ -473,7 +473,7 @@ async def test_the_re_ensured_event_records_the_resume_identity(tmp_path, monkey
     """Which is what a later delivery of the same resume recognizes, and what the
     claim is keyed on."""
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(collect)
+        run = await start(collect)
         hook = await wait_for_hook(world, TOKEN)
         resume = Resume.of(hook, {"n": 7})
 

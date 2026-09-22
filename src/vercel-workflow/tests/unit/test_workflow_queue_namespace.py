@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from vercel._internal.core.polyfills import UTC
-from vercel.workflow import Workflows
+from vercel.workflow import Workflows, start
 from vercel.workflow._internal import core, runtime, world as w
 
 from ..world_stubs import NoStreams
@@ -208,7 +208,7 @@ async def test_start_without_namespace_uses_unnamespaced_topic() -> None:
     async def example() -> None:
         pass
 
-    await runtime.start(example)
+    await start(example)
 
     assert world.queued[0][0] == f"__wkf_workflow_{example.workflow_id}"
     # The key is left out entirely rather than set to null, which is what the TS
@@ -235,8 +235,8 @@ async def test_start_routes_each_registry_to_its_namespace() -> None:
     async def second_workflow() -> None:
         pass
 
-    await runtime.start(first_workflow)
-    await runtime.start(second_workflow)
+    await start(first_workflow)
+    await start(second_workflow)
 
     assert [queue_name for queue_name, _ in world.queued] == [
         f"__first_wkf_workflow_{first_workflow.workflow_id}",

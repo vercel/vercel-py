@@ -39,6 +39,7 @@ from cryptography.hazmat.primitives.serialization import (
 import vendor.respx as respx
 from tests.payloads import PLAIN_ENCODER
 from vercel.oidc import VercelOidcTokenError
+from vercel.workflow import start
 from vercel.workflow._internal import (
     core,
     encryption,
@@ -860,7 +861,7 @@ async def test_start_encrypts_a_new_run_and_publishes_its_public_key(tmp_path, m
         return amount
 
     try:
-        public_run = await runtime.start(checkout, 21)
+        public_run = await start(checkout, 21)
         stored = await world.runs_get(public_run.run_id)
     finally:
         w.set_world(None)
@@ -906,7 +907,7 @@ async def test_start_stays_plaintext_without_a_project_id(monkeypatch) -> None:
         return amount
 
     try:
-        await runtime.start(checkout, 21)
+        await start(checkout, 21)
     finally:
         w.set_world(None)
 

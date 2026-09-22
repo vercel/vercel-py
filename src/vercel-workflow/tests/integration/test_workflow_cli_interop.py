@@ -45,6 +45,7 @@ import pytest
 
 from tests.payloads import PLAIN_ENCODER
 from vercel.queue.testing import clear_subscriptions
+from vercel.workflow import start
 from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.streams import workflow_run_stream_id as stream_id
 from vercel.workflow._internal.worlds import local as local_mod
@@ -310,7 +311,7 @@ async def py_run(tmp_path, monkeypatch) -> tuple[Path, str]:
     runtime.workflow_entrypoint(registry)
 
     try:
-        run = await runtime.start(checkout, 21)
+        run = await start(checkout, 21)
         result = await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
 
         # Guard the premise: if Python itself did not finish the run, a later

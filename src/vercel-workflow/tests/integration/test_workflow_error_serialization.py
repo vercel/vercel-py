@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from vercel.queue.testing import clear_subscriptions
-from vercel.workflow import FatalError
+from vercel.workflow import FatalError, start
 from vercel.workflow._internal import core, runtime, world as w
 from vercel.workflow._internal.worlds import local as local_mod
 
@@ -66,7 +66,7 @@ async def running_world(tmp_path, monkeypatch) -> AsyncIterator[local_mod.LocalW
 
 async def test_workflow_catches_the_error_raised_by_a_step(tmp_path, monkeypatch) -> None:
     async with running_world(tmp_path, monkeypatch) as world:
-        run = await runtime.start(catch_step_error)
+        run = await start(catch_step_error)
         result = await asyncio.wait_for(run.return_value(), RUN_DEADLINE_SECONDS)
 
         assert result == {
