@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast, overload
 
@@ -38,12 +39,14 @@ class Run(Generic[T]):
         self,
         run_id: str,
         *,
-        output_codec: signature_codec.SignatureCodec | None = None,
+        output_validator: Callable[[Any], T] | None = None,
     ) -> None:
         self._run_id = run_id
-        # Only `start` has the workflow in hand; a `Run` built from a run id
-        # picked up elsewhere reads its output as whatever the wire carried.
-        self._codec = output_codec
+        # `output_validator` is used by `return_value()` to validate the return value.
+        # `start()` builds it from the workflow's return annotation, while
+        # `get_run()` builds it from the caller's `type` argument.
+        # If no validator is provided, the decoded value is returned unchanged.
+        self._output_validator = output_validator
 
     @property
     def run_id(self) -> str:
@@ -78,9 +81,9 @@ class Run(Generic[T]):
             raise errors.WorkflowRunFailedError(
                 self._run_id, result.value, error_code=result.error_code
             )
-        if self._codec is None:
+        if self._output_validator is None:
             return cast("T", result.value)
-        return cast("T", self._codec.validate_return(result.value))
+        return self._output_validator(result.value)
 
     @overload
     def readable(
@@ -168,6 +171,35 @@ class Run(Generic[T]):
     async def list_streams(self) -> list[str]:
         """Every stream this run has written to, namespaced ones included."""
         return await w.get_world().streams_list(self._run_id)
+
+
+@overload
+def get_run(run_id: str) -> Run[Any]: ...
+
+
+@overload
+def get_run(run_id: str, *, type: type[T]) -> Run[T]: ...
+
+
+@overload
+def get_run(run_id: str, *, type: Any) -> Run[Any]: ...
+
+
+def get_run(run_id: str, *, type: Any = Any) -> Run[Any]:
+    """Return a :class:`Run` for the given run ID.
+
+    If the run doesn't exist, you'll get an error when you request its status
+    or result through the returned object, rather than when you call this function.
+
+    Pass *type* to convert and validate the result of :meth:`Run.return_value`
+    using Pydantic. A value that fails validation raises
+    :class:`~vercel.workflow.TypeValidationError`. If *type* is omitted or
+    Pydantic cannot build a validator for it, the decoded value is returned
+    unchanged.
+    """
+    codec = signature_codec.TypeCodec(type)
+    validator = functools.partial(codec.validate, what=f"the return value of run {run_id}")
+    return Run(run_id, output_validator=validator)
 
 
 @core.builtin_step
@@ -281,4 +313,4 @@ async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> R
         deployment_id=deployment_id,
     )
 
-    return Run(run_id, output_codec=wf.codec)
+    return Run(run_id, output_validator=wf.codec.validate_return)

@@ -8,7 +8,7 @@ from vercel.workflow._internal.core import (
     sleep,
     time_ns,
 )
-from vercel.workflow._internal.run import Run, start
+from vercel.workflow._internal.run import Run, get_run, start
 from vercel.workflow._internal.runtime import (
     ENDPOINT_PATH,
     MANIFEST_PATH,
@@ -76,6 +76,7 @@ __all__ = [
     "Hook",
     "HookEvent",
     "get_hook_by_token",
+    "get_run",
     "get_step_metadata",
     "get_workflow_metadata",
     "get_writable",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import decimal
 import hashlib
+from dataclasses import dataclass
 from typing import Any, get_type_hints
 from unittest.mock import AsyncMock, Mock
 
@@ -12,7 +13,14 @@ import pydantic
 import pytest
 
 from tests.payloads import PLAIN_ENCODER
-from vercel.workflow import Run, WorkflowRunFailedError, WorkflowRunStatus, serializable, start
+from vercel.workflow import (
+    Run,
+    WorkflowRunFailedError,
+    WorkflowRunStatus,
+    get_run,
+    serializable,
+    start,
+)
 from vercel.workflow._internal import (
     core,
     py_sandbox,
@@ -32,6 +40,44 @@ class Order(pydantic.BaseModel):
     sku: str
     quantity: int
     total: decimal.Decimal
+
+
+@dataclass
+class Result:
+    value: int
+
+
+@pytest.mark.parametrize(
+    ("annotation", "value", "expected"),
+    [
+        (Result, {"value": 42}, Result(42)),
+        (list[Result], [{"value": 42}], [Result(42)]),
+        (Result | None, None, None),
+        (type(None), None, None),
+        (Any, {"value": 42}, {"value": 42}),
+    ],
+)
+async def test_get_run_validates_return_value(
+    monkeypatch: pytest.MonkeyPatch, annotation: Any, value: Any, expected: Any
+) -> None:
+    read = AsyncMock(return_value=run_mod.ReturnValueResult("completed", value))
+    monkeypatch.setattr(run_mod, "_get_return_value", read)
+
+    run = get_run("run_123", type=annotation)
+    assert run.run_id == "run_123"
+    read.assert_not_called()
+    assert await run.return_value() == expected
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+async def test_get_run_preserves_run_errors(monkeypatch: pytest.MonkeyPatch, status: Any) -> None:
+    read = AsyncMock(return_value=run_mod.ReturnValueResult(status, "failure"))
+    monkeypatch.setattr(run_mod, "_get_return_value", read)
+
+    error = RuntimeError if status == "cancelled" else WorkflowRunFailedError
+    message = "workflow cancelled" if status == "cancelled" else "failure"
+    with pytest.raises(error, match=message):
+        await get_run("run_123", type=Result).return_value()
 
 
 async def test_return_value_validates_against_the_workflow_return(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -257,8 +303,8 @@ async def terminate_conflict() -> str:
 
 @registry.workflow
 async def read_result(run_id: str, *, typed: bool = False) -> Any:
-    codec = target.codec if typed else None
-    run = Run[Any](run_id, output_codec=codec)
+    validator = target.codec.validate_return if typed else None
+    run = Run[Any](run_id, output_validator=validator)
     try:
         result = await run.return_value()
     except WorkflowRunFailedError as error:
