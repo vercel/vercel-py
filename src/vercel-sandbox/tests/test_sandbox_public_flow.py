@@ -518,9 +518,8 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         side_effect=update_handler
     )
 
-    async with session(service_options=_session_options()):
+    async with session(service_options=_session_options(project_id="prj_other")):
         handle = await sandbox.create_sandbox(
-            project_id="prj_other",
             name="preview",
             source=GitSource(
                 url="https://github.com/vercel/vercel-py",
@@ -610,13 +609,16 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
 async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
     mock_env_clear: None,
 ) -> None:
-    pending = _sandbox_response(name="forked", session_id="sbx_fork", status="pending")
+    pending = _sandbox_response(
+        name="forked", session_id="sbx_fork", status="pending", project_id="prj_other"
+    )
     fork_route = respx.post("https://sandbox.test/v2/sandboxes/source/fork").mock(
         return_value=httpx.Response(200, json=pending)
     )
     get_route = respx.get("https://sandbox.test/v2/sandboxes/forked").mock(
         return_value=httpx.Response(
-            200, json=_sandbox_response(name="forked", session_id="sbx_fork")
+            200,
+            json=_sandbox_response(name="forked", session_id="sbx_fork", project_id="prj_other"),
         )
     )
     stop_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_fork/stop").mock(
@@ -633,10 +635,9 @@ async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
         )
     )
 
-    async with session(service_options=_session_options()):
+    async with session(service_options=_session_options(project_id="prj_other")):
         async with sandbox.fork_sandbox(
             source_sandbox="source",
-            project_id="prj_other",
             name="forked",
             ports=[],
             execution_time_limit=12.5,
@@ -1707,15 +1708,13 @@ async def test_async_get_or_create_returns_existing_or_created_sandbox(
 
     create_route = respx.post("https://sandbox.test/v3/sandboxes").mock(side_effect=create_handler)
 
-    async with session(service_options=_session_options()):
+    async with session(service_options=_session_options(project_id="prj_other")):
         existing, existing_created = await sandbox.get_or_create_sandbox(
             name="existing",
-            project_id="prj_other",
             image="existing-repository:latest",
         )
         created, was_created = await sandbox.get_or_create_sandbox(
             name="missing",
-            project_id="prj_other",
             persistent=True,
             tags={"purpose": "test"},
         )
@@ -1947,15 +1946,13 @@ async def test_async_get_fetches_and_resume_ensures_active_session(
 
     respx.get("https://sandbox.test/v2/sandboxes/preview").mock(side_effect=handler)
 
-    async with session(service_options=_session_options()):
+    async with session(service_options=_session_options(project_id="prj_other")):
         fetched = await sandbox.get_sandbox(
             name="preview",
-            project_id="prj_other",
             include_system_routes=True,
         )
         resumed = await sandbox.resume_sandbox(
             name="preview",
-            project_id="prj_other",
             include_system_routes=True,
         )
 
@@ -2654,10 +2651,9 @@ async def test_async_sandbox_recovery_preserves_route_projection(
         return_value=httpx.Response(200, json=_command_response(session_id="sbx_new"))
     )
 
-    async with session(service_options=_session_options()):
+    async with session(service_options=_session_options(project_id="prj_bound")):
         handle = await sandbox.get_sandbox(
             name="preview",
-            project_id="prj_bound",
             include_system_routes=include_system_routes,
         )
         await handle.create_process("python")
@@ -4008,10 +4004,10 @@ async def test_drive_get_or_create_query_delete_and_mount_serialization(
         side_effect=sandbox_handler
     )
 
-    async with session(service_options=_session_options(region="sfo1")):
+    async with session(service_options=_session_options(project_id="prj_other")):
         drive, created = await sandbox.get_or_create_drive(
             name="cache",
-            project_id="prj_other",
+            region="sfo1",
             max_size_bytes=1024**3,
         )
         assert created is True
@@ -4041,7 +4037,6 @@ async def test_drive_get_or_create_query_delete_and_mount_serialization(
         assert [item.name for item in drives] == ["cache-1", "cache-2"]
 
         await sandbox.create_sandbox(
-            project_id="prj_other",
             name="preview",
             region="sfo1",
             mounts={
@@ -4070,7 +4065,7 @@ async def test_drive_get_or_create_query_delete_and_mount_serialization(
     assert query_requests == [
         {
             "teamId": "team_123",
-            "projectId": "prj_123",
+            "projectId": "prj_other",
             "limit": "1",
             "sortBy": "name",
             "sortOrder": "asc",
@@ -4078,7 +4073,7 @@ async def test_drive_get_or_create_query_delete_and_mount_serialization(
         },
         {
             "teamId": "team_123",
-            "projectId": "prj_123",
+            "projectId": "prj_other",
             "limit": "1",
             "cursor": "cursor_2",
             "sortBy": "name",
@@ -4163,15 +4158,14 @@ async def test_drive_mount_validates_known_conflicts_and_defers_project_names(
         return_value=httpx.Response(200, json=_sandbox_response())
     )
 
-    async with session(service_options=_session_options(region="iad1")):
-        drive, _ = await sandbox.get_or_create_drive(
-            name="cache", project_id="project-name", region="sfo1"
-        )
+    async with session(service_options=_session_options(project_id="project-name", region="iad1")):
+        drive, _ = await sandbox.get_or_create_drive(name="cache", region="sfo1")
 
+    async with session(service_options=_session_options(project_id="prj_other", region="iad1")):
         with pytest.raises(ValueError, match="project"):
-            await sandbox.create_sandbox(
-                project_id="prj_other", region="sfo1", mounts={"/cache": drive}
-            )
+            await sandbox.create_sandbox(region="sfo1", mounts={"/cache": drive})
+
+    async with session(service_options=_session_options(project_id="project-name", region="iad1")):
         with pytest.raises(ValueError, match="region"):
             await sandbox.create_sandbox(region="cle1", mounts={"/cache": drive})
         with pytest.raises(ValueError, match="failover"):
@@ -4183,9 +4177,7 @@ async def test_drive_mount_validates_known_conflicts_and_defers_project_names(
         with pytest.raises(ValueError, match="region"):
             await sandbox.fork_sandbox(source_sandbox="source", mounts={"/cache": drive})
 
-        await sandbox.create_sandbox(
-            project_id="project-name", region="sfo1", mounts={"/cache": drive}
-        )
+        await sandbox.create_sandbox(region="sfo1", mounts={"/cache": drive})
 
     assert create_route.call_count == 1
     assert not fork_route.called
@@ -4308,21 +4300,17 @@ async def test_async_fork_never_inherits_and_accepts_explicit_mounts(
         ]
     )
 
-    async with session(service_options=_session_options(region="iad1")):
-        drive, _ = await sandbox.get_or_create_drive(
-            name="cache", project_id="prj_other", region="sfo1"
-        )
-        await sandbox.fork_sandbox(source_sandbox="source", project_id="prj_other")
-        await sandbox.fork_sandbox(source_sandbox="source", project_id="prj_other", mounts={})
+    async with session(service_options=_session_options(project_id="prj_other", region="iad1")):
+        drive, _ = await sandbox.get_or_create_drive(name="cache", region="sfo1")
+        await sandbox.fork_sandbox(source_sandbox="source")
+        await sandbox.fork_sandbox(source_sandbox="source", mounts={})
         await sandbox.fork_sandbox(
             source_sandbox="source",
-            project_id="prj_other",
             mounts={"/cache": "cache"},
             region="sfo1",
         )
         await sandbox.fork_sandbox(
             source_sandbox="source",
-            project_id="prj_other",
             mounts={"/cache": drive},
             region="sfo1",
         )

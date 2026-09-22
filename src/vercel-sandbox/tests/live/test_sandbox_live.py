@@ -268,7 +268,6 @@ async def test_drive_persists_files_for_a_mounted_sandbox() -> None:
                 names=(first_sandbox_name, second_sandbox_name),
                 known_sandboxes=known_sandboxes,
                 drive_name=drive_name,
-                project_id=drive.project_id if drive is not None else None,
                 original_error=original_error,
             )
 
@@ -328,7 +327,6 @@ async def test_fork_does_not_inherit_a_running_source_drive() -> None:
                 names=(source_name, fork_name),
                 known_sandboxes=known_sandboxes,
                 drive_name=drive_name,
-                project_id=drive.project_id if drive is not None else None,
                 original_error=original_error,
             )
 
@@ -426,6 +424,5 @@ async def test_snapshot_mount_and_next_session_mount_updates() -> None:
                 names=(initializer_name, snapshot_name, update_name),
                 known_sandboxes=known_sandboxes,
                 drive_name=drive_name,
-                project_id=drive.project_id if drive is not None else None,
                 original_error=original_error,
             )
