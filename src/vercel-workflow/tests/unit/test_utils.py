@@ -1,6 +1,9 @@
+from typing import Annotated
+
+import pydantic
 import pytest
 
-from vercel.workflow._internal.utils import utf16_code_unit_length
+from vercel.workflow._internal.utils import Utf16MaxLength, utf16_code_unit_length
 
 
 @pytest.mark.parametrize(
@@ -20,3 +23,50 @@ from vercel.workflow._internal.utils import utf16_code_unit_length
 )
 def test_utf16_code_unit_length(value: str, expected: int) -> None:
     assert utf16_code_unit_length(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "ab", "中文", "😀", "\ud800", "\udc00", "\ud83d\ude00"],
+)
+def test_utf16_max_length_accepts_within_limit(value: str) -> None:
+    adapter = pydantic.TypeAdapter[str](Annotated[str, Utf16MaxLength(code_units=2)])
+    assert adapter.validate_python(value) == value
+
+
+@pytest.mark.parametrize("value", ["abc", "中文名", "😀x", "😀😀", "\ud83d\ude00x"])
+def test_utf16_max_length_rejects_over_limit(value: str) -> None:
+    adapter = pydantic.TypeAdapter[str](Annotated[str, Utf16MaxLength(2)])
+    with pytest.raises(pydantic.ValidationError, match="at most 2 UTF-16 code units"):
+        adapter.validate_python(value)
+
+
+def test_utf16_max_length_optional_field() -> None:
+    class Model(pydantic.BaseModel):
+        value: Annotated[str, Utf16MaxLength(2)] | None = None
+
+    assert Model().value is None
+    assert Model(value=None).value is None
+    assert Model.model_validate_json('{"value": "😀"}').model_dump() == {"value": "😀"}
+    with pytest.raises(pydantic.ValidationError, match="at most 2 UTF-16 code units"):
+        Model.model_validate_json('{"value": "😀x"}')
+    with pytest.raises(pydantic.ValidationError, match="valid string"):
+        Model.model_validate({"value": 123})
+
+
+def test_utf16_max_length_zero() -> None:
+    adapter = pydantic.TypeAdapter[str](Annotated[str, Utf16MaxLength(0)])
+    assert adapter.validate_python("") == ""
+    with pytest.raises(pydantic.ValidationError, match="at most 0 UTF-16 code units"):
+        adapter.validate_python("x")
+
+
+def test_utf16_max_length_negative_limit() -> None:
+    with pytest.raises(ValueError, match="code_units must be non-negative"):
+        Utf16MaxLength(-1)
+
+
+def test_utf16_max_length_json_schema() -> None:
+    adapter = pydantic.TypeAdapter[str](Annotated[str, Utf16MaxLength(2)])
+    # JSON Schema's maxLength counts code points, not UTF-16 code units.
+    assert adapter.json_schema() == {"type": "string"}

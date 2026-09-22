@@ -31,7 +31,7 @@ from vercel._internal.core.polyfills import UTC, Self
 from vercel.queue import SanitizedName
 
 from . import ulid
-from .utils import utf16_code_unit_length
+from .utils import Utf16MaxLength
 
 if TYPE_CHECKING:
     from .serialization import PayloadEncoder
@@ -624,16 +624,12 @@ class RunFailedEvent(BaseEvent):
 
 
 class RunCancelledEventData(BaseModel):
-    cancel_reason: str | None = pydantic.Field(
+    cancel_reason: Annotated[str, Utf16MaxLength(512)] | None = pydantic.Field(
         default=None, alias="cancelReason", exclude_if=lambda e: e is None
     )
 
-    @pydantic.field_validator("cancel_reason")
-    @classmethod
-    def validate_cancel_reason(cls, value: str | None) -> str | None:
-        if value is not None and utf16_code_unit_length(value) > 512:
-            raise ValueError("cancelReason must be at most 512 UTF-16 code units")
-        return value
+    def into_event(self) -> "RunCancelledEvent":
+        return RunCancelledEvent(event_data=self)
 
 
 class RunCancelledEvent(BaseEvent):

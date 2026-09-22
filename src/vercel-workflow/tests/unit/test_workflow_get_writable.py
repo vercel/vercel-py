@@ -45,6 +45,7 @@ class FakeWorld(NoStreams, w.World):
 
     def __init__(self, *, fail_writes: bool = False, step_input: bytes | None = None) -> None:
         self.log: list[tuple[str, Any]] = []
+        self.steps: dict[tuple[str, str], w.WorkflowStep] = {}
         self.fail_writes = fail_writes
         self.step_input = step_input or PLAIN_ENCODER.encode(ser.step_arguments((), {}))
 
@@ -82,19 +83,8 @@ class FakeWorld(NoStreams, w.World):
 
     async def events_create(self, run_id: str | None, data: w.Event) -> w.EventResult:
         if data.event_type == "step_started":
-            return w.EventResult(
-                step=w.NonFinalWorkflowStep(
-                    run_id=RUN_ID,
-                    step_id=STEP_ID,
-                    step_name=data.correlation_id or "",
-                    status="running",
-                    attempt=1,
-                    created_at=NOW,
-                    updated_at=NOW,
-                    started_at=NOW,
-                    input=self.step_input,
-                )
-            )
+            assert run_id is not None
+            return w.EventResult(step=self.steps[(run_id, data.correlation_id)])
         self.log.append((data.event_type, data))
         return w.EventResult()
 
@@ -123,6 +113,19 @@ def registry() -> core.Workflows:
 
 
 async def _invoke(registry: core.Workflows, step_name: str) -> w.QueueContinuation | None:
+    fake = w.get_world()
+    assert isinstance(fake, FakeWorld)
+    fake.steps[(RUN_ID, STEP_ID)] = w.NonFinalWorkflowStep(
+        run_id=RUN_ID,
+        step_id=STEP_ID,
+        step_name=step_name,
+        status="running",
+        attempt=1,
+        created_at=NOW,
+        updated_at=NOW,
+        started_at=NOW,
+        input=fake.step_input,
+    )
     payload = w.WorkflowInvokePayload(
         run_id=RUN_ID,
         step_id=STEP_ID,

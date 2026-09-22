@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any, Generic, Literal, ParamSpec, TypeVar, cast, overload
 
 from . import (
@@ -14,6 +15,7 @@ from . import (
     signature_codec,
     streams,
     ulid,
+    utils,
     world as w,
 )
 
@@ -24,6 +26,13 @@ logger = logging.getLogger("vercel.workflow")
 _generate_run_ulid = ulid.monotonic_factory()
 
 
+@dataclass
+class ReturnValueResult:
+    status: Literal["completed", "failed", "cancelled"]
+    value: Any = None
+    error_code: str | None = None
+
+
 class Run(Generic[T]):
     def __init__(
         self,
@@ -32,7 +41,6 @@ class Run(Generic[T]):
         output_codec: signature_codec.SignatureCodec | None = None,
     ) -> None:
         self._run_id = run_id
-        self._world = w.get_world()
         # Only `start` has the workflow in hand; a `Run` built from a run id
         # picked up elsewhere reads its output as whatever the wire carried.
         self._codec = output_codec
@@ -41,13 +49,11 @@ class Run(Generic[T]):
     def run_id(self) -> str:
         return self._run_id
 
-    async def status(self) -> Literal["pending", "running", "completed", "failed", "cancelled"]:
-        run = await self._world.runs_get(self._run_id)
-        return run.status
+    async def status(self) -> w.WorkflowRunStatus:
+        return await _get_status(self._run_id)
 
     async def attributes(self) -> dict[str, str]:
-        run = await self._world.runs_get(self._run_id)
-        return dict(run.attributes)
+        return await _get_attributes(self._run_id)
 
     async def terminate(self, *, reason: str | None = None) -> None:
         """Terminate the workflow run.
@@ -59,46 +65,22 @@ class Run(Generic[T]):
         *reason* records optional plaintext on the cancellation event
         (at most 512 UTF-16 code units).
         """
-        event_data = w.RunCancelledEventData(cancel_reason=reason) if reason is not None else None
-        await self._world.events_create(self._run_id, w.RunCancelledEvent(event_data=event_data))
-
-    async def _failure(self, run: w.WorkflowRun) -> Exception:
-        what = f"the error of run {run.run_id}"
-        try:
-            key = None
-            if ser.is_encrypted(run.error):
-                key = await self._world.run_key(run.run_id, deployment_id=run.deployment_id)
-            return ser.hydrate_error(run.error, what=what, key=key)
-        except Exception as error:
-            logger.debug("[Workflows] '%s' - could not read %s: %s", run.run_id, what, error)
-            return RuntimeError(f"cannot read {what}: {error}")
+        if reason is not None and utils.utf16_code_unit_length(reason) > 512:
+            raise ValueError("cancelReason must be at most 512 UTF-16 code units")
+        await _terminate(self._run_id, reason=reason)
 
     async def return_value(self) -> T:
-        while True:
-            run = await self._world.runs_get(self._run_id)
-            if run.status == "completed":
-                if not run.output:
-                    raise RuntimeError(f"Completed workflow {run.run_id} has no output")
-                key = None
-                if ser.is_encrypted(run.output):
-                    key = await self._world.run_key(run.run_id, deployment_id=run.deployment_id)
-                output = ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
-                if self._codec is None:
-                    return cast("T", output)
-                return cast("T", self._codec.validate_return(output))
+        result = await _get_return_value(self._run_id)
 
-            elif run.status == "cancelled":
-                raise RuntimeError("workflow cancelled")
-
-            elif run.status == "failed":
-                raise errors.WorkflowRunFailedError(
-                    run.run_id,
-                    await self._failure(run),
-                    error_code=run.error_code,
-                )
-
-            else:
-                await asyncio.sleep(1)
+        if result.status == "cancelled":
+            raise RuntimeError("workflow cancelled")
+        if result.status == "failed":
+            raise errors.WorkflowRunFailedError(
+                self._run_id, result.value, error_code=result.error_code
+            )
+        if self._codec is None:
+            return cast("T", result.value)
+        return cast("T", self._codec.validate_return(result.value))
 
     @overload
     def readable(
@@ -148,7 +130,7 @@ class Run(Generic[T]):
         iterating a property twice would quietly start a second one.
         """
         name = streams.workflow_run_stream_id(self._run_id, namespace)
-        return streams._read_stream(self._world, self._run_id, name, type, start_index)
+        return streams._read_stream(w.get_world(), self._run_id, name, type, start_index)
 
     def readable_bytes(
         self, *, namespace: str | None = None, start_index: int | None = None
@@ -181,11 +163,73 @@ class Run(Generic[T]):
         as a position.
         """
         name = streams.workflow_run_stream_id(self._run_id, namespace)
-        return await self._world.streams_get_info(self._run_id, name)
+        return await w.get_world().streams_get_info(self._run_id, name)
 
     async def list_streams(self) -> list[str]:
         """Every stream this run has written to, namespaced ones included."""
-        return await self._world.streams_list(self._run_id)
+        return await w.get_world().streams_list(self._run_id)
+
+
+@core.builtin_step
+async def _get_status(run_id: str) -> w.WorkflowRunStatus:
+    run = await w.get_world().runs_get(run_id)
+    return run.status
+
+
+@core.builtin_step
+async def _get_attributes(run_id: str) -> dict[str, str]:
+    run = await w.get_world().runs_get(run_id)
+    return dict(run.attributes)
+
+
+@core.builtin_step
+async def _terminate(run_id: str, *, reason: str | None = None) -> None:
+    event = (
+        w.RunCancelledEventData(cancel_reason=reason).into_event()
+        if reason is not None
+        else w.RunCancelledEvent()
+    )
+    await w.get_world().events_create(run_id, event)
+
+
+@core.builtin_step
+async def _get_return_value(run_id: str) -> ReturnValueResult:
+    world = w.get_world()
+    while True:
+        run = await world.runs_get(run_id)
+        if run.status == "completed":
+            if not run.output:
+                raise RuntimeError(f"Completed workflow {run.run_id} has no output")
+            key = None
+            if ser.is_encrypted(run.output):
+                key = await world.run_key(run.run_id, deployment_id=run.deployment_id)
+            output = ser.hydrate(run.output, what=f"the output of run {run.run_id}", key=key)
+            return ReturnValueResult(status="completed", value=output)
+
+        elif run.status == "cancelled":
+            return ReturnValueResult(status="cancelled")
+
+        elif run.status == "failed":
+            return ReturnValueResult(
+                status="failed",
+                value=await _failure(run, world=world),
+                error_code=run.error_code,
+            )
+
+        else:
+            await asyncio.sleep(1)
+
+
+async def _failure(run: w.WorkflowRun, *, world: w.World) -> Exception:
+    what = f"the error of run {run.run_id}"
+    try:
+        key = None
+        if ser.is_encrypted(run.error):
+            key = await world.run_key(run.run_id, deployment_id=run.deployment_id)
+        return ser.hydrate_error(run.error, what=what, key=key)
+    except Exception as error:
+        logger.debug("[Workflows] '%s' - could not read %s: %s", run.run_id, what, error)
+        return RuntimeError(f"cannot read {what}: {error}")
 
 
 async def start(wf: core.Workflow[P, T], *args: P.args, **kwargs: P.kwargs) -> Run[T]:

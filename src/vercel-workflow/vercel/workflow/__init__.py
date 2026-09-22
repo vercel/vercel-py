@@ -29,7 +29,12 @@ from vercel.workflow._internal.streams import (
     WorkflowWritable,
     read_stream,
 )
-from vercel.workflow._internal.world import HTTPHandler, HTTPRequest, HTTPResponse
+from vercel.workflow._internal.world import (
+    HTTPHandler,
+    HTTPRequest,
+    HTTPResponse,
+    WorkflowRunStatus,
+)
 
 from . import sandbox
 from .errors import (
@@ -66,6 +71,7 @@ __all__ = [
     "start",
     "time_ns",
     "Run",
+    "WorkflowRunStatus",
     "BaseHook",
     "Hook",
     "HookEvent",

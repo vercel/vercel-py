@@ -165,6 +165,49 @@ class Step(Generic[P, T]):
         return await ctx.run_step(self, *args, **kwargs)
 
 
+class BuiltinStep(Step[P, T]):
+    async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        from . import runtime
+
+        try:
+            ctx = runtime.WorkflowOrchestratorContext.current()
+        except LookupError:
+            pass
+        else:
+            return await ctx.run_step(self, *args, **kwargs)
+        return await self.func(*args, **kwargs)
+
+
+_builtin_steps: dict[str, BuiltinStep[Any, Any]] = {}
+
+
+@overload
+def builtin_step(func: Callable[P, Coroutine[Any, Any, T]]) -> BuiltinStep[P, T]: ...
+
+
+@overload
+def builtin_step(
+    *, max_retries: int = ..., cancellable: bool = ...
+) -> Callable[[Callable[P, Coroutine[Any, Any, T]]], BuiltinStep[P, T]]: ...
+
+
+def builtin_step(
+    func: Callable[P, Coroutine[Any, Any, T]] | None = None,
+    *,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    cancellable: bool = False,
+) -> BuiltinStep[P, T] | Callable[[Callable[P, Coroutine[Any, Any, T]]], BuiltinStep[P, T]]:
+    def register(f: Callable[P, Coroutine[Any, Any, T]]) -> BuiltinStep[P, T]:
+        step = BuiltinStep(f, max_retries=max_retries, cancellable=cancellable)
+        assert step.name not in _builtin_steps, f"Duplicate built-in step name: {step.name}"
+        _builtin_steps[step.name] = step
+        return step
+
+    if func is None:
+        return register
+    return register(func)
+
+
 async def sleep(param: DurationParam) -> None:
     from . import runtime
 
@@ -405,6 +448,8 @@ class Workflows:
         return register(func)
 
     def _get_step(self, step_name: str) -> Step[Any, Any]:
+        if step_name in _builtin_steps:
+            return _builtin_steps[step_name]
         try:
             return self._steps[step_name]
         except KeyError:

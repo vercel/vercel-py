@@ -9,7 +9,7 @@ function.
 from __future__ import annotations
 
 from vercel.workflow import Workflows
-from vercel.workflow._internal.core import DEFAULT_MAX_RETRIES
+from vercel.workflow._internal.core import DEFAULT_MAX_RETRIES, builtin_step
 
 
 def test_step_default_max_retries() -> None:
@@ -56,3 +56,11 @@ def test_both_decorator_forms_register_step() -> None:
 
     assert wf._get_step(a.name) is a
     assert wf._get_step(b.name) is b
+
+
+def test_builtin_step_forwards_step_options() -> None:
+    @builtin_step(max_retries=1, cancellable=True)
+    async def configured() -> None: ...
+
+    assert configured.max_retries == 1
+    assert configured.cancellable is True

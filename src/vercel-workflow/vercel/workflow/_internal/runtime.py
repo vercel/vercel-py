@@ -2165,12 +2165,12 @@ async def _execute_step(
         raise RuntimeError(f"Step '{req.step_id}' has no 'startedAt' timestamp")
 
     try:
-        step = registry._get_step(req.step_name)
+        step = registry._get_step(step_run.step_name)
     except errors.StepNotRegisteredError as missing_error:
         logger.error(
             "[Workflows] '%s' - step '%s' is not registered, failing step",
             req.run_id,
-            req.step_name,
+            step_run.step_name,
         )
         await world.events_create(
             req.run_id,
