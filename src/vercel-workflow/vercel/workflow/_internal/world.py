@@ -628,6 +628,9 @@ class RunCancelledEventData(BaseModel):
         default=None, alias="cancelReason", exclude_if=lambda e: e is None
     )
 
+    def into_event(self) -> "RunCancelledEvent":
+        return RunCancelledEvent(event_data=self)
+
 
 class RunCancelledEvent(BaseEvent):
     event_type: Literal["run_cancelled"] = pydantic.Field(
