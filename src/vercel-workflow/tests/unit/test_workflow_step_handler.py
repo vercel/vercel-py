@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx2 as httpx
 import pydantic
@@ -170,6 +171,42 @@ def _event_types(fake: FakeWorld) -> list[str]:
 
 def _workflow_enqueues(fake: FakeWorld) -> list[tuple[str, Any]]:
     return [q for q in fake.queued if q[0] == WORKFLOW_QUEUE]
+
+
+@pytest.mark.parametrize("delivery_kind", ["registered", "builtin", "unregistered"])
+async def test_step_dispatch_uses_stored_name_without_prereading(
+    registry: core.Workflows, monkeypatch: pytest.MonkeyPatch, delivery_kind: str
+) -> None:
+    calls: list[str] = []
+
+    @registry.step
+    async def expected_step() -> str:
+        calls.append("expected")
+        return "ok"
+
+    async def other_step() -> str:
+        calls.append("other")
+        return "other"
+
+    if delivery_kind == "registered":
+        delivery_name = registry.step(other_step).name
+    elif delivery_kind == "builtin":
+        builtin = core.BuiltinStep(other_step)
+        monkeypatch.setitem(core._builtin_steps, builtin.name, builtin)
+        delivery_name = builtin.name
+    else:
+        delivery_name = "step//tests.unregistered"
+
+    fake = FakeWorld(started_step=_running_step(expected_step.name, attempt=1))
+    get_step = AsyncMock(wraps=fake.steps_get)
+    monkeypatch.setattr(fake, "steps_get", get_step)
+    w.set_world(fake)
+
+    assert await _invoke(registry, delivery_name) is None
+    get_step.assert_not_called()
+    assert calls == ["expected"]
+    assert _event_types(fake) == ["step_completed"]
+    assert len(_workflow_enqueues(fake)) == 1
 
 
 async def test_too_early_defers_without_running(registry: core.Workflows) -> None:
