@@ -120,6 +120,7 @@ def create_sandbox(
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
     network_policy: NetworkPolicy | None = None,
+    network_id: str | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     mounts: DriveMountsInput[_RemotePathT] | None = None,
@@ -147,6 +148,7 @@ def create_sandbox(
         resources: Requested CPU and memory resources.
         persistent: Whether the sandbox persists beyond its current session.
         network_policy: Network access policy sent to the Sandbox API.
+        network_id: Secure Compute network ID to attach to the sandbox.
         env: Environment variables for the sandbox.
         tags: Metadata tags used to organize and query sandboxes.
         mounts: Drive names or handles keyed by absolute mount path.
@@ -176,6 +178,7 @@ def create_sandbox(
         resources=resources,
         persistent=persistent,
         network_policy=network_policy,
+        network_id=network_id,
         env=env,
         tags=tags,
         mounts=mounts,
@@ -198,6 +201,7 @@ def fork_sandbox(
     image: str | None = None,
     persistent: bool | None = None,
     network_policy: NetworkPolicy | None = None,
+    network_id: str | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     mounts: DriveMountsInput[_RemotePathT] | None = None,
@@ -228,6 +232,7 @@ def fork_sandbox(
         image: Vercel Container Registry image override.
         persistent: Persistence override.
         network_policy: Network access policy override.
+        network_id: Secure Compute network ID override.
         env: Environment variable override.
         tags: Metadata tag override.
         mounts: Drives to attach explicitly to the fork. Forks never inherit
@@ -256,6 +261,7 @@ def fork_sandbox(
         image=image,
         persistent=persistent,
         network_policy=network_policy,
+        network_id=network_id,
         env=env,
         tags=tags,
         mounts=mounts,
@@ -280,6 +286,7 @@ async def get_or_create_sandbox(
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
     network_policy: NetworkPolicy | None = None,
+    network_id: str | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     mounts: DriveMountsInput[_RemotePathT] | None = None,
@@ -309,6 +316,7 @@ async def get_or_create_sandbox(
         resources: Requested CPU and memory resources.
         persistent: Whether the sandbox persists beyond its current session.
         network_policy: Network access policy sent to the Sandbox API.
+        network_id: Secure Compute network ID to attach to the sandbox.
         env: Environment variables for the sandbox.
         tags: Metadata tags used to organize and query sandboxes.
         mounts: Drive names or handles keyed by absolute mount path.
@@ -335,6 +343,7 @@ async def get_or_create_sandbox(
         resources=resources,
         persistent=persistent,
         network_policy=network_policy,
+        network_id=network_id,
         env=env,
         tags=tags,
         mounts=mounts,

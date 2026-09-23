@@ -410,6 +410,11 @@ class RuntimeSessionHandleBase:
         return self._payload.network_policy
 
     @property
+    def network_id(self) -> str | None:
+        """Secure Compute network connected to this sandbox."""
+        return self._payload.network_id
+
+    @property
     def requested_at(self) -> int | None:
         return self._payload.requested_at
 
@@ -540,6 +545,11 @@ class SandboxHandleBase(Generic[RuntimeSessionHandleT]):
     @property
     def network_policy(self) -> NetworkPolicy | None:
         return self._payload.network_policy
+
+    @property
+    def network_id(self) -> str | None:
+        """Secure Compute network connected to this sandbox."""
+        return self._payload.network_id
 
     @property
     def snapshot_expiration(self) -> timedelta | None:

@@ -14,6 +14,18 @@ async with session():
 
 The package can be installed independently with `pip install vercel-sandbox`.
 
+To attach a sandbox to a Secure Compute private network, pass its connect
+network ID at creation:
+
+```python
+async with session():
+    instance = await sandbox.create_sandbox(network_id="network_123")
+    print(instance.network_id)
+    await instance.update(network_id=None)  # Disconnect from Secure Compute
+```
+
+`network_id` is also accepted by `fork_sandbox()` and the synchronous APIs.
+
 When no image is provided, the Sandbox API uses
 `vercel/sandbox/universal:latest`.
 

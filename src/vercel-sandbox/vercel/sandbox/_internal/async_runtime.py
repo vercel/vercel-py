@@ -48,6 +48,7 @@ from vercel.sandbox._internal.models import (
     DriveQuery,
     DurationInput,
     FailoverRegionsInput,
+    NetworkIdUpdate,
     NetworkPolicy,
     PrivateSandboxParameters,
     ProcessLog,
@@ -1332,6 +1333,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         resources: SandboxResources | None = None,
         persistent: bool | None = None,
         network_policy: NetworkPolicy | None = None,
+        network_id: NetworkIdUpdate = _OMITTED,
         env: dict[str, str] | None = None,
         tags: dict[str, str] | None = None,
         mounts: DriveMountsInput[_RemotePathT] | None = None,
@@ -1364,6 +1366,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
+            network_id=network_id,
             env=env,
             tags=tags,
             mounts=mounts,
@@ -1475,6 +1478,7 @@ class _CreateSandboxParams:
     resources: SandboxResources | None = None
     persistent: bool | None = None
     network_policy: NetworkPolicy | None = None
+    network_id: str | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
     mounts: Mapping[Any, DriveMountInput] | None = None
@@ -1527,6 +1531,7 @@ class CreateSandboxOperation:
             resources=self._params.resources,
             persistent=self._params.persistent,
             network_policy=self._params.network_policy,
+            network_id=self._params.network_id,
             env=self._params.env,
             tags=self._params.tags,
             mounts=self._params.mounts,
@@ -1577,6 +1582,7 @@ class _ForkSandboxParams:
     image: str | None = None
     persistent: bool | None = None
     network_policy: NetworkPolicy | None = None
+    network_id: str | None = None
     env: Mapping[str, str] | None = None
     tags: Mapping[str, str] | None = None
     mounts: Mapping[Any, DriveMountInput] | None = None
@@ -1628,6 +1634,7 @@ class ForkSandboxOperation:
             image=self._params.image,
             persistent=self._params.persistent,
             network_policy=self._params.network_policy,
+            network_id=self._params.network_id,
             env=self._params.env,
             tags=self._params.tags,
             mounts=self._params.mounts,
@@ -1785,6 +1792,7 @@ def create_sandbox_operation(
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
     network_policy: NetworkPolicy | None = None,
+    network_id: str | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     mounts: DriveMountsInput[_RemotePathT] | None = None,
@@ -1807,6 +1815,7 @@ def create_sandbox_operation(
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
+            network_id=network_id,
             env=env,
             tags=tags,
             mounts=mounts,
@@ -1832,6 +1841,7 @@ def fork_sandbox_operation(
     image: str | None = None,
     persistent: bool | None = None,
     network_policy: NetworkPolicy | None = None,
+    network_id: str | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     mounts: DriveMountsInput[_RemotePathT] | None = None,
@@ -1854,6 +1864,7 @@ def fork_sandbox_operation(
             image=image,
             persistent=persistent,
             network_policy=network_policy,
+            network_id=network_id,
             env=env,
             tags=tags,
             mounts=mounts,
@@ -1903,6 +1914,7 @@ async def get_or_create_sandbox(
     resources: SandboxResources | None = None,
     persistent: bool | None = None,
     network_policy: NetworkPolicy | None = None,
+    network_id: str | None = None,
     env: Mapping[str, str] | None = None,
     tags: Mapping[str, str] | None = None,
     mounts: DriveMountsInput[_RemotePathT] | None = None,
@@ -1925,6 +1937,7 @@ async def get_or_create_sandbox(
             resources=resources,
             persistent=persistent,
             network_policy=network_policy,
+            network_id=network_id,
             env=env,
             tags=tags,
             mounts=mounts,
