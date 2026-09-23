@@ -59,9 +59,9 @@ def test_zoneinfo_datetime_supplies_the_timezone() -> None:
     assert resolve_one_off(local, None) == ("2026-10-01T09:30:00", "America/Los_Angeles")
 
 
-@pytest.mark.parametrize("subminute", [{"second": 15}, {"microsecond": 1}])
-def test_one_off_rejects_subminute_precision(subminute: dict[str, int]) -> None:
-    at = AT.replace(**subminute)
+@pytest.mark.parametrize(("second", "microsecond"), [(15, 0), (0, 1)])
+def test_one_off_rejects_subminute_precision(second: int, microsecond: int) -> None:
+    at = AT.replace(second=second, microsecond=microsecond)
     with pytest.raises(SchedulesValidationError, match="whole-minute precision"):
         resolve_one_off(at, None)
     with pytest.raises(SchedulesValidationError, match="whole-minute precision"):
