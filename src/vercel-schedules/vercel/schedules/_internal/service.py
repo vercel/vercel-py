@@ -61,8 +61,10 @@ def _timezone_name(at: datetime) -> str | None:
 
 
 def _wall_clock(at: datetime) -> str:
-    """Render a wall-clock time the way the service expects: no offset, whole seconds."""
-    return at.replace(tzinfo=None, microsecond=0).isoformat(timespec="seconds")
+    """Render a minute-aligned wall-clock time with no offset and zero seconds."""
+    if at.second or at.microsecond:
+        raise SchedulesValidationError("at must have whole-minute precision")
+    return at.replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def resolve_one_off(at: datetime, timezone: str | None) -> tuple[str, str]:

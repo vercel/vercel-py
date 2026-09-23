@@ -53,10 +53,21 @@ def update_body(**overrides: Any) -> dict[str, Any]:
 # --- one-off resolution ----------------------------------------------------
 
 
-def test_zoneinfo_datetime_supplies_the_timezone_and_drops_subseconds() -> None:
-    local = datetime(2026, 10, 1, 9, 30, 15, 250_000, tzinfo=ZoneInfo("America/Los_Angeles"))
+def test_zoneinfo_datetime_supplies_the_timezone() -> None:
+    local = datetime(2026, 10, 1, 9, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
 
-    assert resolve_one_off(local, None) == ("2026-10-01T09:30:15", "America/Los_Angeles")
+    assert resolve_one_off(local, None) == ("2026-10-01T09:30:00", "America/Los_Angeles")
+
+
+@pytest.mark.parametrize("subminute", [{"second": 15}, {"microsecond": 1}])
+def test_one_off_rejects_subminute_precision(subminute: dict[str, int]) -> None:
+    at = AT.replace(**subminute)
+    with pytest.raises(SchedulesValidationError, match="whole-minute precision"):
+        resolve_one_off(at, None)
+    with pytest.raises(SchedulesValidationError, match="whole-minute precision"):
+        resolve_one_off(at.replace(tzinfo=None), "Europe/Berlin")
+    with pytest.raises(SchedulesValidationError, match="whole-minute precision"):
+        resolve_one_off(at, "Asia/Tokyo")
 
 
 @pytest.mark.parametrize("tzinfo", [timezone.utc, ZoneInfo("UTC")])
@@ -134,6 +145,7 @@ def test_create_accepts_jitter_bounds_inclusive(jitter: timedelta) -> None:
         ({"at": AT.replace(tzinfo=None)}, "at is naive"),
         ({"at": AT.astimezone(timezone(timedelta(hours=-5)))}, "fixed offset"),
         ({"at": AT, "timezone": "Mars/Olympus_Mons"}, "not a known IANA timezone"),
+        ({"at": AT.replace(second=15)}, "whole-minute precision"),
         ({"cron": "* * * * *", "jitter": timedelta(seconds=-1)}, "between"),
         ({"cron": "* * * * *", "jitter": timedelta(seconds=59)}, "between"),
         ({"cron": "* * * * *", "jitter": timedelta(minutes=15, seconds=1)}, "between"),
@@ -198,6 +210,7 @@ def test_update_one_off_converts_into_explicit_timezone() -> None:
     [
         ({}, "at least one field"),
         ({"cron": "* * * * *", "at": AT}, "at most one of cron or at"),
+        ({"at": AT.replace(microsecond=1)}, "whole-minute precision"),
         ({"jitter": timedelta(seconds=30)}, "between"),
         ({"topic": ""}, "topic"),
     ],

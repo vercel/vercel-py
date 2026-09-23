@@ -68,8 +68,9 @@ await create_schedule(
 ```
 
 Given both an aware `at` and `timezone`, `at` is converted into that timezone,
-so the instant is preserved. Fixed-offset datetimes other than UTC are rejected
-because they carry no IANA name.
+so the instant is preserved. One-off schedules have minute precision; `at` with
+nonzero seconds or microseconds is rejected. Fixed-offset datetimes other than
+UTC are rejected because they carry no IANA name.
 
 ### Manage schedules
 
