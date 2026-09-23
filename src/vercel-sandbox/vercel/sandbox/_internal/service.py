@@ -620,13 +620,13 @@ class SandboxService:
         project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
-    ) -> DriveState:
+    ) -> tuple[DriveState, bool]:
         self._ensure_open()
         return await self._api_client.get_or_create_drive(
             name=name,
             project_id=project_id,
             max_size_bytes=max_size_bytes,
-            region=region,
+            region=region or self._options.region,
         )
 
     async def query_drives_page(

@@ -1778,18 +1778,16 @@ def get_or_create_drive(
     project_id: str | None = None,
     max_size_bytes: int | None = None,
     region: str | None = None,
-) -> SyncDrive:
-    return SyncDrive(
-        payload=iter_coroutine(
-            service.get_or_create_drive(
-                name=name,
-                project_id=project_id,
-                max_size_bytes=max_size_bytes,
-                region=region,
-            )
-        ),
-        service=service,
+) -> tuple[SyncDrive, bool]:
+    state, created = iter_coroutine(
+        service.get_or_create_drive(
+            name=name,
+            project_id=project_id,
+            max_size_bytes=max_size_bytes,
+            region=region,
+        )
     )
+    return SyncDrive(payload=state, service=service), created
 
 
 def delete_drive(service: SandboxService, *, name: str, project_id: str | None = None) -> SyncDrive:

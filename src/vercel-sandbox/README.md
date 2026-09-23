@@ -164,7 +164,7 @@ from pathlib import PurePosixPath
 from vercel import sandbox
 from vercel.sandbox import DriveMount
 
-cache = await sandbox.get_or_create_drive(
+cache, _ = await sandbox.get_or_create_drive(
     name="cache",
     region="sfo1",
     max_size_bytes=10 * 1024**3,

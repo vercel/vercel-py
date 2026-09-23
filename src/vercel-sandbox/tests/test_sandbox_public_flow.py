@@ -4008,13 +4008,13 @@ async def test_drive_get_or_create_query_delete_and_mount_serialization(
         side_effect=sandbox_handler
     )
 
-    async with session(service_options=_session_options()):
-        drive = await sandbox.get_or_create_drive(
+    async with session(service_options=_session_options(region="sfo1")):
+        drive, created = await sandbox.get_or_create_drive(
             name="cache",
             project_id="prj_other",
-            region="sfo1",
             max_size_bytes=1024**3,
         )
+        assert created is True
         assert isinstance(drive, sandbox.Drive)
         assert drive.id == "drive_123"
         assert drive.name == "cache"
@@ -4136,7 +4136,8 @@ def test_sync_drive_get_or_create_query_and_delete(mock_env_clear: None) -> None
     )
 
     with session(service_options=_session_options()):
-        drive = sandbox_sync.get_or_create_drive(name="cache")
+        drive, created = sandbox_sync.get_or_create_drive(name="cache")
+        assert created is False
         assert isinstance(drive, sandbox_sync.SyncDrive)
         assert drive.snapshot() == DriveMount(drive, mode="snapshot")
         assert [item.name for item in sandbox_sync.query_drives()] == ["cache"]
@@ -4163,7 +4164,7 @@ async def test_drive_mount_validates_known_conflicts_and_defers_project_names(
     )
 
     async with session(service_options=_session_options(region="iad1")):
-        drive = await sandbox.get_or_create_drive(
+        drive, _ = await sandbox.get_or_create_drive(
             name="cache", project_id="project-name", region="sfo1"
         )
 
@@ -4308,7 +4309,7 @@ async def test_async_fork_never_inherits_and_accepts_explicit_mounts(
     )
 
     async with session(service_options=_session_options(region="iad1")):
-        drive = await sandbox.get_or_create_drive(
+        drive, _ = await sandbox.get_or_create_drive(
             name="cache", project_id="prj_other", region="sfo1"
         )
         await sandbox.fork_sandbox(source_sandbox="source", project_id="prj_other")

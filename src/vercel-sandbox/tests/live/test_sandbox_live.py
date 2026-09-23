@@ -201,7 +201,7 @@ async def test_drive_persists_files_for_a_mounted_sandbox() -> None:
 
     async with session():
         try:
-            drive = await sandbox.get_or_create_drive(
+            drive, _ = await sandbox.get_or_create_drive(
                 name=drive_name,
                 region="iad1",
                 max_size_bytes=1024**3,
@@ -288,7 +288,7 @@ async def test_fork_does_not_inherit_a_running_source_drive() -> None:
 
     async with session():
         try:
-            drive = await sandbox.get_or_create_drive(name=drive_name, region="iad1")
+            drive, _ = await sandbox.get_or_create_drive(name=drive_name, region="iad1")
             creating_name = source_name
             source = await sandbox.create_sandbox(
                 name=source_name,
@@ -350,7 +350,7 @@ async def test_snapshot_mount_and_next_session_mount_updates() -> None:
 
     async with session():
         try:
-            drive = await sandbox.get_or_create_drive(name=drive_name, region="iad1")
+            drive, _ = await sandbox.get_or_create_drive(name=drive_name, region="iad1")
 
             creating_name = initializer_name
             initializer = await sandbox.create_sandbox(

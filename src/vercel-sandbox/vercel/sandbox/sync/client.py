@@ -251,7 +251,7 @@ class SyncSandboxClient:
         project_id: str | None = None,
         max_size_bytes: int | None = None,
         region: str | None = None,
-    ) -> SyncDrive:
+    ) -> tuple[SyncDrive, bool]:
         return _get_or_create_sync_drive(
             self._service,
             name=name,
