@@ -1,7 +1,6 @@
 """Shared recovery policy for sandbox-level session operations."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, TypeVar
 
@@ -24,9 +23,6 @@ _LIFECYCLE_ERROR_CODES = {
     "sandbox_stopping": SandboxLifecycle.STOPPING,
     "sandbox_snapshotting": SandboxLifecycle.SNAPSHOTTING,
 }
-
-TRANSITION_POLL_INTERVAL = 0.5
-TRANSITION_TIMEOUT = 300.0
 
 
 def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle | None:
@@ -51,28 +47,15 @@ def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle |
 
 
 class SandboxRecoveryCoordinator(Protocol):
-    """Coordinate one lifecycle recovery before an operation is replayed.
+    """Provide the current session ID and a shared API resume attempt."""
 
-    Returning ``False`` leaves the original operation failure in place. This
-    lets runtime-specific coordinators add transition waiting and shared
-    recovery without changing the one-attempt/one-replay policy.
-    """
-
-    def _capture_recovery_target(self) -> "SandboxRecoveryTarget":
-        """Capture the session identity and optional bound handle for an attempt."""
+    def _capture_recovery_session_id(self) -> str:
+        """Capture the session identity for an operation attempt."""
         ...
 
-    async def _recover(self, lifecycle: SandboxLifecycle, target: "SandboxRecoveryTarget") -> bool:
-        """Recover the current sandbox session when this runtime supports it."""
+    async def _await_shared_resume(self) -> None:
+        """Resume through the API, sharing the attempt with concurrent callers."""
         ...
-
-
-@dataclass(frozen=True, slots=True)
-class SandboxRecoveryTarget:
-    """The exact session used by an operation's first attempt."""
-
-    session_id: str
-    session: object | None
 
 
 _ResultT = TypeVar("_ResultT")
@@ -89,12 +72,11 @@ async def execute_with_sandbox_recovery(
     so callers can resolve their current session ID immediately before each
     request. A replay failure is never eligible for another recovery cycle.
     """
-    target = coordinator._capture_recovery_target()
+    session_id = coordinator._capture_recovery_session_id()
     try:
-        return await operation(target.session_id)
+        return await operation(session_id)
     except Exception as error:
-        lifecycle = classify_sandbox_lifecycle_error(error)
-        if lifecycle is None or not await coordinator._recover(lifecycle, target):
+        if classify_sandbox_lifecycle_error(error) is None:
             raise
-    replay_target = coordinator._capture_recovery_target()
-    return await operation(replay_target.session_id)
+        await coordinator._await_shared_resume()
+    return await operation(coordinator._capture_recovery_session_id())

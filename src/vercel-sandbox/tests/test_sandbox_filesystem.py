@@ -520,20 +520,11 @@ def test_sync_active_writer_finish_lifecycle_failure_does_not_resume(
 @respx.mock
 @pytest.mark.parametrize("sync", [False, True])
 @pytest.mark.parametrize("error_code", ["sandbox_stopping", "sandbox_snapshotting"])
-async def test_stream_binding_polls_transition_before_pinning_session(
+async def test_stream_binding_retries_api_resume_before_pinning_session(
     mock_env_clear: None,
-    monkeypatch: pytest.MonkeyPatch,
     sync: bool,
     error_code: str,
 ) -> None:
-    async def no_delay(_delay: float) -> None:
-        return None
-
-    if sync:
-        monkeypatch.setattr("vercel.sandbox._internal.sync_runtime.time.sleep", lambda _delay: None)
-    else:
-        monkeypatch.setattr("vercel.sandbox._internal.async_runtime.anyio.sleep", no_delay)
-
     attempts = 0
 
     def sandbox_handler(request: httpx.Request) -> httpx.Response:
@@ -551,18 +542,6 @@ async def test_stream_binding_polls_transition_before_pinning_session(
     sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         side_effect=sandbox_handler
     )
-    old_session = cast(dict[str, object], _sandbox_response("sbx_old")["session"])
-    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "session": {
-                    **old_session,
-                    "status": "stopped",
-                }
-            },
-        )
-    )
     write_route = respx.post("https://sandbox.test/v2/sandboxes/sessions/sbx_new/fs/write").mock(
         return_value=httpx.Response(204)
     )
@@ -579,7 +558,6 @@ async def test_stream_binding_polls_transition_before_pinning_session(
                 await async_writer.write(b"data")
 
     assert sandbox_route.call_count == 3
-    assert poll_route.call_count == 1
     assert write_route.call_count == 1
 
 

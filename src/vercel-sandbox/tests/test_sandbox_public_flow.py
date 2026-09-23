@@ -48,7 +48,6 @@ from vercel.sandbox import (
     SandboxSource,
     SandboxStatus,
     SandboxTerminalStateError,
-    SandboxTimeoutError,
     SnapshotExpiration,
     SnapshotRetention,
     SnapshotRetentionState,
@@ -56,10 +55,6 @@ from vercel.sandbox import (
     TagFilter,
     TarballSource,
     sync as sandbox_sync,
-)
-from vercel.sandbox._internal import (
-    async_runtime as sandbox_async_runtime,
-    sync_runtime as sandbox_sync_runtime,
 )
 from vercel.sandbox._internal.service import get_sandbox_service
 from vercel.sandbox._internal.state import (
@@ -2680,121 +2675,6 @@ async def _run_async_unrecovered_operation(handle: sandbox.Sandbox, operation: s
     raise AssertionError(f"Unexpected operation: {operation}")
 
 
-@respx.mock
-@pytest.mark.anyio
-@pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_transition_polling_is_cancellable(
-    mock_env_clear: None,
-    monkeypatch: pytest.MonkeyPatch,
-    anyio_backend: str,
-) -> None:
-    poll_waiting = anyio.Event()
-    never_release = anyio.Event()
-
-    async def blocked_delay(_delay: float) -> None:
-        poll_waiting.set()
-        await never_release.wait()
-
-    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", blocked_delay)
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
-        )
-    )
-    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
-        return_value=httpx.Response(500)
-    )
-
-    async with session(service_options=_session_options()):
-        handle = await sandbox.get_sandbox(name="preview")
-        cancel_scope = anyio.CancelScope()
-
-        async def query() -> None:
-            with cancel_scope:
-                await handle.query_processes()
-
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(query)
-            await poll_waiting.wait()
-            cancel_scope.cancel()
-
-    assert poll_route.call_count == 0
-
-
-@respx.mock
-@pytest.mark.parametrize("sync", [False, True])
-async def test_transition_polling_has_deadline(
-    mock_env_clear: None,
-    monkeypatch: pytest.MonkeyPatch,
-    sync: bool,
-) -> None:
-    runtime = sandbox_sync_runtime if sync else sandbox_async_runtime
-    monkeypatch.setattr(runtime, "TRANSITION_TIMEOUT", -1.0)
-    respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
-        )
-    )
-    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
-        return_value=httpx.Response(500)
-    )
-
-    if sync:
-        with session(service_options=_session_options(sync=True)):
-            sync_handle = sandbox_sync.get_sandbox(name="preview")
-            with pytest.raises(SandboxTimeoutError, match="within -1.0s"):
-                sync_handle.query_processes()
-    else:
-        async with session(service_options=_session_options()):
-            async_handle = await sandbox.get_sandbox(name="preview")
-            with pytest.raises(SandboxTimeoutError, match="within -1.0s"):
-                await async_handle.query_processes()
-
-    assert poll_route.call_count == 0
-
-
-@respx.mock
-async def test_async_transition_poll_failure_propagates_without_resuming(
-    mock_env_clear: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def no_delay(_delay: float) -> None:
-        return None
-
-    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", no_delay)
-    sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
-        return_value=httpx.Response(200, json=_sandbox_response(session_id="sbx_old"))
-    )
-    respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old/cmd").mock(
-        return_value=httpx.Response(
-            409,
-            json={"error": {"code": "sandbox_stopping", "message": "transitioning"}},
-        )
-    )
-    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
-        return_value=httpx.Response(
-            503,
-            json={"error": {"code": "poll_failed", "message": "poll failed"}},
-        )
-    )
-
-    async with session(service_options=_session_options()):
-        handle = await sandbox.get_sandbox(name="preview")
-        with pytest.raises(SandboxApiError) as exc_info:
-            await handle.query_processes()
-
-    assert exc_info.value.code == "poll_failed"
-    assert poll_route.call_count == 1
-    assert sandbox_route.call_count == 1
-
-
 def _run_sync_unrecovered_operation(handle: sandbox_sync.SyncSandbox, operation: str) -> object:
     if operation == "update":
         return handle.update(ports=[3001])
@@ -3189,15 +3069,10 @@ async def test_async_session_operation_is_single_use_and_warns_unconsumed(
 
 @respx.mock
 @pytest.mark.parametrize("error_code", ["sandbox_stopping", "sandbox_snapshotting"])
-async def test_async_session_acquisition_polls_transition_then_retries_once(
+async def test_async_session_acquisition_retries_api_resume_once(
     mock_env_clear: None,
-    monkeypatch: pytest.MonkeyPatch,
     error_code: str,
 ) -> None:
-    async def no_delay(_delay: float) -> None:
-        return None
-
-    monkeypatch.setattr(sandbox_async_runtime.anyio, "sleep", no_delay)
     attempts = 0
 
     def sandbox_handler(request: httpx.Request) -> httpx.Response:
@@ -3220,34 +3095,20 @@ async def test_async_session_acquisition_polls_transition_then_retries_once(
     sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         side_effect=sandbox_handler
     )
-    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "session": _sandbox_response(
-                    session_id="sbx_old", status="stopped", session_status="stopped"
-                )["session"]
-            },
-        )
-    )
-
     async with session(service_options=_session_options()):
         box = await sandbox.get_sandbox(name="preview")
         acquired = await box.session()
 
     assert acquired.id == "sbx_new"
     assert sandbox_route.call_count == 3
-    assert poll_route.call_count == 1
 
 
 @respx.mock
 @pytest.mark.parametrize("error_code", ["sandbox_stopping", "sandbox_snapshotting"])
-def test_sync_session_acquisition_polls_transition_then_retries_once(
+def test_sync_session_acquisition_retries_api_resume_once(
     mock_env_clear: None,
-    monkeypatch: pytest.MonkeyPatch,
     error_code: str,
 ) -> None:
-    monkeypatch.setattr(sandbox_sync_runtime.time, "sleep", lambda _delay: None)
     attempts = 0
 
     def sandbox_handler(request: httpx.Request) -> httpx.Response:
@@ -3270,24 +3131,12 @@ def test_sync_session_acquisition_polls_transition_then_retries_once(
     sandbox_route = respx.get("https://sandbox.test/v2/sandboxes/preview").mock(
         side_effect=sandbox_handler
     )
-    poll_route = respx.get("https://sandbox.test/v2/sandboxes/sessions/sbx_old").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "session": _sandbox_response(
-                    session_id="sbx_old", status="stopped", session_status="stopped"
-                )["session"]
-            },
-        )
-    )
-
     with session(service_options=_session_options()):
         box = sandbox_sync.get_sandbox(name="preview")
         acquired = box.session()
 
     assert acquired.id == "sbx_new"
     assert sandbox_route.call_count == 3
-    assert poll_route.call_count == 1
 
 
 @respx.mock

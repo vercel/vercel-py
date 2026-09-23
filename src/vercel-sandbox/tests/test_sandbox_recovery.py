@@ -8,7 +8,6 @@ from vercel.sandbox._internal.errors import (
 )
 from vercel.sandbox._internal.recovery import (
     SandboxLifecycle,
-    SandboxRecoveryTarget,
     classify_sandbox_lifecycle_error,
     execute_with_sandbox_recovery,
 )
@@ -59,27 +58,19 @@ def test_classify_sandbox_lifecycle_error(
 
 
 class _Coordinator:
-    def __init__(
-        self,
-        *,
-        recover: bool = True,
-        recovery_error: BaseException | None = None,
-    ) -> None:
+    def __init__(self, *, recovery_error: BaseException | None = None) -> None:
         self.session_id = "session-1"
-        self.recover_result = recover
         self.recovery_error = recovery_error
-        self.recoveries: list[tuple[SandboxLifecycle, SandboxRecoveryTarget]] = []
+        self.resume_count = 0
 
-    def _capture_recovery_target(self) -> SandboxRecoveryTarget:
-        return SandboxRecoveryTarget(session_id=self.session_id, session=None)
+    def _capture_recovery_session_id(self) -> str:
+        return self.session_id
 
-    async def _recover(self, lifecycle: SandboxLifecycle, target: SandboxRecoveryTarget) -> bool:
-        self.recoveries.append((lifecycle, target))
+    async def _await_shared_resume(self) -> None:
+        self.resume_count += 1
         if self.recovery_error is not None:
             raise self.recovery_error
-        if self.recover_result:
-            self.session_id = "session-2"
-        return self.recover_result
+        self.session_id = "session-2"
 
 
 @pytest.mark.asyncio
@@ -95,27 +86,13 @@ async def test_execute_recovers_once_and_replays_on_the_new_target() -> None:
 
     assert await execute_with_sandbox_recovery(operation, coordinator=coordinator) == "result"
     assert targets == ["session-1", "session-2"]
-    assert coordinator.recoveries == [
-        (
-            SandboxLifecycle.STOPPED,
-            SandboxRecoveryTarget(session_id="session-1", session=None),
-        )
-    ]
+    assert coordinator.resume_count == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("error", "recover"),
-    [
-        (_api_error(status_code=409, code="other"), True),
-        (_api_error(status_code=410), False),
-    ],
-    ids=["unrelated-error", "recovery-declined"],
-)
-async def test_execute_preserves_the_original_error_without_replay(
-    error: SandboxApiError, recover: bool
-) -> None:
-    coordinator = _Coordinator(recover=recover)
+async def test_execute_preserves_unrelated_error_without_replay() -> None:
+    error = _api_error(status_code=409, code="other")
+    coordinator = _Coordinator()
     attempts = 0
 
     async def operation(_session_id: str) -> None:
@@ -128,7 +105,7 @@ async def test_execute_preserves_the_original_error_without_replay(
 
     assert caught.value is error
     assert attempts == 1
-    assert len(coordinator.recoveries) == (0 if recover else 1)
+    assert coordinator.resume_count == 0
 
 
 @pytest.mark.asyncio
@@ -163,4 +140,4 @@ async def test_execute_does_not_recover_a_failed_replay() -> None:
 
     assert caught.value is replay_error
     assert attempts == 2
-    assert len(coordinator.recoveries) == 1
+    assert coordinator.resume_count == 1
