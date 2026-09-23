@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.11.0 - 2026-09-23
+
+### Features
+
+- Add `Run.terminate()` with an optional termination reason. (#396)
+- Make Run.status(), attributes(), return_value(), and terminate() durable steps when called inside a workflow. (#405)
+- Add `get_run(run_id, type=...)` to retrieve a run handle with optional return-value type validation. (#407)
+
+### Bug Fixes
+
+- Finalize async generators dropped inside workflows without emitting sandbox warnings. (#398)
+
+### Internal
+
+- Separate the run API and stream readers from the workflow execution runtime, keeping public imports unchanged. (#403)
+
 ## 0.10.2 - 2026-09-14
 
 > **Release note:** Supersedes repository-declared versions `0.10.1` and `0.10.0`,
