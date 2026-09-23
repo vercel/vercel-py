@@ -29,6 +29,7 @@ members = [
     "vercel-internal-core",
     "vercel-internal-telemetry",
     "vercel-oidc",
+    "vercel-proxy",
     "vercel-queue",
     "vercel-sandbox",
     "vercel-workflow",
@@ -2819,6 +2820,16 @@ requires-dist = [
     { name = "vercel-headers", editable = "src/vercel-headers" },
 ]
 provides-extras = ["verify"]
+
+[[package]]
+name = "vercel-proxy"
+source = { editable = "src/vercel-proxy" }
+dependencies = [
+    { name = "starlette" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "starlette", specifier = ">=1.0,<2" }]
 
 [[package]]
 name = "vercel-queue"
