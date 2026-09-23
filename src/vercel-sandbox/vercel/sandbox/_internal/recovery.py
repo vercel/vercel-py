@@ -25,9 +25,6 @@ _LIFECYCLE_ERROR_CODES = {
     "sandbox_snapshotting": SandboxLifecycle.SNAPSHOTTING,
 }
 
-TRANSITION_POLL_INTERVAL = 0.5
-TRANSITION_TIMEOUT = 300.0
-
 
 def classify_sandbox_lifecycle_error(error: BaseException) -> SandboxLifecycle | None:
     """Return the supported lifecycle condition carried by ``error``.
@@ -54,8 +51,8 @@ class SandboxRecoveryCoordinator(Protocol):
     """Coordinate one lifecycle recovery before an operation is replayed.
 
     Returning ``False`` leaves the original operation failure in place. This
-    lets runtime-specific coordinators add transition waiting and shared
-    recovery without changing the one-attempt/one-replay policy.
+    lets runtime-specific coordinators share a resume without changing the
+    one-attempt/one-replay policy.
     """
 
     def _capture_recovery_target(self) -> "SandboxRecoveryTarget":

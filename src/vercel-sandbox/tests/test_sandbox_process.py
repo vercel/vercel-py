@@ -1369,29 +1369,17 @@ class _AsyncTransitionCoordinationService:
     def __init__(self) -> None:
         self.allow_resume = anyio.Event()
         self.resume_started = anyio.Event()
-        self.second_poll_arrived = anyio.Event()
-        self.second_poll_returning = anyio.Event()
-        self.operation_count = 0
-        self.poll_count = 0
+        self.operation_sessions: list[str] = []
         self.resume_count = 0
 
     async def query_processes(self, *, session_id: str) -> list[object]:
-        self.operation_count += 1
+        self.operation_sessions.append(session_id)
         if session_id == "sbx_old":
             raise _transition_error()
         return []
 
     async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
-        assert session_id == "sbx_old"
-        self.poll_count += 1
-        poll_number = self.poll_count
-        if poll_number == 1:
-            await self.second_poll_arrived.wait()
-        else:
-            self.second_poll_arrived.set()
-            await self.resume_started.wait()
-            self.second_poll_returning.set()
-        return SandboxRuntimeSessionState(id="sbx_old", status=sandbox.SandboxStatus.STOPPED)
+        raise AssertionError("transition recovery must not poll")
 
     async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
         self.resume_count += 1
@@ -1408,14 +1396,7 @@ class _AsyncTransitionCoordinationService:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
-async def test_async_transition_callers_poll_independently_and_share_resume(
-    anyio_backend: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def no_delay(_delay: float) -> None:
-        return None
-
-    monkeypatch.setattr(anyio, "sleep", no_delay)
+async def test_async_transition_callers_share_api_resume(anyio_backend: str) -> None:
     service = _AsyncTransitionCoordinationService()
     box = sandbox.Sandbox(
         payload=SandboxState(
@@ -1435,46 +1416,33 @@ async def test_async_transition_callers_poll_independently_and_share_resume(
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(query)
+        await service.resume_started.wait()
         task_group.start_soon(query)
-        await service.second_poll_returning.wait()
+        await anyio.sleep(0)
         service.allow_resume.set()
 
     assert results == [[], []]
-    assert service.poll_count == 2
     assert service.resume_count == 1
-    assert service.operation_count == 4
+    assert service.operation_sessions == ["sbx_old", "sbx_old", "sbx_new", "sbx_new"]
 
 
 class _SyncTransitionCoordinationService:
     def __init__(self) -> None:
         self.allow_resume = Event()
         self.resume_started = Event()
-        self.second_poll_arrived = Event()
-        self.second_poll_returning = Event()
         self._lock = Lock()
-        self.operation_count = 0
-        self.poll_count = 0
+        self.operation_sessions: list[str] = []
         self.resume_count = 0
 
     async def query_processes(self, *, session_id: str) -> list[object]:
         with self._lock:
-            self.operation_count += 1
+            self.operation_sessions.append(session_id)
         if session_id == "sbx_old":
             raise _transition_error()
         return []
 
     async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
-        assert session_id == "sbx_old"
-        with self._lock:
-            self.poll_count += 1
-            poll_number = self.poll_count
-        if poll_number == 1:
-            assert self.second_poll_arrived.wait(timeout=5)
-        else:
-            self.second_poll_arrived.set()
-            assert self.resume_started.wait(timeout=5)
-            self.second_poll_returning.set()
-        return SandboxRuntimeSessionState(id="sbx_old", status=sandbox.SandboxStatus.STOPPED)
+        raise AssertionError("transition recovery must not poll")
 
     async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
         with self._lock:
@@ -1490,10 +1458,7 @@ class _SyncTransitionCoordinationService:
         )
 
 
-def test_sync_transition_callers_poll_independently_and_share_resume(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("vercel.sandbox._internal.sync_runtime.time.sleep", lambda _delay: None)
+def test_sync_transition_callers_share_api_resume() -> None:
     service = _SyncTransitionCoordinationService()
     box = sandbox_sync.SyncSandbox(
         payload=SandboxState(
@@ -1508,22 +1473,21 @@ def test_sync_transition_callers_poll_independently_and_share_resume(
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(box.query_processes)
+        assert service.resume_started.wait(timeout=5)
         second = executor.submit(box.query_processes)
-        assert service.second_poll_returning.wait(timeout=5)
         service.allow_resume.set()
         assert first.result(timeout=5) == []
         assert second.result(timeout=5) == []
 
-    assert service.poll_count == 2
     assert service.resume_count == 1
-    assert service.operation_count == 4
+    assert service.operation_sessions[0] == "sbx_old"
+    assert service.operation_sessions[-1] == "sbx_new"
 
 
-class _SyncPollingExitService:
+class _SyncResumeExitService:
     def __init__(self, error: BaseException) -> None:
         self.error = error
         self.operation_count = 0
-        self.poll_count = 0
         self.resume_count = 0
 
     async def query_processes(self, *, session_id: str) -> list[object]:
@@ -1531,21 +1495,18 @@ class _SyncPollingExitService:
         raise _transition_error()
 
     async def get_runtime_session(self, *, session_id: str) -> SandboxRuntimeSessionState:
-        self.poll_count += 1
-        raise self.error
+        raise AssertionError("transition recovery must not poll")
 
     async def resume_sandbox(self, **_kwargs: object) -> SandboxState:
         self.resume_count += 1
-        raise AssertionError("poll exit must not resume")
+        raise self.error
 
 
-@pytest.mark.parametrize("poll_error", [RuntimeError("poll failed"), KeyboardInterrupt()])
-def test_sync_transition_poll_failure_or_interruption_exits_without_resume(
-    monkeypatch: pytest.MonkeyPatch,
-    poll_error: BaseException,
+@pytest.mark.parametrize("resume_error", [RuntimeError("resume failed"), KeyboardInterrupt()])
+def test_sync_transition_resume_failure_or_interruption_exits_without_replay(
+    resume_error: BaseException,
 ) -> None:
-    monkeypatch.setattr("vercel.sandbox._internal.sync_runtime.time.sleep", lambda _delay: None)
-    service = _SyncPollingExitService(poll_error)
+    service = _SyncResumeExitService(resume_error)
     box = sandbox_sync.SyncSandbox(
         payload=SandboxState(
             name="preview",
@@ -1557,10 +1518,9 @@ def test_sync_transition_poll_failure_or_interruption_exits_without_resume(
         service=service,  # type: ignore[arg-type]
     )
 
-    with pytest.raises(type(poll_error)) as exc_info:
+    with pytest.raises(type(resume_error)) as exc_info:
         box.query_processes()
 
-    assert exc_info.value is poll_error
+    assert exc_info.value is resume_error
     assert service.operation_count == 1
-    assert service.poll_count == 1
-    assert service.resume_count == 0
+    assert service.resume_count == 1

@@ -2,7 +2,6 @@
 
 import signal as signal_module
 import subprocess
-import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -26,7 +25,6 @@ from vercel.sandbox._internal.errors import (
     SandboxCleanupError,
     SandboxResponseError,
     SandboxTerminalStateError,
-    SandboxTimeoutError,
 )
 from vercel.sandbox._internal.filesystem_handle_common import _validate_open_options
 from vercel.sandbox._internal.filesystem_handle_core import (
@@ -81,8 +79,6 @@ from vercel.sandbox._internal.process_output import (
     _validate_reader_destination,
 )
 from vercel.sandbox._internal.recovery import (
-    TRANSITION_POLL_INTERVAL,
-    TRANSITION_TIMEOUT,
     SandboxLifecycle,
     SandboxRecoveryTarget,
     classify_sandbox_lifecycle_error,
@@ -1032,17 +1028,14 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         return (await self._acquire_session()).id
 
     async def _acquire_session(self) -> SandboxRuntimeSession:
-        target = self._capture_recovery_target()
         try:
             await self._await_shared_resume()
         except Exception as error:
-            lifecycle = classify_sandbox_lifecycle_error(error)
-            if lifecycle not in {
+            if classify_sandbox_lifecycle_error(error) not in {
                 SandboxLifecycle.STOPPING,
                 SandboxLifecycle.SNAPSHOTTING,
             }:
                 raise
-            await self._wait_for_transition(target)
             await self._await_shared_resume()
         session = self.current_session
         if session is None:
@@ -1060,26 +1053,7 @@ class Sandbox(SandboxHandleBase[SandboxRuntimeSession]):
         """
         return SandboxSessionOperation(self)
 
-    async def _wait_for_transition(self, target: SandboxRecoveryTarget) -> None:
-        deadline = time.monotonic() + TRANSITION_TIMEOUT
-        while True:
-            if time.monotonic() >= deadline:
-                raise SandboxTimeoutError(
-                    f"Sandbox session {target.session_id!r} did not leave a "
-                    f"transitional state within {TRANSITION_TIMEOUT}s"
-                )
-            await anyio.sleep(TRANSITION_POLL_INTERVAL)
-            payload = await self._service.get_runtime_session(session_id=target.session_id)
-            self._apply_recovery_session_payload(target, payload)
-            if payload.status not in {
-                SandboxStatus.STOPPING,
-                SandboxStatus.SNAPSHOTTING,
-            }:
-                return
-
     async def _recover(self, lifecycle: SandboxLifecycle, target: SandboxRecoveryTarget) -> bool:
-        if lifecycle in {SandboxLifecycle.STOPPING, SandboxLifecycle.SNAPSHOTTING}:
-            await self._wait_for_transition(target)
         await self._await_shared_resume()
         return True
 
