@@ -1,0 +1,1 @@
+Commit hook registration and explicit disposal in same-token lifecycle order, and reconcile remaining workflow history before completion so retries do not recreate released hooks or overlook replay divergence. Stop diverged replays before flushing new hook operations.
