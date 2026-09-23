@@ -84,6 +84,7 @@ def _sandbox_response(
             "image": "vercel/sandbox/universal:latest",
             "status": status,
             "persistent": True,
+            "networkId": "network_123",
             "region": "iad1",
             "failoverRegions": ["sfo1", "cle1"],
             "timeout": 300000,
@@ -238,13 +239,6 @@ async def test_async_sandbox_supports_legacy_httpx_session_client(
     assert requests[0].url.path == "/v2/sandboxes/legacy-async"
     assert requests[0].url.params["teamId"] == "team_123"
     assert client.is_closed
-
-
-def test_public_sandbox_functions_reject_unknown_parameters() -> None:
-    with pytest.raises(TypeError, match="unexpected keyword argument 'network_id'"):
-        sandbox.create_sandbox(network_id="network_123")
-    with pytest.raises(TypeError, match="unexpected keyword argument 'network_id'"):
-        sandbox_sync.create_sandbox(network_id="network_123")
 
 
 def _image_sandbox_response(
@@ -470,6 +464,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 "deleteEvicted": False,
             },
             "tags": {"env": "test"},
+            "networkId": "network_123",
             "region": "iad1",
             "failoverRegions": ["sfo1", "cle1"],
         }
@@ -534,11 +529,13 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 delete_evicted=False,
             ),
             tags={"env": "test"},
+            network_id="network_123",
             region="iad1",
             failover_regions=("sfo1", "cle1"),
         )
         assert handle.image == "vercel/sandbox/universal:latest"
         assert handle.region == "iad1"
+        assert handle.network_id == "network_123"
         assert handle.failover_regions == ("sfo1", "cle1")
         assert not hasattr(handle, "runtime")
         assert handle.current_session is not None
@@ -551,6 +548,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         retained_session = handle.current_session
 
         await handle.update(
+            network_id="network_456",
             tags={"env": "updated"},
             execution_time_limit=4.5,
             snapshot_expiration=0,
@@ -566,7 +564,7 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
         assert handle.routes[0].url == "https://preview.sandbox.test"
         assert handle.project_id == "prj_other"
 
-        await handle.update(tags={}, ports=[])
+        await handle.update(tags={}, ports=[], network_id=None)
         assert handle.tags == {}
         assert handle.routes == ()
         assert handle.project_id == "prj_other"
@@ -591,10 +589,11 @@ async def test_public_create_sandbox_encodes_protocol_and_observed_state(
                 "deleteEvicted": True,
             },
             "tags": {"env": "updated"},
+            "networkId": "network_456",
             "region": "sfo1",
             "failoverRegions": [],
         },
-        {"ports": [], "tags": {}},
+        {"ports": [], "tags": {}, "networkId": None},
         {"keepLastSnapshots": None},
     ]
     assert handle.status is None
@@ -645,6 +644,7 @@ async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
             image="team/project/image:v1",
             persistent=False,
             network_policy=NetworkPolicy.deny_all(),
+            network_id="network_123",
             env={},
             tags={},
             snapshot_expiration=0,
@@ -671,6 +671,7 @@ async def test_public_fork_sandbox_encodes_overrides_polls_and_cleans_up(
         "image": "team/project/image:v1",
         "persistent": False,
         "networkPolicy": {"mode": "deny-all"},
+        "networkId": "network_123",
         "env": {},
         "tags": {},
         "mounts": {},
@@ -1146,12 +1147,13 @@ def test_sync_create_sandbox_serializes_image_without_runtime(mock_env_clear: No
     )
 
     with session(service_options=_session_options()):
-        handle = sandbox_sync.create_sandbox(name="preview", image=image)
+        handle = sandbox_sync.create_sandbox(name="preview", image=image, network_id="network_123")
 
     assert json.loads(route.calls.last.request.content) == {
         "projectId": "prj_123",
         "name": "preview",
         "image": image,
+        "networkId": "network_123",
     }
     assert handle.image == "my-repository@sha256:resolved"
     assert not hasattr(handle, "runtime")

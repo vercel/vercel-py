@@ -865,6 +865,7 @@ class SnapshotRetention(_InputModel):
 
 
 SnapshotRetentionUpdate: TypeAlias = SnapshotRetention | None | _Omitted
+NetworkIdUpdate: TypeAlias = str | None | _Omitted
 
 
 class TagFilter(_InputModel):
